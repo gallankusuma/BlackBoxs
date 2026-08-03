@@ -35,6 +35,31 @@ Deploy: `./deploy-blackbox.sh` (build FE → rsync dist, `npx tsc` BE lokal → 
 - **Frontend**: `views/` = halaman (terdaftar di `router/index.ts`, ~132 route, semua lazy `import()`), `stores/` = Pinia per domain, `components/ui/` = primitives (Button, Dialog, StatusBadge, DataTable, dll). Panggil API lewat `src/lib/api.ts`.
 - **Mobile**: PWA terpisah di dalam app yang sama — `views/mobile/*` di bawah path `/mobile/*` (login, attendance, payslip, material request, settings). Folder root `attendance-app/` adalah prototipe PWA vanilla lama, bukan bagian build.
 
+## Model autentikasi
+
+Ada **dua jenis token**, keduanya JWT ditandatangani `JWT_SECRET` yang sama tapi dibedakan lewat isi payload. Semuanya di [backend/src/middleware/auth.ts](backend/src/middleware/auth.ts).
+
+| Middleware | Menerima | Dipakai untuk |
+|---|---|---|
+| `authMiddleware` | token admin (`userId`) | Seluruh endpoint kantor/desktop |
+| `mobileAuthMiddleware` | token mobile (`employeeId` + `scope: 'mobile'`) | Endpoint PWA karyawan |
+| `anyAuthMiddleware` | salah satu dari keduanya | Resource yang sah dibaca dua sisi (mis. `GET /webauthn/offices`) |
+
+Aturan yang harus dijaga:
+
+1. **Identitas selalu dari token, tidak pernah dari input klien.** Jangan membaca `employee_id` dari body, query, atau header untuk menentukan siapa pemanggilnya. Untuk endpoint yang masih membawa `:employee_id` di URL, panggil `assertSelf(req, res, req.params.employee_id)` — kalau tidak cocok dengan token, balas 403.
+2. **Scope dipisah tegas.** Token admin ditolak di endpoint mobile, dan sebaliknya. Ini disengaja: karyawan tidak punya baris di tabel `users`.
+3. **Kepemilikan dicek untuk resource milik orang.** Contoh `ownsCredential` di `webauthn.routes.ts` — `:id` di sana adalah id baris kredensial, bukan employee, jadi harus di-query dulu.
+4. **Endpoint yang boleh tanpa auth hanya jalur login**: `POST /api/auth/*`, `POST /api/hr/mobile/login`, `POST /api/webauthn/auth/options`, `POST /api/webauthn/auth/verify`. Dua yang terakhir diamankan oleh challenge WebAuthn + sidik jari itu sendiri.
+
+Di frontend: desktop pakai `api` dari [lib/api.ts](frontend/src/lib/api.ts), mobile pakai `mobileApi` dari [lib/mobileApi.ts](frontend/src/lib/mobileApi.ts). **Jangan** lewatkan `/webauthn/auth/verify` ke `mobileApi` — endpoint itu membalas 401 saat sidik jari tidak cocok, dan interceptor akan salah mengartikannya sebagai sesi habis lalu menendang user ke login.
+
+Audit cepat endpoint yang belum diamankan:
+
+```bash
+cd backend/src/routes && for f in *.ts; do grep -nE "^router\.(get|post|put|delete|patch)\(" "$f" | grep -vE "authMiddleware|mobileAuthMiddleware|anyAuthMiddleware" | sed "s|^|$f:|"; done
+```
+
 ## Modul
 
 Estimator (AHSP/HSP/RAB/Proposal + MTO kalkulator konstruksi), Projects (Gantt, Kanban, milestone, cost control, timesheet, manpower), Procurement (PR/PO + approval bertingkat), Inventory & Warehouse, Sales/CRM (leads, prospects, clients), Finance (AP/AR, margin, COGS, fund request, kasbon, payment schedule), HR (employee, attendance, payslip, position rates), Production/PPIC, Quality/QC, Asset Management (asset, production line, P&ID, maintenance, depresiasi), Approval engine, Reports, Audit log, AI routes (Gemini).

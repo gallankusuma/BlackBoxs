@@ -108,7 +108,7 @@
 import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import axios from 'axios';
-import { setMobileToken } from '../../lib/mobileApi';
+import { mobileApi, setMobileToken } from '../../lib/mobileApi';
 
 const router    = useRouter();
 const nik       = ref('');
@@ -250,7 +250,7 @@ async function doNikLogin() {
 
     // Check if employee already has registered credentials
     try {
-      const credRes = await axios.get(`/api/webauthn/credentials/${emp.id}`);
+      const credRes = await mobileApi.get(`/api/webauthn/credentials/${emp.id}`);
       const hasCreds = credRes.data.data?.length > 0;
       if (hasCreds) {
         // Already onboarded → go home

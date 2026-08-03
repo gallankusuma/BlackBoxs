@@ -122,7 +122,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
-import axios from 'axios';
+import { mobileApi } from '../../lib/mobileApi';
 
 const router = useRouter();
 const emp         = ref<any>(null);
@@ -140,7 +140,7 @@ async function loadPayslips() {
   if (!emp.value?.id) return;
   loading.value = true;
   try {
-    const res = await axios.get(`/api/hr/mobile/payslip/${emp.value.id}`);
+    const res = await mobileApi.get(`/api/hr/mobile/payslip/${emp.value.id}`);
     payslips.value = (res.data.data || []).filter((p: any) => p.period_year == selectedYear.value);
   } catch { payslips.value = []; }
   finally { loading.value = false; }

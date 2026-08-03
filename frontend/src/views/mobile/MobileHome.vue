@@ -115,6 +115,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import axios from 'axios';
+import { mobileApi, setMobileToken } from '../../lib/mobileApi';
 
 const router = useRouter();
 const emp       = ref<any>(null);
@@ -155,7 +156,7 @@ function formatDate(d: string) {
 
 async function loadAttendance() {
   if (!emp.value?.id) return;
-  const res = await axios.get(`/api/hr/mobile/attendance/${emp.value.id}`);
+  const res = await mobileApi.get(`/api/hr/mobile/attendance/${emp.value.id}`);
   todayLog.value = res.data.today;
   summary.value = res.data.summary;
   recentLogs.value = res.data.data?.slice(0, 7) || [];
@@ -197,6 +198,9 @@ async function doCheckin(type: string) {
       latitude: lat, longitude: lng,
       type,
     });
+
+    // Absen sidik jari juga memperbarui token — perpanjang sesi selama HP aktif dipakai
+    if (verifyRes.data.token) setMobileToken(verifyRes.data.token);
 
     showToast(verifyRes.data.checkin?.message || '✅ Berhasil!', 'success');
     await loadAttendance();

@@ -143,7 +143,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
-import axios from 'axios';
+import { mobileApi } from '../../lib/mobileApi';
 
 const router = useRouter();
 const emp = ref<any>(null);
@@ -164,7 +164,7 @@ function formatDate(d: string) {
 async function loadCredentials() {
   if (!emp.value?.id) return;
   try {
-    const res = await axios.get(`/api/webauthn/credentials/${emp.value.id}`);
+    const res = await mobileApi.get(`/api/webauthn/credentials/${emp.value.id}`);
     credentials.value = res.data.data || [];
   } catch { credentials.value = []; }
 }
@@ -216,7 +216,7 @@ async function startRegistration() {
   regMsg.value = ''; registering.value = true;
   try {
     // 1. Get challenge
-    const optRes = await axios.post('/api/webauthn/register/options', { employee_id: emp.value.id });
+    const optRes = await mobileApi.post('/api/webauthn/register/options', { employee_id: emp.value.id });
     const options = optRes.data;
     options.challenge = base64urlToBuffer(options.challenge);
     options.user.id   = base64urlToBuffer(typeof options.user.id === 'string' ? options.user.id : bufferToBase64url(options.user.id));
@@ -228,7 +228,7 @@ async function startRegistration() {
     if (!credential) throw new Error('Dibatalkan');
 
     // 3. Send credential + GPS to server
-    await axios.post('/api/webauthn/register/verify', {
+    await mobileApi.post('/api/webauthn/register/verify', {
       employee_id: emp.value.id,
       registration_response: attResponseToJSON(credential),
       device_name:   regForm.value.device_name || `HP ${emp.value.name?.split(' ')[0]}`,
@@ -252,7 +252,7 @@ async function startRegistration() {
 
 async function deleteCred(id: number) {
   if (!confirm('Hapus sidik jari ini?\nAnda harus daftar ulang untuk bisa absen.')) return;
-  await axios.delete(`/api/webauthn/credentials/${id}`);
+  await mobileApi.delete(`/api/webauthn/credentials/${id}`);
   await loadCredentials();
 }
 
@@ -261,7 +261,7 @@ async function updateLocation(cred: any) {
   detectingGPS.value = true;
   try {
     const pos: any = await new Promise((res, rej) => navigator.geolocation.getCurrentPosition(res, rej, { timeout: 10000, enableHighAccuracy: true }));
-    await axios.put(`/api/webauthn/credentials/${cred.id}/location`, {
+    await mobileApi.put(`/api/webauthn/credentials/${cred.id}/location`, {
       latitude: pos.coords.latitude, longitude: pos.coords.longitude,
       radius: cred.registered_radius, location_name: cred.location_name,
     });

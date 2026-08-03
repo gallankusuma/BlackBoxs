@@ -1,5 +1,6 @@
 import express, { Request, Response } from 'express';
 import { dbQuery, dbGet, dbAll, dbRun } from '../config/database';
+import { authMiddleware } from '../middleware/auth';
 
 const router = express.Router();
 
@@ -62,7 +63,7 @@ const generateProspectCode = async (): Promise<string> => {
 };
 
 // ── GET / — List with filters ──
-router.get('/', async (req: Request, res: Response) => {
+router.get('/', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { search, temperature, status, source, assigned_to,
       sort_by = 'created_at', sort_dir = 'DESC',
@@ -113,7 +114,7 @@ router.get('/', async (req: Request, res: Response) => {
 });
 
 // ── GET /stats ──
-router.get('/stats', async (_req: Request, res: Response) => {
+router.get('/stats', authMiddleware, async (_req: Request, res: Response) => {
   try {
     const tempStats = await dbAll(`
       SELECT temperature, COUNT(*) as count FROM prospects WHERE status NOT IN ('converted','disqualified') GROUP BY temperature
@@ -133,7 +134,7 @@ router.get('/stats', async (_req: Request, res: Response) => {
 });
 
 // ── GET /:id ──
-router.get('/:id', async (req: Request, res: Response) => {
+router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
   try {
     const row = await dbGet(`
       SELECT p.*, u.full_name as assigned_to_name, cb.full_name as created_by_name
@@ -148,7 +149,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 });
 
 // ── POST / ──
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', authMiddleware, async (req: Request, res: Response) => {
   try {
     const code = await generateProspectCode();
     const { company_name, contact_name, contact_title, email, phone, industry, website, address, city, country,
@@ -174,7 +175,7 @@ router.post('/', async (req: Request, res: Response) => {
 });
 
 // ── PUT /:id ──
-router.put('/:id', async (req: Request, res: Response) => {
+router.put('/:id', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { company_name, contact_name, contact_title, email, phone, industry, website, address, city, country,
       source, temperature, status, interest, estimated_value, next_follow_up, assigned_to, notes } = req.body;
@@ -194,7 +195,7 @@ router.put('/:id', async (req: Request, res: Response) => {
 });
 
 // ── DELETE /:id ──
-router.delete('/:id', async (req: Request, res: Response) => {
+router.delete('/:id', authMiddleware, async (req: Request, res: Response) => {
   try {
     await dbRun('DELETE FROM prospects WHERE id = ?', [req.params.id]);
     res.json({ message: 'Prospect deleted' });
@@ -204,7 +205,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
 });
 
 // ── POST /:id/convert-to-lead ──
-router.post('/:id/convert-to-lead', async (req: Request, res: Response) => {
+router.post('/:id/convert-to-lead', authMiddleware, async (req: Request, res: Response) => {
   try {
     const prospect = await dbGet('SELECT * FROM prospects WHERE id = ?', [req.params.id]);
     if (!prospect) return res.status(404).json({ error: 'Prospect not found' });

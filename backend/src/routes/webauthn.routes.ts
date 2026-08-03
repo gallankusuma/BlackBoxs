@@ -1,6 +1,6 @@
 import express, { Request, Response } from 'express';
 import { dbAll, dbGet, dbRun } from '../config/database';
-import { generateMobileToken } from '../middleware/auth';
+import { generateMobileToken, mobileAuthMiddleware, anyAuthMiddleware, authMiddleware, assertSelf, MobileAuthRequest } from '../middleware/auth';
 import {
   generateRegistrationOptions,
   verifyRegistrationResponse,
@@ -37,9 +37,9 @@ function validateGPSAgainstCredential(
 // ─── REGISTRATION ─────────────────────────────────────────────────────────────
 
 // POST /webauthn/register/options
-router.post('/register/options', async (req: Request, res: Response) => {
+router.post('/register/options', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Response) => {
   try {
-    const { employee_id } = req.body;
+    const employee_id = req.employeeId; // dari token — hanya boleh mendaftar untuk diri sendiri
     const emp: any = await dbGet(
       'SELECT id, code, name FROM employees WHERE id = ? AND status = ?',
       [employee_id, 'ACTIVE']
@@ -84,9 +84,10 @@ router.post('/register/options', async (req: Request, res: Response) => {
 });
 
 // POST /webauthn/register/verify — save credential + GPS location
-router.post('/register/verify', async (req: Request, res: Response) => {
+router.post('/register/verify', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Response) => {
   try {
-    const { employee_id, registration_response, device_name, latitude, longitude, location_name, radius } = req.body;
+    const { registration_response, device_name, latitude, longitude, location_name, radius } = req.body;
+    const employee_id = req.employeeId; // dari token
 
     const challengeRow: any = await dbGet(
       'SELECT * FROM webauthn_challenges WHERE employee_id = ? AND type = ? AND expires_at > NOW()',
@@ -334,7 +335,7 @@ router.post('/auth/verify', async (req: Request, res: Response) => {
 // ─── CREDENTIAL MANAGEMENT ────────────────────────────────────────────────────
 
 // GET /webauthn/credentials/count — for admin dashboard
-router.get('/credentials/count', async (_req: Request, res: Response) => {
+router.get('/credentials/count', authMiddleware, async (_req: Request, res: Response) => {
   try {
     const row: any = await dbGet('SELECT COUNT(DISTINCT employee_id) as count FROM employee_webauthn_credentials');
     res.json({ count: row?.count || 0 });
@@ -342,29 +343,47 @@ router.get('/credentials/count', async (_req: Request, res: Response) => {
 });
 
 // GET /webauthn/credentials/:employee_id
-router.get('/credentials/:employee_id', async (req: Request, res: Response) => {
+router.get('/credentials/:employee_id', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Response) => {
   try {
+    if (!assertSelf(req, res, req.params.employee_id)) return;
     const rows = await dbAll(
-      `SELECT id, device_name, registered_lat, registered_lng, registered_radius, 
-              location_name, created_at, last_used_at 
+      `SELECT id, device_name, registered_lat, registered_lng, registered_radius,
+              location_name, created_at, last_used_at
        FROM employee_webauthn_credentials WHERE employee_id = ? ORDER BY created_at DESC`,
-      [req.params.employee_id]
+      [req.employeeId]
     );
     res.json({ data: rows });
   } catch (error) { res.status(500).json({ error: 'Failed' }); }
 });
 
+// Kredensial hanya boleh disentuh pemiliknya — :id di sini adalah id baris
+// kredensial, bukan employee_id, jadi kepemilikannya dicek lewat query.
+const ownsCredential = async (req: MobileAuthRequest, res: Response): Promise<boolean> => {
+  const row: any = await dbGet(
+    'SELECT employee_id FROM employee_webauthn_credentials WHERE id = ?',
+    [req.params.id]
+  );
+  if (!row) { res.status(404).json({ error: 'Kredensial tidak ditemukan' }); return false; }
+  if (Number(row.employee_id) !== req.employeeId) {
+    res.status(403).json({ error: 'Bukan kredensial Anda' });
+    return false;
+  }
+  return true;
+};
+
 // DELETE /webauthn/credentials/:id
-router.delete('/credentials/:id', async (req: Request, res: Response) => {
+router.delete('/credentials/:id', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Response) => {
   try {
+    if (!(await ownsCredential(req, res))) return;
     await dbRun('DELETE FROM employee_webauthn_credentials WHERE id = ?', [req.params.id]);
     res.json({ success: true });
   } catch (error) { res.status(500).json({ error: 'Failed' }); }
 });
 
 // PUT /webauthn/credentials/:id/location — update registered GPS
-router.put('/credentials/:id/location', async (req: Request, res: Response) => {
+router.put('/credentials/:id/location', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Response) => {
   try {
+    if (!(await ownsCredential(req, res))) return;
     const { latitude, longitude, radius, location_name } = req.body;
     await dbRun(
       'UPDATE employee_webauthn_credentials SET registered_lat=?, registered_lng=?, registered_radius=?, location_name=? WHERE id=?',
@@ -376,8 +395,8 @@ router.put('/credentials/:id/location', async (req: Request, res: Response) => {
 
 // ─── OFFICE LOCATIONS (Admin managed) ────────────────────────────────────────
 
-// GET /webauthn/offices — list all locations (public, used by mobile onboarding)
-router.get('/offices', async (_req: Request, res: Response) => {
+// GET /webauthn/offices — dibaca onboarding mobile & admin desktop
+router.get('/offices', anyAuthMiddleware, async (_req: Request, res: Response) => {
   try {
     const rows = await dbAll(
       `SELECT id, name, latitude, longitude, radius_m, project_name, is_active, created_at
@@ -391,7 +410,7 @@ router.get('/offices', async (_req: Request, res: Response) => {
 });
 
 // POST /webauthn/offices — create new location
-router.post('/offices', async (req: Request, res: Response) => {
+router.post('/offices', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { name, latitude, longitude, radius_m, project_id, is_active, description } = req.body;
     if (!name || !latitude || !longitude) {
@@ -417,7 +436,7 @@ router.post('/offices', async (req: Request, res: Response) => {
 });
 
 // PUT /webauthn/offices/:id — update location
-router.put('/offices/:id', async (req: Request, res: Response) => {
+router.put('/offices/:id', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { name, latitude, longitude, radius_m, is_active, description } = req.body;
     await dbRun(
@@ -440,7 +459,7 @@ router.put('/offices/:id', async (req: Request, res: Response) => {
 });
 
 // DELETE /webauthn/offices/:id
-router.delete('/offices/:id', async (req: Request, res: Response) => {
+router.delete('/offices/:id', authMiddleware, async (req: Request, res: Response) => {
   try {
     await dbRun('DELETE FROM office_locations WHERE id = ?', [req.params.id]);
     res.json({ success: true });

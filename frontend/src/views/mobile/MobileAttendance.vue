@@ -165,7 +165,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
-import axios from 'axios';
+import { mobileApi } from '../../lib/mobileApi';
 
 const router = useRouter();
 const emp = ref<any>(null);
@@ -306,7 +306,7 @@ async function fetchData() {
   if (!emp.value?.id) return;
   loading.value = true;
   try {
-    const res = await axios.get(`/api/hr/mobile/attendance/${emp.value.id}`, {
+    const res = await mobileApi.get(`/api/hr/mobile/attendance/${emp.value.id}`, {
       params: { month: viewMonth.value + 1, year: viewYear.value }
     });
     // Normalize dates from ISO to YYYY-MM-DD for calendar matching

@@ -1,6 +1,6 @@
 import express, { Request, Response } from 'express';
 import { dbAll, dbGet, dbRun } from '../config/database';
-import { authMiddleware, generateMobileToken } from '../middleware/auth';
+import { authMiddleware, generateMobileToken, mobileAuthMiddleware, assertSelf, MobileAuthRequest } from '../middleware/auth';
 
 const router = express.Router();
 
@@ -676,10 +676,11 @@ router.post('/mobile/login', async (req: Request, res: Response) => {
 });
 
 // POST /hr/mobile/checkin — Self check-in from mobile
-router.post('/mobile/checkin', async (req: Request, res: Response) => {
+router.post('/mobile/checkin', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Response) => {
   try {
-    const { employee_id, type, latitude, longitude, project_id } = req.body;
-    if (!employee_id || !type) return res.status(400).json({ error: 'employee_id and type required' });
+    const { type, latitude, longitude, project_id } = req.body;
+    const employee_id = req.employeeId; // dari token — tidak bisa absen atas nama orang lain
+    if (!type) return res.status(400).json({ error: 'type required' });
     const emp: any = await dbGet('SELECT id, name FROM employees WHERE id = ? AND status = ?', [employee_id, 'ACTIVE']);
     if (!emp) return res.status(404).json({ error: 'Karyawan tidak ditemukan' });
     const now = new Date();
@@ -710,8 +711,9 @@ router.post('/mobile/checkin', async (req: Request, res: Response) => {
 });
 
 // GET /hr/mobile/attendance/:employee_id — Recent attendance for mobile view
-router.get('/mobile/attendance/:employee_id', async (req: Request, res: Response) => {
+router.get('/mobile/attendance/:employee_id', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Response) => {
   try {
+    if (!assertSelf(req, res, req.params.employee_id)) return;
     const { month, year } = req.query;
     const m = month || (new Date().getMonth() + 1);
     const y = year || new Date().getFullYear();
@@ -729,8 +731,9 @@ router.get('/mobile/attendance/:employee_id', async (req: Request, res: Response
 });
 
 // GET /hr/mobile/payslip/:employee_id — Payslip history for mobile
-router.get('/mobile/payslip/:employee_id', async (req: Request, res: Response) => {
+router.get('/mobile/payslip/:employee_id', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Response) => {
   try {
+    if (!assertSelf(req, res, req.params.employee_id)) return;
     const rows = await dbAll(
       `SELECT pr.*, e.name as employee_name, e.code as employee_code, e.position
        FROM payslip_records pr JOIN employees e ON pr.employee_id=e.id

@@ -158,7 +158,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
-import axios from 'axios';
+import { mobileApi } from '../../lib/mobileApi';
 
 const router    = useRouter();
 const emp       = ref<any>(null);
@@ -176,7 +176,7 @@ const registered  = ref(false);
 async function loadLocations() {
   loadingLocations.value = true;
   try {
-    const res = await axios.get('/api/webauthn/offices');
+    const res = await mobileApi.get('/api/webauthn/offices');
     locations.value = (res.data.data || []).filter((l: any) => l.is_active);
   } catch { locations.value = []; }
   finally { loadingLocations.value = false; }
@@ -219,7 +219,7 @@ async function doRegister() {
   regError.value = ''; registering.value = true;
   try {
     // 1. Get challenge
-    const optRes = await axios.post('/api/webauthn/register/options', { employee_id: emp.value.id });
+    const optRes = await mobileApi.post('/api/webauthn/register/options', { employee_id: emp.value.id });
     const options = optRes.data;
     options.challenge = base64urlToBuffer(options.challenge);
     options.user.id   = base64urlToBuffer(typeof options.user.id === 'string'
@@ -234,7 +234,7 @@ async function doRegister() {
     if (!credential) throw new Error('Dibatalkan');
 
     // 3. Verify + save with admin-configured GPS
-    await axios.post('/api/webauthn/register/verify', {
+    await mobileApi.post('/api/webauthn/register/verify', {
       employee_id:           emp.value.id,
       registration_response: attResponseToJSON(credential),
       device_name:           `HP ${emp.value.name?.split(' ')[0]} - ${navigator.platform || 'Mobile'}`,
@@ -271,7 +271,7 @@ onMounted(async () => {
 
   // Double check server — if already has credentials, go home
   try {
-    const res = await axios.get(`/api/webauthn/credentials/${empData.id}`);
+    const res = await mobileApi.get(`/api/webauthn/credentials/${empData.id}`);
     if (res.data.data?.length > 0) {
       empData.onboarded = true;
       localStorage.setItem('mobile_employee', JSON.stringify(empData));
