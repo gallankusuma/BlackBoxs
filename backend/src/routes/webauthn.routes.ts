@@ -1,5 +1,6 @@
 import express, { Request, Response } from 'express';
 import { dbAll, dbGet, dbRun } from '../config/database';
+import { generateMobileToken } from '../middleware/auth';
 import {
   generateRegistrationOptions,
   verifyRegistrationResponse,
@@ -322,6 +323,7 @@ router.post('/auth/verify', async (req: Request, res: Response) => {
       gps: gpsResult,
       checkin: checkinResult,
       employee: emp,
+      token: generateMobileToken(Number(employee_id)),
     });
   } catch (error: any) {
     console.error('auth/verify error:', error);

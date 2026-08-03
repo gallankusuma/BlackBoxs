@@ -216,7 +216,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
-import axios from 'axios';
+import { mobileApi, getMobileToken } from '../../lib/mobileApi';
 
 const router = useRouter();
 const emp = ref<any>(null);
@@ -265,7 +265,7 @@ async function loadCatalog() {
     const params: any = {};
     if (search.value) params.search = search.value;
     if (selectedCat.value) params.category_id = selectedCat.value;
-    const res = await axios.get('/api/material-requests/catalog', { params });
+    const res = await mobileApi.get('/api/material-requests/catalog', { params });
     products.value = res.data.products || [];
     categories.value = res.data.categories || [];
   } catch { showToast('Gagal load katalog', 'error'); }
@@ -298,7 +298,7 @@ async function onPhotoCapture(e: Event) {
   try {
     const fd = new FormData();
     fd.append('photo', file);
-    const res = await axios.post('/api/material-requests/upload-photo', fd);
+    const res = await mobileApi.post('/api/material-requests/upload-photo', fd);
     customPhotoUrl.value = res.data.url;
     showToast('📸 Foto berhasil diupload');
   } catch {
@@ -333,14 +333,14 @@ function addCustomItem() {
 
 async function loadHistory() {
   try {
-    const res = await axios.get('/api/material-requests/my', { params: { employee_id: emp.value?.id } });
+    const res = await mobileApi.get('/api/material-requests/my');
     history.value = res.data.data || [];
   } catch {}
 }
 
 async function loadProjects() {
   try {
-    const res = await axios.get('/api/material-requests/projects/list');
+    const res = await mobileApi.get('/api/material-requests/projects/list');
     projectList.value = res.data.data || [];
   } catch {}
 }
@@ -350,9 +350,7 @@ async function submitMR() {
   submitting.value = true;
   try {
     const proj = projectList.value.find(p => p.id === selectedProject.value);
-    await axios.post('/api/material-requests/', {
-      employee_id: emp.value?.id,
-      employee_name: emp.value?.name,
+    await mobileApi.post('/api/material-requests/', {
       project_id: selectedProject.value,
       project_name: proj?.project_name || null,
       priority: priority.value,
@@ -371,7 +369,8 @@ async function submitMR() {
 
 onMounted(() => {
   const stored = localStorage.getItem('mobile_employee');
-  if (!stored) { router.push('/mobile'); return; }
+  // Sesi lama (sebelum token mobile diterapkan) tidak punya token — login ulang.
+  if (!stored || !getMobileToken()) { router.push('/mobile'); return; }
   emp.value = JSON.parse(stored);
   loadCatalog();
   loadProjects();

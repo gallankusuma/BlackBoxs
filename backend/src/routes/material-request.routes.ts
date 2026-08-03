@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { dbAll, dbGet, dbRun } from '../config/database';
+import { authMiddleware, mobileAuthMiddleware, MobileAuthRequest } from '../middleware/auth';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
@@ -16,7 +17,7 @@ const mrStorage = multer.diskStorage({
 const mrUpload = multer({ storage: mrStorage, limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB
 
 // POST /upload-photo — upload a photo from mobile camera
-router.post('/upload-photo', mrUpload.single('photo'), (req: Request, res: Response) => {
+router.post('/upload-photo', mobileAuthMiddleware, mrUpload.single('photo'), (req: Request, res: Response) => {
   try {
     const file = (req as any).file;
     if (!file) return res.status(400).json({ error: 'No photo uploaded' });
@@ -27,18 +28,9 @@ router.post('/upload-photo', mrUpload.single('photo'), (req: Request, res: Respo
   }
 });
 
-// Simple auth check for mobile — uses token from localStorage
-const mobileAuth = async (req: Request, res: Response, next: any) => {
-  // Accept employee_id from query or body for mobile simplicity
-  const empId = req.query.employee_id || req.body.employee_id || req.headers['x-employee-id'];
-  if (!empId) return res.status(401).json({ error: 'employee_id required' });
-  (req as any).employeeId = Number(empId);
-  next();
-};
-
 // ─── PRODUCT CATALOG (marketplace) ─────────────────────────────────
 // GET /catalog — browse products with search + category filter
-router.get('/catalog', async (req: Request, res: Response) => {
+router.get('/catalog', mobileAuthMiddleware, async (req: Request, res: Response) => {
   try {
     const { search, category_id } = req.query;
     let sql = `
@@ -80,9 +72,9 @@ router.get('/catalog', async (req: Request, res: Response) => {
 // ─── MATERIAL REQUESTS CRUD ─────────────────────────────────────────
 
 // GET /my — list my material requests
-router.get('/my', mobileAuth, async (req: Request, res: Response) => {
+router.get('/my', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Response) => {
   try {
-    const empId = (req as any).employeeId;
+    const empId = req.employeeId;
     const rows = await dbAll(
       `SELECT mr.*, cp.project_name as proj_name, cp.project_number,
               (SELECT COUNT(*) FROM material_request_items WHERE mr_id = mr.id) as item_count
@@ -100,7 +92,7 @@ router.get('/my', mobileAuth, async (req: Request, res: Response) => {
 });
 
 // GET /all — list all MRs (for admin/office)
-router.get('/all', async (req: Request, res: Response) => {
+router.get('/all', authMiddleware, async (req: Request, res: Response) => {
   try {
     const rows = await dbAll(
       `SELECT mr.*, cp.project_name as proj_name, cp.project_number,
@@ -116,8 +108,8 @@ router.get('/all', async (req: Request, res: Response) => {
   }
 });
 
-// GET /:id — detail with items
-router.get('/:id', async (req: Request, res: Response) => {
+// GET /:id — detail with items (office)
+router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
   try {
     const mr = await dbGet(
       `SELECT mr.*, cp.project_name as proj_name, cp.project_number
@@ -143,12 +135,18 @@ router.get('/:id', async (req: Request, res: Response) => {
 });
 
 // POST / — create new MR from mobile
-router.post('/', mobileAuth, async (req: Request, res: Response) => {
+router.post('/', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Response) => {
   try {
-    const empId = (req as any).employeeId;
-    const { project_id, project_name, priority, needed_by, notes, items, employee_name } = req.body;
+    const empId = req.employeeId;
+    const { project_id, project_name, priority, needed_by, notes, items } = req.body;
 
     if (!items?.length) return res.status(400).json({ error: 'At least 1 item required' });
+
+    // Nama pemohon diambil dari DB, bukan dari body — supaya MR tidak bisa
+    // diajukan atas nama orang lain.
+    const emp = await dbGet('SELECT name FROM employees WHERE id = ? AND status = ?', [empId, 'ACTIVE']) as any;
+    if (!emp) return res.status(403).json({ error: 'Karyawan tidak aktif' });
+    const employee_name = emp.name;
 
     // Generate MR number: MR-YYYYMMDD-XXXX
     const now = new Date();
@@ -162,7 +160,7 @@ router.post('/', mobileAuth, async (req: Request, res: Response) => {
     const result = await dbRun(
       `INSERT INTO material_requests (mr_number, employee_id, employee_name, project_id, project_name, priority, needed_by, notes)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [mrNumber, empId, employee_name || null, project_id || null, project_name || null, priority || 'normal', needed_by || null, notes || null]
+      [mrNumber, empId, employee_name, project_id || null, project_name || null, priority || 'normal', needed_by || null, notes || null]
     );
     const mrId = result.insertId;
 
@@ -182,7 +180,7 @@ router.post('/', mobileAuth, async (req: Request, res: Response) => {
 });
 
 // PUT /:id/approve — approve MR → auto-create PR
-router.put('/:id/approve', async (req: Request, res: Response) => {
+router.put('/:id/approve', authMiddleware, async (req: Request, res: Response) => {
   try {
     const mrId = req.params.id;
     const mr = await dbGet('SELECT * FROM material_requests WHERE id = ?', [mrId]) as any;
@@ -251,7 +249,7 @@ router.put('/:id/approve', async (req: Request, res: Response) => {
 });
 
 // PUT /:id/reject — reject MR
-router.put('/:id/reject', async (req: Request, res: Response) => {
+router.put('/:id/reject', authMiddleware, async (req: Request, res: Response) => {
   try {
     const mr = await dbGet('SELECT status FROM material_requests WHERE id = ?', [req.params.id]) as any;
     if (!mr) return res.status(404).json({ error: 'MR not found' });
@@ -265,7 +263,7 @@ router.put('/:id/reject', async (req: Request, res: Response) => {
 });
 
 // DELETE /:id — delete MR (only if pending)
-router.delete('/:id', async (req: Request, res: Response) => {
+router.delete('/:id', authMiddleware, async (req: Request, res: Response) => {
   try {
     const mr = await dbGet('SELECT status FROM material_requests WHERE id = ?', [req.params.id]) as any;
     if (!mr) return res.status(404).json({ error: 'MR not found' });
@@ -280,7 +278,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
 });
 
 // GET /projects/list — get active projects for dropdown
-router.get('/projects/list', async (_req: Request, res: Response) => {
+router.get('/projects/list', mobileAuthMiddleware, async (_req: Request, res: Response) => {
   try {
     const projects = await dbAll(
       `SELECT id, project_number, project_name FROM client_projects WHERE status IN ('open','active','in_progress') ORDER BY project_name`

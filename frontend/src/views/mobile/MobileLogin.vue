@@ -108,6 +108,7 @@
 import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import axios from 'axios';
+import { setMobileToken } from '../../lib/mobileApi';
 
 const router    = useRouter();
 const nik       = ref('');
@@ -206,10 +207,11 @@ async function loginWithFingerprint() {
       auto_checkin: true,
     });
 
-    const { employee, gps, checkin } = verifyRes.data;
+    const { employee, gps, checkin, token } = verifyRes.data;
     gpsStatus.value = gps;
 
     // Update stored employee
+    setMobileToken(token);
     localStorage.setItem('mobile_employee', JSON.stringify(employee));
 
     // Show checkin result then navigate
@@ -243,6 +245,7 @@ async function doNikLogin() {
       name: nameInput.value || undefined,
     });
     const emp = res.data.employee;
+    setMobileToken(res.data.token);
     localStorage.setItem('mobile_employee', JSON.stringify(emp));
 
     // Check if employee already has registered credentials

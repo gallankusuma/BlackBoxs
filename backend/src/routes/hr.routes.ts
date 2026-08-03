@@ -1,6 +1,6 @@
 import express, { Request, Response } from 'express';
 import { dbAll, dbGet, dbRun } from '../config/database';
-import { authMiddleware } from '../middleware/auth';
+import { authMiddleware, generateMobileToken } from '../middleware/auth';
 
 const router = express.Router();
 
@@ -671,7 +671,7 @@ router.post('/mobile/login', async (req: Request, res: Response) => {
     if (name && !emp.name.toLowerCase().includes(name.toLowerCase().trim())) {
       return res.status(401).json({ error: 'Nama tidak cocok dengan NIK' });
     }
-    res.json({ success: true, employee: emp });
+    res.json({ success: true, employee: emp, token: generateMobileToken(emp.id) });
   } catch (error) { res.status(500).json({ error: 'Login gagal' }); }
 });
 
