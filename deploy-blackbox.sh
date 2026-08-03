@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
-# DEPLOY SCRIPT - GENJAYA EPC
-# Domain: blackboxs.io (same VPS as app.genjaya.com)
+# DEPLOY SCRIPT - BLACKBOX EPC
+# Domain: blackboxs.io
 # Target VPS: root@76.13.22.155 → /var/www/erp-genjaya/
 # NOTE: TS compiled locally (tsc not in VPS PATH)
 # ============================================================
@@ -14,7 +14,7 @@ REMOTE_BACKEND="/var/www/erp-genjaya/backend"
 LOCAL_FRONTEND="/Users/gallankusuma/Webapps/EPC/frontend"
 LOCAL_BACKEND="/Users/gallankusuma/Webapps/EPC/backend"
 
-echo "🚀 GENJAYA EPC Deploy → blackboxs.io"
+echo "🚀 BLACKBOX EPC Deploy → blackboxs.io"
 echo "VPS: $VPS | Path: $REMOTE_FRONTEND"
 echo ""
 

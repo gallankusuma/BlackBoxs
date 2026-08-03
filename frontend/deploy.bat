@@ -1,16 +1,16 @@
 @echo off
 REM ============================================
-REM  GENJAYA EPC - Deploy Script
+REM  BLACKBOX EPC - Deploy Script
 REM  3-Tier: Local Git → GitHub → VPS Production
 REM ============================================
 
 set VPS_HOST=root@76.13.22.155
 set VPS_PATH=/var/www/erp-genjaya/frontend
-set PROJECT_DIR=c:\xampp1\htdocs\ERP-Genjaya\frontend
+set PROJECT_DIR=c:\xampp1\htdocs\ERP-BlackBox\frontend
 
 echo.
 echo =============================================
-echo   GENJAYA EPC - Deployment Pipeline
+echo   BLACKBOX EPC - Deployment Pipeline
 echo =============================================
 echo.
 
@@ -55,7 +55,7 @@ echo      ✅ VPS deployment complete!
 echo.
 
 echo =============================================
-echo   🎉 ALL DONE! app.genjaya.com is LIVE
+echo   🎉 ALL DONE! blackboxs.io is LIVE
 echo =============================================
 echo.
 pause

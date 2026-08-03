@@ -1,4 +1,4 @@
-# EPC / Genjaya ERP
+# EPC / BlackBox ERP
 
 Monolithic ERP + EPC (Engineering, Procurement, Construction) web app.
 Bahasa campur ID/EN di UI. Deployment: `blackboxs.io` (VPS `76.13.22.155`, pm2 proses `erp-genjaya-backend`).
@@ -25,7 +25,7 @@ VS Code punya task `Run All: Backend + Frontend` yang auto-run saat folder dibuk
 
 **Prasyarat lokal:** MySQL harus jalan di `localhost` dengan database `erp_genjaya`. Salin `backend/.env.example` → `backend/.env` dan `frontend/.env.example` → `frontend/.env`, lalu isi kredensialnya. Skema dibuat otomatis saat backend boot.
 
-Deploy: `./deploy-genjaya.sh` (build FE → rsync dist, `npx tsc` BE lokal → rsync `dist/`+`src/`, `pm2 restart`). Script punya guard yang abort kalau path mengandung `rheologi`.
+Deploy: `./deploy-blackbox.sh` (build FE → rsync dist, `npx tsc` BE lokal → rsync `dist/`+`src/`, `pm2 restart`). Script punya guard yang abort kalau path mengandung `rheologi`.
 
 ## Arsitektur & konvensi
 
@@ -41,11 +41,25 @@ Estimator (AHSP/HSP/RAB/Proposal + MTO kalkulator konstruksi), Projects (Gantt, 
 
 ## Kondisi repo
 
-- Remote: `github.com/gallankusuma/BlackBoxs` (private). Monorepo: backend + frontend dalam satu repo.
+- Remote: `github.com/gallankusuma/BlackBoxs` — **repo publik**. Jangan pernah commit kredensial; `.env`, `ecosystem.config.*`, dan dump data sudah masuk `.gitignore`.
 - History di-reset bersih pada Agustus 2026 karena history lama memuat `backend/.env` dan arsip >100MB. Commit lama masih ada di branch lokal `backup-pre-clean`; history git frontend lama tersimpan sebagai bundle di scratchpad sesi.
-- **Yang sengaja tidak masuk repo** (lihat `.gitignore`): `.env`, `backend/uploads/` (dokumen bisnis), `backend/dist/` & `frontend/dist/` (build output), `genjaya/` (snapshot lama app yang sama — stale, jangan diedit), dump `.sql` produksi, semua `.xlsx`, dan `backend/insert_employees.sql` (nama + gaji karyawan asli).
-- `backend/dist/` **tidak** di-commit — `deploy-genjaya.sh` menjalankan `npx tsc` lokal sebelum rsync, jadi tidak perlu.
+- **Yang sengaja tidak masuk repo** (lihat `.gitignore`): `.env`, `backend/uploads/` (dokumen bisnis), `backend/dist/` & `frontend/dist/` (build output), `_stale-snapshot/` (salinan lama app yang sama — stale, jangan diedit), dump `.sql` produksi, semua `.xlsx`, dan `backend/insert_employees.sql` (nama + gaji karyawan asli).
+- `backend/dist/` **tidak** di-commit — `deploy-blackbox.sh` menjalankan `npx tsc` lokal sebelum rsync, jadi tidak perlu.
 - File `*.old.bak` / `*.ts.backup` di `src/` adalah sisa lama, abaikan.
+
+### Penamaan
+
+Branding aplikasi adalah **BlackBox EPC**. Nama lama "Genjaya" sudah dihapus dari semua teks, judul, dan dokumen.
+
+Yang **masih** memakai nama lama adalah identifier infrastruktur yang benar-benar hidup di server, jadi jangan diganti sembarangan lewat find-and-replace — mengubahnya tanpa migrasi sisi server akan mematikan aplikasi:
+
+| Identifier | Dipakai di |
+|---|---|
+| database `erp_genjaya` | `backend/.env`, `.env.example`, `fix_db.js`, `scrape_product_images.py` |
+| path `/var/www/erp-genjaya/` | `deploy-blackbox.sh`, `frontend/deploy.bat`, 2 blok `root` di nginx VPS |
+| proses pm2 `erp-genjaya-backend` | `deploy-blackbox.sh` (langkah restart) |
+
+Renaming ketiganya butuh langkah terkoordinasi di VPS (rename database, pindah direktori, update nginx, `pm2 delete` + start ulang) dan menyebabkan downtime.
 
 ## Verifikasi sebelum commit
 

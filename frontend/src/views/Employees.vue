@@ -140,7 +140,7 @@
           </div>
           <div>
             <label class="text-xs text-gray-500 mb-1 block">Email</label>
-            <input v-model="formData.email" type="email" placeholder="budi@genjaya.com" class="w-full px-3 py-2 border border-gray-300 rounded text-sm" />
+            <input v-model="formData.email" type="email" placeholder="budi@blackboxs.io" class="w-full px-3 py-2 border border-gray-300 rounded text-sm" />
           </div>
           <div class="grid grid-cols-2 gap-3">
             <div>
@@ -357,8 +357,8 @@ const fetchDepartments = async () => {
 const downloadSample = () => {
   const headers = ['employee_code','first_name','last_name','email','phone','position','department_name','hire_date','basic_salary','contract_type'];
   const samples = [
-    ['EMP-001','Budi','Santoso','budi@genjaya.com','081234567890','Site Engineer','Engineering','2024-01-15','8000000','monthly'],
-    ['EMP-002','Siti','Rahayu','siti@genjaya.com','082345678901','Procurement Staff','Procurement','2024-02-01','6000000','monthly'],
+    ['EMP-001','Budi','Santoso','budi@blackboxs.io','081234567890','Site Engineer','Engineering','2024-01-15','8000000','monthly'],
+    ['EMP-002','Siti','Rahayu','siti@blackboxs.io','082345678901','Procurement Staff','Procurement','2024-02-01','6000000','monthly'],
     ['EMP-003','Ahmad','Fauzi','','085678901234','Operator','Operations','2024-03-10','350000','daily'],
   ];
   const csv = [headers.join(','), ...samples.map(r => r.map(v => `"${v}"`).join(','))].join('\n');

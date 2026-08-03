@@ -10,7 +10,7 @@ import {
 
 const router = express.Router();
 
-const RP_NAME = 'Genjaya EPC Employee Portal';
+const RP_NAME = 'BlackBox EPC Employee Portal';
 const RP_ID   = process.env.WEBAUTHN_RP_ID  || 'blackboxs.io';
 const ORIGIN  = process.env.WEBAUTHN_ORIGIN || 'https://blackboxs.io';
 

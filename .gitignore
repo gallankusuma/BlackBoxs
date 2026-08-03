@@ -33,7 +33,7 @@ backend/uploads/
 *.ts.bak
 
 # Snapshot lama aplikasi — stale, sumber kebenaran ada di backend/ + frontend/
-genjaya/
+_stale-snapshot/
 
 # Large DB dumps & backups
 erp_rheologi_dev.sql

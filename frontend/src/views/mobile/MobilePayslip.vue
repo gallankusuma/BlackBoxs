@@ -68,7 +68,7 @@
           </div>
 
           <div id="slip-print" class="slip-body">
-            <div class="slip-company">🏗 GENJAYA EPC</div>
+            <div class="slip-company">🏗 BLACKBOX EPC</div>
             <div class="slip-period">SLIP GAJI — {{ monthName(activeSlip.period_month).toUpperCase() }} {{ activeSlip.period_year }}</div>
 
             <div class="slip-info">

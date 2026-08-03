@@ -555,7 +555,7 @@
                 <!-- ══ LEFT PANEL: Salary Summary ══ -->
                 <div class="slip-left">
                   <!-- Company header -->
-                  <div class="slip-co">🏗 GENJAYA EPC</div>
+                  <div class="slip-co">🏗 BLACKBOX EPC</div>
                   <div class="slip-title">SLIP GAJI / PAYSLIP</div>
                   <div class="slip-period">{{ psMonthLabel }}</div>
 
