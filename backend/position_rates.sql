@@ -1,0 +1,36 @@
+CREATE TABLE IF NOT EXISTS position_rates (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  position_code VARCHAR(30) NOT NULL UNIQUE,
+  position_name VARCHAR(100) NOT NULL,
+  grade VARCHAR(30) DEFAULT NULL,
+  salary_type VARCHAR(10) NOT NULL DEFAULT 'daily',
+  basic_rate DECIMAL(12,2) NOT NULL DEFAULT 0,
+  tunjangan_rate DECIMAL(12,2) NOT NULL DEFAULT 0,
+  ot_rate DECIMAL(12,2) NOT NULL DEFAULT 0,
+  description TEXT DEFAULT NULL,
+  is_active TINYINT(1) NOT NULL DEFAULT 1,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+INSERT IGNORE INTO position_rates (position_code, position_name, grade, salary_type, basic_rate, tunjangan_rate, ot_rate) VALUES
+('WLD-1', 'Welder', 'Kelas 1', 'daily', 250000, 50000, 40000),
+('WLD-2', 'Welder', 'Kelas 2', 'daily', 200000, 40000, 30000),
+('WLD-3', 'Welder', 'Kelas 3', 'daily', 170000, 35000, 25000),
+('FIT-1', 'Fitter', 'Kelas 1', 'daily', 230000, 45000, 35000),
+('FIT-2', 'Fitter', 'Kelas 2', 'daily', 190000, 40000, 28000),
+('FIT-3', 'Fitter', 'Kelas 3', 'daily', 160000, 30000, 22000),
+('PIPE-1', 'Pipe Fitter', 'Kelas 1', 'daily', 240000, 50000, 38000),
+('PIPE-2', 'Pipe Fitter', 'Kelas 2', 'daily', 195000, 40000, 30000),
+('RIGGER', 'Rigger', NULL, 'daily', 200000, 40000, 30000),
+('HELPER', 'Helper', NULL, 'daily', 130000, 25000, 18000),
+('FOREMAN', 'Foreman', NULL, 'daily', 300000, 60000, 50000),
+('SAFETY', 'Safety Officer', NULL, 'daily', 280000, 50000, 45000),
+('ELECT-1', 'Electrician', 'Kelas 1', 'daily', 240000, 50000, 38000),
+('ELECT-2', 'Electrician', 'Kelas 2', 'daily', 190000, 40000, 28000),
+('PAINTER', 'Painter', NULL, 'daily', 170000, 35000, 25000),
+('OPER-CRANE', 'Operator Crane', NULL, 'daily', 280000, 55000, 45000),
+('OPER-EXCAV', 'Operator Excavator', NULL, 'daily', 250000, 50000, 40000),
+('SUPV', 'Supervisor', NULL, 'monthly', 8000000, 0, 0),
+('PM', 'Project Manager', NULL, 'monthly', 15000000, 0, 0),
+('ADMIN-P', 'Admin Proyek', NULL, 'monthly', 5000000, 0, 0);

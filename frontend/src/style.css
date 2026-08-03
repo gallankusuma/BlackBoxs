@@ -1,0 +1,204 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: "Inter", "Manrope", "Segoe UI", system-ui, -apple-system, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  background-color: #f4f6fb;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: radial-gradient(circle at 10% 20%, rgba(79, 70, 229, 0.08), transparent 25%),
+    radial-gradient(circle at 80% 0%, rgba(56, 189, 248, 0.08), transparent 25%),
+    #f8fafc;
+  color: #0f172a;
+}
+
+/* ===== DARK MODE - Global Overrides ===== */
+/* These rules auto-adapt all page views when dark mode is active */
+
+html.dark body {
+  background: #0f172a;
+  color: #e2e8f0;
+}
+
+html.dark :root {
+  background-color: #0f172a;
+}
+
+/* ---------- Backgrounds ---------- */
+html.dark .bg-white { background-color: #1e293b !important; }
+html.dark .bg-gray-50 { background-color: #111827 !important; }
+html.dark .bg-gray-100 { background-color: #1e293b !important; }
+html.dark .bg-gray-200 { background-color: #334155 !important; }
+
+/* ---------- ALL Text → Light ---------- */
+/* Force every text-gray-* shade to a readable light tone */
+html.dark .text-gray-900,
+html.dark .text-gray-800 { color: #f1f5f9 !important; }
+html.dark .text-gray-700 { color: #e2e8f0 !important; }
+html.dark .text-gray-600 { color: #cbd5e1 !important; }
+html.dark .text-gray-500 { color: #94a3b8 !important; }
+html.dark .text-gray-400 { color: #94a3b8 !important; }
+
+/* Catch-all: any element inside the main content that has no explicit color */
+html.dark main,
+html.dark main * {
+  color: inherit;
+}
+html.dark main {
+  color: #e2e8f0;
+}
+
+/* Headings & important text */
+html.dark h1, html.dark h2, html.dark h3,
+html.dark h4, html.dark h5, html.dark h6 {
+  color: #f1f5f9 !important;
+}
+
+/* Paragraphs, spans, labels, list items, table cells */
+html.dark p:not([class*="text-green"]):not([class*="text-red"]):not([class*="text-blue"]):not([class*="text-orange"]):not([class*="text-yellow"]) {
+  color: #cbd5e1;
+}
+html.dark label { color: #e2e8f0 !important; }
+html.dark th { color: #94a3b8 !important; }
+html.dark td { color: #cbd5e1 !important; }
+html.dark td .font-medium,
+html.dark td .font-semibold { color: #f1f5f9 !important; }
+
+/* Strong / bold text */
+html.dark strong, html.dark b { color: #f1f5f9; }
+
+/* Font-semibold / font-medium used as titles */
+html.dark .font-semibold:not([class*="text-green"]):not([class*="text-red"]):not([class*="text-blue"]):not([class*="text-white"]):not([class*="text-orange"]):not([class*="text-yellow"]):not([class*="text-cyan"]):not([class*="text-indigo"]) {
+  color: #f1f5f9 !important;
+}
+html.dark .font-bold:not([class*="text-green"]):not([class*="text-red"]):not([class*="text-blue"]):not([class*="text-white"]):not([class*="text-orange"]):not([class*="text-cyan"]) {
+  color: #f1f5f9 !important;
+}
+html.dark .font-medium:not([class*="text-green"]):not([class*="text-red"]):not([class*="text-blue"]):not([class*="text-white"]):not([class*="text-orange"]) {
+  color: #e2e8f0 !important;
+}
+
+/* Uppercase small text (column headers etc) */
+html.dark .uppercase { color: #94a3b8 !important; }
+html.dark .text-xs:not([class*="text-green"]):not([class*="text-red"]):not([class*="text-blue"]):not([class*="text-orange"]):not([class*="text-white"]):not([class*="text-yellow"]):not([class*="text-cyan"]) {
+  color: #94a3b8;
+}
+html.dark .text-sm:not([class*="text-green"]):not([class*="text-red"]):not([class*="text-blue"]):not([class*="text-orange"]):not([class*="text-white"]):not([class*="text-yellow"]):not([class*="text-cyan"]) {
+  color: #cbd5e1;
+}
+
+/* ---------- Borders ---------- */
+html.dark .border-gray-200 { border-color: #334155 !important; }
+html.dark .border-gray-300 { border-color: #475569 !important; }
+html.dark .border-gray-100 { border-color: #1e293b !important; }
+html.dark .divide-gray-200 > :not([hidden]) ~ :not([hidden]) { border-color: #334155 !important; }
+html.dark .divide-gray-100 > :not([hidden]) ~ :not([hidden]) { border-color: #1e293b !important; }
+
+/* ---------- Form elements ---------- */
+html.dark input,
+html.dark select,
+html.dark textarea {
+  background-color: #0f172a !important;
+  border-color: #475569 !important;
+  color: #f1f5f9 !important;
+}
+html.dark input::placeholder,
+html.dark select::placeholder,
+html.dark textarea::placeholder {
+  color: #64748b !important;
+}
+html.dark input:disabled,
+html.dark select:disabled,
+html.dark textarea:disabled {
+  background-color: #1e293b !important;
+  color: #64748b !important;
+}
+html.dark input:focus,
+html.dark select:focus,
+html.dark textarea:focus {
+  border-color: #3b82f6 !important;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3) !important;
+}
+html.dark select option {
+  background-color: #1e293b;
+  color: #f1f5f9;
+}
+
+/* ---------- Buttons ---------- */
+html.dark button:not([class*="bg-blue"]):not([class*="bg-green"]):not([class*="bg-red"]):not([class*="bg-orange"]):not([class*="bg-indigo"]):not([class*="bg-purple"]) {
+  color: #e2e8f0;
+}
+html.dark .hover\:bg-gray-50:hover { background-color: #334155 !important; }
+html.dark .hover\:bg-gray-100:hover { background-color: #334155 !important; }
+
+/* ---------- Tables ---------- */
+html.dark thead { background-color: #1e293b !important; }
+html.dark thead th { background-color: #1e293b !important; }
+html.dark tbody tr { border-color: #334155; }
+html.dark tbody tr:hover { background-color: #334155 !important; }
+
+/* ---------- Cards / Panels ---------- */
+html.dark .shadow { box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5) !important; }
+html.dark .shadow-sm { box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4) !important; }
+html.dark .shadow-lg { box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5) !important; }
+html.dark .shadow-xl { box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5) !important; }
+html.dark .rounded-lg { border-color: #334155; }
+
+/* ---------- Badges - soften in dark mode ---------- */
+html.dark .bg-green-100 { background-color: rgba(34, 197, 94, 0.15) !important; }
+html.dark .bg-blue-100 { background-color: rgba(59, 130, 246, 0.15) !important; }
+html.dark .bg-yellow-100 { background-color: rgba(234, 179, 8, 0.15) !important; }
+html.dark .bg-red-100 { background-color: rgba(239, 68, 68, 0.15) !important; }
+html.dark .bg-purple-100 { background-color: rgba(168, 85, 247, 0.15) !important; }
+html.dark .bg-orange-100 { background-color: rgba(249, 115, 22, 0.15) !important; }
+html.dark .bg-indigo-50 { background-color: rgba(99, 102, 241, 0.15) !important; }
+html.dark .bg-cyan-50 { background-color: rgba(6, 182, 212, 0.15) !important; }
+html.dark .bg-amber-100 { background-color: rgba(245, 158, 11, 0.15) !important; }
+html.dark .bg-green-50 { background-color: rgba(34, 197, 94, 0.1) !important; }
+html.dark .bg-blue-50 { background-color: rgba(59, 130, 246, 0.1) !important; }
+
+/* ---------- Modals / Overlays ---------- */
+html.dark .bg-black.bg-opacity-50 { background-color: rgba(0, 0, 0, 0.75) !important; }
+html.dark .fixed .bg-white { background-color: #1e293b !important; }
+
+/* ---------- Misc ---------- */
+html.dark .border-dashed { border-color: #475569 !important; }
+html.dark .bg-gradient-to-r { background-image: none !important; background-color: #1e293b !important; }
+
+/* Scrollbar */
+html.dark ::-webkit-scrollbar-track { background: #1e293b; }
+html.dark ::-webkit-scrollbar-thumb { background: #475569; }
+html.dark ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+
+/* ===== END DARK MODE ===== */
+
+#app {
+  width: 100%;
+}
+
+/* ⚠️ NO 3D EFFECTS ON FORMS - Prevents text blur */
+/* All cards and forms use simple 2D transforms only */
+
+.card-hover {
+  transition: transform 180ms ease, box-shadow 180ms ease;
+}
+
+.card-hover:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 10px 25px -8px rgba(15, 23, 42, 0.25);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card-hover {
+    transition: none;
+    transform: none !important;
+  }
+}
+

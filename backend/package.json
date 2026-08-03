@@ -1,0 +1,50 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "description": "ERP backend API",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "tsx watch src/index.ts --clear-screen=false",
+    "dev:auto": "tsx watch src/index.ts --clear-screen=false",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "lint": "eslint src --ext .ts",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "seed": "node init-database.js"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "@simplewebauthn/server": "^13.3.1",
+    "@simplewebauthn/types": "^12.0.0",
+    "@types/multer": "^2.0.0",
+    "axios": "^1.13.5",
+    "bcrypt": "^5.1.1",
+    "better-sqlite3": "^12.6.2",
+    "cheerio": "^1.2.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^4.22.1",
+    "express-validator": "^7.3.1",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.3",
+    "morgan": "^1.10.1",
+    "multer": "^1.4.5-lts.1",
+    "mysql2": "^3.22.3",
+    "pg": "^8.18.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^5.0.2",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/morgan": "^1.9.10",
+    "@types/node": "^22.19.1",
+    "@typescript-eslint/eslint-plugin": "^8.48.1",
+    "@typescript-eslint/parser": "^8.48.1",
+    "eslint": "^9.39.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

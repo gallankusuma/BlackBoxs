@@ -1,0 +1,47 @@
+-- Add civil/structural positions
+INSERT IGNORE INTO position_rates (position_code, position_name, grade, salary_type, basic_rate, tunjangan_rate, ot_rate) VALUES
+('TUKANG-1', 'Tukang Batu', 'Kelas 1', 'daily', 220000, 45000, 35000),
+('TUKANG-2', 'Tukang Batu', 'Kelas 2', 'daily', 180000, 35000, 27000),
+('TUKANG-3', 'Tukang Batu', 'Kelas 3', 'daily', 150000, 30000, 22000),
+('BESI-1', 'Tukang Besi/Pembesian', 'Kelas 1', 'daily', 230000, 45000, 35000),
+('BESI-2', 'Tukang Besi/Pembesian', 'Kelas 2', 'daily', 190000, 40000, 28000),
+('BESI-3', 'Tukang Besi/Pembesian', 'Kelas 3', 'daily', 155000, 30000, 22000),
+('BEKIST-1', 'Tukang Bekisting', 'Kelas 1', 'daily', 230000, 45000, 35000),
+('BEKIST-2', 'Tukang Bekisting', 'Kelas 2', 'daily', 190000, 40000, 28000),
+('COR-1', 'Tukang Cor', 'Kelas 1', 'daily', 220000, 45000, 35000),
+('COR-2', 'Tukang Cor', 'Kelas 2', 'daily', 180000, 35000, 27000),
+('PLESTER', 'Tukang Plester', NULL, 'daily', 200000, 40000, 30000),
+('KERAMIK', 'Tukang Keramik', NULL, 'daily', 220000, 45000, 35000),
+('KAYU-1', 'Tukang Kayu', 'Kelas 1', 'daily', 230000, 45000, 35000),
+('KAYU-2', 'Tukang Kayu', 'Kelas 2', 'daily', 185000, 35000, 27000),
+('SCAFF-1', 'Scaffolder', 'Kelas 1', 'daily', 240000, 50000, 38000),
+('SCAFF-2', 'Scaffolder', 'Kelas 2', 'daily', 195000, 40000, 30000),
+('SURVEY', 'Surveyor', NULL, 'daily', 280000, 55000, 45000),
+('DRAFTER', 'Drafter', NULL, 'monthly', 6000000, 0, 0),
+('SIPIL-ENG', 'Site Engineer Civil', NULL, 'monthly', 12000000, 0, 0),
+('QC-CIVIL', 'QC Inspector Civil', NULL, 'monthly', 8000000, 0, 0),
+('MECH-1', 'Mekanik', 'Kelas 1', 'daily', 240000, 50000, 38000),
+('MECH-2', 'Mekanik', 'Kelas 2', 'daily', 190000, 40000, 28000),
+('INSUL-1', 'Insulator', 'Kelas 1', 'daily', 220000, 45000, 35000),
+('INSUL-2', 'Insulator', 'Kelas 2', 'daily', 180000, 35000, 27000),
+('SANDBL', 'Sandblaster', NULL, 'daily', 200000, 40000, 30000),
+('MANDOR', 'Mandor', NULL, 'daily', 280000, 55000, 45000),
+('OPER-MIXER', 'Operator Mixer', NULL, 'daily', 200000, 40000, 30000),
+('OPER-POMPA', 'Operator Pompa Beton', NULL, 'daily', 250000, 50000, 40000),
+('OPER-GENSET', 'Operator Genset', NULL, 'daily', 200000, 40000, 30000),
+('DRIVER', 'Supir/Driver', NULL, 'daily', 180000, 35000, 27000),
+('SATPAM', 'Satpam/Security', NULL, 'monthly', 4500000, 0, 0);
+
+-- Fund request documents table
+CREATE TABLE IF NOT EXISTS fund_request_documents (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  fund_request_id INT NOT NULL,
+  file_name VARCHAR(255) NOT NULL,
+  original_name VARCHAR(255) NOT NULL,
+  file_path VARCHAR(500) NOT NULL,
+  file_size INT DEFAULT 0,
+  file_type VARCHAR(100) DEFAULT NULL,
+  uploaded_by INT DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (fund_request_id) REFERENCES fund_requests(id) ON DELETE CASCADE
+);

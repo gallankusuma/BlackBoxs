@@ -1,0 +1,50 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Backend: npm run dev",
+      "type": "shell",
+      "command": "npm run dev",
+      "options": {
+        "cwd": "${workspaceFolder}/backend"
+      },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": {
+        "panel": "dedicated",
+        "showReuseMessage": false,
+        "clear": false
+      }
+    },
+    {
+      "label": "Frontend: npm run dev",
+      "type": "shell",
+      "command": "npm run dev",
+      "options": {
+        "cwd": "${workspaceFolder}/frontend"
+      },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": {
+        "panel": "dedicated",
+        "showReuseMessage": false,
+        "clear": false
+      }
+    },
+    {
+      "label": "Run All: Backend + Frontend",
+      "dependsOrder": "parallel",
+      "dependsOn": [
+        "Backend: npm run dev",
+        "Frontend: npm run dev"
+      ],
+      "runOptions": {
+        "runOn": "folderOpen"
+      },
+      "presentation": {
+        "panel": "shared",
+        "reveal": "always"
+      }
+    }
+  ]
+}

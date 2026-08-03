@@ -1,0 +1,58 @@
+# Dependencies
+node_modules/
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.env.bak-*
+# Config pm2 — memuat DB_PASSWORD & JWT_SECRET hardcoded
+ecosystem.config.js
+ecosystem.config.cjs
+
+# Build output (dibuat ulang: `npx tsc` / `npm run build`)
+backend/dist/
+frontend/dist/
+dist.tar.gz
+
+# Runtime uploads (dokumen bisnis: bid, bukti bayar, lampiran PR)
+backend/uploads/
+
+# OS
+.DS_Store
+
+# Editor — tasks/extensions ikut, karena mendokumentasikan cara run
+.vscode/*
+!.vscode/tasks.json
+!.vscode/extensions.json
+.idea/
+
+# Backup / cruft files
+*.old.bak
+*.backup
+*.ts.bak
+
+# Snapshot lama aplikasi — stale, sumber kebenaran ada di backend/ + frontend/
+genjaya/
+
+# Large DB dumps & backups
+erp_rheologi_dev.sql
+erp_rheologi_production.sql
+*.tar.gz
+backups/
+temp_extract/
+temp_frontend/
+
+# Database lokal
+*.sqlite
+*.db
+
+# Data bisnis (gaji, PR/PO, RAB)
+*.xlsx
+*.xls
+# Seed berisi nama + gaji karyawan asli
+backend/insert_employees.sql
+
+# Log
+*.log
+tsc_output.txt

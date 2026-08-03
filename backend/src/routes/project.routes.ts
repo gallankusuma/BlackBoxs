@@ -1,0 +1,1542 @@
+import { Router, Request, Response } from 'express';
+import { dbQuery, dbGet, dbAll, dbRun } from '../config/database';
+import { authMiddleware } from '../middleware/auth';
+import multer from 'multer';
+import path from 'path';
+import fs from 'fs';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+
+const genAI = process.env.GEMINI_API_KEY
+  ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
+  : null;
+
+
+const router = Router();
+
+// Get all projects with client and manager info
+router.get('/', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const projects = await dbAll(`
+      SELECT 
+        p.id, 
+        p.project_number, 
+        p.project_name as title, 
+        p.description, 
+        p.status, 
+        p.start_date, 
+        p.end_date as deadline, 
+        p.budget as price, 
+        p.created_at,
+        c.name as client_name,
+        u.full_name as manager_name,
+        (SELECT COUNT(*) FROM project_tasks t WHERE t.project_id = p.id AND t.status = 'Done') * 100 / 
+        NULLIF((SELECT COUNT(*) FROM project_tasks t WHERE t.project_id = p.id), 0) as progress
+      FROM client_projects p
+      LEFT JOIN clients c ON p.client_id = c.id
+      LEFT JOIN users u ON p.assigned_to = u.id
+      ORDER BY p.created_at DESC
+    `);
+    
+    // Format numeric values
+    const formattedProjects = projects.map((p: any) => ({
+      ...p,
+      progress: Math.round(p.progress || 0)
+    }));
+    
+    res.json(formattedProjects);
+  } catch (error) {
+    console.error('Error fetching projects:', error);
+    res.status(500).json({ error: 'Failed to fetch projects' });
+  }
+});
+
+// Get single project details
+router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const project = await dbGet(`
+      SELECT 
+        p.*, 
+        p.project_name as title,
+        p.budget as price,
+        c.name as client_name, (SELECT COUNT(*) FROM project_tasks t WHERE t.project_id = p.id AND t.status = 'Done') * 100 / 
+        NULLIF((SELECT COUNT(*) FROM project_tasks t WHERE t.project_id = p.id), 0) as progress,
+        u.full_name as manager_name
+      FROM client_projects p
+      LEFT JOIN clients c ON p.client_id = c.id
+      LEFT JOIN users u ON p.assigned_to = u.id
+      WHERE p.id = ?
+    `, [req.params.id]);
+
+    if (!project) {
+      return res.status(404).json({ error: 'Project not found' });
+    }
+
+    // Get members
+    const members = await dbAll(`
+      SELECT u.id, u.full_name, u.email, pm.role 
+      FROM project_members pm
+      JOIN users u ON pm.user_id = u.id
+      WHERE pm.project_id = ?
+    `, [req.params.id]);
+
+    res.json({ ...project, members });
+  } catch (error) {
+    console.error('Error fetching project:', error);
+    res.status(500).json({ error: 'Failed to fetch project' });
+  }
+});
+
+// Create project (Also links to Client)
+router.post('/', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { 
+      client_id, 
+      title, 
+      description, 
+      status, 
+      start_date, 
+      deadline, 
+      price, 
+      priority,
+      assigned_to 
+    } = req.body;
+
+    const projectNumber = `PRJ-${Date.now()}`; // Simple auto-generation
+
+    const result = await dbRun(`
+      INSERT INTO client_projects (
+        client_id, project_number, project_name, description, status, 
+        start_date, end_date, budget, assigned_to, created_by
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [
+      client_id || null, projectNumber, title, description || null, status || 'open',
+      start_date || null, deadline || null, price || 0, assigned_to || null, (req as any).user?.userId || null
+    ]);
+
+    res.status(201).json({ id: result.insertId, message: 'Project created' });
+  } catch (error) {
+    console.error('Error creating project:', error);
+    res.status(500).json({ error: 'Failed to create project' });
+  }
+});
+
+// Update project
+router.put('/:id', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { 
+      title, project_name,
+      description, 
+      status, 
+      start_date, 
+      deadline, end_date,
+      price, budget,
+      assigned_to,
+      client_id
+    } = req.body;
+
+    const effectiveName = title || project_name || null;
+    const effectiveBudget = price || budget || null;
+    const effectiveEnd = deadline || end_date || null;
+
+    await dbRun(`
+      UPDATE client_projects SET 
+        project_name = COALESCE(?, project_name), 
+        description = ?, 
+        status = COALESCE(?, status), 
+        start_date = ?, 
+        end_date = ?, 
+        budget = COALESCE(?, budget), 
+        assigned_to = ?,
+        client_id = COALESCE(?, client_id),
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `, [
+      effectiveName, description || null, status, start_date || null, effectiveEnd, effectiveBudget, assigned_to || null, client_id ?? null, req.params.id
+    ]);
+
+    res.json({ message: 'Project updated' });
+  } catch (error) {
+    console.error('Error updating project:', error);
+    res.status(500).json({ error: 'Failed to update project' });
+  }
+});
+
+// Delete project (cascade child records)
+router.delete('/:id', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id;
+
+    // Check if real project exists
+    const project = await dbGet('SELECT id, project_name FROM client_projects WHERE id = ?', [projectId]) as any;
+    if (!project) {
+      return res.status(404).json({ error: 'Project not found' });
+    }
+
+    // Check for blocking references (PO/PR that are in-progress)
+    try {
+      const linkedPOs = await dbAll(
+        `SELECT id, po_number FROM purchase_orders WHERE project_id = ? AND status NOT IN ('draft', 'cancelled')`,
+        [projectId]
+      ) as any[];
+      if (linkedPOs && linkedPOs.length > 0) {
+        return res.status(400).json({
+          error: `Cannot delete: project has ${linkedPOs.length} active Purchase Order(s). Cancel or complete them first.`
+        });
+      }
+    } catch { /* table may not exist */ }
+
+    // Safe cascade delete helper
+    const safeDelete = async (sql: string, params: any[]) => {
+      try { await dbRun(sql, params); } catch (e: any) {
+        console.warn(`Warning during cascade delete: ${e.message?.substring(0, 100)}`);
+      }
+    };
+
+    // Cascade delete child records (order matters for FK)
+    await safeDelete('DELETE FROM project_activities WHERE project_id = ?', [projectId]);
+    await safeDelete('DELETE FROM project_files WHERE project_id = ?', [projectId]);
+    await safeDelete('DELETE FROM project_members WHERE project_id = ?', [projectId]);
+    await safeDelete('DELETE FROM project_tasks WHERE project_id = ?', [projectId]);
+    await safeDelete('DELETE FROM project_milestones WHERE project_id = ?', [projectId]);
+    await safeDelete('DELETE FROM project_expenses WHERE project_id = ?', [projectId]);
+    // Unlink POs/PRs (set project_id to NULL instead of blocking)
+    await safeDelete('UPDATE purchase_orders SET project_id = NULL WHERE project_id = ?', [projectId]);
+    await safeDelete('UPDATE purchase_requests SET project_id = NULL WHERE project_id = ?', [projectId]);
+    // Unlink other nullable references
+    await safeDelete('UPDATE proposals SET project_id = NULL WHERE project_id = ?', [projectId]);
+    await safeDelete('UPDATE client_events SET project_id = NULL WHERE project_id = ?', [projectId]);
+    await safeDelete('UPDATE client_invoices SET project_id = NULL WHERE project_id = ?', [projectId]);
+    await safeDelete('UPDATE fund_requests SET project_id = NULL WHERE project_id = ?', [projectId]);
+
+    // Finally delete the project
+    await dbRun('DELETE FROM client_projects WHERE id = ?', [projectId]);
+
+    console.log(`✅ Project #${projectId} "${project.project_name}" deleted with all child records.`);
+    res.json({ message: 'Project deleted successfully' });
+  } catch (error: any) {
+    console.error('Error deleting project:', error);
+    res.status(500).json({ error: error?.message || 'Failed to delete project' });
+  }
+});
+
+// ... Existing routes ...
+
+// --- Task Routes ---
+
+// Get all tasks for a project
+router.get('/:id/tasks', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const tasks = await dbAll(`
+      SELECT 
+        t.*,
+        u.full_name as assigned_to_name,
+        m.title as milestone_title
+      FROM project_tasks t
+      LEFT JOIN users u ON t.assigned_to = u.id
+      LEFT JOIN project_milestones m ON t.milestone_id = m.id
+      WHERE t.project_id = ?
+      ORDER BY t.created_at DESC
+    `, [req.params.id]);
+    res.json(tasks);
+  } catch (error) {
+    console.error('Error fetching tasks:', error);
+    res.status(500).json({ error: 'Failed to fetch tasks' });
+  }
+});
+
+// Create task
+router.post('/:id/tasks', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { 
+      title, 
+      description, 
+      status, 
+      priority, 
+      start_date, 
+      due_date, 
+      assigned_to,
+      milestone_id 
+    } = req.body;
+
+    const result = await dbRun(`
+      INSERT INTO project_tasks (
+        project_id, title, description, status, priority, 
+        start_date, due_date, assigned_to, milestone_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [
+      req.params.id, title, description || null, status || 'To Do', priority || 'Medium',
+      start_date || null, due_date || null, assigned_to || null, milestone_id || null
+    ]);
+
+    // Log Activity
+    await dbRun(`
+      INSERT INTO project_activities (project_id, user_id, action_type, description)
+      VALUES (?, ?, 'created_task', ?)
+    `, [req.params.id, (req as any).user?.userId || null, `Created task: ${title}`]);
+
+    res.status(201).json({ id: result.insertId, message: 'Task created' });
+  } catch (error) {
+    console.error('Error creating task:', error);
+    res.status(500).json({ error: 'Failed to create task' });
+  }
+});
+
+// Update task
+router.put('/tasks/:taskId', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { 
+      title, 
+      description, 
+      status, 
+      priority, 
+      start_date, 
+      due_date, 
+      assigned_to, 
+      milestone_id 
+    } = req.body;
+
+    await dbRun(`
+      UPDATE project_tasks SET 
+        title = ?, 
+        description = ?, 
+        status = ?, 
+        priority = ?, 
+        start_date = ?, 
+        due_date = ?, 
+        assigned_to = ?, 
+        milestone_id = ?
+      WHERE id = ?
+    `, [
+      title || null, description || null, status || null, priority || null, 
+      start_date || null, due_date || null, assigned_to || null, milestone_id || null, 
+      req.params.taskId
+    ]);
+
+    res.json({ message: 'Task updated' });
+  } catch (error) {
+    console.error('Error updating task:', error);
+    res.status(500).json({ error: 'Failed to update task' });
+  }
+});
+
+// Delete task
+router.delete('/tasks/:taskId', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    await dbRun('DELETE FROM project_tasks WHERE id = ?', [req.params.taskId]);
+    res.json({ message: 'Task deleted' });
+  } catch (error) {
+    console.error('Error deleting task:', error);
+    res.status(500).json({ error: 'Failed to delete task' });
+  }
+});
+
+// ... Existing routes ...
+
+// --- Milestone Routes ---
+
+// Get all milestones for a project
+router.get('/:id/milestones', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const milestones = await dbAll(`
+      SELECT m.*, 
+      (SELECT COUNT(*) FROM project_tasks t WHERE t.milestone_id = m.id) as total_tasks,
+      (SELECT COUNT(*) FROM project_tasks t WHERE t.milestone_id = m.id AND t.status = 'Done') as completed_tasks
+      FROM project_milestones m
+      WHERE m.project_id = ?
+      ORDER BY m.due_date ASC
+    `, [req.params.id]);
+    res.json(milestones);
+  } catch (error) {
+    console.error('Error fetching milestones:', error);
+    res.status(500).json({ error: 'Failed to fetch milestones' });
+  }
+});
+
+// Create milestone
+router.post('/:id/milestones', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { title, description, due_date, status, amount } = req.body;
+    const result = await dbRun(`
+      INSERT INTO project_milestones (project_id, title, description, due_date, status, amount)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `, [req.params.id, title, description, due_date, status || 'Pending', amount || 0]);
+
+    // Log Activity
+    await dbRun(`
+      INSERT INTO project_activities (project_id, user_id, action_type, description)
+      VALUES (?, ?, 'created_milestone', ?)
+    `, [req.params.id, (req as any).user?.userId || null, `Created milestone: ${title}`]);
+
+    res.status(201).json({ id: result.insertId, message: 'Milestone created' });
+  } catch (error) {
+    console.error('Error creating milestone:', error);
+    res.status(500).json({ error: 'Failed to create milestone' });
+  }
+});
+
+// Update milestone
+router.put('/milestones/:milestoneId', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { title, description, due_date, status, amount } = req.body;
+    await dbRun(`
+      UPDATE project_milestones SET 
+        title = ?, description = ?, due_date = ?, status = ?, amount = ?
+      WHERE id = ?
+    `, [title || null, description || null, due_date || null, status || null, amount || null, req.params.milestoneId]);
+
+    res.json({ message: 'Milestone updated' });
+  } catch (error) {
+    console.error('Error updating milestone:', error);
+    res.status(500).json({ error: 'Failed to update milestone' });
+  }
+});
+
+// Delete milestone
+router.delete('/milestones/:milestoneId', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    await dbRun('DELETE FROM project_milestones WHERE id = ?', [req.params.milestoneId]);
+    res.json({ message: 'Milestone deleted' });
+  } catch (error) {
+    console.error('Error deleting milestone:', error);
+    res.status(500).json({ error: 'Failed to delete milestone' });
+  }
+});
+
+// ... Existing routes ...
+
+// --- File Routes ---
+
+// Configure Multer
+const uploadDir = path.join(__dirname, '../../uploads/project_files');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const upload = multer({ storage });
+
+// Get all files for a project
+router.get('/:id/files', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const files = await dbAll(`
+      Select f.*, u.full_name as uploader_name
+      FROM project_files f
+      LEFT JOIN users u ON f.uploaded_by = u.id
+      WHERE f.project_id = ?
+      ORDER BY f.uploaded_at DESC
+    `, [req.params.id]);
+    res.json(files);
+  } catch (error) {
+    console.error('Error fetching files:', error);
+    res.status(500).json({ error: 'Failed to fetch files' });
+  }
+});
+
+// Upload file
+router.post('/:id/files', authMiddleware, upload.single('file'), async (req: Request, res: Response) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const { originalname, filename, size, mimetype } = req.file;
+    
+    // Determine file type category (for icons)
+    let fileType = 'other';
+    if (mimetype.startsWith('image/')) fileType = 'image';
+    else if (mimetype.includes('pdf')) fileType = 'pdf';
+    else if (mimetype.includes('sheet') || mimetype.includes('excel')) fileType = 'excel';
+    else if (mimetype.includes('document') || mimetype.includes('word')) fileType = 'word';
+
+    const result = await dbRun(`
+      INSERT INTO project_files (project_id, file_name, file_path, file_type, file_size, uploaded_by,
+        doc_title, doc_category, revision, doc_status, doc_no, description, uploaded_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+    `, [req.params.id, originalname, filename, fileType, size, (req as any).user.userId,
+        req.body.doc_title || null, req.body.doc_category || 'Other',
+        req.body.revision || 'A', req.body.doc_status || 'draft',
+        req.body.doc_no || null, req.body.description || null]);
+
+    // Log Activity
+    await dbRun(`
+      INSERT INTO project_activities (project_id, user_id, action_type, description)
+      VALUES (?, ?, 'uploaded_file', ?)
+    `, [req.params.id, (req as any).user.userId, `Uploaded file: ${originalname}`]);
+
+    res.status(201).json({ 
+      id: result.insertId, 
+      message: 'File uploaded',
+      file: {
+        id: result.insertId,
+        file_name: originalname,
+        file_path: filename,
+        file_type: fileType,
+        file_size: size,
+        uploaded_at: new Date(),
+        uploader_name: (req as any).user.name // Assuming user name is available in request or we fetch it
+      }
+    });
+  } catch (error) {
+    console.error('Error uploading file:', error);
+    res.status(500).json({ error: 'Failed to upload file' });
+  }
+});
+
+// Delete file
+router.delete('/files/:fileId', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const file = await dbGet('SELECT * FROM project_files WHERE id = ?', [req.params.fileId]);
+    if (!file) return res.status(404).json({ error: 'File not found' });
+    await dbRun('DELETE FROM project_files WHERE id = ?', [req.params.fileId]);
+    const filePath = path.join(uploadDir, (file as any).file_path);
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    res.json({ message: 'File deleted' });
+  } catch (error) {
+    console.error('Error deleting file:', error);
+    res.status(500).json({ error: 'Failed to delete file' });
+  }
+});
+
+// PATCH: Update file metadata (no file re-upload needed)
+router.patch('/files/:fileId', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { doc_title, doc_category, revision, doc_status, doc_no, description, file_name } = req.body;
+    await dbRun(
+      `UPDATE project_files
+       SET doc_title = ?, doc_category = ?, revision = ?, doc_status = ?,
+           doc_no = ?, description = ?, file_name = COALESCE(?, file_name)
+       WHERE id = ?`,
+      [doc_title || null, doc_category || 'Other', revision || 'A',
+       doc_status || 'draft', doc_no || null, description || null,
+       file_name || null, req.params.fileId]
+    );
+    const updated = await dbGet(
+      `SELECT f.*, u.full_name as uploader_name FROM project_files f
+       LEFT JOIN users u ON f.uploaded_by = u.id WHERE f.id = ?`,
+      [req.params.fileId]
+    );
+    res.json(updated);
+  } catch (error) {
+    console.error('Error updating file metadata:', error);
+    res.status(500).json({ error: 'Failed to update file' });
+  }
+});
+
+// GET: Serve uploaded file for preview
+router.get('/files/:fileId/preview', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const file: any = await dbGet('SELECT * FROM project_files WHERE id = ?', [req.params.fileId]);
+    if (!file) return res.status(404).json({ error: 'File not found' });
+    const filePath = path.join(uploadDir, file.file_path);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not on disk' });
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(file.file_name)}"`);
+    res.sendFile(filePath);
+  } catch (error) {
+    console.error('Error serving file:', error);
+    res.status(500).json({ error: 'Failed to serve file' });
+  }
+});
+
+// GET: Download file
+router.get('/files/:fileId/download', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const file: any = await dbGet('SELECT * FROM project_files WHERE id = ?', [req.params.fileId]);
+    if (!file) return res.status(404).json({ error: 'File not found' });
+    const filePath = path.join(uploadDir, file.file_path);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not on disk' });
+    res.download(filePath, file.file_name);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to download file' });
+  }
+});
+
+// ── AI: Analyze drawing with Gemini Vision ────────────────────────────────
+router.post('/files/:fileId/analyze', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    if (!genAI) {
+      return res.status(503).json({ error: 'GEMINI_API_KEY not configured on server' });
+    }
+
+    const file: any = await dbGet('SELECT * FROM project_files WHERE id = ?', [req.params.fileId]);
+    if (!file) return res.status(404).json({ error: 'File not found' });
+
+    const filePath = path.join(uploadDir, file.file_path);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not on disk' });
+
+    // Read file as base64
+    const fileBuffer = fs.readFileSync(filePath);
+    const base64Data = fileBuffer.toString('base64');
+
+    // Determine MIME type
+    const mimeMap: Record<string, string> = {
+      pdf: 'application/pdf',
+      png: 'image/png',
+      jpg: 'image/jpeg',
+      jpeg: 'image/jpeg',
+      gif: 'image/gif',
+      webp: 'image/webp',
+    };
+    const ext = (file.file_name || '').split('.').pop()?.toLowerCase() || '';
+    const mimeType = mimeMap[ext] || 'application/pdf';
+
+    // EPC-specific prompt — enhanced for dimension reading + quantity takeoff
+    const prompt = `You are a senior EPC quantity surveyor and engineering document analyst with 20+ years of experience reading engineering drawings.
+
+Analyze this engineering drawing/document in EXTREME DETAIL. Your PRIMARY mission is:
+1. Read ALL dimension lines, annotations, and numerical values
+2. Extract the drawing scale (e.g. 1:50, 1:100) from the title block
+3. Perform QUANTITY TAKEOFF — calculate actual quantities from visible dimensions
+4. Read material schedules, BOM tables, and item lists
+
+QUANTITY CALCULATION RULES:
+- If scale is given (e.g. 1:50), use it to verify or estimate dimensions
+- For structural drawings: calculate lengths (m/lm), areas (m²), volumes (m³)
+- For rebar/steel: extract diameter, spacing, length, calculate total weight if possible
+- For concrete: calculate volume = length × width × height
+- For piping: extract pipe sizes (NPS/DN), schedules, and spool lengths
+- For electrical: extract cable sizes, conduit diameters, cable tray widths
+
+Return a SINGLE valid JSON object (no markdown, no explanation):
+
+{
+  "title_block": {
+    "drawing_number": "",
+    "drawing_title": "",
+    "project_name": "",
+    "project_number": "",
+    "client": "",
+    "contractor": "",
+    "revision": "",
+    "date": "",
+    "scale": "",
+    "sheet": "",
+    "discipline": "Civil | Structural | Mechanical | Piping | Electrical | Instrument | Architecture | Other",
+    "drawn_by": "",
+    "checked_by": "",
+    "approved_by": ""
+  },
+  "document_type": "Foundation Plan | Beam/Column Detail | Slab Plan | Wall Section | Roof Plan | P&ID | Isometric | Plot Plan | Layout | Single Line Diagram | Cable Schedule | GA Drawing | Other",
+  "scale_info": {
+    "stated_scale": "e.g. 1:50",
+    "scale_bar": "description if visible",
+    "unit": "mm | cm | m | inch | ft"
+  },
+  "all_dimensions": [
+    {
+      "label": "description of what dimension refers to e.g. 'Column spacing A-B'",
+      "value": "numeric value",
+      "unit": "mm | cm | m",
+      "location": "where on drawing"
+    }
+  ],
+  "quantity_takeoff": [
+    {
+      "item_no": "sequential number",
+      "description": "full description of item",
+      "specification": "material spec, grade, diameter, class, etc.",
+      "size": "cross-section or diameter",
+      "length_or_area": "calculated or read value with unit",
+      "qty": "numeric quantity",
+      "unit": "m | m2 | m3 | pcs | kg | ton | lm | set",
+      "calculation_note": "show your calculation e.g. 3.5m × 2 spans = 7.0m",
+      "confidence": "high | medium | low"
+    }
+  ],
+  "reinforcement": [
+    {
+      "mark": "bar mark e.g. T1, B2",
+      "diameter": "e.g. D16, T13",
+      "spacing": "e.g. 150mm c/c",
+      "length": "cut length per bar",
+      "no_of_bars": "number of bars",
+      "total_length": "calculated total",
+      "weight_kg": "calculated if possible (use 0.00617 × dia² × length formula)",
+      "location": "Top, Bottom, Links, Stirrups, etc."
+    }
+  ],
+  "structural_elements": [
+    {
+      "element_type": "Beam | Column | Slab | Wall | Foundation | Pile | etc.",
+      "mark": "element mark e.g. B1, C2, S3",
+      "size": "cross-section dimensions",
+      "length": "element length",
+      "concrete_grade": "e.g. fc'=25MPa, K-300",
+      "qty": "number of similar elements",
+      "volume_m3": "calculated volume per element",
+      "total_volume_m3": "qty × volume"
+    }
+  ],
+  "equipment_list": [
+    { "tag": "", "description": "", "type": "", "capacity": "", "size": "", "material": "", "qty": 1, "notes": "" }
+  ],
+  "pipe_list": [
+    { "line_number": "", "from": "", "to": "", "nominal_size": "", "pipe_class": "", "schedule": "", "medium": "", "length_m": "", "design_pressure": "", "design_temp": "" }
+  ],
+  "material_schedule": [
+    { "item_no": "", "description": "", "size": "", "material": "", "qty": "", "unit": "", "weight_kg": "", "notes": "" }
+  ],
+  "instrument_list": [
+    { "tag": "", "type": "", "description": "", "range": "", "connection_size": "" }
+  ],
+  "notes": [],
+  "revision_history": [
+    { "rev": "", "date": "", "description": "", "by": "" }
+  ],
+  "summary": "2-3 sentence description including: what the drawing shows, key dimensions found, total quantities identified"
+}
+
+CRITICAL INSTRUCTIONS:
+- READ EVERY dimension line, number, and annotation visible in the drawing
+- For dimension lines: read the exact numbers shown (e.g. 3500, 2400, 150 etc.)
+- ALWAYS specify units — if not stated, infer from drawing context (structural usually mm)
+- Show calculation workings in calculation_note field
+- If a section has no applicable data, OMIT it from the JSON
+- Return ONLY valid JSON — no prose, no markdown code blocks`;
+
+
+    // Direct REST with confirmed working model
+    const apiKey = process.env.GEMINI_API_KEY || '';
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+
+    const fetchRes = await fetch(geminiUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [
+          { inline_data: { mime_type: mimeType, data: base64Data } },
+          { text: prompt }
+        ]}],
+        generationConfig: { temperature: 0.1, maxOutputTokens: 8192 }
+      })
+    });
+
+    if (!fetchRes.ok) {
+      const errBody = await fetchRes.text();
+      throw new Error(`Gemini ${fetchRes.status}: ${errBody.slice(0, 300)}`);
+    }
+    const geminiJson: any = await fetchRes.json();
+    const responseText = (geminiJson.candidates?.[0]?.content?.parts?.[0]?.text || '').trim();
+
+    // Parse JSON response
+    let parsed: any = {};
+    try {
+      // Remove markdown code blocks if present
+      const cleaned = responseText.replace(/^```json\n?/,'').replace(/\n?```$/,'');
+      parsed = JSON.parse(cleaned);
+    } catch {
+      // Return raw text if not valid JSON
+      parsed = { raw_text: responseText, parse_error: true };
+    }
+
+    // Log usage
+    await dbRun(
+      `INSERT INTO project_activities (project_id, user_id, action_type, description)
+       VALUES (?, ?, 'ai_analysis', ?)`,
+      [file.project_id, (req as any).user.userId, `AI analyzed: ${file.file_name}`]
+    ).catch(() => {});
+
+    res.json({
+      file_id: file.id,
+      file_name: file.file_name,
+      model: 'gemini-2.0-flash',
+      analysis: parsed,
+    });
+
+  } catch (error: any) {
+    console.error('Gemini analysis error:', error);
+    res.status(500).json({ error: error.message || 'AI analysis failed' });
+  }
+});
+
+
+
+const generateExpenseNumber = () => {
+  const now = new Date();
+  const datePart = now.toISOString().slice(0, 10).replace(/-/g, '');
+  const rand = Math.floor(1000 + Math.random() * 9000);
+  return `EXP-${datePart}-${rand}`;
+};
+
+// Get project cost summary (budget vs actual from PR, PO, expenses)
+router.get('/:id/cost-summary', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id;
+
+    const project = await dbGet(
+      'SELECT id, budget, actual_cost FROM client_projects WHERE id = ?',
+      [projectId]
+    ) as any;
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+
+    // PR totals (estimated from items stored in notes JSON)
+    const prs = await dbAll(
+      `SELECT id, pr_number, status, approval_status, notes, created_at
+       FROM purchase_requests WHERE project_id = ?`,
+      [projectId]
+    );
+
+    let prTotal = 0;
+    for (const pr of (prs || [])) {
+      try {
+        const parsed = JSON.parse(pr.notes || '{}');
+        prTotal += parseFloat(parsed.estimatedTotal || 0);
+      } catch { /* non-json notes */ }
+    }
+
+    // PO totals from line items
+    const poSummary = await dbGet(`
+      SELECT 
+        COUNT(DISTINCT po.id) as po_count,
+        COALESCE(SUM(poi.quantity * poi.unit_price), 0) as po_total
+      FROM purchase_orders po
+      LEFT JOIN purchase_order_items poi ON poi.po_id = po.id
+      WHERE po.project_id = ?
+    `, [projectId]) as any;
+
+    // PO by status
+    const poByStatus = await dbAll(`
+      SELECT po.status, po.approval_status,
+        COALESCE(SUM(poi.quantity * poi.unit_price), 0) as total
+      FROM purchase_orders po
+      LEFT JOIN purchase_order_items poi ON poi.po_id = po.id
+      WHERE po.project_id = ?
+      GROUP BY po.status, po.approval_status
+    `, [projectId]);
+
+    // Expense totals
+    const expSummary = await dbGet(`
+      SELECT 
+        COUNT(*) as expense_count,
+        COALESCE(SUM(amount), 0) as expense_total
+      FROM project_expenses
+      WHERE project_id = ? AND status != 'rejected'
+    `, [projectId]) as any;
+
+    // Expenses by category
+    const expByCategory = await dbAll(`
+      SELECT category, COALESCE(SUM(amount), 0) as total, COUNT(*) as count
+      FROM project_expenses
+      WHERE project_id = ? AND status != 'rejected'
+      GROUP BY category ORDER BY total DESC
+    `, [projectId]);
+
+    const totalSpent = parseFloat(poSummary?.po_total || 0) + parseFloat(expSummary?.expense_total || 0);
+    const budget = parseFloat(project.budget || 0);
+    const remaining = budget - totalSpent;
+    const usagePercent = budget > 0 ? Math.round((totalSpent / budget) * 100) : 0;
+
+    // Update actual_cost in project
+    await dbRun('UPDATE client_projects SET actual_cost = ? WHERE id = ?', [totalSpent, projectId]);
+
+    res.json({
+      budget,
+      total_spent: totalSpent,
+      remaining,
+      usage_percent: usagePercent,
+      pr: {
+        count: (prs || []).length,
+        estimated_total: prTotal
+      },
+      po: {
+        count: poSummary?.po_count || 0,
+        total: parseFloat(poSummary?.po_total || 0),
+        by_status: poByStatus || []
+      },
+      expenses: {
+        count: expSummary?.expense_count || 0,
+        total: parseFloat(expSummary?.expense_total || 0),
+        by_category: expByCategory || []
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching cost summary:', error);
+    res.status(500).json({ error: 'Failed to fetch cost summary' });
+  }
+});
+
+// List project expenses
+router.get('/:id/expenses', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const expenses = await dbAll(`
+      SELECT e.*, v.name as vendor_name, u.full_name as created_by_name,
+             ua.full_name as approved_by_name
+      FROM project_expenses e
+      LEFT JOIN vendors v ON e.vendor_id = v.id
+      LEFT JOIN users u ON e.created_by = u.id
+      LEFT JOIN users ua ON e.approved_by = ua.id
+      WHERE e.project_id = ?
+      ORDER BY e.expense_date DESC
+    `, [req.params.id]);
+    res.json({ data: expenses || [] });
+  } catch (error) {
+    console.error('Error fetching expenses:', error);
+    res.status(500).json({ error: 'Failed to fetch expenses' });
+  }
+});
+
+// GET all approved expenses across all projects (for Fund Request dropdown)
+router.get('/expenses/approved', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const expenses = await dbAll(`
+      SELECT e.*, p.project_name as project_name
+      FROM project_expenses e
+      LEFT JOIN client_projects p ON e.project_id = p.id
+      WHERE e.status = 'approved'
+      ORDER BY e.expense_date DESC
+    `, []);
+    res.json({ data: expenses || [] });
+  } catch (error) {
+    console.error('Error fetching approved expenses:', error);
+    res.status(500).json({ error: 'Failed to fetch approved expenses' });
+  }
+});
+
+// PATCH: Approve expense
+router.patch('/:id/expenses/:expenseId/approve', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.userId;
+    await dbRun(
+      `UPDATE project_expenses SET status = 'approved', approved_by = ?, approved_at = NOW() WHERE id = ? AND project_id = ?`,
+      [userId, req.params.expenseId, req.params.id]
+    );
+    res.json({ message: 'Expense approved' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to approve expense' });
+  }
+});
+
+// PATCH: Reject expense
+router.patch('/:id/expenses/:expenseId/reject', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    await dbRun(
+      `UPDATE project_expenses SET status = 'rejected' WHERE id = ? AND project_id = ?`,
+      [req.params.expenseId, req.params.id]
+    );
+    res.json({ message: 'Expense rejected' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to reject expense' });
+  }
+});
+
+// Create project expense
+router.post('/:id/expenses', authMiddleware, async (req: Request, res: Response) => {
+
+  try {
+    const projectId = req.params.id;
+    const userId = (req as any).user?.userId;
+    const { category, description, amount, expense_date, vendor_id, receipt_number, notes, status } = req.body;
+
+    if (!description || !amount || !expense_date) {
+      return res.status(400).json({ error: 'description, amount, and expense_date are required' });
+    }
+
+    const expenseNumber = generateExpenseNumber();
+    const result = await dbRun(`
+      INSERT INTO project_expenses (project_id, expense_number, category, description, amount, expense_date, vendor_id, receipt_number, notes, status, created_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [projectId, expenseNumber, category || 'other', description, amount, expense_date, vendor_id || null, receipt_number || null, notes || null, status || 'draft', userId || null]);
+
+    res.status(201).json({ message: 'Expense created', data: { id: result.insertId, expense_number: expenseNumber } });
+  } catch (error) {
+    console.error('Error creating expense:', error);
+    res.status(500).json({ error: 'Failed to create expense' });
+  }
+});
+
+// Update project expense
+router.put('/:id/expenses/:expenseId', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { category, description, amount, expense_date, vendor_id, receipt_number, status, notes } = req.body;
+
+    await dbRun(`
+      UPDATE project_expenses 
+      SET category = ?, description = ?, amount = ?, expense_date = ?, vendor_id = ?, receipt_number = ?, status = ?, notes = ?
+      WHERE id = ? AND project_id = ?
+    `, [category, description, amount, expense_date, vendor_id || null, receipt_number || null, status || 'draft', notes || null, req.params.expenseId, req.params.id]);
+
+    res.json({ message: 'Expense updated' });
+  } catch (error) {
+    console.error('Error updating expense:', error);
+    res.status(500).json({ error: 'Failed to update expense' });
+  }
+});
+
+// Delete project expense
+router.delete('/:id/expenses/:expenseId', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const expense = await dbGet('SELECT status FROM project_expenses WHERE id = ? AND project_id = ?', [req.params.expenseId, req.params.id]) as any;
+    if (!expense) return res.status(404).json({ error: 'Expense not found' });
+    if (expense.status === 'approved' || expense.status === 'paid') {
+      return res.status(400).json({ error: 'Cannot delete approved/paid expenses' });
+    }
+    await dbRun('DELETE FROM project_expenses WHERE id = ? AND project_id = ?', [req.params.expenseId, req.params.id]);
+    res.json({ message: 'Expense deleted' });
+  } catch (error) {
+    console.error('Error deleting expense:', error);
+    res.status(500).json({ error: 'Failed to delete expense' });
+  }
+});
+
+// List PRs linked to a project
+router.get('/:id/purchase-requests', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const prs = await dbAll(`
+      SELECT pr.*, u.full_name as requester_name
+      FROM purchase_requests pr
+      LEFT JOIN users u ON pr.requestor_id = u.id
+      WHERE pr.project_id = ?
+      ORDER BY pr.created_at DESC
+    `, [req.params.id]);
+    res.json({ data: prs || [] });
+  } catch (error) {
+    console.error('Error fetching project PRs:', error);
+    res.status(500).json({ error: 'Failed to fetch project PRs' });
+  }
+});
+
+// List POs linked to a project  
+router.get('/:id/purchase-orders', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const pos = await dbAll(`
+      SELECT po.*, v.name as vendor_name, pr.pr_number,
+        COALESCE((SELECT SUM(poi.quantity * poi.unit_price) FROM purchase_order_items poi WHERE poi.po_id = po.id), 0) as total_amount
+      FROM purchase_orders po
+      LEFT JOIN vendors v ON po.vendor_id = v.id
+      LEFT JOIN purchase_requests pr ON po.pr_id = pr.id
+      WHERE po.project_id = ?
+      ORDER BY po.created_at DESC
+    `, [req.params.id]);
+    res.json({ data: pos || [] });
+  } catch (error) {
+    console.error('Error fetching project POs:', error);
+    res.status(500).json({ error: 'Failed to fetch project POs' });
+  }
+});
+
+// List Fund Requests linked to a project
+router.get('/:id/fund-requests', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const fundRequests = await dbAll(`
+      SELECT fr.*, u.full_name as requester_name,
+        (SELECT COUNT(*) FROM fund_request_items fri WHERE fri.fund_request_id = fr.id) AS item_count
+      FROM fund_requests fr
+      LEFT JOIN users u ON fr.requester_id = u.id
+      WHERE fr.project_id = ?
+      ORDER BY fr.created_at DESC
+    `, [req.params.id]);
+    res.json({ data: fundRequests || [] });
+  } catch (error) {
+    console.error('Error fetching project fund requests:', error);
+    res.status(500).json({ error: 'Failed to fetch project fund requests' });
+  }
+});
+
+// ===== RAB (RENCANA ANGGARAN BIAYA) =====
+
+// Get RAB for project — reads from the linked proposal's items
+router.get('/:id/rab', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id;
+
+    // Find linked proposal
+    const proposal = await dbGet(
+      `SELECT id, proposal_number, project_name, direct_cost, overhead, risk_contingency, total_project, status, revision
+       FROM proposals WHERE project_id = ? ORDER BY updated_at DESC LIMIT 1`,
+      [projectId]
+    ) as any;
+
+    if (!proposal) {
+      return res.json({ proposal: null, disciplines: [], grand_total: 0, total_actual: 0 });
+    }
+
+    // --- Actual costs from POs linked to this project ---
+    // Level 1: per proposal_item_id (most granular — direct PO ↔ RAB line link)
+    const actualByItem = await dbAll(
+      `SELECT poi.proposal_item_id,
+              COALESCE(SUM(poi.quantity * poi.unit_price), 0) as actual_cost
+       FROM purchase_order_items poi
+       JOIN purchase_orders po ON poi.po_id = po.id
+       WHERE po.project_id = ?
+         AND poi.proposal_item_id IS NOT NULL
+         AND po.status NOT IN ('cancelled','draft')
+       GROUP BY poi.proposal_item_id`,
+      [projectId]
+    ) as any[];
+
+    // Level 2: per rab_sub_discipline_id (PO items linked to sub-discipline but not a specific RAB line)
+    const actualBySubDisc = await dbAll(
+      `SELECT poi.rab_sub_discipline_id,
+              COALESCE(SUM(poi.quantity * poi.unit_price), 0) as actual_cost
+       FROM purchase_order_items poi
+       JOIN purchase_orders po ON poi.po_id = po.id
+       WHERE po.project_id = ?
+         AND poi.proposal_item_id IS NULL
+         AND poi.rab_sub_discipline_id IS NOT NULL
+         AND po.status NOT IN ('cancelled','draft')
+       GROUP BY poi.rab_sub_discipline_id`,
+      [projectId]
+    ) as any[];
+
+    // Level 3: unallocated PO total (no RAB link)
+    const unallocatedRow = await dbGet(
+      `SELECT COALESCE(SUM(poi.quantity * poi.unit_price), 0) as actual_cost
+       FROM purchase_order_items poi
+       JOIN purchase_orders po ON poi.po_id = po.id
+       WHERE po.project_id = ?
+         AND poi.proposal_item_id IS NULL
+         AND poi.rab_sub_discipline_id IS NULL
+         AND po.status NOT IN ('cancelled','draft')`,
+      [projectId]
+    ) as any;
+
+    // Build lookup maps
+    const itemActualMap: Record<number, number> = {};
+    for (const r of actualByItem) itemActualMap[r.proposal_item_id] = parseFloat(r.actual_cost || 0);
+    const sdActualMap: Record<number, number> = {};
+    for (const r of actualBySubDisc) sdActualMap[r.rab_sub_discipline_id] = parseFloat(r.actual_cost || 0);
+
+    // Get proposal items
+    const items = await dbAll(
+      `SELECT pi.id, pi.order_no, pi.is_section, pi.section_label, pi.description,
+              pi.qty, pi.unit_snapshot AS unit, pi.unit_price_snapshot AS unit_price,
+              pi.total_price, pi.ahsp_code_snapshot AS ahsp_code, pi.ahsp_name_snapshot AS ahsp_name,
+              d.id AS discipline_id, d.code AS discipline_code, d.name AS discipline_name, d.order_no AS discipline_order,
+              sd.id AS sub_discipline_id, sd.code AS sub_discipline_code, sd.name AS sub_discipline_name, sd.order_no AS sub_discipline_order
+       FROM proposal_items pi
+       LEFT JOIN master_disciplines d ON pi.discipline_id = d.id
+       LEFT JOIN master_sub_disciplines sd ON pi.sub_discipline_id = sd.id
+       WHERE pi.proposal_id = ?
+       ORDER BY d.order_no ASC, sd.order_no ASC, pi.order_no ASC`,
+      [proposal.id]
+    );
+
+    const disciplineMap: Record<string, any> = {};
+    let rowNo = 1;
+
+    for (const item of (items as any[])) {
+      const dKey = item.discipline_id || '__none__';
+      if (!disciplineMap[dKey]) {
+        disciplineMap[dKey] = {
+          id: item.discipline_id,
+          code: item.discipline_code || '-',
+          name: item.discipline_name || 'Umum',
+          order: item.discipline_order || 999,
+          subtotal: 0,
+          actual_total: 0,
+          sub_disciplines: {} as Record<string, any>,
+        };
+      }
+      const disc = disciplineMap[dKey];
+
+      const sdKey = item.sub_discipline_id || '__none__';
+      if (!disc.sub_disciplines[sdKey]) {
+        disc.sub_disciplines[sdKey] = {
+          id: item.sub_discipline_id,
+          code: item.sub_discipline_code || '-',
+          name: item.sub_discipline_name || 'Umum',
+          order: item.sub_discipline_order || 999,
+          subtotal: 0,
+          actual_subtotal: sdActualMap[item.sub_discipline_id] || 0,
+          items: [],
+        };
+      }
+      const sd = disc.sub_disciplines[sdKey];
+      const total = parseFloat(item.total_price || 0);
+      const itemActual = itemActualMap[item.id] || 0;
+
+      sd.items.push({
+        id: item.id,
+        no: item.is_section ? null : rowNo++,
+        is_section: !!item.is_section,
+        section_label: item.section_label || null,
+        ahsp_code: item.ahsp_code || '-',
+        uraian: item.ahsp_name || item.section_label || item.description || '-',
+        description: item.description || null,
+        satuan: item.unit || '-',
+        volume: parseFloat(item.qty || 0),
+        harga_satuan: parseFloat(item.unit_price || 0),
+        jumlah_harga: total,
+        aktual_biaya: itemActual,
+      });
+
+      if (!item.is_section) {
+        sd.subtotal += total;
+        sd.actual_subtotal += itemActual;
+        disc.subtotal += total;
+        disc.actual_total += itemActual;
+      }
+    }
+
+    const disciplines = Object.values(disciplineMap)
+      .sort((a: any, b: any) => a.order - b.order)
+      .map((d: any) => ({
+        ...d,
+        sub_disciplines: Object.values(d.sub_disciplines)
+          .sort((a: any, b: any) => a.order - b.order),
+      }));
+
+    const grandTotal = disciplines.reduce((s: number, d: any) => s + d.subtotal, 0);
+    const totalActual = disciplines.reduce((s: number, d: any) => s + d.actual_total, 0)
+      + parseFloat(unallocatedRow?.actual_cost || 0);
+
+    res.json({
+      proposal: {
+        id: proposal.id,
+        proposal_number: proposal.proposal_number,
+        project_name: proposal.project_name,
+        revision: proposal.revision,
+        status: proposal.status,
+        direct_cost: parseFloat(proposal.direct_cost || 0),
+        overhead: parseFloat(proposal.overhead || 0),
+        risk_contingency: parseFloat(proposal.risk_contingency || 0),
+        total_project: parseFloat(proposal.total_project || 0),
+      },
+      disciplines,
+      grand_total: grandTotal,
+      total_actual: totalActual,
+      unallocated_actual: parseFloat(unallocatedRow?.actual_cost || 0),
+    });
+  } catch (error) {
+    console.error('Error fetching project RAB:', error);
+    res.status(500).json({ error: 'Failed to fetch RAB' });
+  }
+});
+
+// List proposals available to link to this project
+
+router.get('/:id/available-proposals', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const proposals = await dbAll(
+      `SELECT id, proposal_number, project_name, status, total_project, created_at
+       FROM proposals
+       WHERE project_id IS NULL OR project_id = ?
+       ORDER BY created_at DESC`,
+      [req.params.id]
+    );
+    res.json(proposals);
+  } catch (error) {
+    console.error('Error fetching available proposals:', error);
+    res.status(500).json({ error: 'Failed to fetch proposals' });
+  }
+});
+
+// Link a proposal to this project
+router.put('/:id/link-proposal', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { proposal_id } = req.body;
+    const projectId = req.params.id;
+
+    if (!proposal_id) {
+      return res.status(400).json({ error: 'proposal_id is required' });
+    }
+
+    // Unlink any previously linked proposals for this project
+    await dbRun('UPDATE proposals SET project_id = NULL WHERE project_id = ?', [projectId]);
+
+    // Link the new proposal
+    await dbRun('UPDATE proposals SET project_id = ? WHERE id = ?', [projectId, proposal_id]);
+
+    res.json({ message: 'Proposal linked to project' });
+  } catch (error) {
+    console.error('Error linking proposal:', error);
+    res.status(500).json({ error: 'Failed to link proposal' });
+  }
+});
+
+// Unlink proposal from project
+router.delete('/:id/link-proposal', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    await dbRun('UPDATE proposals SET project_id = NULL WHERE project_id = ?', [req.params.id]);
+    res.json({ message: 'Proposal unlinked' });
+  } catch (error) {
+    console.error('Error unlinking proposal:', error);
+    res.status(500).json({ error: 'Failed to unlink proposal' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MTO / QTO (Material Take-Off / Quantity Take-Off) Routes
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Ensure engineering_inputs table exists with proper schema
+async function ensureMtoTable() {
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS engineering_inputs (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      project_id INT DEFAULT NULL,
+      proposal_id INT DEFAULT NULL,
+      element_type VARCHAR(50) NOT NULL,
+      element_name VARCHAR(100) NOT NULL,
+      parameters JSON,
+      quantities JSON,
+      sort_order INT DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_mto_element (proposal_id, project_id, element_type, element_name)
+    )
+  `);
+  // Ensure constraint exists on older tables
+  try {
+    await dbRun('ALTER TABLE engineering_inputs ADD COLUMN proposal_id INT DEFAULT NULL AFTER project_id');
+  } catch { /* column exists */ }
+  try {
+    await dbRun('ALTER TABLE engineering_inputs ADD UNIQUE INDEX uq_mto_element (proposal_id, project_id, element_type, element_name)');
+  } catch { /* index exists */ }
+}
+ensureMtoTable().catch(console.error);
+
+// ── Quantity calculator (pure function, runs on backend) ──────────────────────
+function calculateQuantities(elementType: string, params: any): Record<string, number> {
+  const q: Record<string, number> = {};
+  const STEEL_DENSITY = 7850; // kg/m³
+
+  if (elementType === 'foundation') {
+    const { L = 0, W = 0, H = 0, qty = 1, working_space = 0.3,
+            rebar_main = 16, rebar_stirrup = 10, stirrup_spacing = 0.15, cover = 0.04 } = params;
+    const lWS = L + 2 * working_space;
+    const wWS = W + 2 * working_space;
+    q.vol_concrete    = +(L * W * H * qty).toFixed(3);
+    q.vol_excavation  = +(lWS * wWS * H * qty).toFixed(3);
+    q.vol_backfill    = +(Math.max(q.vol_excavation - q.vol_concrete, 0)).toFixed(3);
+    q.formwork_area   = +(2 * (L + W) * H * qty).toFixed(3);
+    // Rebar weight — simplified: main bars (both ways) + stirrups
+    const mainDia = rebar_main / 1000; // m
+    const stirDia = rebar_stirrup / 1000;
+    const mainArea = Math.PI * (mainDia / 2) ** 2;
+    const stirArea = Math.PI * (stirDia / 2) ** 2;
+    const effectiveL = L - 2 * cover;
+    const effectiveW = W - 2 * cover;
+    const nMainX = Math.floor(effectiveW / 0.15) + 1;
+    const nMainY = Math.floor(effectiveL / 0.15) + 1;
+    const nStir  = Math.floor(effectiveL / stirrup_spacing) + 1;
+    const mainWeight = (nMainX * effectiveL + nMainY * effectiveW) * mainArea * STEEL_DENSITY;
+    const stirWeight = nStir * 2 * (effectiveL + effectiveW) * stirArea * STEEL_DENSITY;
+    q.rebar_weight_kg = +((mainWeight + stirWeight) * qty).toFixed(1);
+    q.rebar_lonjor    = +Math.ceil(q.rebar_weight_kg / (mainArea * STEEL_DENSITY * 12));
+  }
+
+  else if (elementType === 'column') {
+    const { B = 0.3, H = 0.3, height_per_floor = 3, floors = 1, qty_per_floor = 1,
+            rebar_count = 8, rebar_dia = 16, stirrup_dia = 10, stirrup_spacing = 0.15, cover = 0.04 } = params;
+    const totalQty = qty_per_floor * floors;
+    q.vol_concrete   = +(B * H * height_per_floor * totalQty).toFixed(3);
+    q.formwork_area  = +(2 * (B + H) * height_per_floor * totalQty).toFixed(3);
+    const mainDia  = rebar_dia / 1000;
+    const stirDia  = stirrup_dia / 1000;
+    const mainArea = Math.PI * (mainDia / 2) ** 2;
+    const stirArea = Math.PI * (stirDia / 2) ** 2;
+    const nStir = Math.floor(height_per_floor / stirrup_spacing) + 1;
+    const mainWeight = rebar_count * height_per_floor * mainArea * STEEL_DENSITY;
+    const perimStir  = 2 * ((B - 2 * cover) + (H - 2 * cover));
+    const stirWeight = nStir * perimStir * stirArea * STEEL_DENSITY;
+    q.rebar_weight_kg = +((mainWeight + stirWeight) * totalQty).toFixed(1);
+    q.rebar_lonjor    = +Math.ceil(q.rebar_weight_kg / (mainArea * STEEL_DENSITY * 12));
+  }
+
+  else if (elementType === 'beam') {
+    const { B = 0.25, H = 0.5, total_length = 0, rebar_count = 4,
+            rebar_dia = 16, stirrup_dia = 10, stirrup_spacing = 0.15, cover = 0.04 } = params;
+    q.vol_concrete  = +(B * H * total_length).toFixed(3);
+    q.formwork_area = +((2 * H + B) * total_length).toFixed(3); // soffit + 2 sides
+    const mainDia  = rebar_dia / 1000;
+    const stirDia  = stirrup_dia / 1000;
+    const mainArea = Math.PI * (mainDia / 2) ** 2;
+    const stirArea = Math.PI * (stirDia / 2) ** 2;
+    const nStir = Math.floor(total_length / stirrup_spacing) + 1;
+    const perimStir = 2 * ((B - 2 * cover) + (H - 2 * cover));
+    q.rebar_weight_kg = +(rebar_count * total_length * mainArea * STEEL_DENSITY
+                        + nStir * perimStir * stirArea * STEEL_DENSITY).toFixed(1);
+    q.rebar_lonjor = +Math.ceil(q.rebar_weight_kg / (mainArea * STEEL_DENSITY * 12));
+  }
+
+  else if (elementType === 'slab') {
+    const { area = 0, thickness = 0.12, rebar_dia_x = 10, rebar_dia_y = 10,
+            spacing_x = 0.15, spacing_y = 0.15, cover = 0.02 } = params;
+    q.vol_concrete  = +(area * thickness).toFixed(3);
+    q.formwork_area = +area.toFixed(3);
+    const diaX = rebar_dia_x / 1000;
+    const diaY = rebar_dia_y / 1000;
+    const axX  = Math.PI * (diaX / 2) ** 2;
+    const axY  = Math.PI * (diaY / 2) ** 2;
+    // Length of rebar ≈ area / spacing (strips in each direction)
+    const lenX = area / spacing_x;
+    const lenY = area / spacing_y;
+    q.rebar_weight_kg = +((lenX * axX + lenY * axY) * STEEL_DENSITY).toFixed(1);
+    q.rebar_lonjor    = +Math.ceil(q.rebar_weight_kg / ((axX + axY) / 2 * STEEL_DENSITY * 12));
+  }
+
+  else if (elementType === 'wall') {
+    const { area = 0, thickness_mm = 150, has_plaster = true } = params;
+    q.wall_area      = +area.toFixed(2);
+    q.wall_volume    = +(area * (thickness_mm / 1000)).toFixed(3);
+    q.plaster_area   = has_plaster ? +(area * 2).toFixed(2) : 0; // both sides
+    q.acian_area     = q.plaster_area;
+  }
+
+  else if (elementType === 'roof') {
+    const { floor_area = 0, slope_deg = 30, overhang = 0.6 } = params;
+    const slopeFactor = 1 / Math.cos((slope_deg * Math.PI) / 180);
+    q.roof_area      = +((floor_area + 4 * overhang * Math.sqrt(floor_area)) * slopeFactor).toFixed(2);
+    q.gutters_length = +(4 * Math.sqrt(floor_area) + 4 * overhang).toFixed(1);
+  }
+
+  return q;
+}
+
+// Helper: get linked proposal_id for a project
+async function getLinkedProposalId(projectId: any): Promise<number|null> {
+  const p: any = await dbGet('SELECT id FROM proposals WHERE project_id = ? ORDER BY updated_at DESC LIMIT 1', [projectId]);
+  return p?.id || null;
+}
+
+// GET all MTO elements for a project — reads from linked proposal only (project MTO is read-only)
+router.get('/:id/mto', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id;
+    const proposalId = await getLinkedProposalId(projectId);
+
+    if (!proposalId) {
+      return res.json({ elements: [], linked_proposal_id: null });
+    }
+
+    const rows = await dbAll(
+      'SELECT * FROM engineering_inputs WHERE proposal_id = ? ORDER BY sort_order, id',
+      [proposalId]
+    );
+
+    res.json({
+      elements: rows.map(r => ({
+        ...r,
+        parameters: typeof r.parameters === 'string' ? JSON.parse(r.parameters || '{}') : r.parameters,
+        quantities:  typeof r.quantities  === 'string' ? JSON.parse(r.quantities  || '{}') : r.quantities,
+        source: 'proposal',
+      })),
+      linked_proposal_id: proposalId,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST create/upsert MTO element (DB UNIQUE constraint prevents duplicates)
+router.post('/:id/mto', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id;
+    const { element_type, element_name, parameters = {}, sort_order = 0 } = req.body;
+    if (!element_type) return res.status(400).json({ error: 'element_type required' });
+    const quantities = calculateQuantities(element_type, parameters);
+    const proposalId = await getLinkedProposalId(projectId);
+    const name = element_name || element_type;
+    const paramsJson = JSON.stringify(parameters);
+    const qtyJson = JSON.stringify(quantities);
+
+    // Atomic upsert via DB UNIQUE(proposal_id, project_id, element_type, element_name)
+    const result: any = await dbRun(
+      `INSERT INTO engineering_inputs (project_id, proposal_id, element_type, element_name, parameters, quantities, sort_order)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE parameters=VALUES(parameters), quantities=VALUES(quantities), sort_order=VALUES(sort_order)`,
+      [projectId, proposalId, element_type, name, paramsJson, qtyJson, sort_order]
+    );
+    const id = result.insertId || (await dbGet(
+      'SELECT id FROM engineering_inputs WHERE project_id<=>? AND proposal_id<=>? AND element_type=? AND element_name=?',
+      [projectId, proposalId, element_type, name]
+    ) as any)?.id;
+    res.json({ id, quantities, updated: !result.insertId });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT update MTO element (recalculates quantities) — works for both project & proposal records
+router.put('/:id/mto/:elementId', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id;
+    const proposalId = await getLinkedProposalId(projectId);
+    const { element_type, element_name, parameters = {}, sort_order } = req.body;
+    // Allow editing both project-owned and proposal-owned records
+    const existing: any = await dbGet(
+      proposalId
+        ? 'SELECT * FROM engineering_inputs WHERE id = ? AND (project_id = ? OR proposal_id = ?)'
+        : 'SELECT * FROM engineering_inputs WHERE id = ? AND project_id = ?',
+      proposalId ? [req.params.elementId, projectId, proposalId] : [req.params.elementId, projectId]
+    );
+    if (!existing) return res.status(404).json({ error: 'Element not found' });
+    const type = element_type || existing.element_type;
+    const params = Object.keys(parameters).length ? parameters : JSON.parse(existing.parameters || '{}');
+    const quantities = calculateQuantities(type, params);
+    await dbRun(
+      'UPDATE engineering_inputs SET element_type=?, element_name=?, parameters=?, quantities=?, sort_order=? WHERE id=?',
+      [type, element_name || existing.element_name, JSON.stringify(params), JSON.stringify(quantities), sort_order ?? existing.sort_order, req.params.elementId]
+    );
+    res.json({ quantities });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE MTO element — works for both project & proposal records
+router.delete('/:id/mto/:elementId', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id;
+    const proposalId = await getLinkedProposalId(projectId);
+    if (proposalId) {
+      await dbRun('DELETE FROM engineering_inputs WHERE id = ? AND (project_id = ? OR proposal_id = ?)', [req.params.elementId, projectId, proposalId]);
+    } else {
+      await dbRun('DELETE FROM engineering_inputs WHERE id = ? AND project_id = ?', [req.params.elementId, projectId]);
+    }
+    res.json({ message: 'Deleted' });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET QTO Summary — aggregated quantities (includes linked proposal MTO)
+router.get('/:id/mto/summary', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id;
+    const proposalId = await getLinkedProposalId(projectId);
+    let rows: any[];
+    if (proposalId) {
+      rows = await dbAll('SELECT element_type, quantities FROM engineering_inputs WHERE project_id = ? OR proposal_id = ?', [projectId, proposalId]);
+    } else {
+      rows = await dbAll('SELECT element_type, quantities FROM engineering_inputs WHERE project_id = ?', [projectId]);
+    }
+    const summary = {
+      total_vol_concrete: 0,
+      total_vol_excavation: 0,
+      total_vol_backfill: 0,
+      total_rebar_weight_kg: 0,
+      total_formwork_area: 0,
+      total_wall_area: 0,
+      total_plaster_area: 0,
+      total_roof_area: 0,
+    };
+    for (const row of rows) {
+      const q = typeof row.quantities === 'string' ? JSON.parse(row.quantities || '{}') : row.quantities;
+      summary.total_vol_concrete     += q.vol_concrete    || 0;
+      summary.total_vol_excavation   += q.vol_excavation  || 0;
+      summary.total_vol_backfill     += q.vol_backfill    || 0;
+      summary.total_rebar_weight_kg  += q.rebar_weight_kg || 0;
+      summary.total_formwork_area    += q.formwork_area   || 0;
+      summary.total_wall_area        += q.wall_area       || 0;
+      summary.total_plaster_area     += q.plaster_area    || 0;
+      summary.total_roof_area        += q.roof_area       || 0;
+    }
+    Object.keys(summary).forEach(k => { (summary as any)[k] = +((summary as any)[k]).toFixed(2); });
+    res.json({ summary, count: rows.length });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+export const projectRoutes = router;
+
