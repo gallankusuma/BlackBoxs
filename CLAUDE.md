@@ -23,14 +23,32 @@ cd frontend && npm run dev    # vite, host 0.0.0.0, proxy ke http://localhost:30
 
 VS Code punya task `Run All: Backend + Frontend` yang auto-run saat folder dibuka (`.vscode/tasks.json`).
 
-**Prasyarat lokal:** MySQL harus jalan di `localhost` dengan database `erp_genjaya`. Salin `backend/.env.example` → `backend/.env` dan `frontend/.env.example` → `frontend/.env`, lalu isi kredensialnya. Skema dibuat otomatis saat backend boot.
+**Prasyarat lokal:** MySQL 8 di `localhost`. Salin `backend/.env.example` → `backend/.env` dan `frontend/.env.example` → `frontend/.env`, lalu isi kredensialnya.
+
+```bash
+brew install mysql@8.4 && brew services start mysql@8.4
+```
+
+Lalu buat database + user sesuai `.env`:
+
+```bash
+mysql -u root -e "CREATE DATABASE erp_genjaya CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER 'erp_user'@'localhost' IDENTIFIED BY '<password dari .env>'; GRANT ALL ON erp_genjaya.* TO 'erp_user'@'localhost';"
+```
+
+⚠️ **Database kosong TIDAK cukup.** `initializeDatabase()` hanya membuat ±78 tabel, sedangkan produksi punya 141. Selisihnya adalah skema yang dulu diterapkan manual lewat file `.sql` di `backend/database/` dan tidak pernah dimasukkan ke `ensure*Schema` — termasuk kolom `employees.salary_type`, `basic_rate`, `tunjangan_rate`, `ot_rate` yang membuat login mobile gagal. Sampai drift ini dibereskan, cara paling andal menyiapkan dev lokal adalah menarik struktur dari produksi (tanpa data):
+
+```bash
+ssh root@76.13.22.155 "cd /var/www/erp-genjaya/backend && set -a && . ./.env && set +a && mysqldump --no-data --skip-add-drop-table --skip-comments -u \"\$DB_USER\" -p\"\$DB_PASSWORD\" \"\$DB_NAME\"" | mysql -u root erp_genjaya
+```
 
 Deploy: `./deploy-blackbox.sh` (build FE → rsync dist, `npx tsc` BE lokal → rsync `dist/`+`src/`, `pm2 restart`). Script punya guard yang abort kalau path mengandung `rheologi`.
 
 ## Arsitektur & konvensi
 
 - **Backend**: satu file per domain di `backend/src/routes/*.ts`, semua di-mount di `src/index.ts` dengan prefix `/api/<domain>`. Tidak ada layer service/controller — query SQL langsung di handler via helper `dbAll` / `dbGet` / `dbRun` dari `config/database.ts`.
-- **Migrasi**: tidak ada tool migrasi. Skema dijamin idempoten saat boot lewat fungsi `ensure*Schema(connection)` di `backend/src/config/database.ts`, dipanggil berurutan dari `initializeDatabase()`. Tambah tabel/kolom baru = tambah fungsi `ensureXxx` di sana, bukan file SQL baru. File `.sql` di `backend/database/` sifatnya historis/referensi.
+- **Migrasi**: tidak ada tool migrasi. Skema di-`ensure` saat boot lewat fungsi `ensure*Schema(connection)` di `backend/src/config/database.ts`, dipanggil berurutan dari `initializeDatabase()`. Tambah tabel/kolom baru = tambah fungsi `ensureXxx` di sana, bukan file SQL baru.
+  - **Jangan membuat tabel di level modul route** (`initXxx()` yang dipanggil saat import). Itu berjalan sebelum `initializeDatabase()`, sehingga foreign key ke tabel inti gagal di database baru — dan rejection tanpa `.catch()` mematikan proses. Empat kasus seperti ini sudah dipindah ke `ensureRouteModuleSchema`.
+  - File `.sql` di `backend/database/` sifatnya historis. **Isinya belum tercermin di `ensure*Schema`**, itulah sumber drift 78 vs 141 tabel di atas. Memindahkannya ke `ensure*Schema` adalah pekerjaan yang masih terbuka.
   - MySQL 8 tidak dukung `ADD COLUMN IF NOT EXISTS`; ada fallback `tryFallbackAddColumn` yang cek INFORMATION_SCHEMA. Aman untuk tetap menulis `IF NOT EXISTS`.
 - **Frontend**: `views/` = halaman (terdaftar di `router/index.ts`, ~132 route, semua lazy `import()`), `stores/` = Pinia per domain, `components/ui/` = primitives (Button, Dialog, StatusBadge, DataTable, dll). Panggil API lewat `src/lib/api.ts`.
 - **Mobile**: PWA terpisah di dalam app yang sama — `views/mobile/*` di bawah path `/mobile/*` (login, attendance, payslip, material request, settings). Folder root `attendance-app/` adalah prototipe PWA vanilla lama, bukan bagian build.
@@ -48,7 +66,7 @@ Ada **dua jenis token**, keduanya JWT ditandatangani `JWT_SECRET` yang sama tapi
 Aturan yang harus dijaga:
 
 1. **Identitas selalu dari token, tidak pernah dari input klien.** Jangan membaca `employee_id` dari body, query, atau header untuk menentukan siapa pemanggilnya. Untuk endpoint yang masih membawa `:employee_id` di URL, panggil `assertSelf(req, res, req.params.employee_id)` — kalau tidak cocok dengan token, balas 403.
-2. **Scope dipisah tegas.** Token admin ditolak di endpoint mobile, dan sebaliknya. Ini disengaja: karyawan tidak punya baris di tabel `users`.
+2. **Scope dipisah tegas dua arah.** Kedua token ditandatangani `JWT_SECRET` yang sama, jadi `jwt.verify()` saja akan meloloskan keduanya — **isi payload wajib dicek**. `authMiddleware` menolak token ber-`scope: 'mobile'` dan token tanpa `userId`; `mobileAuthMiddleware` menolak yang tanpa `scope: 'mobile'`. Tanpa pemeriksaan ini, token karyawan membuka seluruh endpoint admin dengan `req.userId === undefined`.
 3. **Kepemilikan dicek untuk resource milik orang.** Contoh `ownsCredential` di `webauthn.routes.ts` — `:id` di sana adalah id baris kredensial, bukan employee, jadi harus di-query dulu.
 4. **Endpoint yang boleh tanpa auth hanya jalur login**: `POST /api/auth/*`, `POST /api/hr/mobile/login`, `POST /api/webauthn/auth/options`, `POST /api/webauthn/auth/verify`. Dua yang terakhir diamankan oleh challenge WebAuthn + sidik jari itu sendiri.
 

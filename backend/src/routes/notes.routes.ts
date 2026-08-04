@@ -4,34 +4,7 @@ import { authMiddleware } from '../middleware/auth';
 
 const router = express.Router();
 
-const ensureNotesTable = async () => {
-  try {
-    await dbRun(`
-      CREATE TABLE IF NOT EXISTS crm_notes (
-        id INT PRIMARY KEY AUTO_INCREMENT,
-        title VARCHAR(255),
-        content TEXT NOT NULL,
-        color VARCHAR(20) DEFAULT 'yellow',
-        is_pinned TINYINT DEFAULT 0,
-        category VARCHAR(50) DEFAULT 'general',
-        linked_type VARCHAR(50),
-        linked_id INT,
-        linked_name VARCHAR(255),
-        created_by INT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        INDEX idx_category (category),
-        INDEX idx_pinned (is_pinned),
-        INDEX idx_linked (linked_type, linked_id),
-        INDEX idx_created_by (created_by)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    `);
-    console.log('✅ CRM Notes table ensured');
-  } catch (err) {
-    console.error('CRM Notes table error:', err);
-  }
-};
-ensureNotesTable();
+// Tabel crm_notes dibuat di config/database.ts (ensureRouteModuleSchema)
 
 // GET / — list notes
 router.get('/', authMiddleware, async (req: Request, res: Response) => {

@@ -4,30 +4,7 @@ import { authMiddleware } from '../middleware/auth';
 
 const router = Router();
 
-// ============================================
-// AUTO-CREATE TABLE
-// ============================================
-const initInboxTable = async () => {
-  await dbQuery(`
-    CREATE TABLE IF NOT EXISTS inbox_notifications (
-      id INT PRIMARY KEY AUTO_INCREMENT,
-      user_id INT NOT NULL,
-      type VARCHAR(50) NOT NULL DEFAULT 'system',
-      title VARCHAR(255) NOT NULL,
-      message TEXT,
-      link VARCHAR(255),
-      ref_id INT,
-      ref_type VARCHAR(50),
-      is_read TINYINT(1) DEFAULT 0,
-      created_by INT,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      INDEX idx_user_read (user_id, is_read),
-      INDEX idx_created (created_at),
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-  `);
-};
-initInboxTable();
+// Tabel inbox_notifications dibuat di config/database.ts (ensureRouteModuleSchema)
 
 // ============================================
 // GET /api/inbox - Get inbox for current user

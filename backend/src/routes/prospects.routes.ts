@@ -4,53 +4,7 @@ import { authMiddleware } from '../middleware/auth';
 
 const router = express.Router();
 
-// ── Ensure prospects table exists ──
-const ensureProspectsTable = async () => {
-  try {
-    await dbRun(`
-      CREATE TABLE IF NOT EXISTS prospects (
-        id INT PRIMARY KEY AUTO_INCREMENT,
-        code VARCHAR(50) NOT NULL UNIQUE,
-        company_name VARCHAR(255) NOT NULL,
-        contact_name VARCHAR(255),
-        contact_title VARCHAR(100),
-        email VARCHAR(255),
-        phone VARCHAR(50),
-        industry VARCHAR(150),
-        website VARCHAR(255),
-        address TEXT,
-        city VARCHAR(100),
-        country VARCHAR(100) DEFAULT 'Indonesia',
-        source VARCHAR(50) DEFAULT 'other',
-        temperature VARCHAR(20) DEFAULT 'cold',
-        status VARCHAR(50) DEFAULT 'new',
-        interest TEXT,
-        estimated_value DECIMAL(15,2) DEFAULT 0,
-        next_follow_up DATE,
-        last_contacted_at TIMESTAMP NULL,
-        assigned_to INT,
-        notes TEXT,
-        converted_to_client_id INT,
-        converted_to_lead_id INT,
-        converted_at TIMESTAMP NULL,
-        created_by INT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        INDEX idx_temperature (temperature),
-        INDEX idx_status (status),
-        INDEX idx_source (source),
-        INDEX idx_next_follow_up (next_follow_up),
-        INDEX idx_assigned_to (assigned_to)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    `);
-    console.log('✅ Prospects table ensured');
-  } catch (err) {
-    console.error('Prospects table error:', err);
-  }
-};
-
-// Run on import
-ensureProspectsTable();
+// Tabel prospects dibuat di config/database.ts (ensureRouteModuleSchema)
 
 // ── Helper: generate next prospect code ──
 const generateProspectCode = async (): Promise<string> => {

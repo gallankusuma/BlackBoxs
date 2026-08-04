@@ -15,8 +15,16 @@ export const authMiddleware = (req: AuthRequest, res: Response, next: NextFuncti
       return res.status(401).json({ error: 'No token provided' });
     }
 
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret');
-    req.userId = (decoded as any).userId;
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret') as any;
+
+    // Token mobile ditandatangani JWT_SECRET yang sama, jadi jwt.verify() saja
+    // lolos. Payload-nya wajib dicek: tanpa ini, token karyawan bisa membuka
+    // seluruh endpoint admin dengan req.userId = undefined.
+    if (decoded?.scope === MOBILE_SCOPE || !decoded?.userId) {
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+
+    req.userId = decoded.userId;
     req.user = decoded;
     next();
   } catch (error) {

@@ -1267,32 +1267,7 @@ router.delete('/:id/link-proposal', authMiddleware, async (req: Request, res: Re
 // MTO / QTO (Material Take-Off / Quantity Take-Off) Routes
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Ensure engineering_inputs table exists with proper schema
-async function ensureMtoTable() {
-  await dbRun(`
-    CREATE TABLE IF NOT EXISTS engineering_inputs (
-      id INT PRIMARY KEY AUTO_INCREMENT,
-      project_id INT DEFAULT NULL,
-      proposal_id INT DEFAULT NULL,
-      element_type VARCHAR(50) NOT NULL,
-      element_name VARCHAR(100) NOT NULL,
-      parameters JSON,
-      quantities JSON,
-      sort_order INT DEFAULT 0,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY uq_mto_element (proposal_id, project_id, element_type, element_name)
-    )
-  `);
-  // Ensure constraint exists on older tables
-  try {
-    await dbRun('ALTER TABLE engineering_inputs ADD COLUMN proposal_id INT DEFAULT NULL AFTER project_id');
-  } catch { /* column exists */ }
-  try {
-    await dbRun('ALTER TABLE engineering_inputs ADD UNIQUE INDEX uq_mto_element (proposal_id, project_id, element_type, element_name)');
-  } catch { /* index exists */ }
-}
-ensureMtoTable().catch(console.error);
+// Tabel engineering_inputs dibuat di config/database.ts (ensureRouteModuleSchema)
 
 // ── Quantity calculator (pure function, runs on backend) ──────────────────────
 function calculateQuantities(elementType: string, params: any): Record<string, number> {

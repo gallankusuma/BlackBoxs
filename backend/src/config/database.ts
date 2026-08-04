@@ -671,6 +671,126 @@ const ensureAssetManagementSchema = async (connection: any) => {
   console.log('✅ Asset Management schema ensured');
 };
 
+// ==================== TABEL YANG DULU DIBUAT SAAT IMPORT ROUTE ====================
+// Empat tabel ini sebelumnya dibuat di level modul (`initInboxTable()` dkk di
+// routes/*.ts), yang berjalan saat import — jadi SEBELUM initializeDatabase().
+// Di database kosong, inbox_notifications gagal karena foreign key-nya menunjuk
+// `users` yang belum ada, dan rejection-nya mematikan proses. Dipindah ke sini
+// supaya urutannya dijamin dan konsisten dengan konvensi ensure*Schema.
+const ensureRouteModuleSchema = async (connection: any) => {
+  const statements = [
+    `CREATE TABLE IF NOT EXISTS inbox_notifications (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      user_id INT NOT NULL,
+      type VARCHAR(50) NOT NULL DEFAULT 'system',
+      title VARCHAR(255) NOT NULL,
+      message TEXT,
+      link VARCHAR(255),
+      ref_id INT,
+      ref_type VARCHAR(50),
+      is_read TINYINT(1) DEFAULT 0,
+      created_by INT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_user_read (user_id, is_read),
+      INDEX idx_created (created_at),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+
+    `CREATE TABLE IF NOT EXISTS crm_notes (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      title VARCHAR(255),
+      content TEXT NOT NULL,
+      color VARCHAR(20) DEFAULT 'yellow',
+      is_pinned TINYINT DEFAULT 0,
+      category VARCHAR(50) DEFAULT 'general',
+      linked_type VARCHAR(50),
+      linked_id INT,
+      linked_name VARCHAR(255),
+      created_by INT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_category (category),
+      INDEX idx_pinned (is_pinned),
+      INDEX idx_linked (linked_type, linked_id),
+      INDEX idx_created_by (created_by)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+    `CREATE TABLE IF NOT EXISTS prospects (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      code VARCHAR(50) NOT NULL UNIQUE,
+      company_name VARCHAR(255) NOT NULL,
+      contact_name VARCHAR(255),
+      contact_title VARCHAR(100),
+      email VARCHAR(255),
+      phone VARCHAR(50),
+      industry VARCHAR(150),
+      website VARCHAR(255),
+      address TEXT,
+      city VARCHAR(100),
+      country VARCHAR(100) DEFAULT 'Indonesia',
+      source VARCHAR(50) DEFAULT 'other',
+      temperature VARCHAR(20) DEFAULT 'cold',
+      status VARCHAR(50) DEFAULT 'new',
+      interest TEXT,
+      estimated_value DECIMAL(15,2) DEFAULT 0,
+      next_follow_up DATE,
+      last_contacted_at TIMESTAMP NULL,
+      assigned_to INT,
+      notes TEXT,
+      converted_to_client_id INT,
+      converted_to_lead_id INT,
+      converted_at TIMESTAMP NULL,
+      created_by INT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_temperature (temperature),
+      INDEX idx_status (status),
+      INDEX idx_source (source),
+      INDEX idx_next_follow_up (next_follow_up),
+      INDEX idx_assigned_to (assigned_to)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+    `CREATE TABLE IF NOT EXISTS engineering_inputs (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      project_id INT DEFAULT NULL,
+      proposal_id INT DEFAULT NULL,
+      element_type VARCHAR(50) NOT NULL,
+      element_name VARCHAR(100) NOT NULL,
+      parameters JSON,
+      quantities JSON,
+      sort_order INT DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_mto_element (proposal_id, project_id, element_type, element_name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+
+    // Tabel engineering_inputs versi lama belum punya kolom/indeks ini
+    `ALTER TABLE engineering_inputs ADD COLUMN IF NOT EXISTS proposal_id INT DEFAULT NULL AFTER project_id`,
+  ];
+
+  for (const statement of statements) {
+    await execSchemaEnsure(connection, statement);
+  }
+
+  // Indeks unik tidak punya sintaks IF NOT EXISTS — cek dulu ke INFORMATION_SCHEMA
+  try {
+    const [rows]: any = await connection.execute(
+      `SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.STATISTICS
+       WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'engineering_inputs' AND INDEX_NAME = 'uq_mto_element'`,
+      [activeDatabaseName]
+    );
+    if (!(Array.isArray(rows) && rows[0] && Number(rows[0].c) > 0)) {
+      await connection.execute(
+        'ALTER TABLE engineering_inputs ADD UNIQUE INDEX uq_mto_element (proposal_id, project_id, element_type, element_name)'
+      );
+    }
+  } catch (err: any) {
+    console.warn('uq_mto_element ensure warning:', err.message.substring(0, 120));
+  }
+
+  console.log('✅ Inbox / CRM notes / prospects / MTO schema ensured');
+};
+
 // Initialize database schema
 export async function initializeDatabase() {
   try {
@@ -711,6 +831,7 @@ export async function initializeDatabase() {
     await ensureRnDSchema(connection);
     await ensureApprovalPermissions(connection);
     await ensureAssetManagementSchema(connection);
+    await ensureRouteModuleSchema(connection);
 
     connection.release();
 
