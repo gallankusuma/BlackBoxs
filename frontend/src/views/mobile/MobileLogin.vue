@@ -78,13 +78,14 @@
                 autocomplete="off" autocapitalize="characters" spellcheck="false" />
             </div>
             <div class="field-group">
-              <label class="field-label">Nama (opsional, verifikasi)</label>
-              <input v-model="nameInput" type="text" placeholder="Nama lengkap Anda" class="field-input" />
+              <label class="field-label">PIN</label>
+              <input v-model="pin" type="password" inputmode="numeric" placeholder="6 digit dari HR"
+                class="field-input" autocomplete="current-password" />
             </div>
 
             <div v-if="error" class="error-msg">⚠️ {{ error }}</div>
 
-            <button type="submit" class="btn-login" :disabled="loading || !nik.trim()">
+            <button type="submit" class="btn-login" :disabled="loading || !nik.trim() || !pin.trim()">
               <span v-if="loading">⏳ Memverifikasi...</span>
               <span v-else>🚀 Masuk</span>
             </button>
@@ -95,8 +96,33 @@
           </button>
         </div>
 
+        <!-- STATE: wajib ganti PIN saat login pertama -->
+        <div v-if="mustChangePin" class="change-pin-overlay">
+          <form @submit.prevent="doChangePin" class="login-form">
+            <p class="change-pin-title">Ganti PIN Anda</p>
+            <p class="change-pin-sub">PIN awal dari HR harus diganti sebelum melanjutkan.</p>
+            <div class="field-group">
+              <label class="field-label">PIN lama</label>
+              <input v-model="oldPin" type="password" inputmode="numeric" class="field-input" />
+            </div>
+            <div class="field-group">
+              <label class="field-label">PIN baru (min. 6 digit angka)</label>
+              <input v-model="newPin" type="password" inputmode="numeric" class="field-input" />
+            </div>
+            <div class="field-group">
+              <label class="field-label">Ulangi PIN baru</label>
+              <input v-model="newPin2" type="password" inputmode="numeric" class="field-input" />
+            </div>
+            <div v-if="error" class="error-msg">⚠️ {{ error }}</div>
+            <button type="submit" class="btn-login" :disabled="loading">
+              <span v-if="loading">⏳ Menyimpan...</span>
+              <span v-else>Simpan PIN baru</span>
+            </button>
+          </form>
+        </div>
+
         <div class="login-footer">
-          <p>Hubungi HRD jika lupa NIK Anda</p>
+          <p>Hubungi HRD jika lupa NIK atau PIN Anda</p>
           <a href="/" style="color:#475569;font-size:11px">Admin Portal →</a>
         </div>
       </div>
@@ -112,7 +138,11 @@ import { mobileApi, setMobileToken } from '../../lib/mobileApi';
 
 const router    = useRouter();
 const nik       = ref('');
-const nameInput = ref('');
+const pin       = ref('');
+const mustChangePin = ref(false);
+const oldPin    = ref('');
+const newPin    = ref('');
+const newPin2   = ref('');
 const error     = ref('');
 const loading   = ref(false);
 const showNikForm = ref(false);
@@ -242,31 +272,67 @@ async function doNikLogin() {
   try {
     const res = await axios.post('/api/hr/mobile/login', {
       nik: nik.value.trim().toUpperCase(),
-      name: nameInput.value || undefined,
+      pin: pin.value.trim(),
     });
     const emp = res.data.employee;
     setMobileToken(res.data.token);
     localStorage.setItem('mobile_employee', JSON.stringify(emp));
 
-    // Check if employee already has registered credentials
-    try {
-      const credRes = await mobileApi.get(`/api/webauthn/credentials/${emp.id}`);
-      const hasCreds = credRes.data.data?.length > 0;
-      if (hasCreds) {
-        // Already onboarded → go home
-        emp.onboarded = true;
-        localStorage.setItem('mobile_employee', JSON.stringify(emp));
-        router.push('/mobile/home');
-      } else {
-        // First time → onboarding wizard
-        router.push('/mobile/setup');
-      }
-    } catch {
-      // If check fails, go to setup to be safe
+    // PIN awal dari HR wajib diganti sebelum masuk
+    if (res.data.must_change_pin) {
+      oldPin.value = pin.value.trim();
+      mustChangePin.value = true;
+      return;
+    }
+
+    await goAfterLogin(emp);
+  } catch (e: any) {
+    const data = e?.response?.data;
+    if (data?.code === 'PIN_NOT_SET') {
+      error.value = 'PIN Anda belum diatur. Hubungi HR untuk mendapatkan PIN awal.';
+    } else {
+      error.value = data?.error || 'Login gagal';
+    }
+  } finally {
+    loading.value = false;
+  }
+}
+
+// Setelah PIN benar: karyawan yang sudah punya sidik jari langsung ke home,
+// yang belum diarahkan ke onboarding.
+async function goAfterLogin(emp: any) {
+  try {
+    const credRes = await mobileApi.get(`/api/webauthn/credentials/${emp.id}`);
+    if (credRes.data.data?.length > 0) {
+      emp.onboarded = true;
+      localStorage.setItem('mobile_employee', JSON.stringify(emp));
+      router.push('/mobile/home');
+    } else {
       router.push('/mobile/setup');
     }
+  } catch {
+    router.push('/mobile/setup');
+  }
+}
+
+async function doChangePin() {
+  error.value = '';
+  if (newPin.value.trim() !== newPin2.value.trim()) {
+    error.value = 'PIN baru tidak sama';
+    return;
+  }
+  loading.value = true;
+  try {
+    await mobileApi.post('/api/hr/mobile/change-pin', {
+      current_pin: oldPin.value.trim(),
+      new_pin: newPin.value.trim(),
+    });
+    mustChangePin.value = false;
+    pin.value = ''; oldPin.value = ''; newPin.value = ''; newPin2.value = '';
+    const emp = JSON.parse(localStorage.getItem('mobile_employee') || 'null');
+    if (emp) await goAfterLogin(emp);
   } catch (e: any) {
-    error.value = e?.response?.data?.error || 'Login gagal';
+    error.value = e?.response?.data?.error || 'Gagal mengganti PIN';
   } finally {
     loading.value = false;
   }
@@ -311,6 +377,11 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.change-pin-overlay { position: fixed; inset: 0; background: rgba(15,23,42,0.97); z-index: 50;
+  display: flex; flex-direction: column; justify-content: center; padding: 24px; }
+.change-pin-title { color: #fff; font-size: 20px; font-weight: 800; margin: 0 0 6px; text-align: center; }
+.change-pin-sub { color: #94a3b8; font-size: 13px; margin: 0 0 20px; text-align: center; }
+
 * { box-sizing: border-box; margin: 0; padding: 0; }
 .mobile-app { min-height: 100dvh; }
 .login-bg {

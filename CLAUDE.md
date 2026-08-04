@@ -68,7 +68,8 @@ Aturan yang harus dijaga:
 1. **Identitas selalu dari token, tidak pernah dari input klien.** Jangan membaca `employee_id` dari body, query, atau header untuk menentukan siapa pemanggilnya. Untuk endpoint yang masih membawa `:employee_id` di URL, panggil `assertSelf(req, res, req.params.employee_id)` — kalau tidak cocok dengan token, balas 403.
 2. **Scope dipisah tegas dua arah.** Kedua token ditandatangani `JWT_SECRET` yang sama, jadi `jwt.verify()` saja akan meloloskan keduanya — **isi payload wajib dicek**. `authMiddleware` menolak token ber-`scope: 'mobile'` dan token tanpa `userId`; `mobileAuthMiddleware` menolak yang tanpa `scope: 'mobile'`. Tanpa pemeriksaan ini, token karyawan membuka seluruh endpoint admin dengan `req.userId === undefined`.
 3. **Kepemilikan dicek untuk resource milik orang.** Contoh `ownsCredential` di `webauthn.routes.ts` — `:id` di sana adalah id baris kredensial, bukan employee, jadi harus di-query dulu.
-4. **Endpoint yang boleh tanpa auth hanya jalur login**: `POST /api/auth/*`, `POST /api/hr/mobile/login`, `POST /api/webauthn/auth/options`, `POST /api/webauthn/auth/verify`. Dua yang terakhir diamankan oleh challenge WebAuthn + sidik jari itu sendiri.
+4. **Endpoint yang boleh tanpa auth hanya jalur login**: `POST /api/auth/login`, `POST /api/hr/mobile/login`, `POST /api/webauthn/auth/options`, `POST /api/webauthn/auth/verify`. Dua yang terakhir diamankan oleh challenge WebAuthn + sidik jari itu sendiri. `POST /api/auth/register` **bukan** jalur publik — user dibuat oleh admin.
+5. **Login mobile butuh NIK + PIN.** PIN awal diterbitkan HR lewat `POST /hr/employees/:id/reset-pin` (ditampilkan sekali, tersimpan sebagai hash bcrypt), wajib diganti karyawan saat login pertama. Pesan gagal login sengaja seragam untuk NIK salah maupun PIN salah supaya tidak bisa dipakai menebak NIK. Karyawan baru **tidak bisa login mobile sampai HR memberinya PIN**.
 
 Di frontend: desktop pakai `api` dari [lib/api.ts](frontend/src/lib/api.ts), mobile pakai `mobileApi` dari [lib/mobileApi.ts](frontend/src/lib/mobileApi.ts). **Jangan** lewatkan `/webauthn/auth/verify` ke `mobileApi` — endpoint itu membalas 401 saat sidik jari tidak cocok, dan interceptor akan salah mengartikannya sebagai sesi habis lalu menendang user ke login.
 
@@ -77,6 +78,24 @@ Audit cepat endpoint yang belum diamankan:
 ```bash
 cd backend/src/routes && for f in *.ts; do grep -nE "^router\.(get|post|put|delete|patch)\(" "$f" | grep -vE "authMiddleware|mobileAuthMiddleware|anyAuthMiddleware" | sed "s|^|$f:|"; done
 ```
+
+## Test suite
+
+```bash
+cd backend && npm run test:all
+```
+
+81 kasus dalam tiga suite, ditulis dengan `tsx` + `fetch`. Idempoten — bisa dijalankan berulang tanpa reset database.
+
+| Perintah | Isi | Perlu backend jalan? |
+|---|---|---|
+| `npm test` | middleware auth murni (19) | tidak |
+| `npm run test:http` | auth/otorisasi end-to-end (34) | ya |
+| `npm run test:pin` | alur PIN login mobile (28) | ya |
+
+Butuh 2 karyawan aktif berkode `TEST-A` dan `TEST-B` (bisa ditimpa lewat env `EMP_A`/`EMP_B`). PIN-nya di-reset sendiri oleh tes lewat endpoint HR.
+
+**Jangan menulis tes HTTP dengan bash + curl.** Versi bash sebelumnya memberi hasil palsu: `{...}` di argumen `-d` kena brace expansion, body JSON terpecah, server membalas 500, tapi tesnya tetap "lulus".
 
 ## Modul
 
@@ -113,7 +132,7 @@ cd backend && npx tsc --noEmit
 cd frontend && npx vue-tsc --noEmit
 ```
 
-Keduanya bersih per Agustus 2026 — jaga tetap begitu. Tidak ada test suite.
+Keduanya bersih per Agustus 2026 — jaga tetap begitu.
 
 ## Alur kerja: tim development & tim reviewer
 

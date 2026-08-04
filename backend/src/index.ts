@@ -87,9 +87,14 @@ app.use(express.urlencoded({ extended: true }));
 // Rate limiting — jalur autentikasi jadi sasaran utama brute force.
 // Login mobile hanya butuh NIK, jadi tanpa throttling seluruh rentang NIK
 // bisa disapu dalam hitungan menit.
+// Batas ketat di produksi; di dev dilonggarkan supaya test suite tidak
+// terblokir sendiri. Bisa ditimpa lewat AUTH_RATE_LIMIT_MAX.
+const authLimitMax = Number(process.env.AUTH_RATE_LIMIT_MAX)
+  || (process.env.NODE_ENV === 'production' ? 20 : 500);
+
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 20,
+  limit: authLimitMax,
   standardHeaders: 'draft-7',
   legacyHeaders: false,
   message: { error: 'Terlalu banyak percobaan. Coba lagi dalam 15 menit.' },

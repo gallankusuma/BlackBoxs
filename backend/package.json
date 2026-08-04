@@ -12,7 +12,9 @@
     "format": "prettier --write \"src/**/*.ts\"",
     "seed": "node init-database.js",
     "test": "tsx tests/auth-middleware.ts",
-    "test:http": "bash tests/auth-http.sh"
+    "test:http": "tsx tests/auth-http.ts",
+    "test:pin": "tsx tests/mobile-pin.ts",
+    "test:all": "npm test && npm run test:http && npm run test:pin"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

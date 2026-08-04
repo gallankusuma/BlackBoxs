@@ -1,0 +1,375 @@
+Saya sudah mengecek ulang source terbaru pada commit:
+
+8b5d1850486ed5a04df85ba169b6a65a179d2373
+
+Kesimpulan: revisi sudah memperbaiki sebagian temuan, tetapi belum menyelesaikan temuan P0 utama. Status review masih CHANGES REQUIRED dan belum aman dinyatakan production-ready.
+
+Ringkasan Status
+Area	Status
+Pemisahan token mobile dan admin	✅ Diperbaiki
+IDOR payslip dan attendance	✅ Diperbaiki
+Proteksi credential WebAuthn	✅ Diperbaiki sebagian
+Endpoint CRM Notes tanpa login	✅ Diperbaiki sebagian
+Boot database kosong	⚠️ Tidak crash, tetapi skema belum lengkap
+Master account hardcoded	❌ Belum diperbaiki
+Default password admin123	❌ Belum diperbaiki
+Registrasi user publik	❌ Belum diperbaiki
+Authorization/RBAC backend	❌ Belum diperbaiki
+Login mobile berbasis NIK	❌ Belum diperbaiki
+Proteksi private upload	❌ Belum diperbaiki
+Validasi file upload	❌ Belum diperbaiki
+Database transaction	❌ Belum diperbaiki
+JWT query parameter	❌ Belum diperbaiki
+JWT fallback secret	❌ Belum diperbaiki
+CORS dan rate limiting	❌ Belum diperbaiki
+Automated test dan CI	❌ Belum tersedia
+Perbaikan yang Sudah Berhasil ✅
+1. Token mobile tidak lagi dapat membuka endpoint admin
+
+authMiddleware sekarang memeriksa bahwa payload:
+
+Tidak memiliki scope: mobile
+Memiliki userId
+
+Ini menutup privilege escalation yang memungkinkan token karyawan dipakai pada endpoint desktop/admin.
+
+2. Data mobile sudah dibatasi berdasarkan pemilik token
+
+Endpoint payslip dan attendance sekarang menggunakan:
+
+mobileAuthMiddleware
+assertSelf(...)
+
+Karyawan tidak lagi bisa membaca slip gaji karyawan lain hanya dengan mengganti employee_id pada URL.
+
+3. WebAuthn enrollment sudah mengambil employee dari token
+
+Pada proses registrasi credential, employee_id tidak lagi dipercaya dari request body. Identitas diambil dari:
+
+req.employeeId
+
+Credential juga diperiksa kepemilikannya sebelum dapat diubah atau dihapus. Ini adalah perbaikan yang benar.
+
+4. CRM Notes sekarang membutuhkan autentikasi
+
+Seluruh CRUD Notes sekarang memakai authMiddleware, sehingga pengguna anonim tidak lagi bisa membaca dan menghapus catatan perusahaan.
+
+5. Inisialisasi tabel route sudah dipindahkan
+
+Tabel untuk Notes, Inbox, Project, dan Prospect telah dipindahkan dari eksekusi saat module import ke proses inisialisasi database. Ini mencegah unhandled rejection dan crash saat database masih kosong.
+
+Namun, perbaikannya belum menyelesaikan keseluruhan drift skema database.
+
+Temuan P0 yang Masih Terbuka 🚨
+1. Master account hardcoded masih aktif
+
+Kode berikut masih ada:
+
+if (email === 'master@admin.com' && password === 'master') {
+  const token = generateToken(99999, 10);
+}
+
+Login tersebut memberikan seluruh permission tanpa memeriksa database.
+
+Selain itu, proses inisialisasi database masih membuat akun:
+
+master@admin.com
+password: master
+Status
+
+Belum diperbaiki — Critical.
+
+Selama kode ini masih aktif, seluruh kontrol akses lain dapat dilewati menggunakan kredensial yang sudah diketahui publik dari repository.
+
+2. Default administrator admin123 masih dibuat
+
+Database initialization masih menjalankan:
+
+const hashedPassword = await bcrypt.hash('admin123', 10);
+
+Kemudian membuat:
+
+username: admin
+email: admin@erp.local
+password: admin123
+Status
+
+Belum diperbaiki — Critical.
+
+Hashing tidak membuat password default menjadi aman. Password aslinya tetap diketahui siapa pun yang membaca repository.
+
+3. Registrasi publik masih terbuka
+
+Endpoint berikut masih tidak memiliki autentikasi:
+
+POST /api/auth/register
+
+Endpoint tersebut:
+
+Membuat user database
+Memberikan role default
+Langsung mengeluarkan JWT
+Status
+
+Belum diperbaiki — Critical.
+
+Untuk ERP internal, registrasi publik seharusnya dihapus atau dibatasi menggunakan invitation token/admin permission.
+
+4. Backend RBAC belum diterapkan
+
+Endpoint user hanya memakai authMiddleware. Tidak ada pemeriksaan permission.
+
+User yang memiliki JWT admin biasa masih dapat mengirim request untuk:
+
+Membuat user
+Menentukan role_id
+Menentukan user_level
+Mengganti role user lain
+Mengganti password user lain
+Menonaktifkan atau menghapus user lain
+
+Contohnya, endpoint pembuatan user langsung menerima role_id dan user_level dari body.
+
+Hal serupa terjadi pada permission management. Setiap user dengan JWT desktop dapat membuat, mengubah, dan menghapus permission.
+
+Status
+
+Belum diperbaiki — Critical.
+
+Pemisahan token mobile/admin bukan pengganti RBAC. Saat ini yang dibedakan baru jenis token, bukan kewenangan antar-user desktop.
+
+Diperlukan middleware seperti:
+
+requirePermission('users.create')
+requirePermission('users.edit')
+requirePermission('users.delete')
+requirePermission('permissions.manage')
+requirePermission('hr.salary.view')
+requirePermission('finance.approve')
+5. Login mobile masih cukup dengan NIK
+
+Kode login mobile masih:
+
+const { nik, name } = req.body;
+
+if (name && !emp.name.toLowerCase().includes(...)) {
+  return res.status(401);
+}
+
+Verifikasi nama hanya dijalankan apabila nama dikirim. Request yang hanya membawa NIK tetap mendapatkan token.
+
+Dampak
+
+Seluruh perlindungan baru pada payslip, attendance, Material Request, dan WebAuthn dapat dilewati secara praktis dengan alur:
+
+Penyerang mengetahui NIK karyawan.
+Login menggunakan NIK tanpa nama.
+Mendapatkan mobile JWT milik karyawan.
+Membaca payslip dan attendance karyawan tersebut.
+Mendaftarkan WebAuthn credential baru.
+Menentukan koordinat GPS credential.
+Status
+
+Belum diperbaiki — Critical.
+
+Perbaikan IDOR sudah benar, tetapi autentikasi yang menerbitkan token masih terlalu lemah.
+
+Temuan High yang Masih Terbuka
+6. Enrollment WebAuthn masih bergantung pada autentikasi NIK
+
+WebAuthn sekarang memang meminta mobile token. Namun, mobile token tersebut masih diperoleh hanya dari NIK.
+
+Pengguna bertoken juga dapat menentukan sendiri:
+
+latitude
+longitude
+radius
+location_name
+
+dan dapat mengubah lokasi credential miliknya.
+
+Risiko
+
+Penyerang yang mengetahui NIK dapat:
+
+Mendapatkan token
+Mendaftarkan sidik jari/passkey perangkatnya
+Menetapkan lokasi registrasi sesuai posisi penyerang
+Melakukan absensi sebagai korban
+Rekomendasi
+
+Enrollment pertama harus membutuhkan salah satu dari:
+
+OTP ke kontak resmi karyawan
+PIN awal yang diberikan HR
+Persetujuan administrator
+QR enrollment satu kali
+Password employee
+Verifikasi credential lama
+7. Folder upload masih terbuka secara publik
+
+Backend masih mendaftarkan folder upload dua kali:
+
+app.use('/uploads', express.static(...));
+
+Akibatnya URL seperti berikut dapat diakses tanpa melalui endpoint download yang dilindungi:
+
+/uploads/documents/...
+/uploads/mr-photos/...
+Status
+
+Belum diperbaiki — High.
+
+File bisnis harus disimpan di private storage dan dilayani melalui endpoint yang memeriksa permission.
+
+8. Validasi upload belum diterapkan
+
+Upload dokumen hanya memiliki batas ukuran 50 MB. Nama file server tetap menggunakan ekstensi dari originalname, tanpa whitelist MIME type atau magic-byte validation.
+
+Upload foto Material Request juga menerima ekstensi asli tanpa filter file.
+
+Risiko
+
+Pengguna dapat mengunggah:
+
+HTML aktif
+SVG dengan script
+Executable
+Script server
+File polyglot
+File dengan ekstensi palsu
+9. Material Request belum menggunakan transaction
+
+Pembuatan MR masih menjalankan:
+
+Insert header
+Loop insert item
+
+tanpa transaction.
+
+Approval MR juga:
+
+Mengubah status MR menjadi approved
+Membuat PR
+Menghubungkan PR ke MR
+
+tanpa transaction.
+
+Risiko
+
+MR dapat berstatus approved meskipun pembuatan PR gagal.
+
+10. Nomor dokumen masih rentan collision
+
+Nomor MR masih menggunakan:
+
+COUNT(*) + 1
+
+Nomor PR menggunakan random empat digit.
+
+Dua request bersamaan dapat memperoleh nomor yang sama. Harus ada unique constraint dan mekanisme sequence/retry.
+
+Temuan Medium yang Masih Terbuka
+11. JWT masih diterima dari query parameter
+
+Semua middleware masih menerima:
+
+req.query.token
+
+JWT pada URL dapat tersimpan di browser history, proxy log, access log, analytics, dan Referer.
+
+12. Fallback JWT secret masih aktif
+
+Masih terdapat:
+
+process.env.JWT_SECRET || 'secret'
+
+untuk token admin, mobile, dan verifikasi.
+
+Production harus gagal startup ketika JWT_SECRET kosong, bukan menggunakan nilai default.
+
+13. CORS masih terbuka
+
+Backend masih menggunakan:
+
+app.use(cors());
+
+tanpa whitelist origin.
+
+Belum terdapat pemisahan origin production dan development.
+
+14. Belum ada rate limiting
+
+Dependency backend belum memiliki express-rate-limit atau mekanisme serupa. Endpoint login, mobile login, WebAuthn, upload, import, dan AI belum memiliki throttling.
+
+15. Bug baru pada created_by CRM Notes
+
+Middleware menyimpan identitas sebagai:
+
+req.userId = decoded.userId;
+req.user = decoded;
+
+Namun Notes membaca:
+
+const userId = req.user?.id || null;
+
+Payload token memiliki userId, bukan id. Akibatnya, created_by kemungkinan selalu tersimpan NULL.
+
+Seharusnya:
+
+const userId = req.userId;
+
+Notes juga belum memiliki ownership maupun permission; seluruh user desktop dapat mengubah dan menghapus seluruh catatan.
+
+Temuan Reliability Baru
+16. Clean database belum menghasilkan skema lengkap
+
+Dokumentasi terbaru secara eksplisit mencatat:
+
+Database baru menghasilkan sekitar 78 tabel
+Production memiliki 141 tabel
+Beberapa kolom penting belum dibuat
+Mobile login dapat gagal pada clean database
+Setup lokal masih bergantung pada dump struktur production
+Status
+
+High reliability risk.
+
+Project belum reproducible dari repository saja. Deployment atau disaster recovery ke database baru berpotensi menghasilkan aplikasi yang boot tetapi banyak modul gagal saat digunakan.
+
+Selain itu, helper schema masih menangkap error, mencetak warning, lalu melanjutkan startup. Ini dapat membuat aplikasi terlihat sehat meskipun migrasi sebagian gagal.
+
+17. Automated test belum menjadi bagian repository
+
+Commit menyebut pengujian 19 dan 30 kasus HTTP, tetapi test tersebut belum menjadi test suite yang dapat dijalankan ulang.
+
+backend/package.json belum memiliki script:
+
+"test": "..."
+
+Dokumentasi juga masih menyatakan:
+
+Tidak ada test suite.
+
+Saya juga tidak menemukan workflow CI atau status check pada commit terbaru.
+
+Keputusan Review
+Status: CHANGES REQUIRED ❌
+
+Revisi terbaru valid dan bermanfaat, khususnya untuk:
+
+Memisahkan scope token mobile dan desktop
+Menutup endpoint anonim
+Mengatasi IDOR payslip dan attendance
+Membatasi kepemilikan credential WebAuthn
+Mencegah crash awal database kosong
+
+Namun, project belum dapat dinyatakan aman karena lima temuan kritis masih aktif:
+
+Hardcoded master login
+Default password admin123 dan master
+Registrasi user publik
+Tidak ada backend RBAC
+Mobile login hanya menggunakan NIK
+
+Prioritas berikutnya harus menghentikan pengembangan fitur sementara dan menyelesaikan kelima P0 tersebut terlebih dahulu

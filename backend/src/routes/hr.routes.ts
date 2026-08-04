@@ -1,4 +1,6 @@
 import express, { Request, Response } from 'express';
+import bcrypt from 'bcrypt';
+import { randomInt } from 'crypto';
 import { dbAll, dbGet, dbRun } from '../config/database';
 import { authMiddleware, generateMobileToken, mobileAuthMiddleware, assertSelf, MobileAuthRequest } from '../middleware/auth';
 
@@ -91,15 +93,86 @@ router.get('/employees', authMiddleware, async (req: Request, res: Response) => 
   }
 });
 
+// ===== PENGELOLAAN PIN OLEH HR =====
+// PIN awal dibuat acak dan hanya ditampilkan SEKALI di respons ini, karena yang
+// tersimpan di database adalah hash-nya. Kalau HR kehilangan PIN itu, jalan
+// satu-satunya adalah reset lagi.
+const generatePin = () => String(randomInt(100000, 1000000)); // 6 digit
+
+// POST /hr/employees/:id/reset-pin — reset PIN satu karyawan
+router.post('/employees/:id/reset-pin', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const emp: any = await dbGet('SELECT id, code, name FROM employees WHERE id = ?', [req.params.id]);
+    if (!emp) return res.status(404).json({ error: 'Karyawan tidak ditemukan' });
+
+    const pin = generatePin();
+    await dbRun(
+      `UPDATE employees SET mobile_pin = ?, mobile_pin_set_at = NOW(),
+         mobile_pin_must_change = 1, mobile_pin_failed_attempts = 0, mobile_pin_locked_until = NULL
+       WHERE id = ?`,
+      [await bcrypt.hash(pin, 10), emp.id]
+    );
+
+    res.json({
+      success: true,
+      employee: { id: emp.id, code: emp.code, name: emp.name },
+      pin,
+      message: 'PIN hanya ditampilkan sekali. Catat dan sampaikan ke karyawan.',
+    });
+  } catch (error) { res.status(500).json({ error: 'Gagal reset PIN' }); }
+});
+
+// POST /hr/employees/generate-missing-pins — untuk migrasi awal: buatkan PIN
+// bagi semua karyawan aktif yang belum punya, sekali jalan.
+router.post('/employees/generate-missing-pins', authMiddleware, async (_req: Request, res: Response) => {
+  try {
+    const rows = await dbAll(
+      `SELECT id, code, name FROM employees WHERE status = 'ACTIVE' AND (mobile_pin IS NULL OR mobile_pin = '') ORDER BY code`
+    ) as any[];
+
+    const results: any[] = [];
+    for (const emp of rows) {
+      const pin = generatePin();
+      await dbRun(
+        `UPDATE employees SET mobile_pin = ?, mobile_pin_set_at = NOW(), mobile_pin_must_change = 1 WHERE id = ?`,
+        [await bcrypt.hash(pin, 10), emp.id]
+      );
+      results.push({ id: emp.id, code: emp.code, name: emp.name, pin });
+    }
+
+    res.json({
+      success: true,
+      count: results.length,
+      data: results,
+      message: 'PIN hanya ditampilkan sekali. Simpan/cetak sebelum menutup halaman.',
+    });
+  } catch (error) { res.status(500).json({ error: 'Gagal membuat PIN' }); }
+});
+
+// GET /hr/employees/pin-status — siapa yang belum punya PIN / belum ganti
+router.get('/employees/pin-status', authMiddleware, async (_req: Request, res: Response) => {
+  try {
+    const rows = await dbAll(
+      `SELECT id, code, name, position,
+              (mobile_pin IS NOT NULL AND mobile_pin <> '') AS has_pin,
+              mobile_pin_must_change, mobile_pin_set_at, mobile_pin_locked_until
+       FROM employees WHERE status = 'ACTIVE' ORDER BY code`
+    );
+    res.json({ data: rows });
+  } catch (error) { res.status(500).json({ error: 'Gagal memuat status PIN' }); }
+});
+
 router.get('/employees/:id', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const employee = await dbGet(
+    const employee: any = await dbGet(
       `SELECT e.*, d.name as department_name FROM employees e
        LEFT JOIN departments d ON e.department_id = d.id WHERE e.id = ?`,
       [req.params.id]
     );
     if (!employee) return res.status(404).json({ error: 'Employee not found' });
-    res.json({ data: employee });
+    // `e.*` ikut membawa hash PIN — jangan pernah dikirim ke klien
+    const { mobile_pin, ...safe } = employee;
+    res.json({ data: safe });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch employee' });
   }
@@ -651,28 +724,115 @@ router.get('/payslip/history', authMiddleware, async (req: Request, res: Respons
   } catch (error) { res.status(500).json({ error: 'Failed to fetch payslip history' }); }
 });
 
-// ===== MOBILE / PWA ENDPOINTS (No admin auth — employee self-service) =====
+// ===== MOBILE / PWA ENDPOINTS (login pakai NIK + PIN) =====
 
-// POST /hr/mobile/login — Employee login by NIK/code + name verification
+const PIN_MAX_ATTEMPTS = 5;
+const PIN_LOCK_MINUTES = 15;
+const PIN_MIN_LENGTH = 6;
+
+// POST /hr/mobile/login — NIK + PIN.
+// Dulu NIK saja sudah cukup mendapat token, sehingga siapa pun yang tahu NIK
+// karyawan bisa membaca slip gajinya dan mendaftarkan sidik jari atas namanya.
 router.post('/mobile/login', async (req: Request, res: Response) => {
+  // Pesan sengaja seragam untuk NIK tidak dikenal maupun PIN salah, supaya
+  // endpoint ini tidak bisa dipakai menebak NIK mana yang valid.
+  const invalid = () => res.status(401).json({ error: 'NIK atau PIN salah' });
+
   try {
-    const { nik, name } = req.body;
-    if (!nik) return res.status(400).json({ error: 'NIK diperlukan' });
+    const { nik, pin } = req.body;
+    if (!nik || !pin) return res.status(400).json({ error: 'NIK dan PIN diperlukan' });
+
     const emp: any = await dbGet(
       `SELECT e.id, e.code, e.name, e.position, e.department_id, e.status,
-              e.salary_type, e.basic_rate, e.tunjangan_rate, d.name as department
+              e.salary_type, e.basic_rate, e.tunjangan_rate, d.name as department,
+              e.mobile_pin, e.mobile_pin_must_change,
+              e.mobile_pin_failed_attempts, e.mobile_pin_locked_until
        FROM employees e
        LEFT JOIN departments d ON e.department_id = d.id
        WHERE e.code = ? AND e.status = 'ACTIVE'`,
-      [nik.trim().toUpperCase()]
+      [String(nik).trim().toUpperCase()]
     );
-    if (!emp) return res.status(404).json({ error: 'NIK tidak ditemukan atau karyawan tidak aktif' });
-    // Optional name verification (case-insensitive, partial match)
-    if (name && !emp.name.toLowerCase().includes(name.toLowerCase().trim())) {
-      return res.status(401).json({ error: 'Nama tidak cocok dengan NIK' });
+    if (!emp) return invalid();
+
+    if (emp.mobile_pin_locked_until && new Date(emp.mobile_pin_locked_until) > new Date()) {
+      return res.status(429).json({
+        error: `Terlalu banyak percobaan. Coba lagi setelah ${new Date(emp.mobile_pin_locked_until).toLocaleTimeString('id-ID')}.`,
+      });
     }
-    res.json({ success: true, employee: emp, token: generateMobileToken(emp.id) });
+
+    // Karyawan yang PIN-nya belum diatur HR belum bisa masuk. Ini disengaja:
+    // tanpa PIN, satu-satunya faktor kembali menjadi NIK saja.
+    if (!emp.mobile_pin) {
+      return res.status(403).json({
+        error: 'PIN belum diatur. Hubungi HR untuk mendapatkan PIN awal Anda.',
+        code: 'PIN_NOT_SET',
+      });
+    }
+
+    const ok = await bcrypt.compare(String(pin), emp.mobile_pin);
+    if (!ok) {
+      const attempts = Number(emp.mobile_pin_failed_attempts || 0) + 1;
+      if (attempts >= PIN_MAX_ATTEMPTS) {
+        await dbRun(
+          `UPDATE employees SET mobile_pin_failed_attempts = 0,
+             mobile_pin_locked_until = DATE_ADD(NOW(), INTERVAL ? MINUTE) WHERE id = ?`,
+          [PIN_LOCK_MINUTES, emp.id]
+        );
+        return res.status(429).json({
+          error: `PIN salah ${PIN_MAX_ATTEMPTS} kali. Akun dikunci ${PIN_LOCK_MINUTES} menit.`,
+        });
+      }
+      await dbRun('UPDATE employees SET mobile_pin_failed_attempts = ? WHERE id = ?', [attempts, emp.id]);
+      return invalid();
+    }
+
+    await dbRun(
+      'UPDATE employees SET mobile_pin_failed_attempts = 0, mobile_pin_locked_until = NULL WHERE id = ?',
+      [emp.id]
+    );
+
+    // Jangan pernah kirim hash PIN ke klien
+    const { mobile_pin, mobile_pin_failed_attempts, mobile_pin_locked_until, mobile_pin_must_change, ...employee } = emp;
+
+    res.json({
+      success: true,
+      employee,
+      token: generateMobileToken(emp.id),
+      must_change_pin: !!mobile_pin_must_change,
+    });
   } catch (error) { res.status(500).json({ error: 'Login gagal' }); }
+});
+
+// POST /hr/mobile/change-pin — karyawan mengganti PIN-nya sendiri
+router.post('/mobile/change-pin', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Response) => {
+  try {
+    const { current_pin, new_pin } = req.body;
+    if (!current_pin || !new_pin) return res.status(400).json({ error: 'PIN lama dan PIN baru diperlukan' });
+
+    const newPin = String(new_pin).trim();
+    if (newPin.length < PIN_MIN_LENGTH || !/^\d+$/.test(newPin)) {
+      return res.status(400).json({ error: `PIN baru harus angka, minimal ${PIN_MIN_LENGTH} digit` });
+    }
+    if (String(current_pin) === newPin) {
+      return res.status(400).json({ error: 'PIN baru tidak boleh sama dengan PIN lama' });
+    }
+
+    const emp: any = await dbGet('SELECT mobile_pin FROM employees WHERE id = ? AND status = ?', [req.employeeId, 'ACTIVE']);
+    if (!emp?.mobile_pin) return res.status(403).json({ error: 'PIN belum diatur' });
+
+    if (!(await bcrypt.compare(String(current_pin), emp.mobile_pin))) {
+      return res.status(401).json({ error: 'PIN lama salah' });
+    }
+
+    await dbRun(
+      `UPDATE employees SET mobile_pin = ?, mobile_pin_set_at = NOW(),
+         mobile_pin_must_change = 0, mobile_pin_failed_attempts = 0, mobile_pin_locked_until = NULL
+       WHERE id = ?`,
+      [await bcrypt.hash(newPin, 10), req.employeeId]
+    );
+
+    res.json({ success: true, message: 'PIN berhasil diganti' });
+  } catch (error) { res.status(500).json({ error: 'Gagal mengganti PIN' }); }
 });
 
 // POST /hr/mobile/checkin — Self check-in from mobile

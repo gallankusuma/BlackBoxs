@@ -21,6 +21,11 @@
           📥 Import CSV
           <input type="file" accept=".csv" class="hidden" @change="onFileSelected" ref="fileInput" />
         </label>
+        <!-- Migrasi awal PIN mobile -->
+        <button @click="generateMissingPins"
+          class="px-3 py-2 text-sm border border-amber-300 text-amber-700 rounded-lg bg-amber-50 hover:bg-amber-100">
+          🔑 Buat PIN yang Belum Ada
+        </button>
         <button @click="showForm = true"
           class="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 text-sm">
           + Add Employee
@@ -243,6 +248,7 @@
               </button>
             </td>
             <td class="px-6 py-3 text-sm text-right space-x-2">
+              <button @click="resetPin(employee)" class="text-amber-600 hover:text-amber-900">Reset PIN</button>
               <button @click="editEmployee(employee)" class="text-blue-600 hover:text-blue-900">Edit</button>
               <button @click="deleteEmployee(employee.id)" class="text-red-600 hover:text-red-900">Delete</button>
             </td>
@@ -254,6 +260,37 @@
           </tr>
         </tbody>
       </table>
+    </div>
+  </div>
+
+  <!-- Hasil reset PIN — hanya ditampilkan sekali -->
+  <div v-if="pinResult.length" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" @click.self="pinResult = []">
+    <div class="bg-white rounded-lg shadow-xl max-w-lg w-full max-h-[80vh] flex flex-col">
+      <div class="px-5 py-4 border-b">
+        <h3 class="font-semibold text-gray-900">PIN Awal Karyawan</h3>
+        <p class="text-sm text-amber-700 mt-1">
+          ⚠️ PIN hanya ditampilkan sekali. Catat atau cetak sekarang — setelah dialog ditutup,
+          PIN tidak bisa dilihat lagi dan harus di-reset ulang.
+        </p>
+      </div>
+      <div class="overflow-auto px-5 py-3">
+        <table class="w-full text-sm">
+          <thead class="text-xs text-gray-500 uppercase">
+            <tr><th class="text-left py-1">Kode</th><th class="text-left py-1">Nama</th><th class="text-right py-1">PIN</th></tr>
+          </thead>
+          <tbody class="divide-y">
+            <tr v-for="r in pinResult" :key="r.id">
+              <td class="py-1.5 font-mono">{{ r.code }}</td>
+              <td class="py-1.5">{{ r.name }}</td>
+              <td class="py-1.5 text-right font-mono font-bold tracking-widest">{{ r.pin }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="px-5 py-3 border-t flex justify-end gap-2">
+        <button @click="copyPins" class="px-3 py-1.5 text-sm border rounded hover:bg-gray-50">Salin</button>
+        <button @click="pinResult = []" class="px-3 py-1.5 text-sm bg-gray-900 text-white rounded">Tutup</button>
+      </div>
     </div>
   </div>
 </template>
@@ -309,6 +346,41 @@ const importRows = ref<ImportRow[]>([]);
 const skipDuplicates = ref(true);
 const importing = ref(false);
 const importResult = ref<{ type: 'success' | 'error'; message: string } | null>(null);
+
+// ─── PIN login mobile ────────────────────────────────────────────────────────
+// PIN di-hash di server, jadi nilai aslinya hanya ada di respons ini — sekali.
+const pinResult = ref<{ id: number; code: string; name: string; pin: string }[]>([]);
+
+async function resetPin(employee: Employee) {
+  if (!confirm(`Reset PIN mobile untuk ${employee.first_name}?\n\nPIN lama langsung tidak berlaku, dan PIN baru hanya ditampilkan sekali.`)) return;
+  try {
+    const res = await api.post(`/hr/employees/${employee.id}/reset-pin`);
+    pinResult.value = [res.data.employee ? { ...res.data.employee, pin: res.data.pin } : res.data];
+  } catch (err: any) {
+    alert(err?.response?.data?.error || 'Gagal reset PIN');
+  }
+}
+
+async function generateMissingPins() {
+  if (!confirm('Buatkan PIN untuk semua karyawan aktif yang belum punya?\n\nPIN hanya ditampilkan sekali setelah ini.')) return;
+  try {
+    const res = await api.post('/hr/employees/generate-missing-pins');
+    if (!res.data.count) { alert('Semua karyawan aktif sudah punya PIN.'); return; }
+    pinResult.value = res.data.data || [];
+  } catch (err: any) {
+    alert(err?.response?.data?.error || 'Gagal membuat PIN');
+  }
+}
+
+async function copyPins() {
+  const text = pinResult.value.map(r => `${r.code}\t${r.name}\t${r.pin}`).join('\n');
+  try {
+    await navigator.clipboard.writeText(text);
+    alert('PIN disalin ke clipboard.');
+  } catch {
+    alert('Gagal menyalin. Silakan catat manual.');
+  }
+}
 
 const formData = ref({
   employee_code: '', first_name: '', last_name: '',

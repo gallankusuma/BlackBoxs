@@ -51,11 +51,26 @@ Reviewer benar bahwa pemisahan token mobile/admin bukan pengganti RBAC. Rencana 
 
 ### 5. Login mobile hanya dengan NIK
 
-**Status: Terbuka — desain sudah diputuskan, implementasi berikutnya.**
+**Status: Diterapkan** — [hr.routes.ts](backend/src/routes/hr.routes.ts), [config/database.ts](backend/src/config/database.ts), [MobileLogin.vue](frontend/src/views/mobile/MobileLogin.vue), [Employees.vue](frontend/src/views/Employees.vue)
 
-Diverifikasi: verifikasi nama hanya jalan bila `name` dikirim, jadi request ber-NIK saja tetap dapat token. Analisis rantai serangan dari reviewer akurat.
+Analisis rantai serangan dari reviewer akurat dan sudah ditutup. `POST /hr/mobile/login` kini mewajibkan **NIK + PIN**; request tanpa PIN dibalas 400, PIN salah dibalas 401.
 
-Keputusan pemilik project: **PIN awal dari HR**, karyawan mengganti saat login pertama. Dipilih karena pekerja lapangan banyak yang tidak punya email, dan tidak butuh gateway OTP. Implementasi mencakup kolom PIN di `employees`, alur ganti-PIN di login pertama, dan UI HR untuk set/reset. Belum dikerjakan.
+Desain yang dipilih pemilik project: **PIN awal dari HR**, wajib diganti karyawan saat login pertama. Dipilih karena banyak pekerja lapangan tidak punya email, sehingga OTP butuh infrastruktur yang belum ada.
+
+Detail implementasi:
+
+- Kolom baru di `employees` lewat `ensureMobilePinSchema`: `mobile_pin` (hash bcrypt, tidak pernah disimpan polos), `mobile_pin_set_at`, `mobile_pin_must_change`, `mobile_pin_failed_attempts`, `mobile_pin_locked_until`.
+- **Pesan seragam** untuk NIK tidak dikenal maupun PIN salah (`"NIK atau PIN salah"`), supaya endpoint ini tidak bisa dipakai menebak NIK mana yang valid.
+- **Lockout**: 5 kali PIN salah mengunci akun 15 menit. Saat terkunci, PIN yang benar pun ditolak.
+- Karyawan yang PIN-nya belum diatur dibalas 403 `PIN_NOT_SET` — disengaja, karena tanpa PIN faktor tunggalnya kembali menjadi NIK saja.
+- `POST /hr/mobile/change-pin` (butuh token mobile): minimal 6 digit angka, tidak boleh sama dengan PIN lama, wajib menyertakan PIN lama.
+- Sisi HR: `POST /hr/employees/:id/reset-pin`, `POST /hr/employees/generate-missing-pins` untuk migrasi awal, dan `GET /hr/employees/pin-status`. PIN hanya ditampilkan **sekali** di respons — yang tersimpan hanya hash-nya.
+- UI: tombol "Reset PIN" per karyawan dan "Buat PIN yang Belum Ada" di halaman Employees, dengan dialog yang memperingatkan PIN hanya tampil sekali dan tombol salin.
+- Hash PIN tidak pernah bocor: `GET /hr/employees/:id` memakai `e.*`, jadi kolom `mobile_pin` dibuang eksplisit sebelum dikirim.
+
+**⚠️ Konsekuensi operasional yang harus disiapkan sebelum deploy:** karyawan yang belum punya PIN **tidak bisa login mobile sama sekali**. HR wajib menjalankan "Buat PIN yang Belum Ada" lalu membagikan PIN-nya sebelum perubahan ini naik ke produksi.
+
+Diverifikasi: `npm run test:pin` — 28 kasus, termasuk lockout, kebocoran hash, dan pesan yang tidak membocorkan NIK valid.
 
 ---
 
@@ -63,7 +78,11 @@ Keputusan pemilik project: **PIN awal dari HR**, karyawan mengganti saat login p
 
 ### 6. Enrollment WebAuthn bergantung autentikasi NIK
 
-**Status: Terbuka** — bergantung pada butir 5. Begitu login mobile punya faktor kedua, rantai serangan yang dijelaskan reviewer ikut tertutup.
+**Status: Diterapkan lewat butir 5.**
+
+Reviewer benar bahwa akar masalahnya ada di butir 5, bukan di WebAuthn-nya. Karena token mobile kini hanya bisa diperoleh dengan NIK **+ PIN**, penyerang yang sekadar tahu NIK tidak lagi bisa mendapat token, mendaftarkan sidik jarinya, atau menetapkan koordinat GPS atas nama korban.
+
+Yang **masih terbuka**: pengguna bertoken tetap bisa menentukan sendiri `latitude`/`longitude`/`radius` credential miliknya. Artinya karyawan sah masih bisa mendaftarkan lokasi absensi di titik pilihannya sendiri. Menutup ini butuh keputusan proses (mis. lokasi wajib dipilih dari master `office_locations` yang dikelola admin, bukan dari koordinat bebas) — belum diputuskan.
 
 ### 7. Folder upload terbuka publik
 
@@ -146,13 +165,18 @@ Catatan tambahan reviewer bahwa `execSchemaEnsure` menangkap error lalu tetap la
 Tes yang sebelumnya hanya disebut di commit message kini masuk repo dan bisa dijalankan ulang:
 
 ```bash
-cd backend && npm test        # 19 kasus middleware, tanpa perlu DB/server
-```
-```bash
-cd backend && npm run test:http   # 33 kasus HTTP, perlu backend jalan
+cd backend && npm run test:all
 ```
 
-`test:http` sekarang mengambil `employee_id` dari respons login (tidak lagi hardcode) dan menerima override lewat variabel `API`, `EMP_A`, `EMP_B`.
+Tiga suite, **81 kasus**, semuanya lulus dan bisa dijalankan berulang tanpa reset database:
+
+| Perintah | Isi | Perlu server? |
+|---|---|---|
+| `npm test` | 19 kasus middleware murni | tidak |
+| `npm run test:http` | 34 kasus auth/otorisasi end-to-end | ya |
+| `npm run test:pin` | 28 kasus alur PIN mobile | ya |
+
+Ditulis dengan `tsx` + `fetch`, bukan bash — versi bash sempat memberi hasil palsu karena `{...}` di argumen `curl -d` kena brace expansion sehingga body JSON terpecah dan server membalas 500, tetapi tesnya tetap lolos. Fixture dibuat sendiri oleh tiap suite (reset PIN lewat endpoint HR, karyawan sementara untuk kasus "belum punya PIN"), jadi tidak bergantung urutan jalan.
 
 CI workflow **belum** ada — masih terbuka.
 
@@ -162,10 +186,12 @@ CI workflow **belum** ada — masih terbuka.
 
 | Status | Butir |
 |---|---|
-| Diterapkan | 2, 3, 11, 12, 13, 14, 15, 17 |
+| Diterapkan | 2, 3, 5, 6, 11, 12, 13, 14, 15, 17 |
 | Sebagian | 7 |
-| Terbuka | 1, 4, 5, 6, 8, 9, 10, 16, CI |
+| Terbuka | 1, 4, 8, 9, 10, 16, CI |
 
-Prioritas ronde berikutnya, mengikuti arahan reviewer untuk menuntaskan P0 lebih dulu: **butir 5** (PIN mobile) → **butir 4** (RBAC) → butir 1 (setelah akun admin normal siap).
+Dari 5 temuan P0 yang disebut reviewer, **3 sudah tertutup** (registrasi publik, password default, login mobile NIK-saja). Sisa P0: butir 4 (RBAC) dan butir 1 (master hardcoded, ditahan atas keputusan pemilik).
 
-Verifikasi ronde ini: `npm test` 19/19, `npm run test:http` 33/33, `tsc --noEmit` dan `vue-tsc --noEmit` bersih.
+Prioritas berikutnya: **butir 4 (RBAC)** → butir 9 & 10 (transaction + nomor dokumen) → butir 16 (drift skema).
+
+Verifikasi: `npm run test:all` 81/81, `tsc --noEmit` dan `vue-tsc --noEmit` bersih.

@@ -792,6 +792,27 @@ const ensureRouteModuleSchema = async (connection: any) => {
   console.log('✅ Inbox / CRM notes / prospects / MTO schema ensured');
 };
 
+// ==================== PIN LOGIN MOBILE ====================
+// Sebelumnya login mobile cukup dengan NIK, sehingga siapa pun yang tahu NIK
+// karyawan bisa mendapat token miliknya — dan seluruh proteksi IDOR di
+// payslip/attendance/WebAuthn jadi bisa dilewati. PIN di-hash bcrypt, tidak
+// pernah disimpan polos.
+const ensureMobilePinSchema = async (connection: any) => {
+  const statements = [
+    `ALTER TABLE employees ADD COLUMN IF NOT EXISTS mobile_pin VARCHAR(255) NULL`,
+    `ALTER TABLE employees ADD COLUMN IF NOT EXISTS mobile_pin_set_at TIMESTAMP NULL`,
+    // Wajib ganti PIN saat login pertama — PIN awal diketahui HR.
+    `ALTER TABLE employees ADD COLUMN IF NOT EXISTS mobile_pin_must_change TINYINT(1) NOT NULL DEFAULT 1`,
+    `ALTER TABLE employees ADD COLUMN IF NOT EXISTS mobile_pin_failed_attempts INT NOT NULL DEFAULT 0`,
+    `ALTER TABLE employees ADD COLUMN IF NOT EXISTS mobile_pin_locked_until TIMESTAMP NULL`,
+  ];
+
+  for (const statement of statements) {
+    await execSchemaEnsure(connection, statement);
+  }
+  console.log('✅ Mobile PIN schema ensured');
+};
+
 // Initialize database schema
 export async function initializeDatabase() {
   try {
@@ -833,6 +854,7 @@ export async function initializeDatabase() {
     await ensureApprovalPermissions(connection);
     await ensureAssetManagementSchema(connection);
     await ensureRouteModuleSchema(connection);
+    await ensureMobilePinSchema(connection);
 
     connection.release();
 
