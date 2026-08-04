@@ -1,5 +1,35 @@
 import jwt from 'jsonwebtoken';
+import path from 'path';
+import dotenv from 'dotenv';
 import { Request, Response, NextFunction } from 'express';
+
+// JWT_SECRET dibaca saat modul ini di-load, sedangkan dotenv.config() di
+// index.ts baru jalan setelah semua import. Muat sendiri di sini supaya tidak
+// bergantung pada urutan import.
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+
+// JWT_SECRET wajib ada. Dulu setiap pemanggilan memakai fallback
+// `process.env.JWT_SECRET || 'secret'` — kalau variabel itu lupa diisi saat
+// deploy, seluruh token ditandatangani dengan string 'secret' yang bisa ditebak
+// siapa pun, dan aplikasinya tetap terlihat sehat. Lebih baik gagal saat boot.
+const JWT_SECRET = (() => {
+  const s = process.env.JWT_SECRET;
+  if (!s || s.trim().length === 0) {
+    throw new Error(
+      'JWT_SECRET tidak diset. Isi di backend/.env sebelum menjalankan aplikasi — ' +
+      'tanpa itu semua token bisa dipalsukan.'
+    );
+  }
+  return s;
+})();
+
+// Token HANYA dibaca dari header. Dulu semua middleware juga menerima
+// ?token=... di URL, yang ikut tersimpan di history browser, access log proxy,
+// dan header Referer. Satu-satunya pemakaian sah adalah preview/unduh berkas —
+// tag <a> dan <img> tidak bisa mengirim header — dan itu ditangani
+// downloadAuthMiddleware di bawah.
+const bearerToken = (req: Request): string | undefined =>
+  req.headers.authorization?.split(' ')[1];
 
 interface AuthRequest extends Request {
   userId?: number;
@@ -8,14 +38,13 @@ interface AuthRequest extends Request {
 
 export const authMiddleware = (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
-    const token = req.headers.authorization?.split(' ')[1]
-                  || (req.query.token as string | undefined);
+    const token = bearerToken(req);
 
     if (!token) {
       return res.status(401).json({ error: 'No token provided' });
     }
 
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret') as any;
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
 
     // Token mobile ditandatangani JWT_SECRET yang sama, jadi jwt.verify() saja
     // lolos. Payload-nya wajib dicek: tanpa ini, token karyawan bisa membuka
@@ -35,7 +64,7 @@ export const authMiddleware = (req: AuthRequest, res: Response, next: NextFuncti
 export const generateToken = (userId: number, userLevel?: number) => {
   return jwt.sign(
     { userId, userLevel },
-    process.env.JWT_SECRET || 'secret',
+    JWT_SECRET,
     { expiresIn: process.env.JWT_EXPIRES_IN || '7d' } as jwt.SignOptions
   );
 };
@@ -53,7 +82,7 @@ export interface MobileAuthRequest extends Request {
 export const generateMobileToken = (employeeId: number) => {
   return jwt.sign(
     { employeeId, scope: MOBILE_SCOPE },
-    process.env.JWT_SECRET || 'secret',
+    JWT_SECRET,
     { expiresIn: process.env.MOBILE_JWT_EXPIRES_IN || '30d' } as jwt.SignOptions
   );
 };
@@ -63,12 +92,11 @@ export const mobileAuthMiddleware = (req: MobileAuthRequest, res: Response, next
     res.status(401).json({ error: 'Sesi berakhir, silakan login ulang', code: 'MOBILE_AUTH_REQUIRED' });
 
   try {
-    const token = req.headers.authorization?.split(' ')[1]
-                  || (req.query.token as string | undefined);
+    const token = bearerToken(req);
 
     if (!token) return unauthorized();
 
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret') as any;
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
     if (decoded?.scope !== MOBILE_SCOPE || !decoded?.employeeId) return unauthorized();
 
     req.employeeId = Number(decoded.employeeId);
@@ -82,12 +110,11 @@ export const mobileAuthMiddleware = (req: MobileAuthRequest, res: Response, next
 // saat onboarding karyawan sekaligus dikelola admin dari desktop.
 export const anyAuthMiddleware = (req: MobileAuthRequest & AuthRequest, res: Response, next: NextFunction) => {
   try {
-    const token = req.headers.authorization?.split(' ')[1]
-                  || (req.query.token as string | undefined);
+    const token = bearerToken(req);
 
     if (!token) return res.status(401).json({ error: 'No token provided' });
 
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret') as any;
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
     if (decoded?.scope === MOBILE_SCOPE && decoded?.employeeId) {
       req.employeeId = Number(decoded.employeeId);
     } else if (decoded?.userId) {
@@ -114,4 +141,25 @@ export const assertSelf = (req: MobileAuthRequest, res: Response, paramValue: un
     return false;
   }
   return true;
+};
+
+// Khusus route preview/unduh berkas yang dibuka langsung oleh browser lewat
+// URL, sehingga tidak bisa menyertakan header Authorization. Selain route
+// tersebut, pakai authMiddleware biasa.
+export const downloadAuthMiddleware = (req: AuthRequest, res: Response, next: NextFunction) => {
+  try {
+    const token = bearerToken(req) || (req.query.token as string | undefined);
+    if (!token) return res.status(401).json({ error: 'No token provided' });
+
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
+    if (decoded?.scope === MOBILE_SCOPE || !decoded?.userId) {
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+
+    req.userId = decoded.userId;
+    req.user = decoded;
+    next();
+  } catch (error) {
+    res.status(401).json({ error: 'Invalid token' });
+  }
 };

@@ -39,7 +39,7 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { title, content, color, category, linked_type, linked_id, linked_name } = req.body;
     if (!content) return res.status(400).json({ error: 'Content is required' });
-    const userId = (req as any).user?.id || null;
+    const userId = (req as any).userId ?? null;
 
     const result = await dbRun(`
       INSERT INTO crm_notes (title, content, color, category, linked_type, linked_id, linked_name, created_by)

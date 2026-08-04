@@ -2,6 +2,7 @@ import path from 'path';
 import dotenv from 'dotenv';
 import mysql from 'mysql2/promise';
 import bcrypt from 'bcrypt';
+import { randomBytes } from 'crypto';
 
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
@@ -860,29 +861,25 @@ async function seedDatabase() {
     );
 
     if (!adminUser) {
-      const hashedPassword = await bcrypt.hash('admin123', 10);
+      // Password admin awal TIDAK boleh berupa nilai tetap di source code —
+      // repo ini publik, jadi 'admin123' sama saja dengan tanpa password.
+      // Ambil dari SEED_ADMIN_PASSWORD; kalau kosong, buat acak dan tampilkan
+      // sekali di log boot supaya operator bisa langsung memakainya lalu ganti.
+      const generated = !process.env.SEED_ADMIN_PASSWORD;
+      const plainPassword = process.env.SEED_ADMIN_PASSWORD || randomBytes(12).toString('base64url');
+      const hashedPassword = await bcrypt.hash(plainPassword, 10);
       await dbRun(
         `INSERT INTO users (username, email, password, full_name, role_id, is_active)
          VALUES (?, ?, ?, ?, ?, ?)`,
         ['admin', 'admin@erp.local', hashedPassword, 'System Administrator', adminRole.insertId || 1, 1]
       );
-      console.log('✅ Default admin user created (username: admin, password: admin123)');
-    }
-
-    // Create super admin user (master@admin.com) - Hardcoded
-    const masterUser = await dbGet(
-      'SELECT id FROM users WHERE email = ?',
-      ['master@admin.com']
-    );
-
-    if (!masterUser) {
-      const masterPassword = await bcrypt.hash('master', 10);
-      await dbRun(
-        `INSERT INTO users (username, email, password, full_name, role_id, is_active)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        ['master', 'master@admin.com', masterPassword, 'Super Administrator', adminRole.insertId || 1, 1]
-      );
-      console.log('✅ Super admin user created (email: master@admin.com, password: master)');
+      if (generated) {
+        console.log('✅ User admin dibuat (username: admin)');
+        console.log(`   Password sekali pakai: ${plainPassword}`);
+        console.log('   ⚠️  Catat sekarang — tidak ditampilkan lagi. Segera ganti setelah login.');
+      } else {
+        console.log('✅ User admin dibuat (username: admin, password dari SEED_ADMIN_PASSWORD)');
+      }
     }
 
     // Check and seed departments if empty

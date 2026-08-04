@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import multer from 'multer';
 import { dbAll, dbGet, dbRun } from '../config/database';
-import { authMiddleware } from '../middleware/auth';
+import { authMiddleware , downloadAuthMiddleware} from '../middleware/auth';
 
 const router = Router();
 
@@ -405,7 +405,7 @@ router.post('/:id/documents', authMiddleware, upload.single('file'), async (req:
   }
 });
 
-router.get('/documents/:docId/preview', authMiddleware, async (req: Request, res: Response) => {
+router.get('/documents/:docId/preview', downloadAuthMiddleware, async (req: Request, res: Response) => {
   try {
     const file: any = await dbGet('SELECT * FROM asset_documents WHERE id = ?', [req.params.docId]);
     if (!file) return res.status(404).json({ error: 'File not found' });
@@ -418,7 +418,7 @@ router.get('/documents/:docId/preview', authMiddleware, async (req: Request, res
   }
 });
 
-router.get('/documents/:docId/download', authMiddleware, async (req: Request, res: Response) => {
+router.get('/documents/:docId/download', downloadAuthMiddleware, async (req: Request, res: Response) => {
   try {
     const file: any = await dbGet('SELECT * FROM asset_documents WHERE id = ?', [req.params.docId]);
     if (!file) return res.status(404).json({ error: 'File not found' });

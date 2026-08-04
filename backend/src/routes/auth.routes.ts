@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { body, validationResult } from 'express-validator';
 import { dbAll, dbGet, dbRun } from '../config/database';
 import { hashPassword, verifyPassword, validateEmail } from '../utils/auth.utils';
-import { generateToken } from '../middleware/auth';
+import { generateToken, authMiddleware } from '../middleware/auth';
 
 const router = Router();
 
@@ -97,9 +97,12 @@ router.post(
   }
 );
 
-// POST /api/auth/register
+// POST /api/auth/register — ERP internal: user dibuat oleh admin, bukan
+// registrasi mandiri. Dulu endpoint ini terbuka tanpa auth sehingga siapa pun
+// bisa membuat akun sendiri lalu langsung mendapat JWT.
 router.post(
   '/register',
+  authMiddleware,
   [
     body('email').isEmail().withMessage('Invalid email'),
     body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
@@ -132,12 +135,10 @@ router.post(
         [email, hashedPassword, name, defaultRole?.id || null, 1]
       );
 
-      // Generate token
-      const token = generateToken(result.insertId as number);
-
+      // Sengaja TIDAK menerbitkan token: yang memanggil endpoint ini adalah
+      // admin yang membuatkan akun, bukan user yang bersangkutan.
       res.status(201).json({
         message: 'User registered successfully',
-        token,
         user: {
           id: result.insertId,
           email,

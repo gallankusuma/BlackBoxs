@@ -2,6 +2,7 @@ import express, { Application, Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
+import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
 import path from 'path';
 
@@ -56,11 +57,56 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(helmet());
-app.use(cors());
+
+// CORS: dulu `cors()` polos, artinya origin mana pun boleh memanggil API.
+// Daftar origin diambil dari CORS_ORIGINS (dipisah koma) supaya bisa beda
+// antara dev dan produksi tanpa mengubah kode.
+const corsOrigins = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map(o => o.trim())
+  .filter(Boolean);
+const defaultOrigins = process.env.NODE_ENV === 'production'
+  ? ['https://blackboxs.io']
+  : ['http://localhost:5173', 'http://localhost:3005'];
+const allowedOrigins = corsOrigins.length ? corsOrigins : defaultOrigins;
+
+app.use(cors({
+  origin: (origin, callback) => {
+    // Tanpa Origin = permintaan non-browser (curl, health check, app mobile native)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    callback(new Error(`Origin tidak diizinkan: ${origin}`));
+  },
+  credentials: true,
+}));
+
 app.use(morgan('dev'));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+
+// Rate limiting — jalur autentikasi jadi sasaran utama brute force.
+// Login mobile hanya butuh NIK, jadi tanpa throttling seluruh rentang NIK
+// bisa disapu dalam hitungan menit.
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { error: 'Terlalu banyak percobaan. Coba lagi dalam 15 menit.' },
+});
+const generalLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 300,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { error: 'Terlalu banyak permintaan, coba lagi sebentar lagi.' },
+});
+
+app.use('/api/auth/login', authLimiter);
+app.use('/api/auth/register', authLimiter);
+app.use('/api/hr/mobile/login', authLimiter);
+app.use('/api/webauthn/auth', authLimiter);
+app.use('/api', generalLimiter);
 
 // Routes
 app.get('/api/health', (req: Request, res: Response) => {
