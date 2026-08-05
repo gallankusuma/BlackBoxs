@@ -14,7 +14,8 @@
     "test": "tsx tests/auth-middleware.ts",
     "test:http": "tsx tests/auth-http.ts",
     "test:pin": "tsx tests/mobile-pin.ts",
-    "test:all": "npm test && npm run test:http && npm run test:pin"
+    "test:rbac": "tsx tests/rbac.ts",
+    "test:all": "npm test && npm run test:http && npm run test:pin && npm run test:rbac"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

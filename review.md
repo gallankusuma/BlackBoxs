@@ -43,11 +43,35 @@ Diverifikasi: `register tanpa token → 401` di `npm run test:http`.
 
 ### 4. RBAC backend
 
-**Status: Terbuka — dijadwalkan berikutnya.**
+**Status: Diterapkan sebagian — endpoint manajemen user/role/permission sudah ditegakkan.**
 
-Diverifikasi: tidak ada satu pun `requirePermission` / `hasPermission` di seluruh `backend/src/routes/`. [user.routes.ts:115](backend/src/routes/user.routes.ts) memang menerima `role_id` dan `user_level` langsung dari body.
+Reviewer benar sepenuhnya: pemisahan token mobile/admin membedakan **jenis token**, bukan **kewenangan antar-user desktop**.
 
-Reviewer benar bahwa pemisahan token mobile/admin bukan pengganti RBAC. Rencana yang disepakati dengan pemilik project: buat middleware `requirePermission(...)` lalu pasang bertahap, dimulai dari endpoint paling sensitif (`users`, `permissions`, `roles`, approve finance, HR salary), baru meluas. Belum dikerjakan di ronde ini.
+Yang dibuat: [middleware/permission.ts](backend/src/middleware/permission.ts) dengan `requirePermission('resource.action')`. Nama permission sengaja memakai string yang **sudah ada di database produksi** (`admin.users.create`, `admin.roles.edit`, dst.) — string yang sama juga sudah dipakai frontend lewat `authStore.hasPermission()`, jadi penegakan backend konsisten dengan apa yang memang sudah disembunyikan di UI.
+
+Keputusan desain:
+
+- **`user_level` dan permission dibaca dari database, bukan dari payload token.** Kalau dibaca dari token, pencabutan hak baru berlaku setelah token kedaluwarsa (7 hari).
+- **`user_level >= 10` (master) melewati pemeriksaan**, disamakan dengan aturan di `authStore.hasPermission` supaya UI dan backend tidak berbeda pendapat.
+- **User non-aktif ditolak** meski tokennya masih valid.
+
+Sudah ditegakkan di `user.routes.ts`, `role.routes.ts`, `permissions.routes.ts` — total 17 endpoint.
+
+**Dua temuan sampingan yang ikut ditutup:**
+
+1. **Eskalasi lewat `user_level`.** Pemegang `admin.users.edit` bisa menyetel `user_level = 10` pada dirinya sendiri, yang berarti melewati seluruh RBAC yang baru dibuat. Sekarang hanya master yang boleh memberikan level ≥ 10, baik saat membuat maupun mengubah user.
+
+2. **Role Admin ternyata tidak memiliki seluruh permission** — 480 dari 484 di produksi. Empat yang hilang (`assets.view`, `assets.manage`, `master_data.bom.approve_1/2`) adalah permission yang ditambahkan belakangan lewat `ensure*Schema` tapi tidak pernah dipetakan. Kalau endpoint asset diproteksi tanpa ini, admin produksi justru ikut terkunci. Ditutup dengan `ensureAdminRoleHasAllPermissions()` yang jalan paling akhir saat boot.
+
+**Verifikasi kondisi produksi sebelum menegakkan:** dari 8 role, hanya 2 yang punya mapping permission (Admin 480, Manager Finance 234). Enam role lain nol permission — tapi **tidak ada user yang memakainya**, jadi penegakan ini tidak mengunci siapa pun. Kelima user produksi ada di dua role yang terisi.
+
+**Penyimpangan yang disengaja:** `GET /users` **tidak** digembok `admin.users.view`, karena dipakai dropdown pilih project manager, tampilan nama approver, dan filter audit log — menggemboknya akan memutus fitur bagi user non-admin. Sebagai gantinya, kolom pribadi (email, telepon, alamat, `user_level`, `last_login`) hanya dikirim ke pemegang `admin.users.view`; yang lain menerima daftar nama saja.
+
+**Temuan ketiga — katalog permission tidak reproducible (terkait butir 16).** Saat menguji RBAC di database lokal, ketahuan instalasi baru hanya punya **35 permission**, sedangkan produksi punya **484**. Artinya RBAC yang baru dibuat akan **menolak semua orang kecuali master** di instalasi baru, karena `admin.users.edit` dan kawan-kawannya tidak pernah ada. Katalognya ternyata dibuat manual di produksi dan tidak pernah masuk repo.
+
+Ditutup dengan `ensurePermissionCatalog()`: 484 permission dari 88 resource, ditulis ringkas sebagai 7 kelompok aksi (bukan 484 baris literal). Diverifikasi database lokal kini identik dengan produksi — 484 permission, role Admin memegang seluruhnya.
+
+**Masih terbuka:** modul lain (finance approve, HR payroll, procurement, inventory) belum memakai `requirePermission`. Fondasi dan katalognya sudah ada, tinggal dipasang per endpoint. Notes juga belum punya ownership (bagian kedua butir 15).
 
 ### 5. Login mobile hanya dengan NIK
 
@@ -187,11 +211,11 @@ CI workflow **belum** ada — masih terbuka.
 | Status | Butir |
 |---|---|
 | Diterapkan | 2, 3, 5, 6, 11, 12, 13, 14, 15, 17 |
-| Sebagian | 7 |
-| Terbuka | 1, 4, 8, 9, 10, 16, CI |
+| Sebagian | 4, 7 |
+| Terbuka | 1, 8, 9, 10, 16, CI |
 
-Dari 5 temuan P0 yang disebut reviewer, **3 sudah tertutup** (registrasi publik, password default, login mobile NIK-saja). Sisa P0: butir 4 (RBAC) dan butir 1 (master hardcoded, ditahan atas keputusan pemilik).
+Dari 5 temuan P0 yang disebut reviewer, **4 sudah tertutup** (registrasi publik, password default, login mobile NIK-saja, dan RBAC untuk manajemen user/role/permission). Sisa P0: butir 1 (master hardcoded, ditahan atas keputusan pemilik) dan perluasan RBAC ke modul lain.
 
-Prioritas berikutnya: **butir 4 (RBAC)** → butir 9 & 10 (transaction + nomor dokumen) → butir 16 (drift skema).
+Prioritas berikutnya: perluas `requirePermission` ke finance/HR/procurement/inventory → butir 9 & 10 (transaction + nomor dokumen) → butir 16 (drift skema tabel, katalog permission-nya sudah beres).
 
-Verifikasi: `npm run test:all` 81/81, `tsc --noEmit` dan `vue-tsc --noEmit` bersih.
+Verifikasi: `npm run test:all` **109/109** (19 middleware + 34 HTTP + 28 PIN + 28 RBAC), `tsc --noEmit` dan `vue-tsc --noEmit` bersih.

@@ -813,6 +813,133 @@ const ensureMobilePinSchema = async (connection: any) => {
   console.log('✅ Mobile PIN schema ensured');
 };
 
+// Katalog permission — sumber kebenaran untuk RBAC.
+// Produksi punya 484 baris yang dulu dibuat manual dan tidak pernah masuk repo,
+// sehingga instalasi baru hanya punya ~35 permission: requirePermission() akan
+// menolak semua orang kecuali master. Didefinisikan di sini supaya reproducible.
+const PERMISSION_CATALOG: { actions: string[]; resources: string[] }[] = [
+  {
+    actions: ['approve_1', 'approve_2'],
+    resources: [
+      'inventory.stock-adjustment', 'inventory.stock-transfer', 'master_data.bom',
+      'master-data.bom', 'production.fg-receipt', 'production.workorders', 'quality.batch-release',
+      'quality.ncr', 'rnd.rnd-formulations', 'rnd.rnd-projects'
+    ],
+  },
+  {
+    actions: ['approve_1', 'approve_2', 'view'],
+    resources: [
+      'procurement.spec-approval'
+    ],
+  },
+  {
+    actions: ['approve', 'approve_1', 'approve_2', 'create', 'delete', 'edit', 'export', 'view'],
+    resources: [
+      'finance.ap', 'finance.ar', 'finance.fund-requests', 'procurement.grn',
+      'procurement.purchase-orders', 'procurement.purchase-requests'
+    ],
+  },
+  {
+    actions: ['approve', 'create', 'delete', 'edit', 'export', 'view'],
+    resources: [
+      'admin.approval-config', 'admin.audit-log', 'admin.backup', 'admin.integration',
+      'admin.notifications', 'admin.roles', 'admin.system-settings', 'admin.users',
+      'approval.approval-history', 'approval.approval-inbox', 'approval.approval-rules',
+      'dashboard.dashboard-alerts', 'dashboard.dashboard-approvals',
+      'dashboard.dashboard-overview', 'estimator.estimator-ahsp', 'estimator.estimator-masters',
+      'estimator.estimator-proposals', 'estimator.hsp', 'estimator.rab',
+      'finance.accounts-payable', 'finance.accounts-receivable', 'finance.cost-analysis',
+      'finance.financial-summary', 'finance.kasbon', 'finance.payment-schedule', 'hr.attendance',
+      'hr.kasbon', 'hr.office-locations', 'hr.payroll', 'hr.position-rates',
+      'master_data.item-types', 'master_data.suppliers', 'master_data.warehouse-locations',
+      'master-data.categories', 'master-data.customers', 'master-data.departments',
+      'master-data.items', 'master-data.units', 'master-data.warehouses',
+      'procurement.material-price-comparison', 'procurement.procurement-dashboard',
+      'procurement.procurement-history', 'procurement.vendor-price-list', 'projects.clients',
+      'projects.dashboard', 'projects.documents', 'projects.expenses', 'projects.help',
+      'projects.leads', 'projects.manpower', 'projects.messages', 'projects.mto', 'projects.notes',
+      'projects.project-events', 'projects.projects', 'projects.prospects', 'projects.reports',
+      'projects.sales', 'projects.schedule', 'projects.settings', 'projects.tasks',
+      'projects.team', 'projects.tickets', 'reports.export-data', 'reports.finance-reports',
+      'reports.inventory-reports', 'reports.procurement-reports'
+    ],
+  },
+  {
+    actions: ['create', 'delete', 'edit', 'export', 'view'],
+    resources: [
+      'hr.employees'
+    ],
+  },
+  {
+    actions: ['export', 'view'],
+    resources: [
+      'finance.project-pl', 'hr.reports'
+    ],
+  },
+  {
+    actions: ['manage', 'view'],
+    resources: [
+      'assets'
+    ],
+  },
+];
+// Total: 484 permission dari 88 resource
+
+const ensurePermissionCatalog = async (connection: any) => {
+  const rows: [string, string, string][] = [];
+  for (const g of PERMISSION_CATALOG) {
+    for (const resource of g.resources) {
+      // module = segmen pertama resource, dipakai UI untuk mengelompokkan
+      const module = resource.split('.')[0];
+      for (const action of g.actions) rows.push([resource, action, module]);
+    }
+  }
+
+  try {
+    // INSERT IGNORE butuh UNIQUE(resource, action); tanpa itu jalankan cek manual
+    const [existing]: any = await connection.execute(
+      'SELECT CONCAT(resource, "|", action) AS k FROM permissions'
+    );
+    const have = new Set((existing || []).map((r: any) => r.k));
+    const missing = rows.filter(([res, act]) => !have.has(`${res}|${act}`));
+
+    for (const [resource, action, module] of missing) {
+      await connection.execute(
+        'INSERT INTO permissions (resource, action, module, name, description) VALUES (?, ?, ?, ?, ?)',
+        [resource, action, module, `${action} ${resource}`, null]
+      );
+    }
+    console.log(`✅ Katalog permission: ${missing.length > 0 ? `${missing.length} ditambahkan` : 'sudah lengkap'} (${rows.length} total)`);
+  } catch (err: any) {
+    console.warn('ensurePermissionCatalog warning:', err.message.substring(0, 120));
+  }
+};
+
+// Role Admin harus selalu memiliki SELURUH permission. Tanpa invariant ini,
+// permission yang ditambahkan belakangan lewat ensure*Schema (mis. assets.view,
+// master_data.bom.approve_1) tidak pernah terpetakan ke Admin — dan begitu
+// endpoint-nya diproteksi requirePermission, admin justru ikut terkunci.
+const ensureAdminRoleHasAllPermissions = async (connection: any) => {
+  try {
+    const [rows]: any = await connection.execute(
+      `SELECT id FROM roles WHERE name = 'Admin' OR code = 'ADMIN' ORDER BY id LIMIT 1`
+    );
+    const adminRoleId = Array.isArray(rows) && rows[0]?.id;
+    if (!adminRoleId) return;
+
+    const [result]: any = await connection.execute(
+      `INSERT INTO role_permissions (role_id, permission_id)
+       SELECT ?, p.id FROM permissions p
+       WHERE p.id NOT IN (SELECT permission_id FROM role_permissions WHERE role_id = ?)`,
+      [adminRoleId, adminRoleId]
+    );
+    const added = result?.affectedRows || 0;
+    console.log(`✅ Role Admin: ${added > 0 ? `${added} permission baru dipetakan` : 'permission sudah lengkap'}`);
+  } catch (err: any) {
+    console.warn('ensureAdminRoleHasAllPermissions warning:', err.message.substring(0, 120));
+  }
+};
+
 // Initialize database schema
 export async function initializeDatabase() {
   try {
@@ -855,6 +982,9 @@ export async function initializeDatabase() {
     await ensureAssetManagementSchema(connection);
     await ensureRouteModuleSchema(connection);
     await ensureMobilePinSchema(connection);
+    await ensurePermissionCatalog(connection);
+    // Harus paling akhir: semua permission dari ensure* di atas sudah ada
+    await ensureAdminRoleHasAllPermissions(connection);
 
     connection.release();
 

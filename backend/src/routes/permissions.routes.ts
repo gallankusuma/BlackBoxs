@@ -1,11 +1,12 @@
 import express, { Request, Response } from 'express';
 import { dbAll, dbGet, dbRun } from '../config/database';
 import { authMiddleware } from '../middleware/auth';
+import { requirePermission } from '../middleware/permission';
 
 const router = express.Router();
 
 // GET /permissions - Get all permissions
-router.get('/', authMiddleware, async (req: Request, res: Response) => {
+router.get('/', authMiddleware, requirePermission('admin.roles.view'), async (req: Request, res: Response) => {
   try {
     const permissions = await dbAll(
       'SELECT id, resource, action, module, name, description FROM permissions ORDER BY module, action',
@@ -18,7 +19,7 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // GET /permissions/grouped - Get permissions grouped by module
-router.get('/grouped', authMiddleware, async (req: Request, res: Response) => {
+router.get('/grouped', authMiddleware, requirePermission('admin.roles.view'), async (req: Request, res: Response) => {
   try {
     const permissions = await dbAll(
       'SELECT id, resource, action, module, name, description FROM permissions ORDER BY module, FIELD(action, "view","create","edit","delete","approve","export")',
@@ -40,7 +41,7 @@ router.get('/grouped', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // GET /permissions/:id - Get permission by ID
-router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:id', authMiddleware, requirePermission('admin.roles.view'), async (req: Request, res: Response) => {
   try {
     const permission = await dbGet('SELECT * FROM permissions WHERE id = ?', [req.params.id]);
     if (!permission) {
@@ -53,7 +54,7 @@ router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // POST /permissions - Create new permission
-router.post('/', authMiddleware, async (req: Request, res: Response) => {
+router.post('/', authMiddleware, requirePermission('admin.roles.create'), async (req: Request, res: Response) => {
   try {
     const { resource, action, module, name, description } = req.body;
     if (!resource || !action || !module) {
@@ -70,7 +71,7 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // PUT /permissions/:id - Update permission
-router.put('/:id', authMiddleware, async (req: Request, res: Response) => {
+router.put('/:id', authMiddleware, requirePermission('admin.roles.edit'), async (req: Request, res: Response) => {
   try {
     const { resource, action, module, name, description } = req.body;
     await dbRun(
@@ -84,7 +85,7 @@ router.put('/:id', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // DELETE /permissions/:id - Delete permission
-router.delete('/:id', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/:id', authMiddleware, requirePermission('admin.roles.delete'), async (req: Request, res: Response) => {
   try {
     await dbRun('DELETE FROM role_permissions WHERE permission_id = ?', [req.params.id]);
     await dbRun('DELETE FROM permissions WHERE id = ?', [req.params.id]);

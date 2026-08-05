@@ -71,6 +71,21 @@ Aturan yang harus dijaga:
 4. **Endpoint yang boleh tanpa auth hanya jalur login**: `POST /api/auth/login`, `POST /api/hr/mobile/login`, `POST /api/webauthn/auth/options`, `POST /api/webauthn/auth/verify`. Dua yang terakhir diamankan oleh challenge WebAuthn + sidik jari itu sendiri. `POST /api/auth/register` **bukan** jalur publik — user dibuat oleh admin.
 5. **Login mobile butuh NIK + PIN.** PIN awal diterbitkan HR lewat `POST /hr/employees/:id/reset-pin` (ditampilkan sekali, tersimpan sebagai hash bcrypt), wajib diganti karyawan saat login pertama. Pesan gagal login sengaja seragam untuk NIK salah maupun PIN salah supaya tidak bisa dipakai menebak NIK. Karyawan baru **tidak bisa login mobile sampai HR memberinya PIN**.
 
+### Otorisasi (RBAC)
+
+`authMiddleware` hanya menjawab "siapa kamu", bukan "boleh apa". Untuk itu ada `requirePermission()` di [backend/src/middleware/permission.ts](backend/src/middleware/permission.ts):
+
+```ts
+router.post('/', authMiddleware, requirePermission('admin.users.create'), handler);
+```
+
+- Nama permission = `resource.action` dari tabel `permissions` (mis. `admin.users.create`, `hr.payroll.view`). **Pakai string yang sudah ada di database** — jangan mengarang nama baru, karena role di produksi dipetakan ke string tersebut dan frontend memakai string yang sama lewat `authStore.hasPermission()`.
+- Level dan permission dibaca **dari database setiap request**, bukan dari payload token, supaya pencabutan hak langsung berlaku.
+- `user_level >= 10` (master) melewati semua pemeriksaan. Hanya master yang boleh memberikan level ≥ 10 ke user lain — tanpa batasan itu, pemegang `admin.users.edit` bisa mengangkat dirinya sendiri.
+- Role **Admin** dijamin selalu punya seluruh permission lewat `ensureAdminRoleHasAllPermissions()` saat boot. Kalau menambah permission baru di `ensure*Schema`, mapping ke Admin terjadi otomatis — tanpa ini, admin justru terkunci dari fitur yang baru diproteksi.
+
+Sudah ditegakkan di `user.routes.ts`, `role.routes.ts`, `permissions.routes.ts`. Modul lain (finance approve, HR payroll, procurement, inventory) **belum** — pekerjaan yang masih terbuka.
+
 Di frontend: desktop pakai `api` dari [lib/api.ts](frontend/src/lib/api.ts), mobile pakai `mobileApi` dari [lib/mobileApi.ts](frontend/src/lib/mobileApi.ts). **Jangan** lewatkan `/webauthn/auth/verify` ke `mobileApi` — endpoint itu membalas 401 saat sidik jari tidak cocok, dan interceptor akan salah mengartikannya sebagai sesi habis lalu menendang user ke login.
 
 Audit cepat endpoint yang belum diamankan:
@@ -85,15 +100,16 @@ cd backend/src/routes && for f in *.ts; do grep -nE "^router\.(get|post|put|dele
 cd backend && npm run test:all
 ```
 
-81 kasus dalam tiga suite, ditulis dengan `tsx` + `fetch`. Idempoten — bisa dijalankan berulang tanpa reset database.
+Ditulis dengan `tsx` + `fetch`. Idempoten — bisa dijalankan berulang tanpa reset database.
 
 | Perintah | Isi | Perlu backend jalan? |
 |---|---|---|
 | `npm test` | middleware auth murni (19) | tidak |
 | `npm run test:http` | auth/otorisasi end-to-end (34) | ya |
 | `npm run test:pin` | alur PIN login mobile (28) | ya |
+| `npm run test:rbac` | penegakan permission per-endpoint | ya |
 
-Butuh 2 karyawan aktif berkode `TEST-A` dan `TEST-B` (bisa ditimpa lewat env `EMP_A`/`EMP_B`). PIN-nya di-reset sendiri oleh tes lewat endpoint HR.
+Butuh 2 karyawan aktif berkode `TEST-A` dan `TEST-B` (bisa ditimpa lewat env `EMP_A`/`EMP_B`). PIN-nya di-reset sendiri oleh tes lewat endpoint HR. `test:rbac` membuat user & role uji sendiri lewat API lalu menghapusnya di akhir.
 
 **Jangan menulis tes HTTP dengan bash + curl.** Versi bash sebelumnya memberi hasil palsu: `{...}` di argumen `-d` kena brace expansion, body JSON terpecah, server membalas 500, tapi tesnya tetap "lulus".
 
