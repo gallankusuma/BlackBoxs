@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { body, validationResult } from 'express-validator';
-import { dbAll, dbGet, dbRun } from '../config/database';
+import { dbAll, dbGet, dbRun, MASTER_EMAIL, MASTER_FALLBACK_ID } from '../config/database';
 import { hashPassword, verifyPassword, validateEmail } from '../utils/auth.utils';
 import { generateToken, authMiddleware } from '../middleware/auth';
 
@@ -23,16 +23,23 @@ router.post(
       const { email, password } = req.body;
 
       // Hardcoded master user (hidden from database)
-      if (email === 'master@admin.com' && password === 'master') {
-        const token = generateToken(99999, 10);
+      if (email === MASTER_EMAIL && password === 'master') {
+        // Token harus menunjuk ke baris users yang NYATA: banyak tabel punya FK
+        // created_by → users(id), jadi id yang tidak ada di tabel membuat master
+        // gagal membuat aset, dokumen, dsb. ensureMasterUserRow() menjamin
+        // barisnya ada; id-nya bisa berbeda antar instalasi.
+        const masterRow: any = await dbGet('SELECT id FROM users WHERE email = ? LIMIT 1', [MASTER_EMAIL]);
+        const masterId = masterRow?.id || MASTER_FALLBACK_ID;
+
+        const token = generateToken(masterId, 10);
         // Fetch all permissions for master admin
         const allPerms = await dbAll(`SELECT CONCAT(resource, '.', action) as perm FROM permissions`, []) as any[];
         return res.json({
           message: 'Login successful',
           token,
           user: {
-            id: 99999,
-            email: 'master@admin.com',
+            id: masterId,
+            email: MASTER_EMAIL,
             name: 'Master Admin',
             role: 'Master Administrator',
             role_id: null,

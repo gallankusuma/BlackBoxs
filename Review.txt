@@ -1,375 +1,1012 @@
-Saya sudah mengecek ulang source terbaru pada commit:
+# REVIEW MODUL ASSET MANAGEMENT
+
+## Development Action List — BlackBox ERP
+
+**Tanggal review:** 4 Agustus 2026
+**Commit:** `10f33813053f245b962dbbdb693c8b2c833cfb25`
+**Status modul:** **CHANGES REQUIRED**
+**Reviewer:** Tim Reviewer
+**Tujuan:** Menyelesaikan Asset Management sampai layak dijadikan acuan flowchart final, architecture code table, dan user manual.
+
+---
+
+# 1. Ruang Lingkup Modul
+
+Berdasarkan source code saat ini, Asset Management mencakup:
+
+1. Asset Category
+2. Production Line
+3. P&ID
+4. Asset Register
+5. Perhitungan depresiasi
+6. Dokumen aset
+7. Riwayat maintenance
+8. Riwayat pembelian atau penambahan nilai
+9. Status aset:
+
+   * Active
+   * Idle
+   * Under Maintenance
+   * Disposed
+
+Komponen utama berada pada:
+
+| Layer                  | File                                          |
+| ---------------------- | --------------------------------------------- |
+| Database schema        | `backend/src/config/database.ts`              |
+| Backend API            | `backend/src/routes/asset.routes.ts`          |
+| Authentication         | `backend/src/middleware/auth.ts`              |
+| Asset register         | `frontend/src/views/AssetList.vue`            |
+| Asset detail           | `frontend/src/views/AssetDetail.vue`          |
+| Production line        | `frontend/src/views/ProductionLines.vue`      |
+| Production line detail | `frontend/src/views/ProductionLineDetail.vue` |
+| P&ID detail            | `frontend/src/views/PnidDetail.vue`           |
+| Frontend routing       | `frontend/src/router/index.ts`                |
+
+---
+
+# 2. Flowchart As-Is
+
+```mermaid
+flowchart TD
+    A[User Login] --> B[Asset Management]
+    B --> C[Asset Register dan KPI]
+    B --> D[Production Line]
+    D --> E[P&ID]
+
+    C --> F[Tambah Aset]
+    E --> F
 
-8b5d1850486ed5a04df85ba169b6a65a179d2373
+    F --> G[Pilih Kategori]
+    G --> H{Kategori membutuhkan Production Line?}
 
-Kesimpulan: revisi sudah memperbaiki sebagian temuan, tetapi belum menyelesaikan temuan P0 utama. Status review masih CHANGES REQUIRED dan belum aman dinyatakan production-ready.
+    H -->|Ya| I[Pilih Line atau P&ID]
+    H -->|Tidak| J[Isi Lokasi]
 
-Ringkasan Status
-Area	Status
-Pemisahan token mobile dan admin	✅ Diperbaiki
-IDOR payslip dan attendance	✅ Diperbaiki
-Proteksi credential WebAuthn	✅ Diperbaiki sebagian
-Endpoint CRM Notes tanpa login	✅ Diperbaiki sebagian
-Boot database kosong	⚠️ Tidak crash, tetapi skema belum lengkap
-Master account hardcoded	❌ Belum diperbaiki
-Default password admin123	❌ Belum diperbaiki
-Registrasi user publik	❌ Belum diperbaiki
-Authorization/RBAC backend	❌ Belum diperbaiki
-Login mobile berbasis NIK	❌ Belum diperbaiki
-Proteksi private upload	❌ Belum diperbaiki
-Validasi file upload	❌ Belum diperbaiki
-Database transaction	❌ Belum diperbaiki
-JWT query parameter	❌ Belum diperbaiki
-JWT fallback secret	❌ Belum diperbaiki
-CORS dan rate limiting	❌ Belum diperbaiki
-Automated test dan CI	❌ Belum tersedia
-Perbaikan yang Sudah Berhasil ✅
-1. Token mobile tidak lagi dapat membuka endpoint admin
+    I --> K[Isi Informasi Pembelian]
+    J --> K
 
-authMiddleware sekarang memeriksa bahwa payload:
+    K --> L[Isi Umur Ekonomis dan Nilai Residu]
+    L --> M[Generate Asset Code]
+    M --> N[Simpan Aset]
+
+    N --> O[Asset Detail]
+    O --> P[Ubah Data Aset]
+    O --> Q[Upload Dokumen]
+    O --> R[Tambah Maintenance]
+    O --> S[Tambah Riwayat Pembelian]
+    O --> T[Ubah Status]
+    O --> U[Hapus Aset]
 
-Tidak memiliki scope: mobile
-Memiliki userId
+    P --> V[Hitung Ulang Nilai Buku Secara Dinamis]
+    S --> O
+    R --> O
+```
 
-Ini menutup privilege escalation yang memungkinkan token karyawan dipakai pada endpoint desktop/admin.
+## Catatan flow saat ini
+
+Flow tersebut belum memiliki:
+
+* Approval registrasi dan perubahan aset
+* Assignment penanggung jawab
+* Riwayat perpindahan aset
+* Proses kapitalisasi
+* Approval disposal
+* Disposal proceeds dan gain/loss
+* Period closing depresiasi
+* Audit trail perubahan nilai finansial
+* Permission berdasarkan role
+
+---
+
+# 3. Flowchart To-Be yang Direkomendasikan
 
-2. Data mobile sudah dibatasi berdasarkan pemilik token
+```mermaid
+flowchart TD
+    A[User Login] --> B{Memiliki Permission Asset?}
+    B -->|Tidak| C[403 Forbidden]
+    B -->|Ya| D[Asset Register]
 
-Endpoint payslip dan attendance sekarang menggunakan:
+    D --> E[Tambah Aset]
+    E --> F{Sumber Aset}
 
-mobileAuthMiddleware
-assertSelf(...)
+    F -->|Procurement| G[Pilih PO atau GRN]
+    F -->|Manual| H[Masukkan Dokumen Perolehan]
 
-Karyawan tidak lagi bisa membaca slip gaji karyawan lain hanya dengan mengganti employee_id pada URL.
+    G --> I[Validasi Data Perolehan]
+    H --> I
 
-3. WebAuthn enrollment sudah mengambil employee dari token
+    I --> J[Pilih Kategori]
+    J --> K{Aset Dapat Didepresiasi?}
 
-Pada proses registrasi credential, employee_id tidak lagi dipercaya dari request body. Identitas diambil dari:
+    K -->|Tidak| L[Non-Depreciable Asset]
+    K -->|Ya| M[Isi Tanggal Siap Digunakan]
+    M --> N[Pilih Metode dan Umur Ekonomis]
 
-req.employeeId
+    L --> O[Validasi Lokasi, Custodian dan Cost Center]
+    N --> O
 
-Credential juga diperiksa kepemilikannya sebelum dapat diubah atau dihapus. Ini adalah perbaikan yang benar.
+    O --> P[Generate Asset Code secara Atomic]
+    P --> Q[Approval Kapitalisasi]
+    Q -->|Rejected| R[Draft atau Revisi]
+    Q -->|Approved| S[Status Active]
 
-4. CRM Notes sekarang membutuhkan autentikasi
+    S --> T[Depreciation Schedule]
+    S --> U[Maintenance]
+    S --> V[Transfer Aset]
+    S --> W[Capital Addition]
+    S --> X[Disposal Request]
 
-Seluruh CRUD Notes sekarang memakai authMiddleware, sehingga pengguna anonim tidak lagi bisa membaca dan menghapus catatan perusahaan.
+    U --> Y[Maintenance History dan Cost]
+    V --> Z[Transfer History]
+    W --> AA[Update Capitalized Value]
+    AA --> T
 
-5. Inisialisasi tabel route sudah dipindahkan
+    X --> AB[Disposal Approval]
+    AB -->|Approved| AC[Catat Proceeds dan Gain/Loss]
+    AC --> AD[Status Disposed dan Record Dikunci]
 
-Tabel untuk Notes, Inbox, Project, dan Prospect telah dipindahkan dari eksekusi saat module import ke proses inisialisasi database. Ini mencegah unhandled rejection dan crash saat database masih kosong.
+    T --> AE[Monthly Depreciation Ledger]
+    AE --> AF[Period Closing]
+```
 
-Namun, perbaikannya belum menyelesaikan keseluruhan drift skema database.
+---
 
-Temuan P0 yang Masih Terbuka 🚨
-1. Master account hardcoded masih aktif
+# 4. Development Action List
 
-Kode berikut masih ada:
+## AST-001 — Backend RBAC belum diterapkan
 
-if (email === 'master@admin.com' && password === 'master') {
-  const token = generateToken(99999, 10);
-}
+**Severity:** P0 — Critical
+**Status:** Open
 
-Login tersebut memberikan seluruh permission tanpa memeriksa database.
+Seluruh endpoint Asset Management hanya menggunakan `authMiddleware`. Setiap user desktop yang memiliki JWT dapat:
 
-Selain itu, proses inisialisasi database masih membuat akun:
+* Membuat dan menghapus production line
+* Membuat dan menghapus P&ID
+* Membuat, mengubah, dan menghapus aset
+* Mengubah harga perolehan
+* Mengubah umur ekonomis dan nilai residu
+* Menghapus dokumen
+* Menghapus maintenance
+* Menghapus riwayat penambahan nilai
 
-master@admin.com
-password: master
-Status
+Tidak ada pemeriksaan permission seperti `assets.create`, `assets.edit`, atau `assets.dispose`.
 
-Belum diperbaiki — Critical.
+### Tindakan
 
-Selama kode ini masih aktif, seluruh kontrol akses lain dapat dilewati menggunakan kredensial yang sudah diketahui publik dari repository.
+Tambahkan permission minimal:
 
-2. Default administrator admin123 masih dibuat
+```text
+assets.view
+assets.create
+assets.edit
+assets.delete
+assets.dispose
+assets.documents.manage
+assets.maintenance.view
+assets.maintenance.manage
+assets.financial.view
+assets.financial.manage
+assets.master.manage
+```
 
-Database initialization masih menjalankan:
+Gunakan middleware:
 
-const hashedPassword = await bcrypt.hash('admin123', 10);
+```ts
+authMiddleware,
+requirePermission('assets.create')
+```
 
-Kemudian membuat:
+### Acceptance criteria
 
-username: admin
-email: admin@erp.local
-password: admin123
-Status
+* User Viewer hanya dapat menggunakan endpoint GET.
+* Asset Officer dapat membuat dan memperbarui data operasional.
+* Maintenance Officer hanya mengelola maintenance.
+* Finance hanya mengelola nilai finansial dan depresiasi.
+* Disposal hanya dapat dilakukan role berwenang.
+* Akses tidak sesuai menghasilkan HTTP `403`.
+* Permission diverifikasi backend, bukan hanya menyembunyikan tombol frontend.
 
-Belum diperbaiki — Critical.
+---
 
-Hashing tidak membuat password default menjadi aman. Password aslinya tetap diketahui siapa pun yang membaca repository.
+## AST-002 — Menyimpan detail aset dapat menghapus P&ID dan spec
 
-3. Registrasi publik masih terbuka
+**Severity:** P0 — Critical
+**Status:** Open
 
-Endpoint berikut masih tidak memiliki autentikasi:
+Endpoint `PUT /assets/:id` melakukan full replacement terhadap:
 
-POST /api/auth/register
+```text
+pnid_id
+spec
+production_line_id
+```
 
-Endpoint tersebut:
+Namun `editForm` di `AssetDetail.vue` tidak membawa `pnid_id` maupun `spec`.
 
-Membuat user database
-Memberikan role default
-Langsung mengeluarkan JWT
-Status
+Akibatnya, ketika user hanya mengganti nama atau status:
 
-Belum diperbaiki — Critical.
+* `pnid_id` dapat berubah menjadi `NULL`
+* `spec` dapat berubah menjadi `{}`
 
-Untuk ERP internal, registrasi publik seharusnya dihapus atau dibatasi menggunakan invitation token/admin permission.
+Aset kemudian hilang dari daftar P&ID dan spesifikasi lama terhapus.
 
-4. Backend RBAC belum diterapkan
+### Tindakan
 
-Endpoint user hanya memakai authMiddleware. Tidak ada pemeriksaan permission.
+Pilih salah satu:
 
-User yang memiliki JWT admin biasa masih dapat mengirim request untuk:
+1. Ubah endpoint menjadi `PATCH` dan hanya update field yang dikirim; atau
+2. Frontend wajib mengirim seluruh data existing; atau
+3. Backend mengambil data existing lalu melakukan merge.
 
-Membuat user
-Menentukan role_id
-Menentukan user_level
-Mengganti role user lain
-Mengganti password user lain
-Menonaktifkan atau menghapus user lain
+Pendekatan yang direkomendasikan:
 
-Contohnya, endpoint pembuatan user langsung menerima role_id dan user_level dari body.
+```ts
+PATCH /api/assets/:id
+```
 
-Hal serupa terjadi pada permission management. Setiap user dengan JWT desktop dapat membuat, mengubah, dan menghapus permission.
+### Acceptance criteria
 
-Status
+* Mengubah nama tidak mengubah `pnid_id`.
+* Mengubah status tidak menghapus `spec`.
+* Mengubah harga tidak mengubah lokasi atau P&ID.
+* Automated test memastikan field yang tidak dikirim tetap utuh.
 
-Belum diperbaiki — Critical.
+---
 
-Pemisahan token mobile/admin bukan pengganti RBAC. Saat ini yang dibedakan baru jenis token, bukan kewenangan antar-user desktop.
+## AST-003 — Metode saldo menurun belum diimplementasikan
 
-Diperlukan middleware seperti:
+**Severity:** P1 — High
+**Status:** Open
 
-requirePermission('users.create')
-requirePermission('users.edit')
-requirePermission('users.delete')
-requirePermission('permissions.manage')
-requirePermission('hr.salary.view')
-requirePermission('finance.approve')
-5. Login mobile masih cukup dengan NIK
+Frontend menyediakan:
 
-Kode login mobile masih:
+```text
+straight_line
+declining_balance
+```
 
-const { nik, name } = req.body;
+Tetapi fungsi `calcDepreciation()` selalu menggunakan rumus garis lurus dan tidak membaca `depreciation_method`.
 
-if (name && !emp.name.toLowerCase().includes(...)) {
-  return res.status(401);
-}
+### Risiko
 
-Verifikasi nama hanya dijalankan apabila nama dikirim. Request yang hanya membawa NIK tetap mendapatkan token.
+User dapat memilih saldo menurun, tetapi hasilnya tetap garis lurus. Laporan aset menjadi menyesatkan.
 
-Dampak
+### Tindakan
 
-Seluruh perlindungan baru pada payslip, attendance, Material Request, dan WebAuthn dapat dilewati secara praktis dengan alur:
+Pilih salah satu:
 
-Penyerang mengetahui NIK karyawan.
-Login menggunakan NIK tanpa nama.
-Mendapatkan mobile JWT milik karyawan.
-Membaca payslip dan attendance karyawan tersebut.
-Mendaftarkan WebAuthn credential baru.
-Menentukan koordinat GPS credential.
-Status
+* Implementasikan saldo menurun lengkap beserta rate; atau
+* Hapus pilihan saldo menurun sampai implementasinya tersedia.
 
-Belum diperbaiki — Critical.
+Tambahkan unit test untuk setiap metode.
 
-Perbaikan IDOR sudah benar, tetapi autentikasi yang menerbitkan token masih terlalu lemah.
+### Acceptance criteria
 
-Temuan High yang Masih Terbuka
-6. Enrollment WebAuthn masih bergantung pada autentikasi NIK
+* Metode yang dipilih menghasilkan rumus yang sesuai.
+* Saldo menurun memiliki rate yang jelas.
+* Nilai buku tidak turun melewati nilai residu.
+* Perhitungan dapat diuji pada tanggal tertentu menggunakan parameter `as_of_date`.
 
-WebAuthn sekarang memang meminta mobile token. Namun, mobile token tersebut masih diperoleh hanya dari NIK.
+---
 
-Pengguna bertoken juga dapat menentukan sendiri:
+## AST-004 — Penambahan nilai tidak masuk ke basis depresiasi
 
-latitude
-longitude
-radius
-location_name
+**Severity:** P1 — High
+**Status:** Open
 
-dan dapat mengubah lokasi credential miliknya.
+Frontend menyebut fitur:
 
-Risiko
+> Riwayat Pembelian / Penambahan Nilai
 
-Penyerang yang mengetahui NIK dapat:
+Namun perhitungan depresiasi hanya membaca `assets.purchase_price`. Data pada `asset_purchase_history.amount` tidak menambah:
 
-Mendapatkan token
-Mendaftarkan sidik jari/passkey perangkatnya
-Menetapkan lokasi registrasi sesuai posisi penyerang
-Melakukan absensi sebagai korban
-Rekomendasi
+* Nilai perolehan
 
-Enrollment pertama harus membutuhkan salah satu dari:
+* Depreciable amount
 
-OTP ke kontak resmi karyawan
-PIN awal yang diberikan HR
-Persetujuan administrator
-QR enrollment satu kali
-Password employee
-Verifikasi credential lama
-7. Folder upload masih terbuka secara publik
+* Nilai buku
 
-Backend masih mendaftarkan folder upload dua kali:
+* Nilai KPI summary
 
-app.use('/uploads', express.static(...));
+### Tindakan
 
-Akibatnya URL seperti berikut dapat diakses tanpa melalui endpoint download yang dilindungi:
+Tambahkan klasifikasi:
 
-/uploads/documents/...
-/uploads/mr-photos/...
-Status
+```text
+capital_addition
+expense
+replacement
+improvement
+```
 
-Belum diperbaiki — High.
+Hanya transaksi `capital_addition` yang menambah nilai aset.
 
-File bisnis harus disimpan di private storage dan dilayani melalui endpoint yang memeriksa permission.
+Tentukan juga:
 
-8. Validasi upload belum diterapkan
+* Tanggal kapitalisasi
+* Sisa umur ekonomis atau umur baru
+* Approval
+* Sumber PO/GRN
+* Depresiasi atas penambahan nilai
 
-Upload dokumen hanya memiliki batas ukuran 50 MB. Nama file server tetap menggunakan ekstensi dari originalname, tanpa whitelist MIME type atau magic-byte validation.
+### Acceptance criteria
 
-Upload foto Material Request juga menerima ekstensi asli tanpa filter file.
+* Capital addition menambah total capitalized cost.
+* Maintenance expense tidak menambah nilai aset.
+* Nilai buku dan depresiasi menggunakan basis terbaru.
+* Histori sebelum kapitalisasi tidak berubah.
+* Transaksi memiliki referensi PO/GRN apabila berasal dari procurement.
 
-Risiko
+---
 
-Pengguna dapat mengunggah:
+## AST-005 — Penghapusan permanen merusak audit trail
 
-HTML aktif
-SVG dengan script
-Executable
-Script server
-File polyglot
-File dengan ekstensi palsu
-9. Material Request belum menggunakan transaction
+**Severity:** P1 — High
+**Status:** Open
 
-Pembuatan MR masih menjalankan:
+Endpoint berikut melakukan hard delete:
 
-Insert header
-Loop insert item
+```http
+DELETE /api/assets/:id
+```
 
-tanpa transaction.
+Database menggunakan cascade untuk dokumen, maintenance, dan purchase history. UI bahkan menjelaskan bahwa seluruh histori ikut terhapus.
 
-Approval MR juga:
+### Risiko
 
-Mengubah status MR menjadi approved
-Membuat PR
-Menghubungkan PR ke MR
+* Jejak aset perusahaan hilang permanen.
+* Histori maintenance dan nilai finansial tidak dapat diaudit.
+* Aset yang sudah pernah digunakan atau didepresiasi dapat dihapus.
 
-tanpa transaction.
+### Tindakan
 
-Risiko
+Gunakan:
 
-MR dapat berstatus approved meskipun pembuatan PR gagal.
+```text
+is_deleted
+deleted_at
+deleted_by
+deletion_reason
+```
 
-10. Nomor dokumen masih rentan collision
+Aturan:
 
-Nomor MR masih menggunakan:
+* Draft yang belum pernah digunakan boleh dihapus.
+* Aset aktif tidak boleh hard delete.
+* Aset berhistori harus melalui disposal.
+* Hard delete hanya untuk administrator database dan bukan melalui UI normal.
 
-COUNT(*) + 1
+### Acceptance criteria
 
-Nomor PR menggunakan random empat digit.
+* Aset aktif tidak dapat dihapus permanen.
+* Data disposed tetap tersedia dalam laporan histori.
+* Dokumen dan maintenance tetap tersimpan.
+* Penghapusan logical tercatat di audit log.
 
-Dua request bersamaan dapat memperoleh nomor yang sama. Harus ada unique constraint dan mekanisme sequence/retry.
+---
 
-Temuan Medium yang Masih Terbuka
-11. JWT masih diterima dari query parameter
+## AST-006 — Disposal belum menjadi proses bisnis
 
-Semua middleware masih menerima:
+**Severity:** P1 — High
+**Status:** Open
 
-req.query.token
+Disposal saat ini hanya dilakukan dengan mengganti:
 
-JWT pada URL dapat tersimpan di browser history, proxy log, access log, analytics, dan Referer.
+```text
+status = disposed
+```
 
-12. Fallback JWT secret masih aktif
+Field `disposed_date` tersedia di backend, tetapi tidak tersedia sebagai input yang jelas di halaman detail.
 
-Masih terdapat:
+Belum ada:
 
-process.env.JWT_SECRET || 'secret'
+* Disposal reason
+* Approval
+* Disposal method
+* Sale proceeds
+* Buyer
+* Write-off value
+* Gain/loss
+* Supporting document
+* Approved by
 
-untuk token admin, mobile, dan verifikasi.
+Selain itu, apabila `disposed_date` kosong, fungsi depresiasi masih menggunakan tanggal hari ini.
 
-Production harus gagal startup ketika JWT_SECRET kosong, bukan menggunakan nilai default.
+### Tindakan
 
-13. CORS masih terbuka
+Buat workflow disposal terpisah:
 
-Backend masih menggunakan:
+```text
+Active
+→ Disposal Requested
+→ Approved/Rejected
+→ Disposed
+```
 
-app.use(cors());
+### Acceptance criteria
 
-tanpa whitelist origin.
+* Status disposed wajib memiliki tanggal disposal.
+* Depresiasi berhenti pada tanggal disposal.
+* Proceeds dan gain/loss dihitung.
+* Aset disposed tidak dapat dikembalikan menjadi active tanpa reversal resmi.
+* Disposal memiliki approval dan audit trail.
 
-Belum terdapat pemisahan origin production dan development.
+---
 
-14. Belum ada rate limiting
+## AST-007 — Link download dokumen berpotensi selalu 401
 
-Dependency backend belum memiliki express-rate-limit atau mekanisme serupa. Endpoint login, mobile login, WebAuthn, upload, import, dan AI belum memiliki throttling.
+**Severity:** P1 — High
+**Status:** Open
 
-15. Bug baru pada created_by CRM Notes
+Route download menggunakan `downloadAuthMiddleware`, yang memerlukan:
 
-Middleware menyimpan identitas sebagai:
+* Authorization header; atau
+* Query token
 
-req.userId = decoded.userId;
-req.user = decoded;
+Namun frontend membuat URL:
 
-Namun Notes membaca:
+```ts
+`${api.defaults.baseURL}/assets/documents/${docId}/download`
+```
 
-const userId = req.user?.id || null;
+URL tersebut tidak menyertakan token. Anchor browser juga tidak menggunakan interceptor Axios.
 
-Payload token memiliki userId, bukan id. Akibatnya, created_by kemungkinan selalu tersimpan NULL.
+### Tindakan
 
-Seharusnya:
+Pendekatan yang direkomendasikan:
 
-const userId = req.userId;
+```ts
+const response = await api.get(url, {
+  responseType: 'blob'
+});
+```
 
-Notes juga belum memiliki ownership maupun permission; seluruh user desktop dapat mengubah dan menghapus seluruh catatan.
+Kemudian buat temporary object URL di browser.
 
-Temuan Reliability Baru
-16. Clean database belum menghasilkan skema lengkap
+Alternatif kedua adalah signed URL berumur pendek. Jangan menempatkan JWT utama berumur tujuh hari di URL.
 
-Dokumentasi terbaru secara eksplisit mencatat:
+### Acceptance criteria
 
-Database baru menghasilkan sekitar 78 tabel
-Production memiliki 141 tabel
-Beberapa kolom penting belum dibuat
-Mobile login dapat gagal pada clean database
-Setup lokal masih bergantung pada dump struktur production
-Status
+* Download berhasil untuk user berwenang.
+* User tanpa token menerima `401`.
+* User tanpa permission menerima `403`.
+* JWT utama tidak tampil pada URL dan browser history.
+* Test mencakup download dokumen aset.
 
-High reliability risk.
+---
 
-Project belum reproducible dari repository saja. Deployment atau disaster recovery ke database baru berpotensi menghasilkan aplikasi yang boot tetapi banyak modul gagal saat digunakan.
+## AST-008 — Upload dokumen belum aman
 
-Selain itu, helper schema masih menangkap error, mencetak warning, lalu melanjutkan startup. Ini dapat membuat aplikasi terlihat sehat meskipun migrasi sebagian gagal.
+**Severity:** P1 — High
+**Status:** Open
 
-17. Automated test belum menjadi bagian repository
+Multer asset document belum memiliki:
 
-Commit menyebut pengujian 19 dan 30 kasus HTTP, tetapi test tersebut belum menjadi test suite yang dapat dijalankan ulang.
+* Batas ukuran file
+* Whitelist MIME
+* Whitelist ekstensi
+* Pemeriksaan magic bytes
+* Malware scanning
+* Cleanup file jika insert database gagal
 
-backend/package.json belum memiliki script:
+Ekstensi server diambil dari `originalname`.
 
-"test": "..."
+### Tindakan
 
-Dokumentasi juga masih menyatakan:
+Terapkan minimal:
 
-Tidak ada test suite.
+```text
+PDF
+JPG/JPEG
+PNG
+DOCX
+XLSX
+```
 
-Saya juga tidak menemukan workflow CI atau status check pada commit terbaru.
+Tambahkan:
 
-Keputusan Review
-Status: CHANGES REQUIRED ❌
+* Ukuran maksimum
+* Validasi MIME dan magic bytes
+* UUID filename
+* Cleanup apabila database gagal
+* `Content-Disposition: attachment` untuk format yang tidak perlu dirender
+* Audit upload dan download
 
-Revisi terbaru valid dan bermanfaat, khususnya untuk:
+### Acceptance criteria
 
-Memisahkan scope token mobile dan desktop
-Menutup endpoint anonim
-Mengatasi IDOR payslip dan attendance
-Membatasi kepemilikan credential WebAuthn
-Mencegah crash awal database kosong
+* Script, executable, SVG aktif, dan HTML ditolak.
+* File melebihi batas menerima HTTP `413` atau `400`.
+* File dengan ekstensi palsu ditolak.
+* Tidak ada orphan file saat insert database gagal.
 
-Namun, project belum dapat dinyatakan aman karena lima temuan kritis masih aktif:
+---
 
-Hardcoded master login
-Default password admin123 dan master
-Registrasi user publik
-Tidak ada backend RBAC
-Mobile login hanya menggunakan NIK
+## AST-009 — Generator asset code masih rentan race condition
 
-Prioritas berikutnya harus menghentikan pengembangan fitur sementara dan menyelesaikan kelima P0 tersebut terlebih dahulu
+**Severity:** P1 — High
+**Status:** Open
+
+Kode aset menggunakan:
+
+```sql
+MAX(...) + 1
+```
+
+Walaupun lebih baik daripada `COUNT(*) + 1`, dua request bersamaan masih dapat memperoleh nomor yang sama.
+
+### Tindakan
+
+Gunakan salah satu:
+
+* Sequence table dengan row lock
+* Database-generated sequence
+* Transaction dan `SELECT ... FOR UPDATE`
+* Retry ketika unique constraint gagal
+
+### Acceptance criteria
+
+* Minimal 20 concurrent create request tidak menghasilkan nomor duplikat.
+* Nomor tetap berurutan sesuai kebijakan.
+* Duplicate key ditangani dengan retry, bukan HTTP `500` mentah.
+
+---
+
+## AST-010 — Model depresiasi belum membedakan aset depreciable dan non-depreciable
+
+**Severity:** P1 — High
+**Status:** Open
+
+Master kategori mencakup `LAND/Tanah`, tetapi setiap aset dengan harga dan tanggal pembelian diproses oleh fungsi depresiasi yang sama. Master kategori hanya memiliki `requires_production_line` dan belum memiliki aturan depresiasi.
+
+### Tindakan
+
+Tambahkan pada kategori atau aset:
+
+```text
+is_depreciable
+default_useful_life_years
+default_depreciation_method
+default_depreciation_rate
+```
+
+Tambahkan juga:
+
+```text
+acquisition_date
+in_service_date
+depreciation_start_date
+```
+
+Depresiasi seharusnya mengikuti tanggal siap digunakan sesuai kebijakan perusahaan, bukan selalu tanggal pembelian.
+
+### Acceptance criteria
+
+* Tanah dapat ditandai non-depreciable.
+* Aset non-depreciable memiliki depresiasi nol.
+* Tanggal pembelian dan tanggal mulai depresiasi dipisahkan.
+* Default kategori dapat dioverride hanya oleh role berwenang.
+
+---
+
+## AST-011 — Nilai historis berubah ketika master diedit
+
+**Severity:** P1 — High
+**Status:** Open
+
+Depresiasi dihitung secara dinamis dari nilai master saat halaman dibuka.
+
+Apabila user mengganti:
+
+* Harga pembelian
+* Tanggal pembelian
+* Umur ekonomis
+* Nilai residu
+
+maka nilai historis seluruh periode ikut berubah secara retroaktif.
+
+### Tindakan
+
+Tambahkan:
+
+* Depreciation schedule
+* Monthly depreciation ledger
+* Posting status
+* Financial period
+* Period locking
+* Adjustment atau reversal mechanism
+
+### Acceptance criteria
+
+* Periode yang sudah ditutup tidak berubah.
+* Perubahan estimasi berlaku prospektif.
+* Adjustment memiliki alasan dan user pembuat.
+* Laporan bulan sebelumnya dapat direproduksi.
+
+---
+
+## AST-012 — Status lifecycle tidak divalidasi
+
+**Severity:** P2 — Medium
+**Status:** Open
+
+Backend menerima string status dari request tanpa state transition validation.
+
+Kemungkinan kondisi:
+
+* Active langsung menjadi disposed
+* Disposed kembali menjadi active
+* Disposed tanpa tanggal
+* Active memiliki disposed date
+* Under maintenance tanpa maintenance record
+
+### Tindakan
+
+Gunakan state machine:
+
+```text
+draft
+active
+idle
+under_maintenance
+disposal_requested
+disposed
+```
+
+### Acceptance criteria
+
+* Transition tidak valid menghasilkan HTTP `409` atau `400`.
+* Disposal wajib melewati workflow.
+* Status maintenance dapat terhubung ke maintenance work order.
+* Perubahan status tercatat.
+
+---
+
+## AST-013 — Penghapusan Production Line dan P&ID belum aman
+
+**Severity:** P2 — Medium
+**Status:** Open
+
+P&ID dihapus melalui dua query:
+
+1. Melepas seluruh asset dari P&ID
+2. Menghapus P&ID
+
+Kedua query tidak menggunakan transaction.
+
+Production Line langsung dihapus tanpa memeriksa apakah masih digunakan.
+
+### Tindakan
+
+* Gunakan soft delete untuk master.
+* Blokir deaktivasi apabila masih digunakan, atau minta proses reassignment.
+* Gunakan transaction jika perlu melepas relasi.
+* Tampilkan jumlah aset yang terdampak.
+
+### Acceptance criteria
+
+* Production Line yang memiliki aset tidak dapat dihapus sembarangan.
+* Tidak ada kondisi aset terlepas tetapi P&ID gagal dihapus.
+* Master nonaktif tetap dapat ditampilkan dalam histori lama.
+
+---
+
+## AST-014 — Validasi backend belum memadai
+
+**Severity:** P2 — Medium
+**Status:** Open
+
+Backend belum memvalidasi secara ketat:
+
+* Harga negatif
+* Nilai residu negatif
+* Nilai residu lebih besar dari harga
+* Umur ekonomis nol atau negatif
+* Maintenance cost negatif
+* Capital addition negatif
+* Status tidak dikenal
+* Metode depresiasi tidak dikenal
+* Tanggal tidak valid
+* Foreign key tidak ditemukan
+* P&ID tidak sesuai production line
+* Asset child record dibuat untuk asset yang tidak ada
+
+Error database dikembalikan menggunakan `error.message`.
+
+### Tindakan
+
+Gunakan validation schema seperti Zod atau `express-validator`.
+
+### Acceptance criteria
+
+* Input tidak valid menerima HTTP `400`.
+* Resource tidak ditemukan menerima HTTP `404`.
+* Conflict menerima HTTP `409`.
+* Pesan SQL mentah tidak dikirim kepada client.
+* Seluruh numeric financial field memiliki batas minimum.
+
+---
+
+## AST-015 — Tag P&ID dan relasi line belum memiliki aturan uniqueness
+
+**Severity:** P2 — Medium
+**Status:** Open
+
+Belum terlihat validasi bahwa:
+
+* P&ID harus berasal dari production line yang sesuai
+* Tag equipment unik dalam satu P&ID atau line
+* Code production line unik
+* Code P&ID unik dalam production line
+
+### Tindakan
+
+Tambahkan unique constraint:
+
+```text
+production_lines.code
+(production_line_id, pnids.code)
+(pnid_id, assets.pnid_tag)
+```
+
+### Acceptance criteria
+
+* Tag duplikat ditolak dengan HTTP `409`.
+* P&ID tidak dapat dipasangkan ke line lain.
+* Constraint diterapkan di database dan backend.
+
+---
+
+## AST-016 — Maintenance masih berupa histori sederhana
+
+**Severity:** P2 — Medium
+**Status:** Open
+
+Fitur maintenance saat ini hanya menyimpan:
+
+* Tipe
+* Deskripsi
+* Cost
+* Pelaksana
+* Vendor
+* Tanggal
+* Next due date
+
+Belum ada:
+
+* Work order number
+* Planned versus actual date
+* Status pekerjaan
+* Downtime
+* Root cause
+* Spare part usage
+* Attachment
+* Approval
+* Reminder next due date
+
+### Rekomendasi scope
+
+Untuk Asset Management versi pertama, minimal implementasikan:
+
+```text
+scheduled
+in_progress
+completed
+cancelled
+```
+
+Tambahkan reminder untuk `next_due_date`.
+
+### Acceptance criteria
+
+* Preventive maintenance yang jatuh tempo dapat dilihat.
+* Maintenance selesai memiliki actual completion date.
+* Aset dapat otomatis berstatus under maintenance selama pekerjaan aktif.
+* Biaya dan downtime dapat dilaporkan.
+
+---
+
+## AST-017 — Integrasi Procurement belum berjalan
+
+**Severity:** P2 — Medium
+**Status:** Open
+
+Schema memiliki `purchase_order_item_id`, tetapi frontend tidak pernah mengirim field tersebut. Vendor juga masih berupa free text.
+
+### Tindakan
+
+Hubungkan asset acquisition dengan:
+
+```text
+Purchase Order
+Goods Receipt
+Supplier
+Invoice
+```
+
+### Acceptance criteria
+
+* Asset dapat dibuat dari item GRN yang dikategorikan sebagai fixed asset.
+* Harga, vendor, dan tanggal perolehan diambil dari transaksi sumber.
+* Satu item procurement tidak dapat dikapitalisasi dua kali.
+* Link menuju PO/GRN dapat dibuka dari asset detail.
+
+---
+
+## AST-018 — Belum ada location, custodian, dan transfer history
+
+**Severity:** P2 — Medium
+**Status:** Open
+
+Perubahan `location` dan `production_line_id` hanya menimpa nilai lama.
+
+Belum tersedia:
+
+* Site
+* Department
+* Cost center
+* Custodian atau PIC
+* Transfer date
+* Transfer reason
+* Approved by
+* Transfer history
+
+### Tindakan
+
+Tambahkan tabel:
+
+```text
+asset_assignments
+asset_transfers
+```
+
+### Acceptance criteria
+
+* Lokasi terkini dapat diketahui.
+* Riwayat perpindahan tidak hilang.
+* Setiap aset memiliki PIC atau unit penanggung jawab.
+* Transfer harus disetujui sesuai permission.
+
+---
+
+## AST-019 — UI master belum lengkap
+
+**Severity:** P3 — Low/Medium
+**Status:** Open
+
+Backend memiliki endpoint update Production Line dan P&ID, tetapi frontend saat ini terutama menyediakan tambah dan hapus. Tidak ada form edit yang jelas.
+
+Asset detail juga belum menyediakan pilihan P&ID yang aman saat memindahkan aset.
+
+### Acceptance criteria
+
+* Production Line dapat diedit dan dinonaktifkan.
+* P&ID dapat diedit dan dinonaktifkan.
+* Asset dapat dipindahkan ke P&ID lain melalui proses transfer.
+* Semua tombol mengikuti permission user.
+
+---
+
+## AST-020 — Belum ada automated test khusus Asset Management
+
+**Severity:** P1 — High
+**Status:** Open
+
+Test yang masuk repository masih berfokus pada authentication, mobile scope, WebAuthn, Material Request, dan endpoint security. Belum terdapat test Asset Management.
+
+### Minimum test
+
+1. Create asset berhasil.
+2. Concurrent create tidak menghasilkan duplicate asset code.
+3. Edit nama tidak menghapus P&ID dan spec.
+4. Straight-line depreciation benar.
+5. Declining-balance benar atau ditolak jika belum didukung.
+6. Non-depreciable asset menghasilkan depresiasi nol.
+7. Capital addition memperbarui basis.
+8. Disposed asset berhenti terdepresiasi.
+9. Viewer tidak dapat membuat atau menghapus aset.
+10. Upload file berbahaya ditolak.
+11. Download membutuhkan autentikasi.
+12. Hard delete aset aktif ditolak.
+13. Master yang sedang digunakan tidak dapat dihapus.
+14. Invalid numeric dan date menerima HTTP `400`.
+
+---
+
+# 5. Urutan Implementasi
+
+## Sprint Asset 1 — Correctness dan Security
+
+1. AST-001 — RBAC
+2. AST-002 — Preserve P&ID dan spec
+3. AST-007 — Perbaiki download
+4. AST-008 — Amankan upload
+5. AST-009 — Atomic asset code
+6. AST-014 — Backend validation
+7. AST-020 — Automated test dasar
+
+## Sprint Asset 2 — Financial Asset
+
+1. AST-003 — Metode depresiasi
+2. AST-004 — Capital addition
+3. AST-010 — Depreciable category dan in-service date
+4. AST-011 — Depreciation ledger dan period lock
+5. AST-006 — Disposal workflow
+
+## Sprint Asset 3 — Lifecycle
+
+1. AST-005 — Soft delete dan audit trail
+2. AST-012 — Status state machine
+3. AST-013 — Master deletion safety
+4. AST-015 — Relasi dan uniqueness
+5. AST-017 — Procurement integration
+6. AST-018 — Custodian dan transfer
+
+## Sprint Asset 4 — Maintenance dan UX
+
+1. AST-016 — Maintenance workflow
+2. AST-019 — Penyempurnaan UI master
+3. Pagination, search, filter, dan export
+
+---
+
+# 6. Settlement Gate Modul Asset Management
+
+Modul dapat dinyatakan **settled** apabila:
+
+| Gate               | Syarat                                         |
+| ------------------ | ---------------------------------------------- |
+| Security           | RBAC diterapkan pada seluruh endpoint asset    |
+| Data integrity     | Edit tidak menghapus relasi atau spec          |
+| Financial accuracy | Metode depresiasi dan basis kapitalisasi benar |
+| Lifecycle          | Disposal dan status memiliki aturan            |
+| Audit              | Aset aktif tidak dapat hard delete             |
+| Documents          | Upload dan download aman                       |
+| Concurrency        | Asset code aman terhadap request bersamaan     |
+| Validation         | Input invalid tidak masuk database             |
+| Testing            | Seluruh acceptance test utama lulus            |
+| Documentation      | Flowchart final sesuai perilaku aplikasi       |
+
+---
+
+# 7. Architecture Code Matrix Sementara
+
+| Component                  | Tanggung Jawab Saat Ini                                         | Catatan Review                                           |
+| -------------------------- | --------------------------------------------------------------- | -------------------------------------------------------- |
+| `database.ts`              | Membuat tabel Asset Management dan seed category                | Perlu constraint, ledger, assignment, transfer, disposal |
+| `asset.routes.ts`          | Seluruh API, depresiasi, dokumen, maintenance, purchase history | Terlalu banyak tanggung jawab dalam satu route           |
+| `auth.ts`                  | JWT admin dan download auth                                     | Belum ada permission guard                               |
+| `AssetList.vue`            | Register, KPI, create, delete                                   | Delete terlalu mudah; belum ada pagination               |
+| `ProductionLines.vue`      | Tambah dan hapus production line                                | Belum ada edit/deactivate                                |
+| `ProductionLineDetail.vue` | Daftar dan tambah P&ID                                          | Delete belum aman                                        |
+| `PnidDetail.vue`           | Daftar dan quick-create asset                                   | Quick-create belum menangkap data aset lengkap           |
+| `AssetDetail.vue`          | Edit, dokumen, maintenance, purchase history                    | Risiko menghapus P&ID/spec; download bermasalah          |
+| `router/index.ts`          | Routing halaman Asset Management                                | Hanya memeriksa login, belum permission                  |
+
+---
+
+# 8. Keputusan Review
+
+**Status: CHANGES REQUIRED**
+
+Modul Asset Management sudah memiliki fondasi yang cukup baik untuk Asset Register dasar, tetapi belum siap dijadikan modul final karena terdapat risiko:
+
+* Kehilangan relasi dan spesifikasi
+* Kesalahan depresiasi
+* Perubahan nilai historis
+* Penghapusan audit trail
+* Dokumen tidak aman
+* Tidak adanya RBAC
+* Tidak adanya test khusus asset
+
+Manual book final belum dikunci pada tahap ini. Setelah seluruh blocker selesai dan telah diverifikasi ulang, dokumentasi modul akan ditutup dengan:
+
+1. Flowchart final
+2. Role and permission matrix
+3. Business rule table
+4. Database relationship/ERD
+5. API reference
+6. Architecture code table
+7. User manual langkah demi langkah
+8. Troubleshooting
+9. Acceptance test result

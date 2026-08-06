@@ -879,6 +879,22 @@ const PERMISSION_CATALOG: { actions: string[]; resources: string[] }[] = [
   {
     actions: ['manage', 'view'],
     resources: [
+      // Sub-resource Asset Management (AST-001). Dipisah supaya Maintenance
+      // Officer tidak otomatis boleh mengubah nilai finansial, dan sebaliknya.
+      'assets.maintenance', 'assets.financial'
+    ],
+  },
+  {
+    actions: ['manage'],
+    resources: [
+      'assets.documents', 'assets.master'
+    ],
+  },
+  {
+    // 'manage' dipertahankan demi kompatibilitas: role produksi sudah dipetakan
+    // ke assets.manage sejak modul ini dirilis.
+    actions: ['view', 'create', 'edit', 'delete', 'dispose', 'manage'],
+    resources: [
       'assets'
     ],
   },
@@ -912,6 +928,48 @@ const ensurePermissionCatalog = async (connection: any) => {
     console.log(`✅ Katalog permission: ${missing.length > 0 ? `${missing.length} ditambahkan` : 'sudah lengkap'} (${rows.length} total)`);
   } catch (err: any) {
     console.warn('ensurePermissionCatalog warning:', err.message.substring(0, 120));
+  }
+};
+
+// Master admin login lewat jalur hardcoded di auth.routes.ts dengan userId
+// 99999, tanpa memeriksa database. Tapi banyak tabel punya FK created_by →
+// users(id): tanpa baris ini, master tidak bisa membuat aset, dokumen, dsb.
+// Password-nya diisi acak dan tidak pernah ditampilkan — baris ini murni
+// sasaran foreign key, bukan kredensial yang bisa dipakai masuk.
+export const MASTER_EMAIL = 'master@admin.com';
+export const MASTER_FALLBACK_ID = 99999;
+
+const ensureMasterUserRow = async (connection: any) => {
+  try {
+    const [existing]: any = await connection.execute(
+      'SELECT id, user_level FROM users WHERE email = ? OR username = ? ORDER BY id LIMIT 1',
+      [MASTER_EMAIL, 'master']
+    );
+    const row = Array.isArray(existing) && existing[0];
+
+    if (row) {
+      // Baris sudah ada (produksi id 99999, instalasi lain bisa berbeda).
+      // Password sengaja TIDAK disentuh — jalur login master tidak memeriksanya.
+      if (Number(row.user_level || 0) < 10) {
+        await connection.execute('UPDATE users SET user_level = 10, is_active = 1 WHERE id = ?', [row.id]);
+        console.log(`✅ User master (id ${row.id}) disetel user_level 10`);
+      }
+      return;
+    }
+
+    const [adminRole]: any = await connection.execute(
+      `SELECT id FROM roles WHERE name = 'Admin' OR code = 'ADMIN' ORDER BY id LIMIT 1`
+    );
+    const roleId = (Array.isArray(adminRole) && adminRole[0]?.id) || null;
+
+    await connection.execute(
+      `INSERT INTO users (id, username, email, password, full_name, role_id, user_level, is_active)
+       VALUES (?, 'master', ?, ?, 'Super Administrator', ?, 10, 1)`,
+      [MASTER_FALLBACK_ID, MASTER_EMAIL, await bcrypt.hash(randomBytes(24).toString('base64url'), 10), roleId]
+    );
+    console.log(`✅ Baris user master (id ${MASTER_FALLBACK_ID}) dibuat sebagai sasaran foreign key`);
+  } catch (err: any) {
+    console.warn('ensureMasterUserRow warning:', err.message.substring(0, 120));
   }
 };
 
@@ -983,6 +1041,7 @@ export async function initializeDatabase() {
     await ensureRouteModuleSchema(connection);
     await ensureMobilePinSchema(connection);
     await ensurePermissionCatalog(connection);
+    await ensureMasterUserRow(connection);
     // Harus paling akhir: semua permission dari ensure* di atas sudah ada
     await ensureAdminRoleHasAllPermissions(connection);
 

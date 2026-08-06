@@ -3,7 +3,8 @@ import path from 'path';
 import fs from 'fs';
 import multer from 'multer';
 import { dbAll, dbGet, dbRun } from '../config/database';
-import { authMiddleware , downloadAuthMiddleware} from '../middleware/auth';
+import { authMiddleware, downloadAuthMiddleware } from '../middleware/auth';
+import { loadUserAccess, requirePermission } from '../middleware/permission';
 
 const router = Router();
 
@@ -58,7 +59,7 @@ async function nextAssetCode(): Promise<string> {
 }
 
 // ── Categories ──────────────────────────────────────────────────────────
-router.get('/categories', authMiddleware, async (_req: Request, res: Response) => {
+router.get('/categories', authMiddleware, requirePermission('assets.view', 'assets.manage'), async (_req: Request, res: Response) => {
   try {
     const rows = await dbAll('SELECT * FROM asset_categories WHERE is_active = 1 ORDER BY order_no, id', []);
     res.json({ data: rows });
@@ -68,7 +69,7 @@ router.get('/categories', authMiddleware, async (_req: Request, res: Response) =
 });
 
 // ── Production lines ───────────────────────────────────────────────────
-router.get('/production-lines', authMiddleware, async (_req: Request, res: Response) => {
+router.get('/production-lines', authMiddleware, requirePermission('assets.view', 'assets.manage'), async (_req: Request, res: Response) => {
   try {
     const rows = await dbAll('SELECT * FROM production_lines WHERE is_active = 1 ORDER BY name', []);
     res.json({ data: rows });
@@ -77,7 +78,7 @@ router.get('/production-lines', authMiddleware, async (_req: Request, res: Respo
   }
 });
 
-router.get('/production-lines/:id', authMiddleware, async (req: Request, res: Response) => {
+router.get('/production-lines/:id', authMiddleware, requirePermission('assets.view', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     const row = await dbGet('SELECT * FROM production_lines WHERE id = ?', [req.params.id]);
     if (!row) return res.status(404).json({ error: 'Production line not found' });
@@ -87,7 +88,7 @@ router.get('/production-lines/:id', authMiddleware, async (req: Request, res: Re
   }
 });
 
-router.post('/production-lines', authMiddleware, async (req: Request, res: Response) => {
+router.post('/production-lines', authMiddleware, requirePermission('assets.master.manage', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     const { code, name, description } = req.body;
     if (!name) return res.status(400).json({ error: 'name is required' });
@@ -101,7 +102,7 @@ router.post('/production-lines', authMiddleware, async (req: Request, res: Respo
   }
 });
 
-router.put('/production-lines/:id', authMiddleware, async (req: Request, res: Response) => {
+router.put('/production-lines/:id', authMiddleware, requirePermission('assets.master.manage', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     const { code, name, description, is_active } = req.body;
     await dbRun(
@@ -114,7 +115,7 @@ router.put('/production-lines/:id', authMiddleware, async (req: Request, res: Re
   }
 });
 
-router.delete('/production-lines/:id', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/production-lines/:id', authMiddleware, requirePermission('assets.master.manage', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     await dbRun('DELETE FROM production_lines WHERE id = ?', [req.params.id]);
     res.json({ message: 'Deleted' });
@@ -124,7 +125,7 @@ router.delete('/production-lines/:id', authMiddleware, async (req: Request, res:
 });
 
 // ── P&IDs (belong to a production line, group assets within the line) ────
-router.get('/production-lines/:lineId/pnids', authMiddleware, async (req: Request, res: Response) => {
+router.get('/production-lines/:lineId/pnids', authMiddleware, requirePermission('assets.view', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     const rows = await dbAll(
       `SELECT p.*, (SELECT COUNT(*) FROM assets a WHERE a.pnid_id = p.id) as asset_count
@@ -137,7 +138,7 @@ router.get('/production-lines/:lineId/pnids', authMiddleware, async (req: Reques
   }
 });
 
-router.post('/production-lines/:lineId/pnids', authMiddleware, async (req: Request, res: Response) => {
+router.post('/production-lines/:lineId/pnids', authMiddleware, requirePermission('assets.master.manage', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     const { code, title, description } = req.body;
     if (!code) return res.status(400).json({ error: 'code is required' });
@@ -151,7 +152,7 @@ router.post('/production-lines/:lineId/pnids', authMiddleware, async (req: Reque
   }
 });
 
-router.get('/pnids/:id', authMiddleware, async (req: Request, res: Response) => {
+router.get('/pnids/:id', authMiddleware, requirePermission('assets.view', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     const row: any = await dbGet(
       `SELECT p.*, l.name as production_line_name, l.code as production_line_code
@@ -166,7 +167,7 @@ router.get('/pnids/:id', authMiddleware, async (req: Request, res: Response) => 
   }
 });
 
-router.put('/pnids/:id', authMiddleware, async (req: Request, res: Response) => {
+router.put('/pnids/:id', authMiddleware, requirePermission('assets.master.manage', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     const { code, title, description, is_active } = req.body;
     await dbRun(
@@ -179,7 +180,7 @@ router.put('/pnids/:id', authMiddleware, async (req: Request, res: Response) => 
   }
 });
 
-router.delete('/pnids/:id', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/pnids/:id', authMiddleware, requirePermission('assets.master.manage', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     await dbRun('UPDATE assets SET pnid_id = NULL WHERE pnid_id = ?', [req.params.id]);
     await dbRun('DELETE FROM pnids WHERE id = ?', [req.params.id]);
@@ -190,7 +191,7 @@ router.delete('/pnids/:id', authMiddleware, async (req: Request, res: Response) 
 });
 
 // ── Assets ──────────────────────────────────────────────────────────────
-router.get('/summary', authMiddleware, async (_req: Request, res: Response) => {
+router.get('/summary', authMiddleware, requirePermission('assets.view', 'assets.manage'), async (_req: Request, res: Response) => {
   try {
     const rows = await dbAll(
       `SELECT a.*, c.name as category_name, c.code as category_code
@@ -226,7 +227,7 @@ router.get('/summary', authMiddleware, async (_req: Request, res: Response) => {
   }
 });
 
-router.get('/', authMiddleware, async (req: Request, res: Response) => {
+router.get('/', authMiddleware, requirePermission('assets.view', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     const { category_id, category_code, production_line_id, pnid_id, status } = req.query;
     const where: string[] = [];
@@ -255,7 +256,7 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
   }
 });
 
-router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:id', authMiddleware, requirePermission('assets.view', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     const row: any = await dbGet(
       `SELECT a.*, c.name as category_name, c.code as category_code,
@@ -274,7 +275,7 @@ router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
   }
 });
 
-router.post('/', authMiddleware, async (req: Request, res: Response) => {
+router.post('/', authMiddleware, requirePermission('assets.create', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     const {
       category_id, production_line_id, pnid_id, pnid_tag, name, location, spec,
@@ -313,7 +314,9 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
   }
 });
 
-router.put('/:id', authMiddleware, async (req: Request, res: Response) => {
+// PATCH adalah bentuk yang benar karena update-nya parsial; PUT tetap
+// didaftarkan ke handler yang sama supaya frontend lama tidak putus.
+const updateAsset = async (req: Request, res: Response) => {
   try {
     const {
       category_id, production_line_id, pnid_id, pnid_tag, name, location, spec,
@@ -321,32 +324,82 @@ router.put('/:id', authMiddleware, async (req: Request, res: Response) => {
       depreciation_method, status, disposed_date, notes,
     } = req.body;
 
-    let lineId = production_line_id || null;
-    if (pnid_id) {
-      const pnid: any = await dbGet('SELECT production_line_id FROM pnids WHERE id = ?', [pnid_id]);
-      if (pnid) lineId = pnid.production_line_id;
+    // Disposal butuh hak terpisah dari edit biasa (AST-001). Karena disposal
+    // saat ini hanya berupa perubahan status, pemeriksaannya di dalam handler.
+    if (status === 'disposed') {
+      const current: any = await dbGet('SELECT status FROM assets WHERE id = ?', [req.params.id]);
+      if (current && current.status !== 'disposed') {
+        const access = await loadUserAccess((req as any).userId);
+        const mayDispose = !!access && (access.level >= 10
+          || access.perms.has('assets.dispose') || access.perms.has('assets.manage'));
+        if (!mayDispose) {
+          return res.status(403).json({
+            error: 'Anda tidak punya hak untuk menghapus-bukukan (dispose) aset',
+            required: ['assets.dispose'],
+            code: 'PERMISSION_DENIED',
+          });
+        }
+      }
     }
 
-    await dbRun(
-      `UPDATE assets SET
-        category_id = ?, production_line_id = ?, pnid_id = ?, pnid_tag = ?, name = ?, location = ?, spec = ?,
-        purchase_date = ?, purchase_price = ?, vendor = ?, useful_life_years = ?, salvage_value = ?,
-        depreciation_method = ?, status = ?, disposed_date = ?, notes = ?
-       WHERE id = ?`,
-      [
-        category_id, lineId, pnid_id || null, pnid_tag || null, name, location || null,
-        JSON.stringify(spec || {}), purchase_date || null, purchase_price || 0, vendor || null,
-        useful_life_years || 1, salvage_value || 0, depreciation_method || 'straight_line',
-        status || 'active', disposed_date || null, notes || null, req.params.id,
-      ]
-    );
+    // PARTIAL UPDATE (AST-002). Dulu handler ini melakukan replace penuh dengan
+    // fallback `|| default`, sehingga field yang tidak dikirim klien ikut
+    // tertimpa: pnid_id jadi NULL, spec jadi {}, purchase_price jadi 0,
+    // useful_life_years jadi 1, dan status jadi 'active'. AssetDetail.vue
+    // memang tidak mengirim pnid_id maupun spec, jadi sekadar mengubah nama
+    // aset sudah cukup untuk melepasnya dari P&ID dan menghapus spesifikasinya.
+    // Sekarang hanya field yang benar-benar ada di body yang disentuh —
+    // `null` eksplisit tetap dihormati sebagai "kosongkan".
+    const has = (k: string) => Object.prototype.hasOwnProperty.call(req.body, k);
+    const fields: string[] = [];
+    const values: any[] = [];
+    const set = (col: string, val: any) => { fields.push(`${col} = ?`); values.push(val); };
+
+    if (has('category_id')) set('category_id', category_id ?? null);
+    if (has('pnid_tag')) set('pnid_tag', pnid_tag ?? null);
+    if (has('name')) set('name', name);
+    if (has('location')) set('location', location ?? null);
+    if (has('spec')) set('spec', spec === null ? null : JSON.stringify(spec));
+    if (has('purchase_date')) set('purchase_date', purchase_date || null);
+    if (has('purchase_price')) set('purchase_price', purchase_price ?? 0);
+    if (has('vendor')) set('vendor', vendor ?? null);
+    if (has('useful_life_years')) set('useful_life_years', useful_life_years ?? 1);
+    if (has('salvage_value')) set('salvage_value', salvage_value ?? 0);
+    if (has('depreciation_method')) set('depreciation_method', depreciation_method || 'straight_line');
+    if (has('status')) set('status', status || 'active');
+    if (has('disposed_date')) set('disposed_date', disposed_date || null);
+    if (has('notes')) set('notes', notes ?? null);
+
+    // production_line_id ikut pnid_id kalau P&ID diubah, karena satu P&ID
+    // selalu milik satu line.
+    if (has('pnid_id')) {
+      set('pnid_id', pnid_id ?? null);
+      if (pnid_id) {
+        const pnid: any = await dbGet('SELECT production_line_id FROM pnids WHERE id = ?', [pnid_id]);
+        if (pnid) set('production_line_id', pnid.production_line_id);
+      } else if (!has('production_line_id')) {
+        set('production_line_id', null);
+      }
+    }
+    if (has('production_line_id') && !fields.some(f => f.startsWith('production_line_id'))) {
+      set('production_line_id', production_line_id ?? null);
+    }
+
+    if (!fields.length) return res.json({ message: 'Tidak ada perubahan' });
+
+    values.push(req.params.id);
+    await dbRun(`UPDATE assets SET ${fields.join(', ')} WHERE id = ?`, values);
     res.json({ message: 'Updated' });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
-});
+};
 
-router.delete('/:id', authMiddleware, async (req: Request, res: Response) => {
+const assetEditGuard = [authMiddleware, requirePermission('assets.edit', 'assets.manage')];
+router.patch('/:id', ...assetEditGuard, updateAsset);
+router.put('/:id', ...assetEditGuard, updateAsset);
+
+router.delete('/:id', authMiddleware, requirePermission('assets.delete', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     await dbRun('DELETE FROM assets WHERE id = ?', [req.params.id]);
     res.json({ message: 'Deleted' });
@@ -369,7 +422,7 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-router.get('/:id/documents', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:id/documents', authMiddleware, requirePermission('assets.view', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     const rows = await dbAll(
       `SELECT d.*, u.full_name as uploader_name FROM asset_documents d
@@ -383,7 +436,7 @@ router.get('/:id/documents', authMiddleware, async (req: Request, res: Response)
   }
 });
 
-router.post('/:id/documents', authMiddleware, upload.single('file'), async (req: Request, res: Response) => {
+router.post('/:id/documents', authMiddleware, requirePermission('assets.documents.manage', 'assets.manage'), upload.single('file'), async (req: Request, res: Response) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     const { originalname, filename, size, mimetype } = req.file;
@@ -405,7 +458,7 @@ router.post('/:id/documents', authMiddleware, upload.single('file'), async (req:
   }
 });
 
-router.get('/documents/:docId/preview', downloadAuthMiddleware, async (req: Request, res: Response) => {
+router.get('/documents/:docId/preview', downloadAuthMiddleware, requirePermission('assets.view', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     const file: any = await dbGet('SELECT * FROM asset_documents WHERE id = ?', [req.params.docId]);
     if (!file) return res.status(404).json({ error: 'File not found' });
@@ -418,7 +471,7 @@ router.get('/documents/:docId/preview', downloadAuthMiddleware, async (req: Requ
   }
 });
 
-router.get('/documents/:docId/download', downloadAuthMiddleware, async (req: Request, res: Response) => {
+router.get('/documents/:docId/download', downloadAuthMiddleware, requirePermission('assets.view', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     const file: any = await dbGet('SELECT * FROM asset_documents WHERE id = ?', [req.params.docId]);
     if (!file) return res.status(404).json({ error: 'File not found' });
@@ -430,7 +483,7 @@ router.get('/documents/:docId/download', downloadAuthMiddleware, async (req: Req
   }
 });
 
-router.delete('/documents/:docId', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/documents/:docId', authMiddleware, requirePermission('assets.documents.manage', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     const file: any = await dbGet('SELECT * FROM asset_documents WHERE id = ?', [req.params.docId]);
     if (!file) return res.status(404).json({ error: 'File not found' });
@@ -444,7 +497,7 @@ router.delete('/documents/:docId', authMiddleware, async (req: Request, res: Res
 });
 
 // ── Maintenance history ─────────────────────────────────────────────────
-router.get('/:id/maintenance', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:id/maintenance', authMiddleware, requirePermission('assets.maintenance.view', 'assets.maintenance.manage', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     const rows = await dbAll(
       'SELECT * FROM asset_maintenance_logs WHERE asset_id = ? ORDER BY performed_at DESC',
@@ -456,7 +509,7 @@ router.get('/:id/maintenance', authMiddleware, async (req: Request, res: Respons
   }
 });
 
-router.post('/:id/maintenance', authMiddleware, async (req: Request, res: Response) => {
+router.post('/:id/maintenance', authMiddleware, requirePermission('assets.maintenance.manage', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     const { maintenance_type, description, cost, performed_by, vendor, performed_at, next_due_date } = req.body;
     if (!performed_at) return res.status(400).json({ error: 'performed_at is required' });
@@ -473,7 +526,7 @@ router.post('/:id/maintenance', authMiddleware, async (req: Request, res: Respon
   }
 });
 
-router.put('/maintenance/:logId', authMiddleware, async (req: Request, res: Response) => {
+router.put('/maintenance/:logId', authMiddleware, requirePermission('assets.maintenance.manage', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     const { maintenance_type, description, cost, performed_by, vendor, performed_at, next_due_date } = req.body;
     await dbRun(
@@ -488,7 +541,7 @@ router.put('/maintenance/:logId', authMiddleware, async (req: Request, res: Resp
   }
 });
 
-router.delete('/maintenance/:logId', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/maintenance/:logId', authMiddleware, requirePermission('assets.maintenance.manage', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     await dbRun('DELETE FROM asset_maintenance_logs WHERE id = ?', [req.params.logId]);
     res.json({ message: 'Deleted' });
@@ -498,7 +551,7 @@ router.delete('/maintenance/:logId', authMiddleware, async (req: Request, res: R
 });
 
 // ── Purchase history ────────────────────────────────────────────────────
-router.get('/:id/purchase-history', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:id/purchase-history', authMiddleware, requirePermission('assets.financial.view', 'assets.financial.manage', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     const rows = await dbAll(
       'SELECT * FROM asset_purchase_history WHERE asset_id = ? ORDER BY purchase_date DESC',
@@ -510,7 +563,7 @@ router.get('/:id/purchase-history', authMiddleware, async (req: Request, res: Re
   }
 });
 
-router.post('/:id/purchase-history', authMiddleware, async (req: Request, res: Response) => {
+router.post('/:id/purchase-history', authMiddleware, requirePermission('assets.financial.manage', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     const { description, amount, purchase_date, vendor, notes, purchase_order_item_id } = req.body;
     if (!purchase_date) return res.status(400).json({ error: 'purchase_date is required' });
@@ -527,7 +580,7 @@ router.post('/:id/purchase-history', authMiddleware, async (req: Request, res: R
   }
 });
 
-router.put('/purchase-history/:entryId', authMiddleware, async (req: Request, res: Response) => {
+router.put('/purchase-history/:entryId', authMiddleware, requirePermission('assets.financial.manage', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     const { description, amount, purchase_date, vendor, notes } = req.body;
     await dbRun(
@@ -540,7 +593,7 @@ router.put('/purchase-history/:entryId', authMiddleware, async (req: Request, re
   }
 });
 
-router.delete('/purchase-history/:entryId', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/purchase-history/:entryId', authMiddleware, requirePermission('assets.financial.manage', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     await dbRun('DELETE FROM asset_purchase_history WHERE id = ?', [req.params.entryId]);
     res.json({ message: 'Deleted' });

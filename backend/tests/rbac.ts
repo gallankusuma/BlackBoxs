@@ -122,7 +122,29 @@ async function main() {
   chk('master boleh mengangkat master',
     await status('PUT', `/users/${adminUser.json?.data?.id}`, { user_level: 10 }, master), 200);
 
-  console.log('\n6. Bersih-bersih');
+  console.log('\n6. AST-001 — RBAC modul Asset Management');
+  // Token desktop tanpa permission asset sama sekali
+  chk('lihat daftar aset', await status('GET', '/assets', undefined, plainToken), 403);
+  chk('lihat kategori aset', await status('GET', '/assets/categories', undefined, plainToken), 403);
+  chk('lihat KPI summary', await status('GET', '/assets/summary', undefined, plainToken), 403);
+  chk('buat aset', await status('POST', '/assets', { name: 'X', category_id: 1 }, plainToken), 403);
+  chk('ubah aset', await status('PUT', '/assets/1', { name: 'X' }, plainToken), 403);
+  chk('hapus aset', await status('DELETE', '/assets/1', undefined, plainToken), 403);
+  chk('buat production line', await status('POST', '/assets/production-lines', { name: 'L' }, plainToken), 403);
+  chk('hapus production line', await status('DELETE', '/assets/production-lines/1', undefined, plainToken), 403);
+  chk('hapus P&ID', await status('DELETE', '/assets/pnids/1', undefined, plainToken), 403);
+  chk('lihat maintenance', await status('GET', '/assets/1/maintenance', undefined, plainToken), 403);
+  chk('tambah maintenance', await status('POST', '/assets/1/maintenance', { performed_at: '2026-01-01' }, plainToken), 403);
+  chk('lihat riwayat pembelian', await status('GET', '/assets/1/purchase-history', undefined, plainToken), 403);
+  chk('hapus dokumen aset', await status('DELETE', '/assets/documents/1', undefined, plainToken), 403);
+  chk('unduh dokumen tanpa token', await status('GET', '/assets/documents/1/download'), 401);
+
+  // Master tetap bisa — memastikan proteksi tidak mengunci yang berwenang
+  chk('master → daftar aset', await status('GET', '/assets', undefined, master), 200);
+  chk('master → kategori aset', await status('GET', '/assets/categories', undefined, master), 200);
+  chk('master → KPI summary', await status('GET', '/assets/summary', undefined, master), 200);
+
+  console.log('\n7. Bersih-bersih');
   for (const id of cleanup) await call('DELETE', `/users/${id}`, undefined, master);
   for (const id of [roleId, editorRoleId]) if (id) await call('DELETE', `/roles/${id}`, undefined, master);
   console.log(`  ok   ${cleanup.length} user uji & 2 role uji dihapus`);
