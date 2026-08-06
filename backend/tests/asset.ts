@@ -234,7 +234,53 @@ async function main() {
   chk('nilai penambahan negatif → 400',
     (await call('POST', `/assets/${assetId}/purchase-history`, { amount: -50, purchase_date: '2026-01-01' }, master)).status, 400);
 
-  console.log('\n8. Bersih-bersih');
+  console.log('\n8. AST-003 & AST-010 — depresiasi lewat API');
+  const landCat = (cats.json?.data || []).find((c: any) => c.code === 'LAND');
+  chk('kategori Tanah ada', !!landCat, true);
+
+  const land = await call('POST', '/assets', {
+    category_id: landCat.id, name: 'Tanah Uji',
+    purchase_date: '2020-01-01', purchase_price: 500_000_000, useful_life_years: 20,
+  }, master);
+  const landRow = (await call('GET', `/assets/${land.json?.id}`, undefined, master)).json?.data;
+  chk('tanah: akumulasi penyusutan nol', Number(landRow?.accumulated_depreciation), 0);
+  chk('tanah: nilai buku = harga perolehan', Number(landRow?.book_value), 500_000_000);
+  chk('tanah: ada alasannya', !!landRow?.depreciation_note, true);
+
+  const machCat = (cats.json?.data || []).find((c: any) => c.code === 'MACH');
+  const sl = await call('POST', '/assets', {
+    category_id: machCat.id, name: 'Mesin SL',
+    purchase_date: '2020-01-01', purchase_price: 120_000_000,
+    salvage_value: 20_000_000, useful_life_years: 10, depreciation_method: 'straight_line',
+  }, master);
+  const db = await call('POST', '/assets', {
+    category_id: machCat.id, name: 'Mesin DB',
+    purchase_date: '2020-01-01', purchase_price: 120_000_000,
+    salvage_value: 20_000_000, useful_life_years: 10, depreciation_method: 'declining_balance',
+  }, master);
+
+  const slRow = (await call('GET', `/assets/${sl.json?.id}?as_of_date=2021-01-01`, undefined, master)).json?.data;
+  const dbRow = (await call('GET', `/assets/${db.json?.id}?as_of_date=2021-01-01`, undefined, master)).json?.data;
+  chk('garis lurus 12 bulan = 10 juta', Number(slRow?.accumulated_depreciation), 10_000_000);
+  chk('saldo menurun BERBEDA dari garis lurus',
+    Number(dbRow?.accumulated_depreciation) !== Number(slRow?.accumulated_depreciation), true);
+  chk('saldo menurun lebih besar di tahun awal',
+    Number(dbRow?.accumulated_depreciation) > Number(slRow?.accumulated_depreciation), true);
+
+  // as_of_date benar-benar berpengaruh
+  const later = (await call('GET', `/assets/${sl.json?.id}?as_of_date=2023-01-01`, undefined, master)).json?.data;
+  chk('as_of_date 3 tahun = 30 juta', Number(later?.accumulated_depreciation), 30_000_000);
+
+  // Tanggal siap pakai menggeser awal depresiasi
+  await call('PATCH', `/assets/${sl.json?.id}`, { in_service_date: '2020-07-01' }, master);
+  const delayed = (await call('GET', `/assets/${sl.json?.id}?as_of_date=2021-01-01`, undefined, master)).json?.data;
+  chk('in_service_date menggeser awal depresiasi', Number(delayed?.accumulated_depreciation), 5_000_000);
+
+  for (const id of [land.json?.id, sl.json?.id, db.json?.id]) {
+    if (id) await call('DELETE', `/assets/${id}`, undefined, master);
+  }
+
+  console.log('\n9. Bersih-bersih');
   await call('DELETE', `/assets/${assetId}`, undefined, master);
   await call('DELETE', `/assets/pnids/${pnidId}`, undefined, master);
   await call('DELETE', `/assets/pnids/${pnid2.json?.id}`, undefined, master);

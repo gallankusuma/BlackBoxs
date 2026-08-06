@@ -792,6 +792,36 @@ const ensureRouteModuleSchema = async (connection: any) => {
   console.log('✅ Inbox / CRM notes / prospects / MTO schema ensured');
 };
 
+// ==================== ATURAN DEPRESIASI ASET (AST-003, AST-010) ====================
+// Sebelumnya setiap aset yang punya harga + tanggal beli diproses fungsi
+// depresiasi yang sama, termasuk kategori Tanah — padahal tanah tidak disusutkan.
+// Master kategori juga belum punya aturan apa pun selain requires_production_line.
+const ensureAssetDepreciationSchema = async (connection: any) => {
+  const statements = [
+    `ALTER TABLE asset_categories ADD COLUMN IF NOT EXISTS is_depreciable TINYINT(1) NOT NULL DEFAULT 1`,
+    `ALTER TABLE asset_categories ADD COLUMN IF NOT EXISTS default_useful_life_years INT NULL`,
+    `ALTER TABLE asset_categories ADD COLUMN IF NOT EXISTS default_depreciation_method VARCHAR(30) NULL`,
+    `ALTER TABLE asset_categories ADD COLUMN IF NOT EXISTS default_depreciation_rate DECIMAL(6,4) NULL`,
+
+    // Depresiasi mulai saat aset SIAP DIGUNAKAN, bukan saat dibeli. Kalau
+    // kosong, jatuh kembali ke purchase_date supaya data lama tetap terhitung.
+    `ALTER TABLE assets ADD COLUMN IF NOT EXISTS in_service_date DATE NULL`,
+    // Rate khusus untuk saldo menurun; kosong = pakai default kategori, lalu
+    // fallback ke double-declining (2 / umur ekonomis).
+    `ALTER TABLE assets ADD COLUMN IF NOT EXISTS depreciation_rate DECIMAL(6,4) NULL`,
+
+    // Tanah tidak disusutkan. Bangunan lazim 20 tahun garis lurus.
+    `UPDATE asset_categories SET is_depreciable = 0 WHERE code = 'LAND'`,
+    `UPDATE asset_categories SET default_useful_life_years = 20, default_depreciation_method = 'straight_line'
+      WHERE code = 'BLDG' AND default_useful_life_years IS NULL`,
+  ];
+
+  for (const statement of statements) {
+    await execSchemaEnsure(connection, statement);
+  }
+  console.log('✅ Aturan depresiasi kategori aset ensured');
+};
+
 // ==================== PIN LOGIN MOBILE ====================
 // Sebelumnya login mobile cukup dengan NIK, sehingga siapa pun yang tahu NIK
 // karyawan bisa mendapat token miliknya — dan seluruh proteksi IDOR di
@@ -1040,6 +1070,7 @@ export async function initializeDatabase() {
     await ensureAssetManagementSchema(connection);
     await ensureRouteModuleSchema(connection);
     await ensureMobilePinSchema(connection);
+    await ensureAssetDepreciationSchema(connection);
     await ensurePermissionCatalog(connection);
     await ensureMasterUserRow(connection);
     // Harus paling akhir: semua permission dari ensure* di atas sudah ada

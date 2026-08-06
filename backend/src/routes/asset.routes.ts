@@ -8,44 +8,17 @@ import { loadUserAccess, requirePermission } from '../middleware/permission';
 import { validateUpload, storeValidatedFile, removeStoredFile } from '../utils/file-validation';
 import { validateAssetInput, validateMaintenanceInput, validatePurchaseHistoryInput, serverError }
   from '../utils/asset-validation';
+import { calcDepreciation } from '../utils/depreciation';
 
 const router = Router();
 
-// ── Depreciation (straight-line) ──────────────────────────────────────────
-function calcDepreciation(asset: any) {
-  const purchasePrice = parseFloat(asset.purchase_price) || 0;
-  const salvage = parseFloat(asset.salvage_value) || 0;
-  const usefulLifeYears = Number(asset.useful_life_years) || 1;
-  const purchaseDate = asset.purchase_date ? new Date(asset.purchase_date) : null;
-
-  if (!purchaseDate || purchasePrice <= 0) {
-    return { accumulated_depreciation: 0, book_value: purchasePrice, monthly_depreciation: 0, percent_depreciated: 0 };
-  }
-
-  const depreciableBase = Math.max(purchasePrice - salvage, 0);
-  const monthlyDepreciation = depreciableBase / (usefulLifeYears * 12);
-
-  const asOf = asset.status === 'disposed' && asset.disposed_date ? new Date(asset.disposed_date) : new Date();
-  let monthsElapsed = (asOf.getFullYear() - purchaseDate.getFullYear()) * 12 + (asOf.getMonth() - purchaseDate.getMonth());
-  monthsElapsed = Math.max(0, Math.min(monthsElapsed, usefulLifeYears * 12));
-
-  const accumulatedDepreciation = +(monthlyDepreciation * monthsElapsed).toFixed(2);
-  const bookValue = +(purchasePrice - accumulatedDepreciation).toFixed(2);
-  const percentDepreciated = depreciableBase > 0 ? +((accumulatedDepreciation / depreciableBase) * 100).toFixed(1) : 0;
-
-  return {
-    accumulated_depreciation: accumulatedDepreciation,
-    book_value: bookValue,
-    monthly_depreciation: +monthlyDepreciation.toFixed(2),
-    percent_depreciated: percentDepreciated,
-  };
-}
-
-function withDepreciation(row: any) {
+// as_of_date memungkinkan memeriksa nilai buku pada tanggal tertentu
+// (acceptance criteria AST-003), bukan selalu hari ini.
+function withDepreciation(row: any, asOfDate?: string) {
   return {
     ...row,
     spec: typeof row.spec === 'string' ? JSON.parse(row.spec || '{}') : (row.spec || {}),
-    ...calcDepreciation(row),
+    ...calcDepreciation(row, asOfDate),
   };
 }
 
@@ -197,12 +170,12 @@ router.delete('/pnids/:id', authMiddleware, requirePermission('assets.master.man
 router.get('/summary', authMiddleware, requirePermission('assets.view', 'assets.manage'), async (_req: Request, res: Response) => {
   try {
     const rows = await dbAll(
-      `SELECT a.*, c.name as category_name, c.code as category_code
+      `SELECT a.*, c.name as category_name, c.code as category_code, c.is_depreciable
        FROM assets a JOIN asset_categories c ON a.category_id = c.id
        WHERE a.status != 'disposed'`,
       []
     );
-    const withDep = rows.map(withDepreciation);
+    const withDep = rows.map(r => withDepreciation(r));
 
     const byCategory: Record<string, any> = {};
     for (const a of withDep) {
@@ -243,7 +216,7 @@ router.get('/', authMiddleware, requirePermission('assets.view', 'assets.manage'
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
     const rows = await dbAll(
-      `SELECT a.*, c.name as category_name, c.code as category_code,
+      `SELECT a.*, c.name as category_name, c.code as category_code, c.is_depreciable,
               p.name as production_line_name, q.code as pnid_code
        FROM assets a
        JOIN asset_categories c ON a.category_id = c.id
@@ -253,7 +226,8 @@ router.get('/', authMiddleware, requirePermission('assets.view', 'assets.manage'
        ORDER BY a.id DESC`,
       params
     );
-    res.json({ data: rows.map(withDepreciation) });
+    const asOf = typeof req.query.as_of_date === 'string' ? req.query.as_of_date : undefined;
+    res.json({ data: rows.map(r => withDepreciation(r, asOf)) });
   } catch (error: any) {
     serverError(res, 'asset', error);
   }
@@ -262,7 +236,7 @@ router.get('/', authMiddleware, requirePermission('assets.view', 'assets.manage'
 router.get('/:id', authMiddleware, requirePermission('assets.view', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     const row: any = await dbGet(
-      `SELECT a.*, c.name as category_name, c.code as category_code,
+      `SELECT a.*, c.name as category_name, c.code as category_code, c.is_depreciable,
               p.name as production_line_name, q.code as pnid_code, q.title as pnid_title
        FROM assets a
        JOIN asset_categories c ON a.category_id = c.id
@@ -272,7 +246,8 @@ router.get('/:id', authMiddleware, requirePermission('assets.view', 'assets.mana
       [req.params.id]
     );
     if (!row) return res.status(404).json({ error: 'Asset not found' });
-    res.json({ data: withDepreciation(row) });
+    const asOf = typeof req.query.as_of_date === 'string' ? req.query.as_of_date : undefined;
+    res.json({ data: withDepreciation(row, asOf) });
   } catch (error: any) {
     serverError(res, 'asset', error);
   }
@@ -283,7 +258,7 @@ router.post('/', authMiddleware, requirePermission('assets.create', 'assets.mana
     const {
       category_id, production_line_id, pnid_id, pnid_tag, name, location, spec,
       purchase_date, purchase_price, vendor, useful_life_years, salvage_value,
-      depreciation_method, status, notes,
+      depreciation_method, depreciation_rate, in_service_date, status, notes,
     } = req.body;
 
     if (!category_id || !name) {
@@ -326,12 +301,13 @@ router.post('/', authMiddleware, requirePermission('assets.create', 'assets.mana
           `INSERT INTO assets
             (asset_code, category_id, production_line_id, pnid_id, pnid_tag, name, location, spec,
              purchase_date, purchase_price, vendor, useful_life_years, salvage_value,
-             depreciation_method, status, notes, created_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             depreciation_method, depreciation_rate, in_service_date, status, notes, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             assetCode, category_id, lineId, pnid_id || null, pnid_tag || null, name, location || null,
             JSON.stringify(spec || {}), purchase_date || null, purchase_price || 0, vendor || null,
             useful_life_years || 1, salvage_value || 0, depreciation_method || 'straight_line',
+            depreciation_rate || null, in_service_date || null,
             status || 'active', notes || null, (req as any).user?.userId || null,
           ]
         );
@@ -356,7 +332,7 @@ const updateAsset = async (req: Request, res: Response) => {
     const {
       category_id, production_line_id, pnid_id, pnid_tag, name, location, spec,
       purchase_date, purchase_price, vendor, useful_life_years, salvage_value,
-      depreciation_method, status, disposed_date, notes,
+      depreciation_method, depreciation_rate, in_service_date, status, disposed_date, notes,
     } = req.body;
 
     const has = (k: string) => Object.prototype.hasOwnProperty.call(req.body, k);
@@ -412,6 +388,8 @@ const updateAsset = async (req: Request, res: Response) => {
     if (has('useful_life_years')) set('useful_life_years', useful_life_years ?? 1);
     if (has('salvage_value')) set('salvage_value', salvage_value ?? 0);
     if (has('depreciation_method')) set('depreciation_method', depreciation_method || 'straight_line');
+    if (has('depreciation_rate')) set('depreciation_rate', depreciation_rate ?? null);
+    if (has('in_service_date')) set('in_service_date', in_service_date || null);
     if (has('status')) set('status', status || 'active');
     if (has('disposed_date')) set('disposed_date', disposed_date || null);
     if (has('notes')) set('notes', notes ?? null);

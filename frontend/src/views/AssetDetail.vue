@@ -27,6 +27,7 @@
       <div class="bg-white border rounded-xl p-4">
         <div class="text-xs text-gray-500">Akumulasi Penyusutan</div>
         <div class="text-lg font-bold text-red-600">{{ formatCurrency(asset.accumulated_depreciation) }}</div>
+        <div v-if="asset.depreciation_note" class="text-[10px] text-amber-600 mt-1">{{ asset.depreciation_note }}</div>
       </div>
       <div class="bg-white border rounded-xl p-4">
         <div class="text-xs text-gray-500">Nilai Buku Saat Ini</div>
@@ -78,6 +79,9 @@
       <div class="grid grid-cols-3 gap-3">
         <div><label class="block text-xs font-medium text-gray-600 mb-1">Tgl. Beli</label>
           <input v-model="editForm.purchase_date" type="date" class="w-full border rounded-lg px-3 py-2 text-sm"></div>
+        <div><label class="block text-xs font-medium text-gray-600 mb-1">Tgl. Siap Digunakan</label>
+          <input v-model="editForm.in_service_date" type="date" class="w-full border rounded-lg px-3 py-2 text-sm">
+          <p class="text-[10px] text-gray-400 mt-0.5">Awal depresiasi. Kosong = pakai tgl. beli.</p></div>
         <div><label class="block text-xs font-medium text-gray-600 mb-1">Harga Beli (Rp)</label>
           <input v-model.number="editForm.purchase_price" type="number" class="w-full border rounded-lg px-3 py-2 text-sm"></div>
         <div><label class="block text-xs font-medium text-gray-600 mb-1">Vendor</label>
@@ -285,6 +289,8 @@ async function loadAsset() {
     pnid_tag: asset.value.pnid_tag,
     location: asset.value.location,
     purchase_date: asset.value.purchase_date ? String(asset.value.purchase_date).substring(0, 10) : '',
+    in_service_date: asset.value.in_service_date ? String(asset.value.in_service_date).substring(0, 10) : '',
+    depreciation_rate: asset.value.depreciation_rate,
     purchase_price: asset.value.purchase_price,
     vendor: asset.value.vendor,
     useful_life_years: asset.value.useful_life_years,

@@ -168,9 +168,41 @@ Tujuh sisanya menguji perilaku yang **belum ada implementasinya** — semuanya b
 
 ---
 
-## Sisa: Sprint Asset 2, 3, dan 4
+# Sprint Asset 2 — Financial Asset
 
-**Status: Terbuka.** AST-003, 004, 005, 006, 010, 011, 012, 013, 015, 016, 017, 018, 019.
+Urutan diubah sedikit dari daftar reviewer: **AST-010 dikerjakan bersama AST-003**, bukan sesudahnya. Keduanya menyentuh fungsi yang sama — AST-010 menentukan *apakah* aset disusutkan, AST-003 menentukan *bagaimana*. Menggarapnya terpisah berarti menulis ulang mesin yang sama dua kali, dan sempat ada kondisi di mana saldo menurun sudah berjalan untuk tanah yang seharusnya tidak disusutkan sama sekali.
+
+## AST-003 — Metode saldo menurun belum diimplementasikan
+
+**Status: Diterapkan** — [utils/depreciation.ts](backend/src/utils/depreciation.ts)
+
+Terkonfirmasi: `calcDepreciation()` lama tidak pernah membaca `depreciation_method`. User memilih saldo menurun, laporannya keluar garis lurus.
+
+Dipilih opsi **implementasi lengkap**, bukan menghapus pilihannya. Rate tahunan diambil berjenjang: nilai eksplisit di aset → default kategori → **double-declining** (`2 / umur ekonomis`). Perhitungannya per bulan atas nilai buku berjalan dan tidak pernah menembus nilai residu.
+
+Mesinnya dipindah ke modul terpisah yang **murni tanpa akses database**, sehingga rumusnya bisa diuji langsung tanpa server — `npm run test:depreciation`, 26 kasus.
+
+Parameter `as_of_date` ditambahkan di `GET /assets` dan `GET /assets/:id` sesuai acceptance criteria, jadi nilai buku bisa diperiksa pada tanggal tertentu, bukan selalu hari ini.
+
+## AST-010 — Depreciable vs non-depreciable
+
+**Status: Diterapkan** — [config/database.ts](backend/src/config/database.ts), [utils/depreciation.ts](backend/src/utils/depreciation.ts)
+
+Master kategori kini punya `is_depreciable`, `default_useful_life_years`, `default_depreciation_method`, `default_depreciation_rate`. Kategori **LAND/Tanah disetel non-depreciable**; sebelumnya tanah ikut disusutkan seperti mesin.
+
+Aset mendapat `in_service_date` — depresiasi dimulai saat aset **siap digunakan**, bukan saat dibeli, sesuai catatan reviewer. Kalau kosong, jatuh kembali ke `purchase_date` supaya data lama tetap terhitung.
+
+Aset non-depreciable mengembalikan `depreciation_note` yang ditampilkan di UI, jadi angka nol itu punya penjelasan alih-alih terlihat seperti bug.
+
+Diverifikasi 26 unit test rumus + 9 kasus end-to-end lewat API (tanah nol, garis lurus vs saldo menurun berbeda, `as_of_date` berpengaruh, `in_service_date` menggeser awal depresiasi).
+
+---
+
+## Sisa: Sprint Asset 2 (lanjutan), 3, dan 4
+
+**Status: Terbuka.** AST-004, 005, 006, 011, 012, 013, 015, 016, 017, 018, 019.
+
+Berikutnya: **AST-004** (capital addition belum masuk basis depresiasi) lalu **AST-011** (nilai historis berubah retroaktif — butuh depreciation ledger + period lock).
 
 ---
 
@@ -180,7 +212,7 @@ Tujuh sisanya menguji perilaku yang **belum ada implementasinya** — semuanya b
 cd backend && npm run test:all
 ```
 
-194 kasus dalam 5 suite, semua lulus:
+229 kasus dalam 6 suite, semua lulus:
 
 | Suite | Kasus |
 |---|---|
@@ -188,6 +220,7 @@ cd backend && npm run test:all
 | `npm run test:http` | 36 |
 | `npm run test:pin` | 28 |
 | `npm run test:rbac` | 45 |
-| `npm run test:asset` | 66 |
+| `npm run test:asset` | 75 |
+| `npm run test:depreciation` | 26 |
 
 `tsc --noEmit` dan `vue-tsc --noEmit` bersih.
