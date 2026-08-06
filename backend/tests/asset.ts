@@ -189,7 +189,52 @@ async function main() {
 
   for (const r of okCreates) await call('DELETE', `/assets/${r.json.id}`, undefined, master);
 
-  console.log('\n7. Bersih-bersih');
+  console.log('\n7. AST-014 — validasi input backend');
+  const bad = async (payload: any) => (await call('POST', '/assets',
+    { category_id: cat.id, name: 'Uji Validasi', ...payload }, master)).status;
+
+  chk('harga negatif', await bad({ purchase_price: -1 }), 400);
+  chk('nilai residu negatif', await bad({ salvage_value: -5 }), 400);
+  chk('residu > harga', await bad({ purchase_price: 100, salvage_value: 200 }), 400);
+  chk('umur ekonomis nol', await bad({ useful_life_years: 0 }), 400);
+  chk('umur ekonomis negatif', await bad({ useful_life_years: -3 }), 400);
+  chk('umur ekonomis pecahan', await bad({ useful_life_years: 2.5 }), 400);
+  chk('status tidak dikenal', await bad({ status: 'ngawur' }), 400);
+  chk('metode depresiasi tidak dikenal', await bad({ depreciation_method: 'ngawur' }), 400);
+  // new Date() terlalu longgar: '32 Februari' jadi tahun 2032, dan '2026-02-30'
+  // digeser diam-diam ke 2 Maret. Keduanya harus ditolak.
+  chk('tanggal ngawur', await bad({ purchase_date: '32 Februari' }), 400);
+  chk('tanggal meluber (2026-02-30)', await bad({ purchase_date: '2026-02-30' }), 400);
+  chk('bulan di luar rentang', await bad({ purchase_date: '2026-13-01' }), 400);
+  chk('tanggal ISO yang benar diterima',
+    (await call('POST', '/assets', { category_id: cat.id, name: 'Tanggal OK', purchase_date: '2026-02-28' }, master)).status, 201);
+  chk('harga bukan angka', await bad({ purchase_price: 'mahal' }), 400);
+  chk('disposed tanpa tanggal', await bad({ status: 'disposed' }), 400);
+
+  console.log('\n   Foreign key → 404/409, bukan 500 berisi nama constraint');
+  const fkCat = await call('POST', '/assets', { category_id: 999999, name: 'X' }, master);
+  chk('kategori tidak ada → 404', fkCat.status, 404);
+  chk('pesan SQL tidak bocor', /constraint|FOREIGN KEY|erp_/i.test(fkCat.text), false);
+
+  chk('P&ID tidak ada → 404',
+    (await call('POST', '/assets', { category_id: cat.id, name: 'X', pnid_id: 999999 }, master)).status, 404);
+  chk('production line tidak ada → 404',
+    (await call('POST', '/assets', { category_id: cat.id, name: 'X', production_line_id: 999999 }, master)).status, 404);
+  chk('P&ID bukan milik line yang dipilih → 409',
+    (await call('POST', '/assets',
+      { category_id: cat.id, name: 'X', pnid_id: pnid2.json?.id, production_line_id: lineId }, master)).status, 409);
+
+  console.log('\n   Child record untuk aset yang tidak ada');
+  chk('maintenance → 404',
+    (await call('POST', '/assets/999999/maintenance', { performed_at: '2026-01-01' }, master)).status, 404);
+  chk('riwayat pembelian → 404',
+    (await call('POST', '/assets/999999/purchase-history', { amount: 100, purchase_date: '2026-01-01' }, master)).status, 404);
+  chk('biaya maintenance negatif → 400',
+    (await call('POST', `/assets/${assetId}/maintenance`, { performed_at: '2026-01-01', cost: -100 }, master)).status, 400);
+  chk('nilai penambahan negatif → 400',
+    (await call('POST', `/assets/${assetId}/purchase-history`, { amount: -50, purchase_date: '2026-01-01' }, master)).status, 400);
+
+  console.log('\n8. Bersih-bersih');
   await call('DELETE', `/assets/${assetId}`, undefined, master);
   await call('DELETE', `/assets/pnids/${pnidId}`, undefined, master);
   await call('DELETE', `/assets/pnids/${pnid2.json?.id}`, undefined, master);

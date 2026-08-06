@@ -6,6 +6,8 @@ import { dbAll, dbGet, dbRun } from '../config/database';
 import { authMiddleware } from '../middleware/auth';
 import { loadUserAccess, requirePermission } from '../middleware/permission';
 import { validateUpload, storeValidatedFile, removeStoredFile } from '../utils/file-validation';
+import { validateAssetInput, validateMaintenanceInput, validatePurchaseHistoryInput, serverError }
+  from '../utils/asset-validation';
 
 const router = Router();
 
@@ -65,7 +67,7 @@ router.get('/categories', authMiddleware, requirePermission('assets.view', 'asse
     const rows = await dbAll('SELECT * FROM asset_categories WHERE is_active = 1 ORDER BY order_no, id', []);
     res.json({ data: rows });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
@@ -75,7 +77,7 @@ router.get('/production-lines', authMiddleware, requirePermission('assets.view',
     const rows = await dbAll('SELECT * FROM production_lines WHERE is_active = 1 ORDER BY name', []);
     res.json({ data: rows });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
@@ -85,7 +87,7 @@ router.get('/production-lines/:id', authMiddleware, requirePermission('assets.vi
     if (!row) return res.status(404).json({ error: 'Production line not found' });
     res.json({ data: row });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
@@ -99,7 +101,7 @@ router.post('/production-lines', authMiddleware, requirePermission('assets.maste
     );
     res.status(201).json({ id: result.insertId });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
@@ -112,7 +114,7 @@ router.put('/production-lines/:id', authMiddleware, requirePermission('assets.ma
     );
     res.json({ message: 'Updated' });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
@@ -121,7 +123,7 @@ router.delete('/production-lines/:id', authMiddleware, requirePermission('assets
     await dbRun('DELETE FROM production_lines WHERE id = ?', [req.params.id]);
     res.json({ message: 'Deleted' });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
@@ -135,7 +137,7 @@ router.get('/production-lines/:lineId/pnids', authMiddleware, requirePermission(
     );
     res.json({ data: rows });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
@@ -149,7 +151,7 @@ router.post('/production-lines/:lineId/pnids', authMiddleware, requirePermission
     );
     res.status(201).json({ id: result.insertId });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
@@ -164,7 +166,7 @@ router.get('/pnids/:id', authMiddleware, requirePermission('assets.view', 'asset
     if (!row) return res.status(404).json({ error: 'P&ID not found' });
     res.json({ data: row });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
@@ -177,7 +179,7 @@ router.put('/pnids/:id', authMiddleware, requirePermission('assets.master.manage
     );
     res.json({ message: 'Updated' });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
@@ -187,7 +189,7 @@ router.delete('/pnids/:id', authMiddleware, requirePermission('assets.master.man
     await dbRun('DELETE FROM pnids WHERE id = ?', [req.params.id]);
     res.json({ message: 'Deleted' });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
@@ -224,7 +226,7 @@ router.get('/summary', authMiddleware, requirePermission('assets.view', 'assets.
 
     res.json({ totals, by_category: Object.values(byCategory) });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
@@ -253,7 +255,7 @@ router.get('/', authMiddleware, requirePermission('assets.view', 'assets.manage'
     );
     res.json({ data: rows.map(withDepreciation) });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
@@ -272,7 +274,7 @@ router.get('/:id', authMiddleware, requirePermission('assets.view', 'assets.mana
     if (!row) return res.status(404).json({ error: 'Asset not found' });
     res.json({ data: withDepreciation(row) });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
@@ -288,11 +290,28 @@ router.post('/', authMiddleware, requirePermission('assets.create', 'assets.mana
       return res.status(400).json({ error: 'category_id and name are required' });
     }
 
+    const invalid = validateAssetInput(req.body);
+    if (invalid) return res.status(400).json({ error: invalid });
+
+    // Foreign key dicek di sini supaya balasannya 404 dengan pesan yang bisa
+    // dibaca, bukan 500 berisi nama constraint database (AST-014).
+    const category = await dbGet('SELECT id FROM asset_categories WHERE id = ?', [category_id]);
+    if (!category) return res.status(404).json({ error: 'Kategori aset tidak ditemukan' });
+
     // If a P&ID is given, derive the production_line_id from it (P&ID is the source of truth)
     let lineId = production_line_id || null;
     if (pnid_id) {
       const pnid: any = await dbGet('SELECT production_line_id FROM pnids WHERE id = ?', [pnid_id]);
-      if (pnid) lineId = pnid.production_line_id;
+      if (!pnid) return res.status(404).json({ error: 'P&ID tidak ditemukan' });
+      // P&ID adalah sumber kebenaran; kalau klien mengirim line yang berbeda,
+      // itu tanda data tidak konsisten — tolak, jangan diam-diam ditimpa.
+      if (lineId && Number(lineId) !== Number(pnid.production_line_id)) {
+        return res.status(409).json({ error: 'P&ID tersebut bukan milik production line yang dipilih' });
+      }
+      lineId = pnid.production_line_id;
+    } else if (lineId) {
+      const line = await dbGet('SELECT id FROM production_lines WHERE id = ?', [lineId]);
+      if (!line) return res.status(404).json({ error: 'Production line tidak ditemukan' });
     }
 
     // AST-009: MAX(...)+1 saja tidak aman — dua request bersamaan bisa membaca
@@ -326,7 +345,7 @@ router.post('/', authMiddleware, requirePermission('assets.create', 'assets.mana
       }
     }
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
@@ -340,11 +359,23 @@ const updateAsset = async (req: Request, res: Response) => {
       depreciation_method, status, disposed_date, notes,
     } = req.body;
 
+    const has = (k: string) => Object.prototype.hasOwnProperty.call(req.body, k);
+
+    const current: any = await dbGet('SELECT * FROM assets WHERE id = ?', [req.params.id]);
+    if (!current) return res.status(404).json({ error: 'Aset tidak ditemukan' });
+
+    const invalid = validateAssetInput(req.body, current);
+    if (invalid) return res.status(400).json({ error: invalid });
+
+    if (has('category_id') && category_id) {
+      const category = await dbGet('SELECT id FROM asset_categories WHERE id = ?', [category_id]);
+      if (!category) return res.status(404).json({ error: 'Kategori aset tidak ditemukan' });
+    }
+
     // Disposal butuh hak terpisah dari edit biasa (AST-001). Karena disposal
     // saat ini hanya berupa perubahan status, pemeriksaannya di dalam handler.
     if (status === 'disposed') {
-      const current: any = await dbGet('SELECT status FROM assets WHERE id = ?', [req.params.id]);
-      if (current && current.status !== 'disposed') {
+      if (current.status !== 'disposed') {
         const access = await loadUserAccess((req as any).userId);
         const mayDispose = !!access && (access.level >= 10
           || access.perms.has('assets.dispose') || access.perms.has('assets.manage'));
@@ -366,7 +397,6 @@ const updateAsset = async (req: Request, res: Response) => {
     // aset sudah cukup untuk melepasnya dari P&ID dan menghapus spesifikasinya.
     // Sekarang hanya field yang benar-benar ada di body yang disentuh —
     // `null` eksplisit tetap dihormati sebagai "kosongkan".
-    const has = (k: string) => Object.prototype.hasOwnProperty.call(req.body, k);
     const fields: string[] = [];
     const values: any[] = [];
     const set = (col: string, val: any) => { fields.push(`${col} = ?`); values.push(val); };
@@ -407,7 +437,7 @@ const updateAsset = async (req: Request, res: Response) => {
     await dbRun(`UPDATE assets SET ${fields.join(', ')} WHERE id = ?`, values);
     res.json({ message: 'Updated' });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 };
 
@@ -420,7 +450,7 @@ router.delete('/:id', authMiddleware, requirePermission('assets.delete', 'assets
     await dbRun('DELETE FROM assets WHERE id = ?', [req.params.id]);
     res.json({ message: 'Deleted' });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
@@ -462,7 +492,7 @@ router.get('/:id/documents', authMiddleware, requirePermission('assets.view', 'a
     );
     res.json({ data: rows });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
@@ -498,7 +528,7 @@ router.post('/:id/documents', authMiddleware, requirePermission('assets.document
   } catch (error: any) {
     // Bersihkan berkas kalau insert gagal, supaya tidak ada orphan di disk
     if (storedName) removeStoredFile(uploadDir, storedName);
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
@@ -511,7 +541,7 @@ router.get('/documents/:docId/preview', authMiddleware, requirePermission('asset
     res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(file.file_name)}"`);
     res.sendFile(filePath);
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
@@ -523,7 +553,7 @@ router.get('/documents/:docId/download', authMiddleware, requirePermission('asse
     if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not on disk' });
     res.download(filePath, file.file_name);
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
@@ -536,7 +566,7 @@ router.delete('/documents/:docId', authMiddleware, requirePermission('assets.doc
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     res.json({ message: 'Deleted' });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
@@ -549,12 +579,19 @@ router.get('/:id/maintenance', authMiddleware, requirePermission('assets.mainten
     );
     res.json({ data: rows });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
 router.post('/:id/maintenance', authMiddleware, requirePermission('assets.maintenance.manage', 'assets.manage'), async (req: Request, res: Response) => {
   try {
+    // Child record untuk aset yang tidak ada harus 404, bukan 500 dari FK
+    const asset = await dbGet('SELECT id FROM assets WHERE id = ?', [req.params.id]);
+    if (!asset) return res.status(404).json({ error: 'Aset tidak ditemukan' });
+
+    const invalidMaintenance = validateMaintenanceInput(req.body);
+    if (invalidMaintenance) return res.status(400).json({ error: invalidMaintenance });
+
     const { maintenance_type, description, cost, performed_by, vendor, performed_at, next_due_date } = req.body;
     if (!performed_at) return res.status(400).json({ error: 'performed_at is required' });
     const result = await dbRun(
@@ -566,12 +603,15 @@ router.post('/:id/maintenance', authMiddleware, requirePermission('assets.mainte
     );
     res.status(201).json({ id: result.insertId });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
 router.put('/maintenance/:logId', authMiddleware, requirePermission('assets.maintenance.manage', 'assets.manage'), async (req: Request, res: Response) => {
   try {
+    const invalidMaintenance = validateMaintenanceInput(req.body);
+    if (invalidMaintenance) return res.status(400).json({ error: invalidMaintenance });
+
     const { maintenance_type, description, cost, performed_by, vendor, performed_at, next_due_date } = req.body;
     await dbRun(
       `UPDATE asset_maintenance_logs SET maintenance_type = ?, description = ?, cost = ?,
@@ -581,7 +621,7 @@ router.put('/maintenance/:logId', authMiddleware, requirePermission('assets.main
     );
     res.json({ message: 'Updated' });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
@@ -590,7 +630,7 @@ router.delete('/maintenance/:logId', authMiddleware, requirePermission('assets.m
     await dbRun('DELETE FROM asset_maintenance_logs WHERE id = ?', [req.params.logId]);
     res.json({ message: 'Deleted' });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
@@ -603,12 +643,18 @@ router.get('/:id/purchase-history', authMiddleware, requirePermission('assets.fi
     );
     res.json({ data: rows });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
 router.post('/:id/purchase-history', authMiddleware, requirePermission('assets.financial.manage', 'assets.manage'), async (req: Request, res: Response) => {
   try {
+    const asset = await dbGet('SELECT id FROM assets WHERE id = ?', [req.params.id]);
+    if (!asset) return res.status(404).json({ error: 'Aset tidak ditemukan' });
+
+    const invalidEntry = validatePurchaseHistoryInput(req.body);
+    if (invalidEntry) return res.status(400).json({ error: invalidEntry });
+
     const { description, amount, purchase_date, vendor, notes, purchase_order_item_id } = req.body;
     if (!purchase_date) return res.status(400).json({ error: 'purchase_date is required' });
     const result = await dbRun(
@@ -620,12 +666,15 @@ router.post('/:id/purchase-history', authMiddleware, requirePermission('assets.f
     );
     res.status(201).json({ id: result.insertId });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
 router.put('/purchase-history/:entryId', authMiddleware, requirePermission('assets.financial.manage', 'assets.manage'), async (req: Request, res: Response) => {
   try {
+    const invalidEntry = validatePurchaseHistoryInput(req.body);
+    if (invalidEntry) return res.status(400).json({ error: invalidEntry });
+
     const { description, amount, purchase_date, vendor, notes } = req.body;
     await dbRun(
       `UPDATE asset_purchase_history SET description = ?, amount = ?, purchase_date = ?, vendor = ?, notes = ? WHERE id = ?`,
@@ -633,7 +682,7 @@ router.put('/purchase-history/:entryId', authMiddleware, requirePermission('asse
     );
     res.json({ message: 'Updated' });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 
@@ -642,7 +691,7 @@ router.delete('/purchase-history/:entryId', authMiddleware, requirePermission('a
     await dbRun('DELETE FROM asset_purchase_history WHERE id = ?', [req.params.entryId]);
     res.json({ message: 'Deleted' });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    serverError(res, 'asset', error);
   }
 });
 

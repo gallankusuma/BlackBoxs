@@ -111,11 +111,66 @@ Diverifikasi persis dengan acceptance criteria reviewer: **20 request create ber
 
 ---
 
-## AST-014 & AST-020 dan seterusnya
+## AST-014 — Validasi backend belum memadai
 
-**Status: Terbuka** — berikutnya dalam Sprint Asset 1.
+**Status: Diterapkan** — [utils/asset-validation.ts](backend/src/utils/asset-validation.ts), [asset.routes.ts](backend/src/routes/asset.routes.ts)
 
-`npm run test:asset` sudah tumbuh jadi 43 kasus dan menutup sebagian daftar AST-020 (create berhasil, concurrent create, edit tidak menghapus P&ID/spec, upload berbahaya ditolak, unduhan butuh autentikasi, viewer tidak bisa membuat/menghapus). Yang belum: pengujian depresiasi (butuh AST-003/010 lebih dulu), hard delete aset aktif (AST-005), dan master yang sedang dipakai (AST-013).
+Seluruh butir dari daftar reviewer ditutup:
+
+| Aturan | Balasan |
+|---|---|
+| Harga negatif, residu negatif, biaya maintenance negatif, capital addition negatif | 400 |
+| Residu > harga perolehan | 400 |
+| Umur ekonomis nol, negatif, atau pecahan | 400 |
+| Status / metode depresiasi tidak dikenal | 400 |
+| Tanggal tidak valid | 400 |
+| Kategori / P&ID / production line tidak ditemukan | 404 |
+| P&ID bukan milik production line yang dipilih | 409 |
+| Maintenance & riwayat pembelian untuk aset yang tidak ada | 404 |
+
+**Pesan SQL mentah tidak lagi bocor.** 30 tempat memakai `res.status(500).json({ error: error.message })`, sehingga klien menerima nama database, tabel, dan constraint — misalnya `` Cannot add or update a child row: ... (`erp_genjaya`.`assets`, CONSTRAINT `assets_ibfk_1` ...) ``. Semuanya diganti `serverError()` yang mencatat detail aslinya ke log server dan membalas pesan umum.
+
+### Catatan: `new Date()` tidak cukup untuk validasi tanggal
+
+Implementasi pertama memakai `new Date(value)` lalu memeriksa `NaN` — dan **tesnya gagal**. Parser Date di JavaScript terlalu longgar:
+
+- `new Date('32 Februari')` → **tahun 2032**, bukan Invalid Date
+- `new Date('2026-02-30')` → digeser diam-diam menjadi **2 Maret 2026**
+
+Keduanya akan lolos ke database sebagai tanggal yang salah tanpa error apa pun. Diganti dengan pemeriksaan format `YYYY-MM-DD` plus round-trip: hasil parse dicocokkan kembali ke angka aslinya untuk menangkap tanggal yang meluber.
+
+---
+
+## AST-020 — Automated test Asset Management
+
+**Status: Sebagian** — [backend/tests/asset.ts](backend/tests/asset.ts), [backend/tests/rbac.ts](backend/tests/rbac.ts)
+
+`npm run test:asset` kini 66 kasus. Dari 14 minimum test yang reviewer daftarkan, **7 sudah tertutup**:
+
+| # | Test | Status |
+|---|---|---|
+| 1 | Create asset berhasil | ✅ |
+| 2 | Concurrent create tidak duplicate | ✅ 20 request paralel |
+| 3 | Edit nama tidak menghapus P&ID dan spec | ✅ |
+| 4 | Straight-line depreciation benar | ⛔ butuh AST-003 |
+| 5 | Declining-balance | ⛔ butuh AST-003 |
+| 6 | Non-depreciable asset | ⛔ butuh AST-010 |
+| 7 | Capital addition memperbarui basis | ⛔ butuh AST-004 |
+| 8 | Disposed berhenti terdepresiasi | ⛔ butuh AST-006 |
+| 9 | Viewer tidak dapat membuat/menghapus | ✅ di `test:rbac` |
+| 10 | Upload file berbahaya ditolak | ✅ |
+| 11 | Download membutuhkan autentikasi | ✅ |
+| 12 | Hard delete aset aktif ditolak | ⛔ butuh AST-005 |
+| 13 | Master yang dipakai tidak dapat dihapus | ⛔ butuh AST-013 |
+| 14 | Invalid numeric dan date → 400 | ✅ |
+
+Tujuh sisanya menguji perilaku yang **belum ada implementasinya** — semuanya bergantung pada Sprint Asset 2 dan 3. Menuliskan tesnya sekarang hanya akan menghasilkan tes yang gagal karena fiturnya memang belum dibuat, jadi ditunda mengikuti sprint masing-masing.
+
+---
+
+## Sisa: Sprint Asset 2, 3, dan 4
+
+**Status: Terbuka.** AST-003, 004, 005, 006, 010, 011, 012, 013, 015, 016, 017, 018, 019.
 
 ---
 
@@ -125,7 +180,7 @@ Diverifikasi persis dengan acceptance criteria reviewer: **20 request create ber
 cd backend && npm run test:all
 ```
 
-171 kasus dalam 5 suite, semua lulus:
+194 kasus dalam 5 suite, semua lulus:
 
 | Suite | Kasus |
 |---|---|
@@ -133,6 +188,6 @@ cd backend && npm run test:all
 | `npm run test:http` | 36 |
 | `npm run test:pin` | 28 |
 | `npm run test:rbac` | 45 |
-| `npm run test:asset` | 43 |
+| `npm run test:asset` | 66 |
 
 `tsc --noEmit` dan `vue-tsc --noEmit` bersih.

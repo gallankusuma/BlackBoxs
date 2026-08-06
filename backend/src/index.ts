@@ -99,9 +99,14 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: 'Terlalu banyak percobaan. Coba lagi dalam 15 menit.' },
 });
+// Sama seperti authLimiter: ketat di produksi, longgar di dev supaya test
+// suite (yang antara lain menembak 20 request paralel) tidak memblokir dirinya.
+const generalLimitMax = Number(process.env.API_RATE_LIMIT_MAX)
+  || (process.env.NODE_ENV === 'production' ? 300 : 5000);
+
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
-  limit: 300,
+  limit: generalLimitMax,
   standardHeaders: 'draft-7',
   legacyHeaders: false,
   message: { error: 'Terlalu banyak permintaan, coba lagi sebentar lagi.' },
