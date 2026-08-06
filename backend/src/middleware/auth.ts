@@ -23,11 +23,10 @@ const JWT_SECRET = (() => {
   return s;
 })();
 
-// Token HANYA dibaca dari header. Dulu semua middleware juga menerima
+// Token HANYA dibaca dari header Authorization. Dulu middleware juga menerima
 // ?token=... di URL, yang ikut tersimpan di history browser, access log proxy,
-// dan header Referer. Satu-satunya pemakaian sah adalah preview/unduh berkas —
-// tag <a> dan <img> tidak bisa mengirim header — dan itu ditangani
-// downloadAuthMiddleware di bawah.
+// dan header Referer. Preview/unduh berkas kini memakai axios responseType
+// 'blob' di frontend, jadi tidak ada lagi kebutuhan menaruh JWT di URL.
 const bearerToken = (req: Request): string | undefined =>
   req.headers.authorization?.split(' ')[1];
 
@@ -141,25 +140,4 @@ export const assertSelf = (req: MobileAuthRequest, res: Response, paramValue: un
     return false;
   }
   return true;
-};
-
-// Khusus route preview/unduh berkas yang dibuka langsung oleh browser lewat
-// URL, sehingga tidak bisa menyertakan header Authorization. Selain route
-// tersebut, pakai authMiddleware biasa.
-export const downloadAuthMiddleware = (req: AuthRequest, res: Response, next: NextFunction) => {
-  try {
-    const token = bearerToken(req) || (req.query.token as string | undefined);
-    if (!token) return res.status(401).json({ error: 'No token provided' });
-
-    const decoded = jwt.verify(token, JWT_SECRET) as any;
-    if (decoded?.scope === MOBILE_SCOPE || !decoded?.userId) {
-      return res.status(401).json({ error: 'Invalid token' });
-    }
-
-    req.userId = decoded.userId;
-    req.user = decoded;
-    next();
-  } catch (error) {
-    res.status(401).json({ error: 'Invalid token' });
-  }
 };

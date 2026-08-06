@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { dbQuery, dbGet, dbAll, dbRun } from '../config/database';
-import { authMiddleware , downloadAuthMiddleware} from '../middleware/auth';
+import { authMiddleware } from '../middleware/auth';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
@@ -532,7 +532,7 @@ router.patch('/files/:fileId', authMiddleware, async (req: Request, res: Respons
 });
 
 // GET: Serve uploaded file for preview
-router.get('/files/:fileId/preview', downloadAuthMiddleware, async (req: Request, res: Response) => {
+router.get('/files/:fileId/preview', authMiddleware, async (req: Request, res: Response) => {
   try {
     const file: any = await dbGet('SELECT * FROM project_files WHERE id = ?', [req.params.fileId]);
     if (!file) return res.status(404).json({ error: 'File not found' });
@@ -547,7 +547,7 @@ router.get('/files/:fileId/preview', downloadAuthMiddleware, async (req: Request
 });
 
 // GET: Download file
-router.get('/files/:fileId/download', downloadAuthMiddleware, async (req: Request, res: Response) => {
+router.get('/files/:fileId/download', authMiddleware, async (req: Request, res: Response) => {
   try {
     const file: any = await dbGet('SELECT * FROM project_files WHERE id = ?', [req.params.fileId]);
     if (!file) return res.status(404).json({ error: 'File not found' });

@@ -124,7 +124,10 @@
             <td class="px-3 py-2"><span class="px-2 py-0.5 bg-gray-100 rounded text-xs">{{ d.doc_category }}</span></td>
             <td class="px-3 py-2 text-gray-500">{{ formatDate(d.uploaded_at) }} — {{ d.uploader_name || '-' }}</td>
             <td class="px-3 py-2 text-right whitespace-nowrap">
-              <a :href="downloadUrl(d.id)" target="_blank" class="text-blue-600 hover:underline text-xs mr-3">Download</a>
+              <button @click="downloadDocument(d)" :disabled="downloadingId === d.id"
+                class="text-blue-600 hover:underline text-xs mr-3 disabled:text-gray-400">
+                {{ downloadingId === d.id ? 'Mengunduh...' : 'Download' }}
+              </button>
               <button @click="deleteDocument(d)" class="text-gray-400 hover:text-red-600">🗑</button>
             </td>
           </tr>
@@ -239,7 +242,37 @@ const statusBadge = (s: string) => ({
 }[s] || 'bg-gray-100 text-gray-600');
 
 const formatDate = (d: string) => d ? new Date(d).toLocaleDateString('id-ID', { year: 'numeric', month: 'short', day: 'numeric' }) : '-';
-const downloadUrl = (docId: number) => `${api.defaults.baseURL}/assets/documents/${docId}/download`;
+// Unduh lewat axios supaya token dikirim di header Authorization (AST-007).
+// Sebelumnya ini berupa <a href> polos tanpa token sama sekali, jadi selalu 401.
+// Menempelkan ?token= bukan jalan keluar: JWT utama berumur 7 hari akan
+// tersimpan di history browser, access log proxy, dan header Referer.
+const downloadingId = ref<number | null>(null);
+
+async function downloadDocument(doc: any) {
+  downloadingId.value = doc.id;
+  try {
+    const { data, headers } = await api.get(`/assets/documents/${doc.id}/download`, { responseType: 'blob' });
+
+    // Nama berkas dari Content-Disposition kalau server mengirimnya
+    let filename = doc.file_name || doc.doc_title || `dokumen-${doc.id}`;
+    const cd = headers?.['content-disposition'] as string | undefined;
+    const match = cd?.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
+    if (match) filename = decodeURIComponent(match[1]);
+
+    const url = URL.createObjectURL(data);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 3000);
+  } catch (err: any) {
+    alert(err?.response?.status === 403
+      ? 'Anda tidak punya hak untuk mengunduh dokumen ini'
+      : 'Gagal mengunduh dokumen');
+  } finally {
+    downloadingId.value = null;
+  }
+}
 
 async function loadAsset() {
   const { data } = await api.get(`/assets/${assetId}`);

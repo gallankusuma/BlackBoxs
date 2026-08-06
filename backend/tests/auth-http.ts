@@ -95,8 +95,12 @@ async function main() {
 
   console.log('\n6. Registrasi publik & JWT di query string');
   chk('register tanpa token', await status('POST', '/auth/register', { email: 'x@y.com', password: 'secret123', name: 'X' }), 401);
+  // AST-007: JWT tidak lagi diterima dari URL di endpoint mana pun, termasuk
+  // route unduhan — frontend memakai axios responseType 'blob'.
   chk('?token= ditolak di API biasa', (await fetch(`${API}/users?token=${adminToken}`)).status, 401);
-  chk('?token= diterima di route unduhan', (await fetch(`${API}/projects/files/999999/download?token=${adminToken}`)).status, 404);
+  chk('?token= ditolak di route unduhan', (await fetch(`${API}/projects/files/999999/download?token=${adminToken}`)).status, 401);
+  chk('?token= ditolak di unduhan dokumen aset', (await fetch(`${API}/assets/documents/1/download?token=${adminToken}`)).status, 401);
+  chk('unduhan dengan header tetap jalan', (await call('GET', '/projects/files/999999/download', undefined, adminToken)).status, 404);
 
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);

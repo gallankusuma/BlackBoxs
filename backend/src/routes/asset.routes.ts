@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import multer from 'multer';
 import { dbAll, dbGet, dbRun } from '../config/database';
-import { authMiddleware, downloadAuthMiddleware } from '../middleware/auth';
+import { authMiddleware } from '../middleware/auth';
 import { loadUserAccess, requirePermission } from '../middleware/permission';
 
 const router = Router();
@@ -458,7 +458,7 @@ router.post('/:id/documents', authMiddleware, requirePermission('assets.document
   }
 });
 
-router.get('/documents/:docId/preview', downloadAuthMiddleware, requirePermission('assets.view', 'assets.manage'), async (req: Request, res: Response) => {
+router.get('/documents/:docId/preview', authMiddleware, requirePermission('assets.view', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     const file: any = await dbGet('SELECT * FROM asset_documents WHERE id = ?', [req.params.docId]);
     if (!file) return res.status(404).json({ error: 'File not found' });
@@ -471,7 +471,7 @@ router.get('/documents/:docId/preview', downloadAuthMiddleware, requirePermissio
   }
 });
 
-router.get('/documents/:docId/download', downloadAuthMiddleware, requirePermission('assets.view', 'assets.manage'), async (req: Request, res: Response) => {
+router.get('/documents/:docId/download', authMiddleware, requirePermission('assets.view', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     const file: any = await dbGet('SELECT * FROM asset_documents WHERE id = ?', [req.params.docId]);
     if (!file) return res.status(404).json({ error: 'File not found' });

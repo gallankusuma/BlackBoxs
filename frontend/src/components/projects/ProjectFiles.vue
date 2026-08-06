@@ -840,12 +840,6 @@ const getApiBase = () => {
   return `${base}/projects/files`;
 };
 
-const getPreviewUrl  = (id: number) =>
-  `${getApiBase()}/${id}/preview?token=${encodeURIComponent(localStorage.getItem('token') || '')}`;
-
-const getDownloadUrl = (id: number) =>
-  `${getApiBase()}/${id}/download?token=${encodeURIComponent(localStorage.getItem('token') || '')}`;
-
 const downloadFile = async (file: any) => {
   try {
     const { data } = await api.get(`/projects/files/${file.id}/download`, { responseType: 'blob' });

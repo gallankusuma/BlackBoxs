@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { authMiddleware , downloadAuthMiddleware} from '../middleware/auth';
+import { authMiddleware } from '../middleware/auth';
 import { dbAll, dbGet, dbRun } from '../config/database';
 import multer from 'multer';
 import path from 'path';
@@ -208,7 +208,7 @@ router.delete('/:id', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // Serve uploaded file
-router.get('/:id/download', downloadAuthMiddleware, async (req: Request, res: Response) => {
+router.get('/:id/download', authMiddleware, async (req: Request, res: Response) => {
   try {
     const doc: any = await dbGet('SELECT file_url, file_name FROM documents WHERE id=?', [req.params.id]);
     if (!doc?.file_url) return res.status(404).json({ error: 'No file attached' });

@@ -64,13 +64,26 @@ Ditutup dengan `ensureMasterUserRow()`: memastikan baris master ada sebagai sasa
 
 ---
 
-## AST-007 s/d AST-020
+## AST-007 — Link download dokumen selalu 401
+
+**Status: Diterapkan** — [AssetDetail.vue](frontend/src/views/AssetDetail.vue), [ProjectFiles.vue](frontend/src/components/projects/ProjectFiles.vue), [middleware/auth.ts](backend/src/middleware/auth.ts)
+
+Terkonfirmasi. Satu koreksi terhadap uraian review: ini **bukan** akibat pergantian ke `downloadAuthMiddleware`. Sebelum pergantian itu route-nya memakai `authMiddleware`, yang juga menuntut token — jadi link tersebut memang sudah selalu 401 sejak awal. Pergantiannya netral, tidak merusak dan tidak memperbaiki.
+
+Diperbaiki mengikuti pendekatan yang direkomendasikan reviewer, bukan signed URL: unduhan lewat `api.get(url, { responseType: 'blob' })` sehingga token dikirim di header, lalu object URL sementara dibuat di browser. Nama berkas diambil dari `Content-Disposition` bila ada.
+
+Sekalian dibereskan: `ProjectFiles.vue` ternyata **sudah** memakai pola blob yang benar, tapi masih menyimpan `getPreviewUrl`/`getDownloadUrl` ber-`?token=` sebagai **kode mati** — tidak pernah dipanggil. Keduanya dihapus.
+
+Karena setelah itu tidak ada satu pun pemanggil yang butuh token di URL, **`downloadAuthMiddleware` dihapus sepenuhnya** dan 8 route preview/download kembali memakai `authMiddleware` biasa. Ini memenuhi acceptance criteria "JWT utama tidak tampil pada URL dan browser history" secara menyeluruh, bukan hanya di modul asset.
+
+Diverifikasi di `npm run test:http`: `?token=` ditolak 401 di API biasa, di route unduhan project, dan di unduhan dokumen aset; unduhan dengan header Authorization tetap lolos auth.
+
+---
+
+## AST-008 s/d AST-020
 
 **Status: Terbuka** — dikerjakan berurutan sesuai Sprint Asset 1.
 
-Verifikasi awal yang sudah dilakukan:
-
-- **AST-007** terkonfirmasi. [AssetDetail.vue:242](frontend/src/views/AssetDetail.vue) membangun URL download tanpa token sama sekali. Perlu dicatat: ini **bukan** akibat pergantian ke `downloadAuthMiddleware`; sebelumnya route ini memakai `authMiddleware` yang juga menuntut token, jadi link tersebut memang sudah selalu 401.
 - **AST-009** terkonfirmasi, `nextAssetCode()` memakai `MAX(...) + 1` tanpa lock.
 
 ---
@@ -81,12 +94,12 @@ Verifikasi awal yang sudah dilakukan:
 cd backend && npm run test:all
 ```
 
-153 kasus dalam 5 suite, semua lulus:
+155 kasus dalam 5 suite, semua lulus:
 
 | Suite | Kasus |
 |---|---|
 | `npm test` | 19 |
-| `npm run test:http` | 34 |
+| `npm run test:http` | 36 |
 | `npm run test:pin` | 28 |
 | `npm run test:rbac` | 45 |
 | `npm run test:asset` | 27 |
