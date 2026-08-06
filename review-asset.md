@@ -80,11 +80,42 @@ Diverifikasi di `npm run test:http`: `?token=` ditolak 401 di API biasa, di rout
 
 ---
 
-## AST-008 s/d AST-020
+## AST-008 — Upload dokumen belum aman
 
-**Status: Terbuka** — dikerjakan berurutan sesuai Sprint Asset 1.
+**Status: Diterapkan** — [utils/file-validation.ts](backend/src/utils/file-validation.ts), [asset.routes.ts](backend/src/routes/asset.routes.ts)
 
-- **AST-009** terkonfirmasi, `nextAssetCode()` memakai `MAX(...) + 1` tanpa lock.
+Terkonfirmasi: tidak ada batas ukuran, tidak ada filter MIME/ekstensi, dan nama berkas di server memakai ekstensi dari `originalname`.
+
+Perbaikan mengikuti seluruh daftar reviewer:
+
+- **Whitelist PDF, JPG/JPEG, PNG, DOCX, XLSX.**
+- **Pemeriksaan magic bytes**, bukan sekadar ekstensi dan MIME — keduanya sepenuhnya di bawah kendali pengunggah. Nama, MIME, dan isi berkas ketiganya harus konsisten.
+- **Batas 20 MB**, dibalas `413` lewat handler multer sendiri (tanpa itu error-nya jatuh ke error handler global dan jadi `500`).
+- **Nama berkas di server = UUID acak**, nama asli hanya jadi metadata. Ini sekaligus menutup path traversal dan ekstensi ganda seperti `laporan.pdf.html`.
+- **Berkas ditahan di memori dulu**, jadi berkas berbahaya tidak pernah menyentuh disk. Kalau insert database gagal, berkas yang terlanjur ditulis dihapus — tidak ada orphan.
+- Aset diverifikasi ada sebelum berkas ditulis, supaya tidak ada dokumen yatim untuk `asset_id` ngawur.
+
+Diverifikasi 13 kasus, termasuk yang paling penting: **`menyamar.pdf` dengan MIME `application/pdf` tapi isinya `<html><script>` ditolak 400**. HTML, SVG beriskrip, executable, dan skrip shell semuanya ditolak.
+
+---
+
+## AST-009 — Generator asset code rentan race condition
+
+**Status: Diterapkan** — [asset.routes.ts](backend/src/routes/asset.routes.ts)
+
+Terkonfirmasi. Dipilih opsi **retry saat unique constraint gagal** dari daftar reviewer, karena kolom `assets.asset_code` sudah punya UNIQUE INDEX — jadi database sendiri yang menjadi penjaga sebenarnya, bukan pembacaan `MAX(...)` yang memang tidak bisa dibuat atomic tanpa lock.
+
+Kegagalan `ER_DUP_ENTRY` pada `asset_code` ditangkap, nomor dihitung ulang, maksimal 8 percobaan dengan jeda acak singkat supaya request yang bertabrakan tidak mencoba ulang bersamaan. Error selain duplikat tetap dilempar apa adanya.
+
+Diverifikasi persis dengan acceptance criteria reviewer: **20 request create bersamaan → 20 berhasil, 20 kode unik, nol respons 500.**
+
+---
+
+## AST-014 & AST-020 dan seterusnya
+
+**Status: Terbuka** — berikutnya dalam Sprint Asset 1.
+
+`npm run test:asset` sudah tumbuh jadi 43 kasus dan menutup sebagian daftar AST-020 (create berhasil, concurrent create, edit tidak menghapus P&ID/spec, upload berbahaya ditolak, unduhan butuh autentikasi, viewer tidak bisa membuat/menghapus). Yang belum: pengujian depresiasi (butuh AST-003/010 lebih dulu), hard delete aset aktif (AST-005), dan master yang sedang dipakai (AST-013).
 
 ---
 
@@ -94,7 +125,7 @@ Diverifikasi di `npm run test:http`: `?token=` ditolak 401 di API biasa, di rout
 cd backend && npm run test:all
 ```
 
-155 kasus dalam 5 suite, semua lulus:
+171 kasus dalam 5 suite, semua lulus:
 
 | Suite | Kasus |
 |---|---|
@@ -102,6 +133,6 @@ cd backend && npm run test:all
 | `npm run test:http` | 36 |
 | `npm run test:pin` | 28 |
 | `npm run test:rbac` | 45 |
-| `npm run test:asset` | 27 |
+| `npm run test:asset` | 43 |
 
 `tsc --noEmit` dan `vue-tsc --noEmit` bersih.

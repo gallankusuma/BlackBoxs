@@ -5,6 +5,7 @@ import multer from 'multer';
 import { dbAll, dbGet, dbRun } from '../config/database';
 import { authMiddleware } from '../middleware/auth';
 import { loadUserAccess, requirePermission } from '../middleware/permission';
+import { validateUpload, storeValidatedFile, removeStoredFile } from '../utils/file-validation';
 
 const router = Router();
 
@@ -294,21 +295,36 @@ router.post('/', authMiddleware, requirePermission('assets.create', 'assets.mana
       if (pnid) lineId = pnid.production_line_id;
     }
 
-    const assetCode = await nextAssetCode();
-    const result = await dbRun(
-      `INSERT INTO assets
-        (asset_code, category_id, production_line_id, pnid_id, pnid_tag, name, location, spec,
-         purchase_date, purchase_price, vendor, useful_life_years, salvage_value,
-         depreciation_method, status, notes, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        assetCode, category_id, lineId, pnid_id || null, pnid_tag || null, name, location || null,
-        JSON.stringify(spec || {}), purchase_date || null, purchase_price || 0, vendor || null,
-        useful_life_years || 1, salvage_value || 0, depreciation_method || 'straight_line',
-        status || 'active', notes || null, (req as any).user?.userId || null,
-      ]
-    );
-    res.status(201).json({ id: result.insertId, asset_code: assetCode });
+    // AST-009: MAX(...)+1 saja tidak aman — dua request bersamaan bisa membaca
+    // angka yang sama sebelum salah satunya sempat INSERT. Penjaga sebenarnya
+    // adalah UNIQUE INDEX pada assets.asset_code; di sini kegagalannya ditangkap
+    // lalu nomor dihitung ulang, bukan dibalas 500 mentah.
+    const MAX_CODE_ATTEMPTS = 8;
+    for (let attempt = 1; attempt <= MAX_CODE_ATTEMPTS; attempt++) {
+      const assetCode = await nextAssetCode();
+      try {
+        const result = await dbRun(
+          `INSERT INTO assets
+            (asset_code, category_id, production_line_id, pnid_id, pnid_tag, name, location, spec,
+             purchase_date, purchase_price, vendor, useful_life_years, salvage_value,
+             depreciation_method, status, notes, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            assetCode, category_id, lineId, pnid_id || null, pnid_tag || null, name, location || null,
+            JSON.stringify(spec || {}), purchase_date || null, purchase_price || 0, vendor || null,
+            useful_life_years || 1, salvage_value || 0, depreciation_method || 'straight_line',
+            status || 'active', notes || null, (req as any).user?.userId || null,
+          ]
+        );
+        return res.status(201).json({ id: result.insertId, asset_code: assetCode });
+      } catch (err: any) {
+        const duplicateCode = err?.code === 'ER_DUP_ENTRY' && String(err.message).includes('asset_code');
+        if (!duplicateCode || attempt === MAX_CODE_ATTEMPTS) throw err;
+        // Beri jeda acak singkat supaya request yang bertabrakan tidak
+        // mencoba ulang pada saat yang sama persis.
+        await new Promise(r => setTimeout(r, 10 + Math.random() * 40));
+      }
+    }
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -413,14 +429,28 @@ const uploadDir = path.join(__dirname, '../../uploads/asset_documents');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, uploadDir),
-  filename: (_req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    cb(null, uniqueSuffix + path.extname(file.originalname));
-  },
+// Berkas ditahan di memori dulu supaya magic bytes-nya bisa diperiksa SEBELUM
+// menyentuh disk (AST-008). Dengan diskStorage, berkas berbahaya sudah terlanjur
+// tertulis — dan kalau insert DB gagal, tertinggal sebagai orphan.
+const MAX_UPLOAD_BYTES = 20 * 1024 * 1024; // 20 MB
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_UPLOAD_BYTES, files: 1 },
 });
-const upload = multer({ storage });
+
+// Multer melempar error sendiri (mis. LIMIT_FILE_SIZE); tanpa handler ini
+// error-nya jatuh ke error handler global dan dibalas 500.
+const handleUploadErrors = (err: any, _req: Request, res: Response, next: any) => {
+  if (err instanceof multer.MulterError) {
+    const tooBig = err.code === 'LIMIT_FILE_SIZE';
+    return res.status(tooBig ? 413 : 400).json({
+      error: tooBig
+        ? `Ukuran berkas melebihi batas ${MAX_UPLOAD_BYTES / 1024 / 1024} MB`
+        : `Upload ditolak: ${err.message}`,
+    });
+  }
+  next(err);
+};
 
 router.get('/:id/documents', authMiddleware, requirePermission('assets.view', 'assets.manage'), async (req: Request, res: Response) => {
   try {
@@ -436,24 +466,38 @@ router.get('/:id/documents', authMiddleware, requirePermission('assets.view', 'a
   }
 });
 
-router.post('/:id/documents', authMiddleware, requirePermission('assets.documents.manage', 'assets.manage'), upload.single('file'), async (req: Request, res: Response) => {
+router.post('/:id/documents', authMiddleware, requirePermission('assets.documents.manage', 'assets.manage'),
+  upload.single('file'), handleUploadErrors, async (req: Request, res: Response) => {
+  let storedName: string | null = null;
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-    const { originalname, filename, size, mimetype } = req.file;
-    let fileType = 'other';
-    if (mimetype.startsWith('image/')) fileType = 'image';
-    else if (mimetype.includes('pdf')) fileType = 'pdf';
-    else if (mimetype.includes('sheet') || mimetype.includes('excel')) fileType = 'excel';
-    else if (mimetype.includes('document') || mimetype.includes('word')) fileType = 'word';
+    const { originalname, mimetype, buffer, size } = req.file;
+
+    // Aset harus ada dulu — mencegah dokumen yatim untuk asset_id ngawur
+    const asset = await dbGet('SELECT id FROM assets WHERE id = ?', [req.params.id]);
+    if (!asset) return res.status(404).json({ error: 'Aset tidak ditemukan' });
+
+    const check = validateUpload(originalname, mimetype, buffer);
+    if (!check.ok) return res.status(400).json({ error: check.error });
+
+    // Nama di server acak; nama asli hanya disimpan sebagai metadata untuk
+    // ditampilkan dan dipakai saat mengunduh.
+    storedName = storeValidatedFile(uploadDir, check.ext!, buffer);
+
+    const fileTypeMap: Record<string, string> = {
+      pdf: 'pdf', jpg: 'image', png: 'image', docx: 'word', xlsx: 'excel',
+    };
 
     const result = await dbRun(
       `INSERT INTO asset_documents (asset_id, doc_title, doc_category, file_name, file_path, file_type, file_size, uploaded_by)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [req.params.id, req.body.doc_title || originalname, req.body.doc_category || 'Lainnya',
-        originalname, filename, fileType, size, (req as any).user?.userId || null]
+        originalname, storedName, fileTypeMap[check.type!] || 'other', size, (req as any).user?.userId || null]
     );
     res.status(201).json({ id: result.insertId });
   } catch (error: any) {
+    // Bersihkan berkas kalau insert gagal, supaya tidak ada orphan di disk
+    if (storedName) removeStoredFile(uploadDir, storedName);
     res.status(500).json({ error: error.message });
   }
 });

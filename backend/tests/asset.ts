@@ -133,7 +133,63 @@ async function main() {
   chk('production_line_id ikut menyesuaikan', moved?.production_line_id, line2.json?.id);
   chk('spec tetap selamat', moved?.spec?.merk, 'Grundfos');
 
-  console.log('\n5. Bersih-bersih');
+  console.log('\n5. AST-008 — validasi upload dokumen');
+  const upload = async (filename: string, mime: string, content: Buffer | string) => {
+    const fd = new FormData();
+    fd.append('file', new Blob([content], { type: mime }), filename);
+    fd.append('doc_title', 'Uji');
+    const res = await fetch(`${API}/assets/${assetId}/documents`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${master}` },
+      body: fd,
+    });
+    return { status: res.status, text: await res.text() };
+  };
+
+  const PDF = Buffer.from('%PDF-1.4\n%âãÏÓ\ntest', 'latin1');
+  const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]);
+
+  chk('PDF asli diterima', (await upload('manual.pdf', 'application/pdf', PDF)).status, 201);
+  chk('PNG asli diterima', (await upload('foto.png', 'image/png', PNG)).status, 201);
+
+  chk('HTML ditolak', (await upload('jahat.html', 'text/html', '<script>alert(1)</script>')).status, 400);
+  chk('SVG ditolak', (await upload('jahat.svg', 'image/svg+xml', '<svg onload="alert(1)"/>')).status, 400);
+  chk('executable ditolak', (await upload('jahat.exe', 'application/octet-stream', 'MZ\x90\x00')).status, 400);
+  chk('skrip shell ditolak', (await upload('jahat.sh', 'text/x-sh', '#!/bin/sh\nrm -rf /')).status, 400);
+
+  // Inti magic-byte: ekstensi dan MIME berbohong, isinya HTML
+  const fake = await upload('menyamar.pdf', 'application/pdf', '<html><script>alert(1)</script></html>');
+  chk('ekstensi palsu (.pdf berisi HTML) ditolak', fake.status, 400);
+  chk('alasannya isi tidak cocok', /tidak cocok dengan ekstensi/i.test(fake.text), true);
+
+  // MIME berbohong tapi ekstensi benar
+  chk('MIME tidak cocok ekstensi ditolak',
+    (await upload('manual.pdf', 'image/png', PDF)).status, 400);
+
+  const tooBig = Buffer.concat([PDF, Buffer.alloc(21 * 1024 * 1024)]);
+  chk('berkas > 20 MB ditolak', (await upload('besar.pdf', 'application/pdf', tooBig)).status, 413);
+
+  const docs = (await call('GET', `/assets/${assetId}/documents`, undefined, master)).json?.data || [];
+  chk('hanya 2 berkas sah yang tersimpan', docs.length, 2);
+  chk('nama server diacak (bukan nama asli)', /^[0-9a-f-]{36}\.(pdf|png)$/.test(docs[0]?.file_path || ''), true);
+  chk('nama asli tetap tersimpan sebagai metadata', /\.(pdf|png)$/.test(docs[0]?.file_name || ''), true);
+
+  console.log('\n6. AST-009 — asset code aman terhadap request bersamaan');
+  const N = 20;
+  const results = await Promise.all(
+    Array.from({ length: N }, (_, i) =>
+      call('POST', '/assets', { category_id: cat.id, name: `Concurrent ${stamp}-${i}` }, master))
+  );
+  const okCreates = results.filter(r => r.status === 201);
+  chk(`${N} request paralel semuanya berhasil`, okCreates.length, N);
+
+  const codes = okCreates.map(r => r.json?.asset_code);
+  chk('tidak ada asset_code duplikat', new Set(codes).size, N);
+  chk('tidak ada yang balas 500', results.filter(r => r.status === 500).length, 0);
+
+  for (const r of okCreates) await call('DELETE', `/assets/${r.json.id}`, undefined, master);
+
+  console.log('\n7. Bersih-bersih');
   await call('DELETE', `/assets/${assetId}`, undefined, master);
   await call('DELETE', `/assets/pnids/${pnidId}`, undefined, master);
   await call('DELETE', `/assets/pnids/${pnid2.json?.id}`, undefined, master);
