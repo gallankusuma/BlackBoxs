@@ -336,7 +336,84 @@ async function main() {
   chk('master bisa membuat aset (FK created_by valid)', masterCreate.status, 201);
   if (masterCreate.json?.id) await call('DELETE', `/assets/${masterCreate.json.id}`, undefined, master);
 
-  console.log('\n11. Bersih-bersih');
+  console.log('\n11. AST-011 — depreciation ledger & period lock');
+
+  const ledgerAsset = await call('POST', '/assets', {
+    category_id: machCat.id, name: 'Mesin Ledger',
+    purchase_date: '2020-01-01', purchase_price: 120_000_000,
+    salvage_value: 0, useful_life_years: 10, depreciation_method: 'straight_line',
+  }, master);
+  const ledgerId = ledgerAsset.json?.id;
+
+  // KOMPATIBILITAS: sebelum ada periode ditutup, perilaku harus identik
+  const beforeLock = (await call('GET', `/assets/${ledgerId}?as_of_date=2021-01-01`, undefined, master)).json?.data;
+  chk('sebelum ada period lock: hitung dinamis seperti biasa',
+    Number(beforeLock?.accumulated_depreciation), 12_000_000);
+  chk('tidak ada penanda locked', beforeLock?.locked_through, undefined);
+
+  // Yang bermakna bukan "tabelnya kosong" — periode yang pernah dibuka kembali
+  // tetap meninggalkan barisnya — melainkan tidak ada yang berstatus tertutup.
+  const periodsBefore = await call('GET', '/assets/depreciation/periods', undefined, master);
+  chk('tidak ada periode tertutup di awal',
+    (periodsBefore.json?.data || []).filter((p: any) => p.status === 'closed').length, 0);
+
+  // Tutup Januari 2020 lalu Februari 2020
+  const closeJan = await call('POST', '/assets/depreciation/periods/close',
+    { period_year: 2020, period_month: 1 }, master);
+  chk('tutup periode 1/2020', closeJan.status, 201);
+  chk('ada entri yang diposting', closeJan.json?.posted_count > 0, true);
+
+  chk('menutup periode yang sama dua kali ditolak',
+    (await call('POST', '/assets/depreciation/periods/close', { period_year: 2020, period_month: 1 }, master)).status, 409);
+  chk('melompati bulan ditolak',
+    (await call('POST', '/assets/depreciation/periods/close', { period_year: 2020, period_month: 5 }, master)).status, 409);
+  chk('periode belum berakhir ditolak',
+    (await call('POST', '/assets/depreciation/periods/close', { period_year: 2099, period_month: 12 }, master)).status, 400);
+
+  await call('POST', '/assets/depreciation/periods/close', { period_year: 2020, period_month: 2 }, master);
+
+  const ledger = await call('GET', `/assets/${ledgerId}/depreciation-ledger`, undefined, master);
+  chk('ledger punya 2 baris', (ledger.json?.data || []).length, 2);
+
+  const afterLock = (await call('GET', `/assets/${ledgerId}?as_of_date=2021-01-01`, undefined, master)).json?.data;
+  chk('angka tetap sama setelah periode ditutup',
+    Number(afterLock?.accumulated_depreciation), 12_000_000);
+  chk('penanda locked muncul', !!afterLock?.locked_through, true);
+
+  console.log('\n   Inti AST-011: perubahan estimasi tidak lagi mengubah periode terkunci');
+  // Naikkan harga perolehan. Tanpa ledger, akumulasi Feb 2020 ikut berubah.
+  await call('PATCH', `/assets/${ledgerId}`, { purchase_price: 240_000_000 }, master);
+
+  // Konvensi aplikasi ini: yang dihitung adalah BULAN PENUH yang sudah lewat,
+  // jadi aset yang dibeli 1 Jan baru mencatat 1 bulan saat akhir Februari.
+  // Konvensi lama dipertahankan supaya angka aset di produksi tidak bergeser.
+  const lockedRow = (await call('GET', `/assets/${ledgerId}/depreciation-ledger`, undefined, master)).json?.data
+    ?.find((r: any) => Number(r.period_month) === 2);
+  chk('nilai ledger Feb 2020 TIDAK berubah meski harga dinaikkan',
+    Number(lockedRow?.accumulated_after), 1_000_000);
+
+  const afterEdit = (await call('GET', `/assets/${ledgerId}?as_of_date=2021-01-01`, undefined, master)).json?.data;
+  chk('periode terkunci memakai nilai ledger, bukan hitung ulang',
+    Number(afterEdit?.locked_accumulated), 1_000_000);
+  chk('perubahan estimasi berlaku prospektif',
+    Number(afterEdit?.accumulated_depreciation) > 12_000_000, true);
+
+  console.log('\n   Buka kembali periode');
+  chk('membuka periode di tengah ditolak',
+    (await call('POST', '/assets/depreciation/periods/reopen', { period_year: 2020, period_month: 1 }, master)).status, 409);
+  chk('membuka periode terakhir boleh',
+    (await call('POST', '/assets/depreciation/periods/reopen', { period_year: 2020, period_month: 2 }, master)).status, 200);
+  chk('ledger periode itu ikut terhapus',
+    ((await call('GET', `/assets/${ledgerId}/depreciation-ledger`, undefined, master)).json?.data || []).length, 1);
+
+  chk('tutup periode butuh permission',
+    (await call('POST', '/assets/depreciation/periods/close', { period_year: 2020, period_month: 3 }, undefined)).status, 401);
+
+  // Kembalikan ke keadaan semula supaya tes bisa diulang
+  await call('POST', '/assets/depreciation/periods/reopen', { period_year: 2020, period_month: 1 }, master);
+  await call('DELETE', `/assets/${ledgerId}`, undefined, master);
+
+  console.log('\n12. Bersih-bersih');
   await call('DELETE', `/assets/${assetId}`, undefined, master);
   await call('DELETE', `/assets/pnids/${pnidId}`, undefined, master);
   await call('DELETE', `/assets/pnids/${pnid2.json?.id}`, undefined, master);

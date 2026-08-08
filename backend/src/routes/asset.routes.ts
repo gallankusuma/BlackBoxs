@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
 import multer from 'multer';
-import { dbAll, dbGet, dbRun } from '../config/database';
+import { dbAll, dbGet, dbRun, withTransaction } from '../config/database';
 import { authMiddleware } from '../middleware/auth';
 import { loadUserAccess, requirePermission } from '../middleware/permission';
 import { validateUpload, storeValidatedFile, removeStoredFile } from '../utils/file-validation';
@@ -14,12 +14,39 @@ const router = Router();
 
 // as_of_date memungkinkan memeriksa nilai buku pada tanggal tertentu
 // (acceptance criteria AST-003), bukan selalu hari ini.
-function withDepreciation(row: any, asOfDate?: string, additions: any[] = []) {
+function withDepreciation(row: any, asOfDate?: string, additions: any[] = [], lock?: any) {
   return {
     ...row,
     spec: typeof row.spec === 'string' ? JSON.parse(row.spec || '{}') : (row.spec || {}),
-    ...calcDepreciation(row, asOfDate, additions),
+    ...calcDepreciation(row, asOfDate, additions, lock),
   };
+}
+
+// Periode terakhir yang sudah ditutup. Selama belum ada yang ditutup, ini
+// mengembalikan null dan perhitungan berjalan dinamis persis seperti semula.
+async function lastClosedPeriod(): Promise<{ year: number; month: number; end: string } | null> {
+  const row: any = await dbGet(
+    `SELECT period_year, period_month FROM asset_depreciation_periods
+     WHERE status = 'closed' ORDER BY period_year DESC, period_month DESC LIMIT 1`
+  );
+  if (!row) return null;
+  const year = Number(row.period_year), month = Number(row.period_month);
+  const day = new Date(year, month, 0).getDate();
+  return { year, month, end: `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}` };
+}
+
+// Akumulasi terkunci per aset, diambil dari baris ledger periode tersebut.
+async function lockedAccumulatedByAsset(assetIds: number[], year: number, month: number): Promise<Record<number, number>> {
+  if (!assetIds.length) return {};
+  const placeholders = assetIds.map(() => '?').join(',');
+  const rows = await dbAll(
+    `SELECT asset_id, accumulated_after FROM asset_depreciation_ledger
+     WHERE period_year = ? AND period_month = ? AND asset_id IN (${placeholders})`,
+    [year, month, ...assetIds]
+  ) as any[];
+  const map: Record<number, number> = {};
+  for (const r of rows) map[r.asset_id] = Number(r.accumulated_after);
+  return map;
 }
 
 // Ambil capital addition untuk banyak aset sekaligus — menghindari query
@@ -245,7 +272,12 @@ router.get('/', authMiddleware, requirePermission('assets.view', 'assets.manage'
     );
     const asOf = typeof req.query.as_of_date === 'string' ? req.query.as_of_date : undefined;
     const additions = await capitalAdditionsByAsset(rows.map((r: any) => r.id));
-    res.json({ data: rows.map((r: any) => withDepreciation(r, asOf, additions[r.id] || [])) });
+    const closed = await lastClosedPeriod();
+    const locked = closed ? await lockedAccumulatedByAsset(rows.map((r: any) => r.id), closed.year, closed.month) : {};
+    res.json({
+      data: rows.map((r: any) => withDepreciation(r, asOf, additions[r.id] || [],
+        closed && locked[r.id] !== undefined ? { through: closed.end, accumulated: locked[r.id] } : undefined)),
+    });
   } catch (error: any) {
     serverError(res, 'asset', error);
   }
@@ -266,7 +298,12 @@ router.get('/:id', authMiddleware, requirePermission('assets.view', 'assets.mana
     if (!row) return res.status(404).json({ error: 'Asset not found' });
     const asOf = typeof req.query.as_of_date === 'string' ? req.query.as_of_date : undefined;
     const additions = (await capitalAdditionsByAsset([row.id]))[row.id] || [];
-    res.json({ data: withDepreciation(row, asOf, additions) });
+    const closed = await lastClosedPeriod();
+    const locked = closed ? (await lockedAccumulatedByAsset([row.id], closed.year, closed.month))[row.id] : undefined;
+    res.json({
+      data: withDepreciation(row, asOf, additions,
+        closed && locked !== undefined ? { through: closed.end, accumulated: locked } : undefined),
+    });
   } catch (error: any) {
     serverError(res, 'asset', error);
   }
@@ -698,6 +735,177 @@ router.delete('/purchase-history/:entryId', authMiddleware, requirePermission('a
     res.json({ message: 'Deleted' });
   } catch (error: any) {
     serverError(res, 'asset', error);
+  }
+});
+
+
+
+// ── Depreciation ledger & period lock (AST-011) ─────────────────────────
+// Selama belum ada periode yang ditutup, seluruh endpoint di bawah tidak
+// mempengaruhi angka mana pun — perhitungan berjalan dinamis seperti semula.
+
+const lastDayOfMonth = (year: number, month: number) =>
+  `${year}-${String(month).padStart(2, '0')}-${String(new Date(year, month, 0).getDate()).padStart(2, '0')}`;
+
+router.get('/depreciation/periods', authMiddleware, requirePermission('assets.financial.view', 'assets.financial.manage', 'assets.manage'),
+  async (_req: Request, res: Response) => {
+  try {
+    const rows = await dbAll(
+      `SELECT p.*, u.full_name AS closed_by_name,
+              (SELECT COUNT(*) FROM asset_depreciation_ledger l
+               WHERE l.period_year = p.period_year AND l.period_month = p.period_month) AS entry_count
+       FROM asset_depreciation_periods p
+       LEFT JOIN users u ON p.closed_by = u.id
+       ORDER BY p.period_year DESC, p.period_month DESC`
+    );
+    res.json({ data: rows });
+  } catch (error: any) {
+    serverError(res, 'periods', error);
+  }
+});
+
+router.get('/:id/depreciation-ledger', authMiddleware, requirePermission('assets.financial.view', 'assets.financial.manage', 'assets.manage'),
+  async (req: Request, res: Response) => {
+  try {
+    const rows = await dbAll(
+      `SELECT * FROM asset_depreciation_ledger WHERE asset_id = ?
+       ORDER BY period_year DESC, period_month DESC`,
+      [req.params.id]
+    );
+    res.json({ data: rows });
+  } catch (error: any) {
+    serverError(res, 'ledger', error);
+  }
+});
+
+// POST /assets/depreciation/periods/close — hitung & posting satu bulan, lalu kunci
+router.post('/depreciation/periods/close', authMiddleware, requirePermission('assets.period.manage', 'assets.manage'),
+  async (req: Request, res: Response) => {
+  try {
+    const year = Number(req.body.period_year);
+    const month = Number(req.body.period_month);
+    if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) {
+      return res.status(400).json({ error: 'period_year dan period_month (1-12) wajib diisi' });
+    }
+
+    const periodEnd = lastDayOfMonth(year, month);
+    if (new Date(periodEnd) > new Date()) {
+      return res.status(400).json({ error: 'Periode yang belum berakhir tidak bisa ditutup' });
+    }
+
+    const existing: any = await dbGet(
+      'SELECT id, status FROM asset_depreciation_periods WHERE period_year = ? AND period_month = ?',
+      [year, month]
+    );
+    if (existing?.status === 'closed') {
+      return res.status(409).json({ error: `Periode ${month}/${year} sudah ditutup` });
+    }
+
+    // Periode harus ditutup berurutan — kalau bulan sebelumnya masih terbuka,
+    // akumulasi yang diposting akan salah.
+    const prevYear = month === 1 ? year - 1 : year;
+    const prevMonth = month === 1 ? 12 : month - 1;
+    const anyClosed: any = await dbGet('SELECT COUNT(*) AS c FROM asset_depreciation_periods WHERE status = ?', ['closed']);
+    if (Number(anyClosed?.c || 0) > 0) {
+      const prev: any = await dbGet(
+        'SELECT status FROM asset_depreciation_periods WHERE period_year = ? AND period_month = ?',
+        [prevYear, prevMonth]
+      );
+      if (prev?.status !== 'closed') {
+        return res.status(409).json({ error: `Tutup periode ${prevMonth}/${prevYear} lebih dulu — periode harus berurutan` });
+      }
+    }
+
+    const assets = await dbAll(
+      `SELECT a.*, c.is_depreciable FROM assets a JOIN asset_categories c ON a.category_id = c.id`
+    ) as any[];
+    const additions = await capitalAdditionsByAsset(assets.map(a => a.id));
+    const userId = (req as any).user?.userId || null;
+
+    const posted = await withTransaction(async tx => {
+      const rows: any[] = [];
+      for (const asset of assets) {
+        // Akumulasi yang sudah terkunci sebelum periode ini
+        const prevLedger: any = await tx.get(
+          `SELECT accumulated_after FROM asset_depreciation_ledger
+           WHERE asset_id = ? AND (period_year < ? OR (period_year = ? AND period_month < ?))
+           ORDER BY period_year DESC, period_month DESC LIMIT 1`,
+          [asset.id, year, year, month]
+        );
+        const before = Number(prevLedger?.accumulated_after || 0);
+
+        const atEnd = calcDepreciation(asset, periodEnd, additions[asset.id] || []);
+        const accumulatedAfter = atEnd.accumulated_depreciation;
+        const charge = Math.max(0, Math.round((accumulatedAfter - before) * 100) / 100);
+
+        await tx.run(
+          `INSERT INTO asset_depreciation_ledger
+            (asset_id, period_year, period_month, depreciation_amount, accumulated_after, book_value_after, posted_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [asset.id, year, month, charge, accumulatedAfter, atEnd.book_value, userId]
+        );
+        rows.push({ asset_id: asset.id, asset_code: asset.asset_code, depreciation_amount: charge });
+      }
+
+      await tx.run(
+        `INSERT INTO asset_depreciation_periods (period_year, period_month, status, closed_at, closed_by, notes)
+         VALUES (?, ?, 'closed', NOW(), ?, ?)
+         ON DUPLICATE KEY UPDATE status='closed', closed_at=NOW(), closed_by=VALUES(closed_by),
+                                 reopened_at=NULL, reopened_by=NULL, notes=VALUES(notes)`,
+        [year, month, userId, req.body.notes || null]
+      );
+      return rows;
+    });
+
+    res.status(201).json({
+      message: `Periode ${month}/${year} ditutup`,
+      posted_count: posted.length,
+      total_depreciation: Math.round(posted.reduce((s, r) => s + r.depreciation_amount, 0) * 100) / 100,
+    });
+  } catch (error: any) {
+    serverError(res, 'close-period', error);
+  }
+});
+
+// POST /assets/depreciation/periods/reopen — buka kembali periode terakhir
+router.post('/depreciation/periods/reopen', authMiddleware, requirePermission('assets.period.manage', 'assets.manage'),
+  async (req: Request, res: Response) => {
+  try {
+    const year = Number(req.body.period_year);
+    const month = Number(req.body.period_month);
+    if (!Number.isInteger(year) || !Number.isInteger(month)) {
+      return res.status(400).json({ error: 'period_year dan period_month wajib diisi' });
+    }
+
+    const period: any = await dbGet(
+      'SELECT id, status FROM asset_depreciation_periods WHERE period_year = ? AND period_month = ?',
+      [year, month]
+    );
+    if (!period) return res.status(404).json({ error: 'Periode tidak ditemukan' });
+    if (period.status !== 'closed') return res.status(409).json({ error: 'Periode sudah terbuka' });
+
+    // Hanya periode TERAKHIR yang boleh dibuka — membuka periode di tengah
+    // membuat akumulasi periode sesudahnya tidak konsisten.
+    const later: any = await dbGet(
+      `SELECT COUNT(*) AS c FROM asset_depreciation_periods
+       WHERE status = 'closed' AND (period_year > ? OR (period_year = ? AND period_month > ?))`,
+      [year, year, month]
+    );
+    if (Number(later?.c || 0) > 0) {
+      return res.status(409).json({ error: 'Buka periode yang lebih baru lebih dulu — hanya periode terakhir yang bisa dibuka' });
+    }
+
+    await withTransaction(async tx => {
+      await tx.run('DELETE FROM asset_depreciation_ledger WHERE period_year = ? AND period_month = ?', [year, month]);
+      await tx.run(
+        `UPDATE asset_depreciation_periods SET status='open', reopened_at=NOW(), reopened_by=? WHERE id = ?`,
+        [(req as any).user?.userId || null, period.id]
+      );
+    });
+
+    res.json({ message: `Periode ${month}/${year} dibuka kembali` });
+  } catch (error: any) {
+    serverError(res, 'reopen-period', error);
   }
 });
 

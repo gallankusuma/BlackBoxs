@@ -220,11 +220,38 @@ Yang **tidak berubah** setelah deploy: seluruh angka depresiasi aset non-tanah, 
 
 ---
 
+## AST-011 — Nilai historis berubah ketika master diedit
+
+**Status: Diterapkan** — [config/database.ts](backend/src/config/database.ts), [utils/depreciation.ts](backend/src/utils/depreciation.ts), [asset.routes.ts](backend/src/routes/asset.routes.ts)
+
+Dua tabel baru: `asset_depreciation_periods` (status periode) dan `asset_depreciation_ledger` (hasil perhitungan per aset per bulan, beserta akumulasi dan nilai buku setelahnya).
+
+**Cara kerjanya dirancang agar nol dampak bagi sistem yang sedang berjalan.** Selama belum ada periode yang ditutup, kedua tabel kosong dan perhitungan berjalan dinamis persis seperti sebelumnya — tidak ada satu angka pun yang berubah setelah deploy. Finance baru mengunci periode ketika mereka siap.
+
+Setelah sebuah periode ditutup: akumulasi sampai periode itu diambil dari **ledger**, dan yang dihitung dinamis hanya **selisih setelah tanggal kunci**. Jadi mengubah harga perolehan atau umur ekonomis hari ini tidak lagi mengubah laporan bulan yang sudah ditutup — perubahan estimasi berlaku prospektif, sesuai acceptance criteria.
+
+Aturan yang ditegakkan:
+
+- Periode harus ditutup **berurutan** — melompati bulan ditolak `409`, karena akumulasi yang diposting akan salah.
+- Periode yang **belum berakhir** tidak bisa ditutup (`400`).
+- Menutup periode yang sama dua kali ditolak `409`.
+- Hanya **periode terakhir** yang bisa dibuka kembali; membuka periode di tengah ditolak `409` karena akumulasi periode sesudahnya jadi tidak konsisten.
+- Penutupan periode berjalan dalam **satu transaction** (helper `withTransaction` baru di `config/database.ts`) — kalau satu insert gagal, seluruh periode tidak jadi ditutup.
+- Butuh permission baru `assets.period.manage`.
+
+### Catatan konvensi yang dipertahankan
+
+Saat menulis tesnya, ketahuan aplikasi ini memakai konvensi **bulan penuh yang sudah lewat**: aset yang dibeli 1 Januari baru mencatat penyusutan pertama saat memasuki Februari. Ekspektasi tes saya semula mengasumsikan sebaliknya.
+
+Konvensi lamanya **sengaja dipertahankan**, bukan diperbaiki — mengubahnya akan menggeser angka setiap aset di produksi sekaligus, dan itu justru jenis gangguan yang sedang kami hindari. Kalau tim reviewer menghendaki konvensi yang berbeda, itu perubahan tersendiri yang perlu direncanakan dengan penutupan periode lebih dulu.
+
+---
+
 ## Sisa: Sprint Asset 2 (lanjutan), 3, dan 4
 
-**Status: Terbuka.** AST-005, 006, 011, 012, 013, 015, 016, 017, 018, 019.
+**Status: Terbuka.** AST-005, 006, 012, 013, 015, 016, 017, 018, 019.
 
-Berikutnya: **AST-011** (nilai historis berubah retroaktif — butuh depreciation ledger + period lock).
+Berikutnya: **AST-006** (disposal workflow) menutup Sprint Asset 2.
 
 ---
 
@@ -234,7 +261,7 @@ Berikutnya: **AST-011** (nilai historis berubah retroaktif — butuh depreciatio
 cd backend && npm run test:all
 ```
 
-241 kasus dalam 6 suite, semua lulus:
+259 kasus dalam 6 suite, semua lulus:
 
 | Suite | Kasus |
 |---|---|
@@ -242,7 +269,7 @@ cd backend && npm run test:all
 | `npm run test:http` | 36 |
 | `npm run test:pin` | 28 |
 | `npm run test:rbac` | 45 |
-| `npm run test:asset` | 87 |
+| `npm run test:asset` | 105 |
 | `npm run test:depreciation` | 26 |
 
 `tsc --noEmit` dan `vue-tsc --noEmit` bersih.

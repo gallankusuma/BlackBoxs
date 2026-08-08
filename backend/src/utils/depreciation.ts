@@ -35,6 +35,9 @@ export interface DepreciationResult {
   /** Hanya muncul kalau aset punya capital addition (AST-004) */
   capitalized_additions?: number;
   total_capitalized_cost?: number;
+  /** Hanya muncul kalau ada periode depresiasi yang sudah ditutup (AST-011) */
+  locked_through?: string;
+  locked_accumulated?: number;
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -56,7 +59,48 @@ export interface CapitalAddition {
   purchase_date?: string | Date | null;
 }
 
+/** Periode terakhir yang sudah ditutup beserta akumulasi yang dipostingnya (AST-011) */
+export interface LedgerLock {
+  /** Akhir periode terkunci, mis. 2026-06-30 */
+  through: string | Date;
+  /** Akumulasi penyusutan yang tercatat di ledger sampai periode itu */
+  accumulated: number;
+}
+
 export function calcDepreciation(
+  asset: DepreciationInput,
+  asOfDate?: string | Date,
+  additions: CapitalAddition[] = [],
+  lock?: LedgerLock,
+): DepreciationResult {
+  // ── AST-011 ───────────────────────────────────────────────────────────
+  // Kalau ada periode yang sudah ditutup, angka sampai periode itu diambil
+  // dari LEDGER, bukan dihitung ulang. Yang dihitung dinamis hanya selisih
+  // setelah tanggal kunci. Efeknya: mengubah harga perolehan atau umur
+  // ekonomis hari ini tidak lagi mengubah laporan bulan-bulan yang sudah
+  // ditutup — perubahan estimasi berlaku prospektif.
+  if (lock) {
+    const atLock = calcDepreciation(asset, lock.through, additions);
+    const atNow = calcDepreciation(asset, asOfDate, additions);
+    const delta = Math.max(0, atNow.accumulated_depreciation - atLock.accumulated_depreciation);
+
+    const price = parseFloat(String(asset.purchase_price ?? 0)) || 0;
+    const addedCost = additions.reduce((sum, a) => sum + (parseFloat(String(a.amount ?? 0)) || 0), 0);
+    const accumulated = round2(lock.accumulated + delta);
+
+    return {
+      ...atNow,
+      accumulated_depreciation: accumulated,
+      book_value: round2(price + addedCost - accumulated),
+      locked_through: typeof lock.through === 'string' ? lock.through : lock.through.toISOString().slice(0, 10),
+      locked_accumulated: round2(lock.accumulated),
+    };
+  }
+
+  return calcDepreciationRaw(asset, asOfDate, additions);
+}
+
+function calcDepreciationRaw(
   asset: DepreciationInput,
   asOfDate?: string | Date,
   additions: CapitalAddition[] = [],

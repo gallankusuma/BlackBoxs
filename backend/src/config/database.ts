@@ -487,6 +487,47 @@ export const dbRun = async (sql: string, params: any[] = []): Promise<{ insertId
   }
 };
 
+/**
+ * Jalankan beberapa query dalam satu transaction. Semua helper di atas memakai
+ * koneksi berbeda tiap panggilan, jadi tidak bisa dipakai untuk operasi yang
+ * harus atomik — mis. menutup periode depresiasi (banyak INSERT ledger +
+ * UPDATE status periode). Kalau callback melempar, seluruhnya di-rollback.
+ */
+export interface TxRunner {
+  run: (sql: string, params?: any[]) => Promise<{ insertId: number; affectedRows: number }>;
+  all: (sql: string, params?: any[]) => Promise<any[]>;
+  get: (sql: string, params?: any[]) => Promise<any>;
+}
+
+export const withTransaction = async <T>(fn: (tx: TxRunner) => Promise<T>): Promise<T> => {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const tx: TxRunner = {
+      run: async (sql, params = []) => {
+        const [r]: any = await connection.execute(sql, params);
+        return { insertId: r.insertId, affectedRows: r.affectedRows };
+      },
+      all: async (sql, params = []) => {
+        const [r]: any = await connection.execute(sql, params);
+        return Array.isArray(r) ? r : [r];
+      },
+      get: async (sql, params = []) => {
+        const [r]: any = await connection.execute(sql, params);
+        return Array.isArray(r) ? r[0] : r;
+      },
+    };
+    const result = await fn(tx);
+    await connection.commit();
+    return result;
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+};
+
 // ==================== APPROVAL 2-STAGE PERMISSIONS ====================
 const ensureApprovalPermissions = async (connection: any) => {
   // Ensure permissions table has module/name columns (production has them, dev may not)
@@ -848,6 +889,57 @@ const ensureAssetDepreciationSchema = async (connection: any) => {
   console.log('✅ Aturan depresiasi kategori aset ensured');
 };
 
+// ==================== LEDGER DEPRESIASI & PERIOD LOCK (AST-011) ====================
+// Depresiasi selama ini dihitung dinamis dari master saat halaman dibuka, jadi
+// mengubah harga perolehan hari ini ikut mengubah nilai seluruh periode
+// sebelumnya secara retroaktif. Dua tabel ini menyimpan hasil perhitungan
+// per bulan dan mengunci periodenya.
+//
+// PENTING untuk sistem yang sedang dipakai: selama belum ada periode yang
+// ditutup, kedua tabel ini kosong dan perhitungan berjalan persis seperti
+// sebelumnya. Tidak ada angka yang berubah setelah deploy.
+const ensureDepreciationLedgerSchema = async (connection: any) => {
+  const statements = [
+    `CREATE TABLE IF NOT EXISTS asset_depreciation_periods (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      period_year INT NOT NULL,
+      period_month TINYINT NOT NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'closed',
+      closed_at TIMESTAMP NULL,
+      closed_by INT NULL,
+      reopened_at TIMESTAMP NULL,
+      reopened_by INT NULL,
+      notes TEXT NULL,
+      UNIQUE KEY uq_depreciation_period (period_year, period_month),
+      FOREIGN KEY (closed_by) REFERENCES users(id) ON DELETE SET NULL,
+      FOREIGN KEY (reopened_by) REFERENCES users(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+    `CREATE TABLE IF NOT EXISTS asset_depreciation_ledger (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      asset_id INT NOT NULL,
+      period_year INT NOT NULL,
+      period_month TINYINT NOT NULL,
+      depreciation_amount DECIMAL(18,2) NOT NULL DEFAULT 0,
+      accumulated_after DECIMAL(18,2) NOT NULL DEFAULT 0,
+      book_value_after DECIMAL(18,2) NOT NULL DEFAULT 0,
+      posted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      posted_by INT NULL,
+      UNIQUE KEY uq_depreciation_ledger (asset_id, period_year, period_month),
+      FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE,
+      FOREIGN KEY (posted_by) REFERENCES users(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+    `INSERT IGNORE INTO permissions (resource, action, module, name, description)
+     VALUES ('assets.period', 'manage', 'assets', 'manage assets.period', 'Tutup & buka kembali periode depresiasi')`,
+  ];
+
+  for (const statement of statements) {
+    await execSchemaEnsure(connection, statement);
+  }
+  console.log('✅ Ledger depresiasi & period lock ensured');
+};
+
 // ==================== PIN LOGIN MOBILE ====================
 // Sebelumnya login mobile cukup dengan NIK, sehingga siapa pun yang tahu NIK
 // karyawan bisa mendapat token miliknya — dan seluruh proteksi IDOR di
@@ -1097,6 +1189,7 @@ export async function initializeDatabase() {
     await ensureRouteModuleSchema(connection);
     await ensureMobilePinSchema(connection);
     await ensureAssetDepreciationSchema(connection);
+    await ensureDepreciationLedgerSchema(connection);
     await ensurePermissionCatalog(connection);
     await ensureMasterUserRow(connection);
     // Harus paling akhir: semua permission dari ensure* di atas sudah ada
