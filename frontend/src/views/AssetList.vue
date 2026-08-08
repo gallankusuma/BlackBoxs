@@ -9,6 +9,9 @@
         <router-link to="/assets/production-lines" class="px-4 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50">
           ⚙️ Kelola Line Produksi
         </router-link>
+        <router-link to="/assets/depreciation-periods" class="px-4 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50">
+          🔒 Periode Depresiasi
+        </router-link>
         <button @click="openCreate" class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700">
           + Tambah Aset
         </button>

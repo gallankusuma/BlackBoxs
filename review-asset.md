@@ -245,6 +245,20 @@ Saat menulis tesnya, ketahuan aplikasi ini memakai konvensi **bulan penuh yang s
 
 Konvensi lamanya **sengaja dipertahankan**, bukan diperbaiki — mengubahnya akan menggeser angka setiap aset di produksi sekaligus, dan itu justru jenis gangguan yang sedang kami hindari. Kalau tim reviewer menghendaki konvensi yang berbeda, itu perubahan tersendiri yang perlu direncanakan dengan penutupan periode lebih dulu.
 
+### UI Periode Depresiasi
+
+Halaman [AssetDepreciationPeriods.vue](frontend/src/views/AssetDepreciationPeriods.vue) ditambahkan supaya finance tidak perlu memanggil API langsung: daftar periode beserta status dan jumlah aset yang diposting, form tutup periode, dan tombol buka kembali yang **hanya muncul pada periode terakhir** — mengikuti aturan backend, bukan mengandalkan backend menolak.
+
+Kedua aksi memakai dialog konfirmasi yang menjelaskan akibatnya, karena menutup periode mengubah cara nilai dihitung seterusnya. Saat belum ada periode tertutup, halaman menampilkan penjelasan bahwa perhitungan masih berjalan dinamis seperti biasa.
+
+### Bug yang tertangkap karena membuka browser
+
+Saat memverifikasi halaman baru ini di browser, ketahuan **`Login.vue` rusak** — ada satu `</div>` tidak berpasangan, sisa operasi penghapusan form registrasi di AST-003. Halaman login gagal render sama sekali.
+
+Yang penting: **`vue-tsc --noEmit` meloloskannya**. Error parse template tidak terdeteksi oleh type checker, hanya oleh build sungguhan (`npm run build`) atau saat halaman dibuka. Seluruh 13 file `.vue` yang disentuh sesi ini kemudian diperiksa ulang lewat compiler Vite — hanya `Login.vue` yang rusak, dan sudah diperbaiki.
+
+`CLAUDE.md` diperbarui: untuk perubahan `.vue`, `vue-tsc` saja tidak cukup, harus `npm run build`.
+
 ---
 
 ## Sisa: Sprint Asset 2 (lanjutan), 3, dan 4

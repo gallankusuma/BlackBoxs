@@ -464,6 +464,12 @@ const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true, title: 'P&ID Detail' },
   },
   {
+    path: '/assets/depreciation-periods',
+    name: 'AssetDepreciationPeriods',
+    component: () => import('../views/AssetDepreciationPeriods.vue'),
+    meta: { requiresAuth: true, title: 'Periode Depresiasi' },
+  },
+  {
     path: '/assets/:id',
     name: 'AssetDetail',
     component: () => import('../views/AssetDetail.vue'),

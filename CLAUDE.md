@@ -148,6 +148,12 @@ cd backend && npx tsc --noEmit
 cd frontend && npx vue-tsc --noEmit
 ```
 
+⚠️ **`vue-tsc --noEmit` tidak menangkap error parse template.** Tag yang tidak berpasangan lolos begitu saja dan baru meledak saat halaman dibuka. Untuk perubahan pada `.vue`, jalankan build sungguhan — ini juga yang dijalankan `deploy-blackbox.sh`:
+
+```bash
+cd frontend && npm run build
+```
+
 Keduanya bersih per Agustus 2026 — jaga tetap begitu.
 
 ## Alur kerja: tim development & tim reviewer
