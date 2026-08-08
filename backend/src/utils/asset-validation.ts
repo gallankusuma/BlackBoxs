@@ -12,6 +12,8 @@ import { Response } from 'express';
 export const ASSET_STATUSES = ['active', 'idle', 'under_maintenance', 'disposed'] as const;
 export const DEPRECIATION_METHODS = ['straight_line', 'declining_balance'] as const;
 export const MAINTENANCE_TYPES = ['preventive', 'corrective', 'inspection'] as const;
+// AST-004 — hanya capital_addition yang menambah basis depresiasi
+export const PURCHASE_ENTRY_TYPES = ['capital_addition', 'expense', 'replacement', 'improvement'] as const;
 
 const has = (body: any, key: string) => Object.prototype.hasOwnProperty.call(body || {}, key);
 
@@ -108,7 +110,9 @@ export function validateMaintenanceInput(body: any): string | null {
 
 export function validatePurchaseHistoryInput(body: any): string | null {
   return checkNumber(body.amount, 'Nilai penambahan', { min: 0 })
-    || checkDate(body.purchase_date, 'Tanggal pembelian');
+    || checkDate(body.purchase_date, 'Tanggal pembelian')
+    || checkDate(body.capitalized_at, 'Tanggal kapitalisasi')
+    || checkEnum(body.entry_type, 'Jenis transaksi', PURCHASE_ENTRY_TYPES);
 }
 
 /**

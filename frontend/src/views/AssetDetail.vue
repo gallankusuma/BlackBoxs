@@ -179,7 +179,15 @@
     <!-- Riwayat Pembelian -->
     <div v-if="activeTab === 'purchases'" class="bg-white border rounded-xl p-6">
       <h3 class="font-semibold text-gray-700 mb-4">🧾 Riwayat Pembelian / Penambahan Nilai</h3>
-      <div class="grid grid-cols-6 gap-2 mb-4 items-end bg-gray-50 border rounded-lg p-3">
+      <div class="grid grid-cols-7 gap-2 mb-4 items-end bg-gray-50 border rounded-lg p-3">
+        <div><label class="block text-[10px] text-gray-500 mb-1">Jenis</label>
+          <select v-model="purchForm.entry_type" class="w-full border rounded px-2 py-1.5 text-xs">
+            <option value="expense">Biaya</option>
+            <option value="capital_addition">Penambahan Nilai</option>
+            <option value="replacement">Penggantian</option>
+            <option value="improvement">Perbaikan</option>
+          </select>
+          <p class="text-[9px] text-gray-400 mt-0.5">Hanya "Penambahan Nilai" menambah basis depresiasi.</p></div>
         <div class="col-span-2"><label class="block text-[10px] text-gray-500 mb-1">Deskripsi</label>
           <input v-model="purchForm.description" type="text" class="w-full border rounded px-2 py-1.5 text-xs" placeholder="mis. Upgrade motor"></div>
         <div><label class="block text-[10px] text-gray-500 mb-1">Jumlah (Rp)</label>
@@ -192,13 +200,17 @@
       </div>
       <table class="w-full text-sm">
         <thead class="bg-gray-50 border-b"><tr class="text-left text-gray-600">
-          <th class="px-3 py-2">Tanggal</th><th class="px-3 py-2">Deskripsi</th><th class="px-3 py-2">Vendor</th>
-          <th class="px-3 py-2 text-right">Jumlah</th><th class="px-3 py-2"></th>
+          <th class="px-3 py-2">Tanggal</th><th class="px-3 py-2">Jenis</th><th class="px-3 py-2">Deskripsi</th>
+          <th class="px-3 py-2">Vendor</th><th class="px-3 py-2 text-right">Jumlah</th><th class="px-3 py-2"></th>
         </tr></thead>
         <tbody>
-          <tr v-if="!purchaseHistory.length"><td colspan="5" class="text-center py-6 text-gray-400">Belum ada riwayat pembelian tambahan.</td></tr>
+          <tr v-if="!purchaseHistory.length"><td colspan="6" class="text-center py-6 text-gray-400">Belum ada riwayat pembelian tambahan.</td></tr>
           <tr v-for="p in purchaseHistory" :key="p.id" class="border-b">
             <td class="px-3 py-2">{{ formatDate(p.purchase_date) }}</td>
+            <td class="px-3 py-2">
+              <span :class="p.entry_type === 'capital_addition' ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-600'"
+                class="px-1.5 py-0.5 rounded text-[10px]">{{ entryTypeLabel(p.entry_type) }}</span>
+            </td>
             <td class="px-3 py-2">{{ p.description || '-' }}</td>
             <td class="px-3 py-2 text-gray-500">{{ p.vendor || '-' }}</td>
             <td class="px-3 py-2 text-right">{{ formatCurrency(p.amount) }}</td>
@@ -361,11 +373,17 @@ async function loadPurchaseHistory() {
   const { data } = await api.get(`/assets/${assetId}/purchase-history`);
   purchaseHistory.value = data.data || [];
 }
-const purchForm = ref({ description: '', amount: 0, purchase_date: '', vendor: '' });
+const purchForm = ref({ description: '', amount: 0, purchase_date: '', vendor: '', entry_type: 'expense' });
+
+const entryTypeLabel = (t: string) => ({
+  capital_addition: 'Penambahan Nilai',
+  replacement: 'Penggantian',
+  improvement: 'Perbaikan',
+}[t] || 'Biaya');
 async function addPurchase() {
   if (!purchForm.value.purchase_date) { alert('Tanggal beli wajib diisi'); return; }
   await api.post(`/assets/${assetId}/purchase-history`, purchForm.value);
-  purchForm.value = { description: '', amount: 0, purchase_date: '', vendor: '' };
+  purchForm.value = { description: '', amount: 0, purchase_date: '', vendor: '', entry_type: 'expense' };
   await loadPurchaseHistory();
 }
 async function deletePurchase(p: any) {

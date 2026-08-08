@@ -196,13 +196,35 @@ Aset non-depreciable mengembalikan `depreciation_note` yang ditampilkan di UI, j
 
 Diverifikasi 26 unit test rumus + 9 kasus end-to-end lewat API (tanah nol, garis lurus vs saldo menurun berbeda, `as_of_date` berpengaruh, `in_service_date` menggeser awal depresiasi).
 
+## AST-004 — Penambahan nilai tidak masuk basis depresiasi
+
+**Status: Diterapkan** — [utils/depreciation.ts](backend/src/utils/depreciation.ts), [config/database.ts](backend/src/config/database.ts), [AssetDetail.vue](frontend/src/views/AssetDetail.vue)
+
+Klasifikasi ditambahkan sesuai daftar reviewer: `capital_addition`, `expense`, `replacement`, `improvement`. **Hanya `capital_addition` yang menambah basis depresiasi.**
+
+**Keputusan kompatibilitas yang penting:** kolom `entry_type` diberi default **`'expense'`**, bukan `'capital_addition'`. Baris riwayat pembelian yang sudah ada di produksi selama ini tidak pernah mempengaruhi depresiasi; menandainya `expense` membuat seluruh angka **tetap persis sama setelah deploy**. Kalau default-nya `capital_addition`, setiap aset yang punya riwayat pembelian akan mendadak naik nilainya dan seluruh laporan berubah tanpa ada yang meminta.
+
+Tiap penambahan disusutkan **sendiri** sejak tanggal kapitalisasinya, memakai metode yang sama dan **sisa** umur ekonomis aset induk. Ini yang membuat acceptance criteria "histori sebelum kapitalisasi tidak berubah" terpenuhi — kalau penambahan digabung begitu saja ke harga perolehan, seluruh periode sebelumnya ikut terhitung ulang.
+
+Diverifikasi: entri tanpa `entry_type` tidak mengubah penyusutan maupun nilai buku sama sekali; `capital_addition` menambah total cost dan memakai basis terbaru; nilai per 6 bulan sebelum tanggal kapitalisasi tetap 6 juta.
+
+---
+
+## Catatan keamanan deploy ke sistem yang sedang dipakai
+
+Seluruh perubahan skema di Sprint Asset 1 & 2 bersifat **aditif** — hanya `ADD COLUMN` dan `CREATE TABLE`, tidak ada kolom yang dihapus, diubah tipe, atau diganti nama. Aplikasi versi lama tetap bisa berjalan di atas skema baru.
+
+Yang **mengubah angka** setelah deploy hanya satu: menandai kategori `LAND` sebagai non-depreciable (AST-010). Aset tanah yang selama ini muncul dengan nilai penyusutan akan menjadi nol — benar secara akuntansi, tetapi berubah dari yang biasa dilihat. Saat boot, backend kini **melaporkan berapa aset yang terdampak** beserta perintah SQL untuk mengembalikannya sementara bila diperlukan.
+
+Yang **tidak berubah** setelah deploy: seluruh angka depresiasi aset non-tanah, seluruh riwayat pembelian (default `expense`), dan akun master admin (dijamin ada oleh `ensureMasterUserRow`, diuji eksplisit di `test:asset`).
+
 ---
 
 ## Sisa: Sprint Asset 2 (lanjutan), 3, dan 4
 
-**Status: Terbuka.** AST-004, 005, 006, 011, 012, 013, 015, 016, 017, 018, 019.
+**Status: Terbuka.** AST-005, 006, 011, 012, 013, 015, 016, 017, 018, 019.
 
-Berikutnya: **AST-004** (capital addition belum masuk basis depresiasi) lalu **AST-011** (nilai historis berubah retroaktif — butuh depreciation ledger + period lock).
+Berikutnya: **AST-011** (nilai historis berubah retroaktif — butuh depreciation ledger + period lock).
 
 ---
 
@@ -212,7 +234,7 @@ Berikutnya: **AST-004** (capital addition belum masuk basis depresiasi) lalu **A
 cd backend && npm run test:all
 ```
 
-229 kasus dalam 6 suite, semua lulus:
+241 kasus dalam 6 suite, semua lulus:
 
 | Suite | Kasus |
 |---|---|
@@ -220,7 +242,7 @@ cd backend && npm run test:all
 | `npm run test:http` | 36 |
 | `npm run test:pin` | 28 |
 | `npm run test:rbac` | 45 |
-| `npm run test:asset` | 75 |
+| `npm run test:asset` | 87 |
 | `npm run test:depreciation` | 26 |
 
 `tsc --noEmit` dan `vue-tsc --noEmit` bersih.

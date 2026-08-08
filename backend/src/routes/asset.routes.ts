@@ -14,12 +14,28 @@ const router = Router();
 
 // as_of_date memungkinkan memeriksa nilai buku pada tanggal tertentu
 // (acceptance criteria AST-003), bukan selalu hari ini.
-function withDepreciation(row: any, asOfDate?: string) {
+function withDepreciation(row: any, asOfDate?: string, additions: any[] = []) {
   return {
     ...row,
     spec: typeof row.spec === 'string' ? JSON.parse(row.spec || '{}') : (row.spec || {}),
-    ...calcDepreciation(row, asOfDate),
+    ...calcDepreciation(row, asOfDate, additions),
   };
+}
+
+// Ambil capital addition untuk banyak aset sekaligus — menghindari query
+// per baris saat menampilkan daftar aset.
+async function capitalAdditionsByAsset(assetIds: number[]): Promise<Record<number, any[]>> {
+  if (!assetIds.length) return {};
+  const placeholders = assetIds.map(() => '?').join(',');
+  const rows = await dbAll(
+    `SELECT asset_id, amount, capitalized_at, purchase_date
+     FROM asset_purchase_history
+     WHERE entry_type = 'capital_addition' AND asset_id IN (${placeholders})`,
+    assetIds
+  ) as any[];
+  const grouped: Record<number, any[]> = {};
+  for (const r of rows) (grouped[r.asset_id] ||= []).push(r);
+  return grouped;
 }
 
 // ── Asset code generator (MAX-based, not COUNT-based) ─────────────────────
@@ -175,7 +191,8 @@ router.get('/summary', authMiddleware, requirePermission('assets.view', 'assets.
        WHERE a.status != 'disposed'`,
       []
     );
-    const withDep = rows.map(r => withDepreciation(r));
+    const summaryAdditions = await capitalAdditionsByAsset(rows.map((r: any) => r.id));
+    const withDep = rows.map((r: any) => withDepreciation(r, undefined, summaryAdditions[r.id] || []));
 
     const byCategory: Record<string, any> = {};
     for (const a of withDep) {
@@ -227,7 +244,8 @@ router.get('/', authMiddleware, requirePermission('assets.view', 'assets.manage'
       params
     );
     const asOf = typeof req.query.as_of_date === 'string' ? req.query.as_of_date : undefined;
-    res.json({ data: rows.map(r => withDepreciation(r, asOf)) });
+    const additions = await capitalAdditionsByAsset(rows.map((r: any) => r.id));
+    res.json({ data: rows.map((r: any) => withDepreciation(r, asOf, additions[r.id] || [])) });
   } catch (error: any) {
     serverError(res, 'asset', error);
   }
@@ -247,7 +265,8 @@ router.get('/:id', authMiddleware, requirePermission('assets.view', 'assets.mana
     );
     if (!row) return res.status(404).json({ error: 'Asset not found' });
     const asOf = typeof req.query.as_of_date === 'string' ? req.query.as_of_date : undefined;
-    res.json({ data: withDepreciation(row, asOf) });
+    const additions = (await capitalAdditionsByAsset([row.id]))[row.id] || [];
+    res.json({ data: withDepreciation(row, asOf, additions) });
   } catch (error: any) {
     serverError(res, 'asset', error);
   }
@@ -633,14 +652,23 @@ router.post('/:id/purchase-history', authMiddleware, requirePermission('assets.f
     const invalidEntry = validatePurchaseHistoryInput(req.body);
     if (invalidEntry) return res.status(400).json({ error: invalidEntry });
 
-    const { description, amount, purchase_date, vendor, notes, purchase_order_item_id } = req.body;
+    const { description, amount, purchase_date, vendor, notes, purchase_order_item_id,
+            entry_type, capitalized_at } = req.body;
     if (!purchase_date) return res.status(400).json({ error: 'purchase_date is required' });
+
+    // Default 'expense': hanya entri yang SENGAJA ditandai capital_addition
+    // yang menambah basis depresiasi (AST-004).
+    const type = entry_type || 'expense';
+    const capitalisedOn = type === 'capital_addition' ? (capitalized_at || purchase_date) : null;
+
     const result = await dbRun(
       `INSERT INTO asset_purchase_history
-        (asset_id, purchase_order_item_id, description, amount, purchase_date, vendor, notes, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        (asset_id, purchase_order_item_id, description, amount, purchase_date, vendor, notes,
+         entry_type, capitalized_at, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [req.params.id, purchase_order_item_id || null, description || null, amount || 0,
-        purchase_date, vendor || null, notes || null, (req as any).user?.userId || null]
+        purchase_date, vendor || null, notes || null, type, capitalisedOn,
+        (req as any).user?.userId || null]
     );
     res.status(201).json({ id: result.insertId });
   } catch (error: any) {

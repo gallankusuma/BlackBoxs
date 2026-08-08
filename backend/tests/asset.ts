@@ -280,7 +280,63 @@ async function main() {
     if (id) await call('DELETE', `/assets/${id}`, undefined, master);
   }
 
-  console.log('\n9. Bersih-bersih');
+  console.log('\n9. AST-004 — capital addition masuk basis depresiasi');
+  const capAsset = await call('POST', '/assets', {
+    category_id: machCat.id, name: 'Mesin Capital',
+    purchase_date: '2020-01-01', purchase_price: 120_000_000,
+    salvage_value: 0, useful_life_years: 10, depreciation_method: 'straight_line',
+  }, master);
+  const capId = capAsset.json?.id;
+
+  const beforeAdd = (await call('GET', `/assets/${capId}?as_of_date=2022-01-01`, undefined, master)).json?.data;
+  chk('sebelum ada penambahan: 24 bulan × 1 juta', Number(beforeAdd?.accumulated_depreciation), 24_000_000);
+
+  // KOMPATIBILITAS: entri tanpa entry_type harus default 'expense' dan TIDAK
+  // mengubah angka apa pun — inilah yang menjaga data produksi lama tetap sama.
+  await call('POST', `/assets/${capId}/purchase-history`,
+    { description: 'Servis rutin', amount: 30_000_000, purchase_date: '2021-01-01' }, master);
+  const afterExpense = (await call('GET', `/assets/${capId}?as_of_date=2022-01-01`, undefined, master)).json?.data;
+  chk('entri tanpa jenis → tidak mengubah penyusutan',
+    Number(afterExpense?.accumulated_depreciation), 24_000_000);
+  chk('entri tanpa jenis → tidak mengubah nilai buku',
+    Number(afterExpense?.book_value), Number(beforeAdd?.book_value));
+
+  // Baru capital_addition yang menambah basis
+  await call('POST', `/assets/${capId}/purchase-history`, {
+    description: 'Upgrade motor', amount: 36_000_000,
+    purchase_date: '2021-01-01', entry_type: 'capital_addition',
+  }, master);
+  const afterCapital = (await call('GET', `/assets/${capId}?as_of_date=2022-01-01`, undefined, master)).json?.data;
+
+  chk('capital addition menambah total cost',
+    Number(afterCapital?.total_capitalized_cost), 156_000_000);
+  chk('penambahan tercatat', Number(afterCapital?.capitalized_additions), 36_000_000);
+  // Induk 24 juta + penambahan 36jt/108 bulan × 12 bulan = 4 juta
+  chk('penyusutan memakai basis terbaru',
+    Number(afterCapital?.accumulated_depreciation), 28_000_000);
+  chk('nilai buku ikut basis baru', Number(afterCapital?.book_value), 128_000_000);
+
+  // Histori sebelum tanggal kapitalisasi tidak berubah
+  const beforeCapDate = (await call('GET', `/assets/${capId}?as_of_date=2020-07-01`, undefined, master)).json?.data;
+  chk('histori sebelum kapitalisasi tidak berubah',
+    Number(beforeCapDate?.accumulated_depreciation), 6_000_000);
+
+  chk('jenis transaksi tidak dikenal ditolak',
+    (await call('POST', `/assets/${capId}/purchase-history`,
+      { amount: 1000, purchase_date: '2021-01-01', entry_type: 'ngawur' }, master)).status, 400);
+
+  await call('DELETE', `/assets/${capId}`, undefined, master);
+
+  console.log('\n10. Master admin tetap berfungsi penuh');
+  const masterCheck = await call('GET', '/users/profile/me', undefined, master);
+  chk('master bisa baca profilnya', masterCheck.status, 200);
+  chk('master masih level 10', Number(masterCheck.json?.data?.user_level), 10);
+  const masterCreate = await call('POST', '/assets',
+    { category_id: machCat.id, name: 'Cek Master' }, master);
+  chk('master bisa membuat aset (FK created_by valid)', masterCreate.status, 201);
+  if (masterCreate.json?.id) await call('DELETE', `/assets/${masterCreate.json.id}`, undefined, master);
+
+  console.log('\n11. Bersih-bersih');
   await call('DELETE', `/assets/${assetId}`, undefined, master);
   await call('DELETE', `/assets/pnids/${pnidId}`, undefined, master);
   await call('DELETE', `/assets/pnids/${pnid2.json?.id}`, undefined, master);

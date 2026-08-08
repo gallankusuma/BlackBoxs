@@ -810,6 +810,14 @@ const ensureAssetDepreciationSchema = async (connection: any) => {
     // fallback ke double-declining (2 / umur ekonomis).
     `ALTER TABLE assets ADD COLUMN IF NOT EXISTS depreciation_rate DECIMAL(6,4) NULL`,
 
+    // AST-004 — klasifikasi riwayat pembelian. Default 'expense' DISENGAJA:
+    // baris yang sudah ada di produksi selama ini tidak pernah menambah nilai
+    // aset, jadi menandainya expense membuat seluruh angka tetap persis sama
+    // setelah deploy. Hanya entri yang sengaja ditandai capital_addition yang
+    // menambah basis depresiasi.
+    `ALTER TABLE asset_purchase_history ADD COLUMN IF NOT EXISTS entry_type VARCHAR(30) NOT NULL DEFAULT 'expense'`,
+    `ALTER TABLE asset_purchase_history ADD COLUMN IF NOT EXISTS capitalized_at DATE NULL`,
+
     // Tanah tidak disusutkan. Bangunan lazim 20 tahun garis lurus.
     `UPDATE asset_categories SET is_depreciable = 0 WHERE code = 'LAND'`,
     `UPDATE asset_categories SET default_useful_life_years = 20, default_depreciation_method = 'straight_line'
@@ -819,6 +827,24 @@ const ensureAssetDepreciationSchema = async (connection: any) => {
   for (const statement of statements) {
     await execSchemaEnsure(connection, statement);
   }
+
+  // Laporkan dampaknya ke laporan yang sudah berjalan. Menandai LAND sebagai
+  // non-depreciable membuat aset tanah yang selama ini muncul dengan angka
+  // penyusutan berubah menjadi nol — benar secara akuntansi, tapi operator
+  // perlu tahu sebelum ada yang menanyakan kenapa laporannya berubah.
+  try {
+    const [rows]: any = await connection.execute(
+      `SELECT COUNT(*) AS c FROM assets a JOIN asset_categories c ON a.category_id = c.id
+       WHERE c.is_depreciable = 0 AND a.purchase_price > 0 AND a.purchase_date IS NOT NULL`
+    );
+    const affected = Array.isArray(rows) && rows[0] ? Number(rows[0].c) : 0;
+    if (affected > 0) {
+      console.log(`⚠️  ${affected} aset berkategori non-depreciable (mis. Tanah) kini bernilai penyusutan 0.`);
+      console.log('   Ini koreksi akuntansi. Untuk mengembalikan sementara:');
+      console.log("   UPDATE asset_categories SET is_depreciable = 1 WHERE code = 'LAND';");
+    }
+  } catch { /* tabel assets belum ada di database baru — abaikan */ }
+
   console.log('✅ Aturan depresiasi kategori aset ensured');
 };
 

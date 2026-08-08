@@ -32,6 +32,9 @@ export interface DepreciationResult {
   percent_depreciated: number;
   /** Alasan kalau depresiasi nol — memudahkan menjelaskan angka di UI */
   depreciation_note?: string;
+  /** Hanya muncul kalau aset punya capital addition (AST-004) */
+  capitalized_additions?: number;
+  total_capitalized_cost?: number;
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -45,7 +48,19 @@ const toDate = (v: any): Date | null => {
 const monthsBetween = (from: Date, to: Date) =>
   (to.getFullYear() - from.getFullYear()) * 12 + (to.getMonth() - from.getMonth());
 
-export function calcDepreciation(asset: DepreciationInput, asOfDate?: string | Date): DepreciationResult {
+/** Penambahan nilai yang dikapitalisasi (AST-004) */
+export interface CapitalAddition {
+  amount: number | string;
+  /** Tanggal kapitalisasi; kalau kosong pakai purchase_date entri */
+  capitalized_at?: string | Date | null;
+  purchase_date?: string | Date | null;
+}
+
+export function calcDepreciation(
+  asset: DepreciationInput,
+  asOfDate?: string | Date,
+  additions: CapitalAddition[] = [],
+): DepreciationResult {
   const price = parseFloat(String(asset.purchase_price ?? 0)) || 0;
   const salvage = parseFloat(String(asset.salvage_value ?? 0)) || 0;
   const lifeYears = Number(asset.useful_life_years) || 1;
@@ -105,14 +120,59 @@ export function calcDepreciation(asset: DepreciationInput, asOfDate?: string | D
     accumulated = Math.min(monthlyDepreciation * monthsElapsed, depreciableBase);
   }
 
-  accumulated = round2(Math.min(accumulated, depreciableBase));
-  const bookValue = round2(price - accumulated);
-  const percent = depreciableBase > 0 ? Math.round((accumulated / depreciableBase) * 1000) / 10 : 0;
+  accumulated = Math.min(accumulated, depreciableBase);
+
+  // ── Capital addition (AST-004) ──────────────────────────────────────────
+  // Tiap penambahan nilai disusutkan sendiri sejak tanggal kapitalisasinya,
+  // memakai metode yang sama dan SISA umur ekonomis aset induk. Histori
+  // sebelum tanggal kapitalisasi tidak berubah — inilah sebabnya penambahan
+  // tidak digabung begitu saja ke harga perolehan.
+  let addedCost = 0;
+  let addedAccumulated = 0;
+  let addedMonthly = 0;
+
+  for (const add of additions) {
+    const amount = parseFloat(String(add.amount ?? 0)) || 0;
+    if (amount <= 0) continue;
+    const addDate = toDate(add.capitalized_at) || toDate(add.purchase_date);
+    if (!addDate) continue;
+
+    addedCost += amount;
+
+    const monthsUsedAtCapitalisation = Math.max(0, monthsBetween(startDate, addDate));
+    const remainingMonths = Math.max(totalMonths - monthsUsedAtCapitalisation, 1);
+    const monthsSince = Math.max(0, Math.min(monthsBetween(addDate, cutoff), remainingMonths));
+
+    if (method === 'declining_balance') {
+      const explicitRate = parseFloat(String(asset.depreciation_rate ?? '')) || 0;
+      const annualRate = explicitRate > 0 ? explicitRate : 2 / lifeYears;
+      const monthlyRate = annualRate / 12;
+      let book = amount;
+      for (let m = 0; m < monthsSince; m++) {
+        const charge = book * monthlyRate;
+        if (charge <= 0) break;
+        book -= charge;
+        addedAccumulated += charge;
+      }
+      addedMonthly += book * monthlyRate;
+    } else {
+      const perMonth = amount / remainingMonths;
+      addedAccumulated += Math.min(perMonth * monthsSince, amount);
+      if (monthsSince < remainingMonths) addedMonthly += perMonth;
+    }
+  }
+
+  const totalCost = price + addedCost;
+  const totalAccumulated = round2(accumulated + addedAccumulated);
+  const totalBase = depreciableBase + addedCost;
+  const bookValue = round2(totalCost - totalAccumulated);
+  const percent = totalBase > 0 ? Math.round((totalAccumulated / totalBase) * 1000) / 10 : 0;
 
   return {
-    accumulated_depreciation: accumulated,
+    accumulated_depreciation: totalAccumulated,
     book_value: bookValue,
-    monthly_depreciation: round2(monthlyDepreciation),
+    monthly_depreciation: round2(monthlyDepreciation + addedMonthly),
     percent_depreciated: percent,
+    ...(addedCost > 0 ? { capitalized_additions: round2(addedCost), total_capitalized_cost: round2(totalCost) } : {}),
   };
 }
