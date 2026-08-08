@@ -9,10 +9,11 @@ import { Response } from 'express';
  * pesan errornya ditulis untuk manusia.
  */
 
-export const ASSET_STATUSES = ['active', 'idle', 'under_maintenance', 'disposed'] as const;
+export const ASSET_STATUSES = ['active', 'idle', 'under_maintenance', 'disposal_requested', 'disposed'] as const;
 export const DEPRECIATION_METHODS = ['straight_line', 'declining_balance'] as const;
 export const MAINTENANCE_TYPES = ['preventive', 'corrective', 'inspection'] as const;
 // AST-004 — hanya capital_addition yang menambah basis depresiasi
+export const DISPOSAL_METHODS = ['sold', 'scrapped', 'donated', 'traded_in', 'lost', 'other'] as const;
 export const PURCHASE_ENTRY_TYPES = ['capital_addition', 'expense', 'replacement', 'improvement'] as const;
 
 const has = (body: any, key: string) => Object.prototype.hasOwnProperty.call(body || {}, key);

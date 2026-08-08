@@ -261,11 +261,43 @@ Yang penting: **`vue-tsc --noEmit` meloloskannya**. Error parse template tidak t
 
 ---
 
-## Sisa: Sprint Asset 2 (lanjutan), 3, dan 4
+## AST-006 — Disposal belum menjadi proses bisnis
 
-**Status: Terbuka.** AST-005, 006, 012, 013, 015, 016, 017, 018, 019.
+**Status: Diterapkan** — [config/database.ts](backend/src/config/database.ts), [asset.routes.ts](backend/src/routes/asset.routes.ts)
 
-Berikutnya: **AST-006** (disposal workflow) menutup Sprint Asset 2.
+Alur yang diminta reviewer diterapkan penuh: `active → disposal_requested → approved (disposed) / rejected`, ditambah **pembatalan resmi** untuk memenuhi kriteria "aset disposed tidak dapat dikembalikan menjadi active tanpa reversal resmi".
+
+Tabel `asset_disposals` mencatat alasan, metode, pembeli, tanggal rencana & realisasi, nilai jual, **nilai buku pada tanggal disposal**, **gain/loss**, dokumen pendukung, serta siapa yang mengajukan, menyetujui, menolak, atau membatalkan.
+
+Gain/loss dihitung sebagai `proceeds − nilai buku pada tanggal disposal`, dan nilai bukunya diambil dari mesin depresiasi yang sama — termasuk menghormati periode yang sudah terkunci (AST-011).
+
+**Perubahan perilaku yang perlu diketahui:** mengubah status menjadi `disposed` lewat edit biasa kini ditolak `409` dan diarahkan ke alur disposal. Begitu pula mengaktifkan kembali aset disposed. Ini satu-satunya bagian Sprint Asset 2 yang mengubah cara kerja pengguna — disengaja, karena tanpa itu seluruh alur persetujuan bisa dilewati. Pesan errornya menyertakan endpoint yang harus dipakai.
+
+Permission baru `assets.dispose.approve` dipisah dari `assets.dispose`, sehingga pemisahan tugas pengaju dan penyetuju bisa diberlakukan lewat konfigurasi role. Saat ini pengaju masih boleh menyetujui permintaannya sendiri — keputusan proses, bukan teknis, mengingat tim produksi hanya 5 user.
+
+Diverifikasi 27 kasus, termasuk kedua arah perhitungan: dijual di bawah nilai buku → **rugi 28 juta**, dijual di atas nilai buku → **untung 12 juta**.
+
+---
+
+## Bug yang tertangkap saat menulis tes disposal
+
+**Tanggal bergeser satu hari, dan merambat setiap kali disimpan.**
+
+Kolom `DATE` dikembalikan mysql2 sebagai objek `Date`, sehingga `2026-01-31` di database menjadi `'2026-01-30T17:00:00.000Z'` di respons — pergeseran zona waktu WIB (+07). [AssetDetail.vue](frontend/src/views/AssetDetail.vue) mengisi form dengan `String(nilai).substring(0, 10)`, jadi form menampilkan **30 Januari**. Begitu disimpan, tanggalnya benar-benar menjadi 30.
+
+Artinya **setiap kali aset dibuka lalu disimpan, tanggal perolehannya mundur satu hari** — tanpa error, tanpa peringatan. Aset yang sering diedit akan melenceng jauh, dan karena tanggal perolehan adalah dasar perhitungan depresiasi, nilai bukunya ikut salah.
+
+Ditutup di level driver dengan `dateStrings: ['DATE']`. Sengaja dibatasi ke `DATE` saja — kolom itu memang tidak punya komponen jam, jadi string tanggal murni selalu lebih benar; `TIMESTAMP` dan `DATETIME` dibiarkan apa adanya supaya modul lain tidak ikut berubah perilakunya.
+
+Ada tes regresinya, termasuk simulasi siklus buka → simpan yang dulu menggeser tanggal.
+
+---
+
+## Sisa: Sprint Asset 3 dan 4
+
+**Status: Terbuka.** AST-005, 012, 013, 015, 016, 017, 018, 019.
+
+**Sprint Asset 1 dan 2 tuntas.**
 
 ---
 
@@ -275,7 +307,7 @@ Berikutnya: **AST-006** (disposal workflow) menutup Sprint Asset 2.
 cd backend && npm run test:all
 ```
 
-259 kasus dalam 6 suite, semua lulus:
+289 kasus dalam 6 suite, semua lulus:
 
 | Suite | Kasus |
 |---|---|
@@ -283,7 +315,7 @@ cd backend && npm run test:all
 | `npm run test:http` | 36 |
 | `npm run test:pin` | 28 |
 | `npm run test:rbac` | 45 |
-| `npm run test:asset` | 105 |
+| `npm run test:asset` | 135 |
 | `npm run test:depreciation` | 26 |
 
 `tsc --noEmit` dan `vue-tsc --noEmit` bersih.

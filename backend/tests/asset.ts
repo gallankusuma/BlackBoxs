@@ -413,7 +413,115 @@ async function main() {
   await call('POST', '/assets/depreciation/periods/reopen', { period_year: 2020, period_month: 1 }, master);
   await call('DELETE', `/assets/${ledgerId}`, undefined, master);
 
-  console.log('\n12. Bersih-bersih');
+  console.log('\n12. AST-006 — disposal workflow');
+
+  const mkAsset = async (name: string) => (await call('POST', '/assets', {
+    category_id: machCat.id, name,
+    purchase_date: '2020-01-01', purchase_price: 120_000_000,
+    salvage_value: 0, useful_life_years: 10, depreciation_method: 'straight_line',
+  }, master)).json?.id;
+
+  const dispA = await mkAsset('Mesin Disposal A');
+
+  // Perubahan status langsung tidak lagi diterima
+  const direct = await call('PATCH', `/assets/${dispA}`, { status: 'disposed', disposed_date: '2026-01-31' }, master);
+  chk('ubah status ke disposed langsung ditolak', direct.status, 409);
+  chk('diarahkan ke alur disposal', direct.json?.code, 'DISPOSAL_WORKFLOW_REQUIRED');
+
+  chk('permintaan tanpa alasan ditolak',
+    (await call('POST', `/assets/${dispA}/disposal-request`, {}, master)).status, 400);
+  chk('metode disposal tidak dikenal ditolak',
+    (await call('POST', `/assets/${dispA}/disposal-request`,
+      { reason: 'Rusak', disposal_method: 'ngawur' }, master)).status, 400);
+
+  const req1 = await call('POST', `/assets/${dispA}/disposal-request`, {
+    reason: 'Mesin rusak berat, biaya perbaikan melebihi nilai buku',
+    disposal_method: 'sold', buyer: 'CV Besi Tua', planned_date: '2026-01-31', proceeds: 20_000_000,
+  }, master);
+  chk('permintaan disposal dibuat', req1.status, 201);
+  const disposalId = req1.json?.id;
+
+  const afterReq = (await call('GET', `/assets/${dispA}`, undefined, master)).json?.data;
+  chk('status aset jadi disposal_requested', afterReq?.status, 'disposal_requested');
+  chk('permintaan ganda ditolak',
+    (await call('POST', `/assets/${dispA}/disposal-request`, { reason: 'lagi' }, master)).status, 409);
+
+  // Nilai buku 31 Jan 2026: 120jt − (72 bulan × 1jt) = 48jt. Proceeds 20jt → rugi 28jt
+  const approve = await call('POST', `/assets/disposals/${disposalId}/approve`,
+    { disposal_date: '2026-01-31', proceeds: 20_000_000 }, master);
+  chk('disposal disetujui', approve.status, 200);
+  chk('nilai buku saat disposal dihitung', Number(approve.json?.book_value_at_disposal), 48_000_000);
+  chk('gain/loss = proceeds − nilai buku', Number(approve.json?.gain_loss), -28_000_000);
+  chk('ditandai sebagai loss', approve.json?.result, 'loss');
+
+  const disposedAsset = (await call('GET', `/assets/${dispA}`, undefined, master)).json?.data;
+  chk('status jadi disposed', disposedAsset?.status, 'disposed');
+  chk('tanggal disposal tersimpan', String(disposedAsset?.disposed_date).slice(0, 10), '2026-01-31');
+  chk('depresiasi berhenti di tanggal disposal',
+    Number(disposedAsset?.accumulated_depreciation), 72_000_000);
+
+  chk('menyetujui dua kali ditolak',
+    (await call('POST', `/assets/disposals/${disposalId}/approve`, {}, master)).status, 409);
+  chk('aset disposed tidak bisa diaktifkan lewat edit biasa',
+    (await call('PATCH', `/assets/${dispA}`, { status: 'active' }, master)).json?.code, 'REVERSAL_REQUIRED');
+
+  console.log('\n   Pembatalan resmi');
+  chk('pembatalan tanpa alasan ditolak',
+    (await call('POST', `/assets/disposals/${disposalId}/reverse`, {}, master)).status, 400);
+  chk('pembatalan resmi berhasil',
+    (await call('POST', `/assets/disposals/${disposalId}/reverse`, { reason: 'Salah input aset' }, master)).status, 200);
+  const reversed = (await call('GET', `/assets/${dispA}`, undefined, master)).json?.data;
+  chk('aset kembali aktif', reversed?.status, 'active');
+  chk('tanggal disposal dikosongkan', reversed?.disposed_date, null);
+
+  console.log('\n   Penolakan & gain');
+  const dispB = await mkAsset('Mesin Disposal B');
+  const req2 = await call('POST', `/assets/${dispB}/disposal-request`, { reason: 'Sudah tidak dipakai' }, master);
+  chk('penolakan tanpa alasan ditolak',
+    (await call('POST', `/assets/disposals/${req2.json?.id}/reject`, {}, master)).status, 400);
+  chk('permintaan ditolak',
+    (await call('POST', `/assets/disposals/${req2.json?.id}/reject`, { reason: 'Masih layak pakai' }, master)).status, 200);
+  chk('aset kembali ke status semula',
+    (await call('GET', `/assets/${dispB}`, undefined, master)).json?.data?.status, 'active');
+
+  // Dijual di atas nilai buku → gain
+  const req3 = await call('POST', `/assets/${dispB}/disposal-request`,
+    { reason: 'Ada penawaran bagus', disposal_method: 'sold', proceeds: 60_000_000 }, master);
+  const gainRes = await call('POST', `/assets/disposals/${req3.json?.id}/approve`,
+    { disposal_date: '2026-01-31', proceeds: 60_000_000 }, master);
+  chk('dijual di atas nilai buku → gain', Number(gainRes.json?.gain_loss), 12_000_000);
+  chk('ditandai sebagai gain', gainRes.json?.result, 'gain');
+
+  const history = await call('GET', `/assets/${dispA}/disposals`, undefined, master);
+  chk('riwayat disposal tersimpan', (history.json?.data || []).length >= 1, true);
+  chk('jejak siapa yang menyetujui ada', !!(history.json?.data || [])[0]?.approved_by_name, true);
+
+  for (const id of [dispA, dispB]) await call('DELETE', `/assets/${id}`, undefined, master);
+
+  console.log('\n13. Tanggal tidak bergeser zona waktu');
+  // Kolom DATE dulu dikembalikan sebagai objek Date, sehingga 2026-01-31 di
+  // database menjadi '2026-01-30T17:00:00.000Z' di respons (WIB +07). Frontend
+  // mengisi form dengan substring(0,10) → tampil 30 Jan → disimpan → tanggalnya
+  // benar-benar mundur satu hari setiap kali aset dibuka lalu disimpan.
+  const dateAsset = await call('POST', '/assets', {
+    category_id: machCat.id, name: 'Uji Tanggal', purchase_date: '2026-01-31',
+  }, master);
+  const dateId = dateAsset.json?.id;
+  const fetched = (await call('GET', `/assets/${dateId}`, undefined, master)).json?.data;
+  chk('purchase_date kembali persis seperti disimpan', String(fetched?.purchase_date), '2026-01-31');
+  chk('substring(0,10) menghasilkan tanggal yang benar',
+    String(fetched?.purchase_date).substring(0, 10), '2026-01-31');
+
+  // Simulasi siklus buka → simpan yang dulu menggeser tanggal
+  await call('PATCH', `/assets/${dateId}`,
+    { purchase_date: String(fetched?.purchase_date).substring(0, 10) }, master);
+  const roundTrip = (await call('GET', `/assets/${dateId}`, undefined, master)).json?.data;
+  chk('buka lalu simpan tidak menggeser tanggal',
+    String(roundTrip?.purchase_date).substring(0, 10), '2026-01-31');
+
+  await call('DELETE', `/assets/${dateId}`, undefined, master);
+
+  console.log('\n14. Bersih-bersih');
   await call('DELETE', `/assets/${assetId}`, undefined, master);
   await call('DELETE', `/assets/pnids/${pnidId}`, undefined, master);
   await call('DELETE', `/assets/pnids/${pnid2.json?.id}`, undefined, master);

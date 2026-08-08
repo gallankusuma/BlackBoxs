@@ -17,6 +17,20 @@ const pool = mysql.createPool({
   queueLimit: 0,
   enableKeepAlive: true,
   keepAliveInitialDelay: 0,
+
+  // Kolom DATE dikembalikan sebagai string 'YYYY-MM-DD', bukan objek Date.
+  //
+  // Sebelumnya `purchase_date` bernilai 2026-01-31 di database berubah menjadi
+  // '2026-01-30T17:00:00.000Z' di respons — pergeseran zona waktu WIB (+07).
+  // Frontend mengisi form tanggal dengan `String(nilai).substring(0, 10)`,
+  // sehingga menampilkan 30 Januari; begitu disimpan, tanggalnya BENAR-BENAR
+  // menjadi 30. Setiap kali aset dibuka lalu disimpan, tanggalnya mundur satu
+  // hari — korupsi data yang merambat pelan tanpa error apa pun.
+  //
+  // Sengaja dibatasi ke DATE saja: kolom itu memang tidak punya komponen jam,
+  // jadi string tanggal murni selalu lebih benar. TIMESTAMP dan DATETIME
+  // dibiarkan apa adanya supaya modul lain tidak ikut berubah perilakunya.
+  dateStrings: ['DATE'] as any,
 });
 
 const activeDatabaseName = process.env.DB_NAME || 'erp_manufacturing';
@@ -940,6 +954,59 @@ const ensureDepreciationLedgerSchema = async (connection: any) => {
   console.log('✅ Ledger depresiasi & period lock ensured');
 };
 
+// ==================== DISPOSAL WORKFLOW (AST-006) ====================
+// Disposal sebelumnya hanya berupa mengubah status menjadi 'disposed' — tanpa
+// alasan, tanpa persetujuan, tanpa nilai jual, dan tanpa perhitungan gain/loss.
+// Aset disposed pun bisa dikembalikan jadi active begitu saja.
+//
+// Aman untuk sistem berjalan: aset yang SUDAH berstatus disposed tidak disentuh
+// sama sekali — tidak ada migrasi data lama. Tabel ini hanya mencatat disposal
+// yang terjadi sejak fitur ini aktif.
+const ensureDisposalSchema = async (connection: any) => {
+  const statements = [
+    `CREATE TABLE IF NOT EXISTS asset_disposals (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      asset_id INT NOT NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'requested',
+      reason TEXT NULL,
+      disposal_method VARCHAR(50) NULL,
+      buyer VARCHAR(200) NULL,
+      planned_date DATE NULL,
+      disposal_date DATE NULL,
+      proceeds DECIMAL(18,2) NOT NULL DEFAULT 0,
+      book_value_at_disposal DECIMAL(18,2) NULL,
+      gain_loss DECIMAL(18,2) NULL,
+      document_id INT NULL,
+      previous_status VARCHAR(30) NULL,
+      requested_by INT NULL,
+      requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      approved_by INT NULL,
+      approved_at TIMESTAMP NULL,
+      rejected_by INT NULL,
+      rejected_at TIMESTAMP NULL,
+      rejection_reason TEXT NULL,
+      reversed_by INT NULL,
+      reversed_at TIMESTAMP NULL,
+      reversal_reason TEXT NULL,
+      FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE,
+      FOREIGN KEY (document_id) REFERENCES asset_documents(id) ON DELETE SET NULL,
+      FOREIGN KEY (requested_by) REFERENCES users(id) ON DELETE SET NULL,
+      FOREIGN KEY (approved_by) REFERENCES users(id) ON DELETE SET NULL,
+      FOREIGN KEY (rejected_by) REFERENCES users(id) ON DELETE SET NULL,
+      FOREIGN KEY (reversed_by) REFERENCES users(id) ON DELETE SET NULL,
+      INDEX idx_asset_disposal (asset_id, status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+    `INSERT IGNORE INTO permissions (resource, action, module, name, description)
+     VALUES ('assets.dispose', 'approve', 'assets', 'approve assets.dispose', 'Menyetujui / menolak permintaan disposal aset')`,
+  ];
+
+  for (const statement of statements) {
+    await execSchemaEnsure(connection, statement);
+  }
+  console.log('✅ Disposal workflow ensured');
+};
+
 // ==================== PIN LOGIN MOBILE ====================
 // Sebelumnya login mobile cukup dengan NIK, sehingga siapa pun yang tahu NIK
 // karyawan bisa mendapat token miliknya — dan seluruh proteksi IDOR di
@@ -1190,6 +1257,7 @@ export async function initializeDatabase() {
     await ensureMobilePinSchema(connection);
     await ensureAssetDepreciationSchema(connection);
     await ensureDepreciationLedgerSchema(connection);
+    await ensureDisposalSchema(connection);
     await ensurePermissionCatalog(connection);
     await ensureMasterUserRow(connection);
     // Harus paling akhir: semua permission dari ensure* di atas sudah ada

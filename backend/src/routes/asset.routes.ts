@@ -4,7 +4,7 @@ import fs from 'fs';
 import multer from 'multer';
 import { dbAll, dbGet, dbRun, withTransaction } from '../config/database';
 import { authMiddleware } from '../middleware/auth';
-import { loadUserAccess, requirePermission } from '../middleware/permission';
+import { requirePermission } from '../middleware/permission';
 import { validateUpload, storeValidatedFile, removeStoredFile } from '../utils/file-validation';
 import { validateAssetInput, validateMaintenanceInput, validatePurchaseHistoryInput, serverError }
   from '../utils/asset-validation';
@@ -404,20 +404,29 @@ const updateAsset = async (req: Request, res: Response) => {
       if (!category) return res.status(404).json({ error: 'Kategori aset tidak ditemukan' });
     }
 
-    // Disposal butuh hak terpisah dari edit biasa (AST-001). Karena disposal
-    // saat ini hanya berupa perubahan status, pemeriksaannya di dalam handler.
-    if (status === 'disposed') {
-      if (current.status !== 'disposed') {
-        const access = await loadUserAccess((req as any).userId);
-        const mayDispose = !!access && (access.level >= 10
-          || access.perms.has('assets.dispose') || access.perms.has('assets.manage'));
-        if (!mayDispose) {
-          return res.status(403).json({
-            error: 'Anda tidak punya hak untuk menghapus-bukukan (dispose) aset',
-            required: ['assets.dispose'],
-            code: 'PERMISSION_DENIED',
-          });
-        }
+    // AST-006 — disposal tidak lagi boleh dilakukan dengan sekadar mengubah
+    // status. Tanpa alur permintaan + persetujuan, tidak ada alasan, nilai
+    // jual, perhitungan gain/loss, maupun jejak siapa yang menyetujui.
+    if (has('status') && status !== current.status) {
+      if (status === 'disposed') {
+        return res.status(409).json({
+          error: 'Disposal harus lewat alur permintaan dan persetujuan, bukan mengubah status langsung',
+          hint: `Ajukan lewat POST /api/assets/${req.params.id}/disposal-request`,
+          code: 'DISPOSAL_WORKFLOW_REQUIRED',
+        });
+      }
+      if (current.status === 'disposed') {
+        return res.status(409).json({
+          error: 'Aset yang sudah disposed hanya bisa diaktifkan kembali lewat pembatalan resmi',
+          hint: 'Gunakan POST /api/assets/disposals/:id/reverse dengan menyertakan alasan',
+          code: 'REVERSAL_REQUIRED',
+        });
+      }
+      if (status === 'disposal_requested' || current.status === 'disposal_requested') {
+        return res.status(409).json({
+          error: 'Status permintaan disposal hanya berubah lewat alur disposal',
+          code: 'DISPOSAL_WORKFLOW_REQUIRED',
+        });
       }
     }
 
@@ -739,6 +748,196 @@ router.delete('/purchase-history/:entryId', authMiddleware, requirePermission('a
 });
 
 
+
+// ── Disposal workflow (AST-006) ─────────────────────────────────────────
+// Alur: active → disposal_requested → approved (disposed) / rejected.
+// Aset yang sudah disposed hanya bisa kembali aktif lewat reversal resmi.
+
+const DISPOSAL_METHODS_LIST = ['sold', 'scrapped', 'donated', 'traded_in', 'lost', 'other'];
+
+// Nilai buku pada tanggal disposal — dasar perhitungan gain/loss.
+async function bookValueAt(assetId: number, date: string): Promise<number> {
+  const row: any = await dbGet(
+    `SELECT a.*, c.is_depreciable FROM assets a
+     JOIN asset_categories c ON a.category_id = c.id WHERE a.id = ?`,
+    [assetId]
+  );
+  if (!row) return 0;
+  const additions = (await capitalAdditionsByAsset([assetId]))[assetId] || [];
+  const closed = await lastClosedPeriod();
+  const locked = closed ? (await lockedAccumulatedByAsset([assetId], closed.year, closed.month))[assetId] : undefined;
+  // Aset dihitung seolah belum disposed, supaya nilai bukunya pada tanggal
+  // tersebut tidak terpotong oleh status yang belum sempat berubah.
+  const result = calcDepreciation({ ...row, status: 'active', disposed_date: null }, date, additions,
+    closed && locked !== undefined ? { through: closed.end, accumulated: locked } : undefined);
+  return result.book_value;
+}
+
+router.get('/:id/disposals', authMiddleware, requirePermission('assets.view', 'assets.manage'),
+  async (req: Request, res: Response) => {
+  try {
+    const rows = await dbAll(
+      `SELECT d.*, ru.full_name AS requested_by_name, au.full_name AS approved_by_name
+       FROM asset_disposals d
+       LEFT JOIN users ru ON d.requested_by = ru.id
+       LEFT JOIN users au ON d.approved_by = au.id
+       WHERE d.asset_id = ? ORDER BY d.id DESC`,
+      [req.params.id]
+    );
+    res.json({ data: rows });
+  } catch (error: any) {
+    serverError(res, 'disposals', error);
+  }
+});
+
+// POST /assets/:id/disposal-request
+router.post('/:id/disposal-request', authMiddleware, requirePermission('assets.dispose', 'assets.manage'),
+  async (req: Request, res: Response) => {
+  try {
+    const asset: any = await dbGet('SELECT id, status FROM assets WHERE id = ?', [req.params.id]);
+    if (!asset) return res.status(404).json({ error: 'Aset tidak ditemukan' });
+    if (asset.status === 'disposed') return res.status(409).json({ error: 'Aset sudah disposed' });
+    if (asset.status === 'disposal_requested') {
+      return res.status(409).json({ error: 'Sudah ada permintaan disposal yang menunggu persetujuan' });
+    }
+
+    const { reason, disposal_method, buyer, planned_date, proceeds, document_id } = req.body;
+    if (!reason) return res.status(400).json({ error: 'Alasan disposal wajib diisi' });
+    if (disposal_method && !DISPOSAL_METHODS_LIST.includes(disposal_method)) {
+      return res.status(400).json({ error: `Metode disposal tidak dikenal. Pilihan: ${DISPOSAL_METHODS_LIST.join(', ')}` });
+    }
+    const invalid = validateAssetInput({ purchase_price: proceeds, purchase_date: planned_date });
+    if (proceeds !== undefined && Number(proceeds) < 0) {
+      return res.status(400).json({ error: 'Nilai jual tidak boleh negatif' });
+    }
+    if (invalid && planned_date) return res.status(400).json({ error: invalid });
+
+    const userId = (req as any).user?.userId || null;
+    const result = await withTransaction(async tx => {
+      const r = await tx.run(
+        `INSERT INTO asset_disposals
+          (asset_id, status, reason, disposal_method, buyer, planned_date, proceeds, document_id,
+           previous_status, requested_by)
+         VALUES (?, 'requested', ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [asset.id, reason, disposal_method || null, buyer || null, planned_date || null,
+          proceeds || 0, document_id || null, asset.status, userId]
+      );
+      await tx.run('UPDATE assets SET status = ? WHERE id = ?', ['disposal_requested', asset.id]);
+      return r;
+    });
+
+    res.status(201).json({ id: result.insertId, message: 'Permintaan disposal diajukan' });
+  } catch (error: any) {
+    serverError(res, 'disposal-request', error);
+  }
+});
+
+// POST /assets/disposals/:disposalId/approve
+router.post('/disposals/:disposalId/approve', authMiddleware, requirePermission('assets.dispose.approve', 'assets.manage'),
+  async (req: Request, res: Response) => {
+  try {
+    const disposal: any = await dbGet('SELECT * FROM asset_disposals WHERE id = ?', [req.params.disposalId]);
+    if (!disposal) return res.status(404).json({ error: 'Permintaan disposal tidak ditemukan' });
+    if (disposal.status !== 'requested') {
+      return res.status(409).json({ error: `Permintaan ini sudah ${disposal.status}` });
+    }
+
+    const disposalDate = req.body.disposal_date || disposal.planned_date
+      || new Date().toISOString().slice(0, 10);
+    const dateError = validateAssetInput({ purchase_date: disposalDate });
+    if (dateError) return res.status(400).json({ error: dateError });
+
+    const proceeds = req.body.proceeds !== undefined ? Number(req.body.proceeds) : Number(disposal.proceeds || 0);
+    if (!Number.isFinite(proceeds) || proceeds < 0) {
+      return res.status(400).json({ error: 'Nilai jual tidak boleh negatif' });
+    }
+
+    // Gain/loss = hasil penjualan − nilai buku pada tanggal disposal
+    const bookValue = await bookValueAt(disposal.asset_id, disposalDate);
+    const gainLoss = Math.round((proceeds - bookValue) * 100) / 100;
+    const userId = (req as any).user?.userId || null;
+
+    await withTransaction(async tx => {
+      await tx.run(
+        `UPDATE asset_disposals SET status='approved', disposal_date=?, proceeds=?,
+           book_value_at_disposal=?, gain_loss=?, approved_by=?, approved_at=NOW()
+         WHERE id = ?`,
+        [disposalDate, proceeds, bookValue, gainLoss, userId, disposal.id]
+      );
+      await tx.run(
+        `UPDATE assets SET status='disposed', disposed_date=? WHERE id = ?`,
+        [disposalDate, disposal.asset_id]
+      );
+    });
+
+    res.json({
+      message: 'Disposal disetujui',
+      disposal_date: disposalDate,
+      proceeds,
+      book_value_at_disposal: bookValue,
+      gain_loss: gainLoss,
+      result: gainLoss >= 0 ? 'gain' : 'loss',
+    });
+  } catch (error: any) {
+    serverError(res, 'disposal-approve', error);
+  }
+});
+
+// POST /assets/disposals/:disposalId/reject
+router.post('/disposals/:disposalId/reject', authMiddleware, requirePermission('assets.dispose.approve', 'assets.manage'),
+  async (req: Request, res: Response) => {
+  try {
+    const disposal: any = await dbGet('SELECT * FROM asset_disposals WHERE id = ?', [req.params.disposalId]);
+    if (!disposal) return res.status(404).json({ error: 'Permintaan disposal tidak ditemukan' });
+    if (disposal.status !== 'requested') {
+      return res.status(409).json({ error: `Permintaan ini sudah ${disposal.status}` });
+    }
+    if (!req.body.reason) return res.status(400).json({ error: 'Alasan penolakan wajib diisi' });
+
+    const userId = (req as any).user?.userId || null;
+    await withTransaction(async tx => {
+      await tx.run(
+        `UPDATE asset_disposals SET status='rejected', rejected_by=?, rejected_at=NOW(), rejection_reason=?
+         WHERE id = ?`,
+        [userId, req.body.reason, disposal.id]
+      );
+      // Kembalikan aset ke status sebelum permintaan diajukan
+      await tx.run('UPDATE assets SET status = ? WHERE id = ?',
+        [disposal.previous_status || 'active', disposal.asset_id]);
+    });
+
+    res.json({ message: 'Permintaan disposal ditolak' });
+  } catch (error: any) {
+    serverError(res, 'disposal-reject', error);
+  }
+});
+
+// POST /assets/disposals/:disposalId/reverse — pembatalan resmi disposal
+router.post('/disposals/:disposalId/reverse', authMiddleware, requirePermission('assets.dispose.approve', 'assets.manage'),
+  async (req: Request, res: Response) => {
+  try {
+    const disposal: any = await dbGet('SELECT * FROM asset_disposals WHERE id = ?', [req.params.disposalId]);
+    if (!disposal) return res.status(404).json({ error: 'Permintaan disposal tidak ditemukan' });
+    if (disposal.status !== 'approved') {
+      return res.status(409).json({ error: 'Hanya disposal yang sudah disetujui yang bisa dibatalkan' });
+    }
+    if (!req.body.reason) return res.status(400).json({ error: 'Alasan pembatalan wajib diisi' });
+
+    const userId = (req as any).user?.userId || null;
+    await withTransaction(async tx => {
+      await tx.run(
+        `UPDATE asset_disposals SET status='reversed', reversed_by=?, reversed_at=NOW(), reversal_reason=?
+         WHERE id = ?`,
+        [userId, req.body.reason, disposal.id]
+      );
+      await tx.run(`UPDATE assets SET status='active', disposed_date=NULL WHERE id = ?`, [disposal.asset_id]);
+    });
+
+    res.json({ message: 'Disposal dibatalkan, aset kembali aktif' });
+  } catch (error: any) {
+    serverError(res, 'disposal-reverse', error);
+  }
+});
 
 // ── Depreciation ledger & period lock (AST-011) ─────────────────────────
 // Selama belum ada periode yang ditutup, seluruh endpoint di bawah tidak
