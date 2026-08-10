@@ -226,13 +226,52 @@ async function main() {
   chk('nomor berikutnya naik satu',
     Number(numTwo.split('-')[2]) - Number(numOne.split('-')[2]), 1);
 
-  // 15 permintaan bersamaan — dulu tabrakan acak membalas 500 ke pengguna
-  const burst = await Promise.all(Array.from({ length: 15 }, () => mkPr()));
+  // 20 permintaan bersamaan — dulu tabrakan acak membalas 500 ke pengguna
+  const burst = await Promise.all(Array.from({ length: 20 }, () => mkPr()));
   const created = burst.filter(r => r.status === 201);
-  chk('15 PR bersamaan semuanya berhasil', created.length, 15);
+  chk('20 PR bersamaan semuanya berhasil', created.length, 20);
   chk('tidak ada yang balas 500', burst.filter(r => r.status === 500).length, 0);
   const numbers = created.map(r => r.json?.data?.pr_number);
-  chk('tidak ada nomor duplikat', new Set(numbers).size, 15);
+  chk('tidak ada nomor duplikat', new Set(numbers).size, 20);
+
+  // PROC-R05: PO dan GRN dulu memanggil generator nomor langsung, tanpa retry
+  const poBurst = await Promise.all(Array.from({ length: 20 }, () =>
+    call('POST', '/procurement/purchase-orders', {
+      vendor_id: vendorId, po_date: today(),
+      items: [{ product_id: product.id, quantity: 1, unit_price: 1000, uom: 'pcs' }],
+    }, master)));
+  const poOk = poBurst.filter(r => r.status === 201);
+  chk('20 PO bersamaan semuanya berhasil', poOk.length, 20);
+  chk('tidak ada PO yang balas 500', poBurst.filter(r => r.status === 500).length, 0);
+  chk('nomor PO tidak ada yang duplikat',
+    new Set(poOk.map(r => r.json?.data?.po_number)).size, 20);
+
+  // Tiap GRN butuh PO sendiri (satu GRN aktif per PO), jadi pakai PO di atas
+  const grnBurst = await Promise.all(poOk.map(r =>
+    call('POST', '/procurement/goods-receipts', {
+      po_id: r.json?.data?.id, warehouse_id: wh.id, received_date: today(),
+      notes: JSON.stringify({ items: [] }),
+    }, master)));
+  const grnOk = grnBurst.filter(r => r.status === 201);
+  chk('20 GRN bersamaan semuanya berhasil', grnOk.length, 20);
+  chk('tidak ada GRN yang balas 500', grnBurst.filter(r => r.status === 500).length, 0);
+  chk('nomor GRN tidak ada yang duplikat',
+    new Set(grnOk.map(r => r.json?.data?.grn_number)).size, 20);
+
+  console.log('\n7b. PO gagal di tengah jalan tidak boleh menyisakan header');
+  // PROC-R04: item kedua memakai product_id yang tidak ada → pelanggaran FK.
+  // Dulu header dan item pertama sudah terlanjur tersimpan.
+  const poCountBefore = ((await call('GET', '/procurement/purchase-orders', undefined, master)).json?.data || []).length;
+  const poFail = await call('POST', '/procurement/purchase-orders', {
+    vendor_id: vendorId, po_date: today(),
+    items: [
+      { product_id: product.id, quantity: 1, unit_price: 1000, uom: 'pcs' },
+      { product_id: 999999999, quantity: 1, unit_price: 1000, uom: 'pcs' },
+    ],
+  }, master);
+  chk('pembuatan PO ditolak', poFail.status >= 400, true);
+  const poCountAfter = ((await call('GET', '/procurement/purchase-orders', undefined, master)).json?.data || []).length;
+  chk('tidak ada PO setengah jadi yang tersimpan', poCountAfter, poCountBefore);
 
   console.log('\n8. Menyimpan PR/GRN tidak boleh menghapus item di dalam notes');
   // Item PR dan GRN disimpan sebagai JSON di kolom `notes`. Dulu menyimpan

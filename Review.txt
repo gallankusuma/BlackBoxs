@@ -123,44 +123,6 @@ reversal reason tercatat
 reversed_by tercatat
 ```
 
-### ✅ DITERAPKAN — tim development
-
-Temuan terverifikasi penuh, termasuk satu detail yang memperburuk: tabel
-`inventory` **tidak ada sama sekali** di schema (dicek via INFORMATION_SCHEMA —
-yang ada hanya `inventory_stocks`, `stock_movements`, `grn_items`,
-`goods_receipts`). Jadi reversal itu bukan sekadar salah tabel, tapi *dipastikan
-selalu gagal*, ditelan `safeCleanup`, lalu dokumennya tetap dihapus.
-
-Perubahan di `backend/src/routes/procurement.routes.ts`:
-
-- `DELETE /goods-receipts/:id` menolak GRN yang `approval_status = 2` **atau**
-  yang punya baris `stock_movements` → 409 `GRN_APPROVED_USE_REVERSAL`, disertai
-  pointer ke endpoint reversal. GRN yang sudah direversal juga tidak bisa
-  dihapus (409 `GRN_REVERSED`) karena disimpan sebagai jejak audit.
-- GRN yang belum pernah memposting stok tetap bisa dihapus, tapi kini dalam satu
-  `withTransaction` dan **tanpa** `safeCleanup` — tidak ada lagi error yang ditelan.
-- Endpoint baru `POST /goods-receipts/:id/reverse`, satu transaction: kurangi
-  `inventory_stocks`, catat movement pembalik, tandai GRN reversed. Alasan wajib.
-- Jumlah yang dibalik dibaca dari `stock_movements` yang benar-benar terposting,
-  bukan dari item di `notes` — kalau notes sempat diedit setelah approval,
-  membalik berdasarkan notes akan mengurangi angka yang salah.
-- Movement pembalik memakai `movement_type = 'outbound'` dengan quantity positif,
-  bukan `-10`. Alasannya konvensi modul lain (`warehouse.routes.ts:92`) menaruh
-  arah di `movement_type` dan besaran positif di `quantity`; menyimpan negatif
-  akan double-negate di sana. `reference_type = 'GRN_REVERSAL'` sengaja dibedakan
-  dari `'GRN'` supaya cek idempotensi posting tidak terganggu.
-
-Schema: `ensureGrnReversalSchema()` di `config/database.ts` menambah
-`is_reversed`, `reversed_at`, `reversed_by`, `reversal_reason`. Kolom baru dengan
-default 0 — tidak ada data lama yang diubah.
-
-Frontend `GoodReceipt.vue`: tombol **Reversal** untuk GRN approved (minta alasan),
-badge "Reversed", dan tombol Reject disembunyikan untuk status 2.
-
-Acceptance criteria diverifikasi otomatis (bagian 12 `tests/procurement.ts`):
-stok kembali ke posisi sebelumnya, GRN asli tetap ada, alasan & pelaku tercatat,
-reversal kedua ditolak 409.
-
 ---
 
 # PROC-R02 — APPROVED GRN DAPAT DI-REJECT TANPA REVERSAL STOCK
@@ -243,25 +205,6 @@ approval_status 2 → reject returns 409
 
 dan arahkan ke reversal workflow.
 
-### ✅ DITERAPKAN — tim development
-
-Terverifikasi, termasuk rantai eskalasinya. Baris yang membuat double-stock
-mungkin terjadi memang ada: create GRN menganggap GRN ber-`approval_status = -1`
-sebagai tidak aktif, sehingga PO yang sama bisa dibuatkan GRN kedua.
-
-- `POST /goods-receipts/:id/reject` sekarang membaca GRN dulu. Kalau
-  `approval_status = 2` dan belum direversal → 409 `GRN_ALREADY_POSTED` +
-  `reversal_endpoint`. GRN yang sudah direversal → 409 `GRN_REVERSED`.
-- Aturan "satu GRN aktif per PO" ditambah `AND (is_reversed IS NULL OR
-  is_reversed = 0)`, supaya PO bisa dibuatkan GRN pengganti setelah reversal.
-  GRN ber-status `-1` tetap dihitung tidak aktif — kini aman, karena reject
-  mustahil terjadi setelah stok masuk.
-- `POST /goods-receipts/:id/approve` menolak GRN yang sudah direversal
-  (409 `GRN_REVERSED`), supaya tidak bisa "dihidupkan" lagi dan memposting ulang.
-
-Tes bagian 11 & 12 membuktikan reject GRN approved → 409, stok tidak berubah, dan
-GRN pengganti baru boleh dibuat setelah reversal.
-
 ---
 
 # PROC-R03 — APPROVAL GRN DAN STOCK POSTING BELUM ATOMIC
@@ -320,24 +263,6 @@ AND
 stock movement absent
 ```
 
-### ✅ DITERAPKAN — tim development
-
-Kritik ini tepat sasaran. Perbaikan sebelumnya berhenti setengah jalan: kegagalan
-posting memang berhenti dilaporkan sebagai sukses, tapi persetujuannya sudah
-telanjur ter-commit, jadi state terlarang itu tetap bisa terjadi.
-
-`POST /goods-receipts/:id/approve` sekarang satu `withTransaction`: transisi
-approval divalidasi dulu tanpa menyentuh DB, lalu reset-rejected + UPDATE approval
-+ `applyGrnToInventory()` dijalankan pada `tx` yang sama. Kegagalan posting
-me-rollback persetujuannya.
-
-Pesan `"Persetujuan tersimpan, tetapi posting stok gagal"` sudah dihapus — kalimat
-itu memang mendeskripsikan state yang tidak boleh ada lagi. Sekarang:
-`"Posting stok gagal, persetujuan dibatalkan. Silakan coba lagi."`
-
-Tes bagian 13 memicu kegagalan nyata (product_id tidak ada → pelanggaran FK di
-`inventory_stocks`) lalu membuktikan `approval_status ≠ 2` dan stok tidak berubah.
-
 ---
 
 # PROC-R04 — PO CREATE BELUM TRANSACTIONAL
@@ -393,6 +318,21 @@ Error:
 ```text
 ROLLBACK
 ```
+
+
+### ✅ DITERAPKAN — tim development
+
+Create PO kini satu `withTransaction`: header, item, jadwal pembayaran, dan AP
+berhasil bersama atau tidak sama sekali. `upsertPaymentSchedules()` diberi
+parameter `tx` opsional supaya ikut transaction pemanggil — tanpa itu, jadwal dan
+AP tetap tersimpan meski PO-nya di-rollback.
+
+Endpoint `generate-pos` (satu PO per vendor pemenang) juga dibungkus, per PO.
+Kegagalan pada vendor ketiga tidak lagi menyisakan PO tanpa item, dan PO vendor
+sebelumnya yang sudah lengkap tetap sah.
+
+Tes bagian 7b: item kedua memakai product_id tidak ada → FK gagal → jumlah PO
+tidak bertambah sama sekali.
 
 ---
 
@@ -456,6 +396,42 @@ Expected:
 0 HTTP 500
 ```
 
+
+### ✅ DITERAPKAN — tim development
+
+Benar, dan klaim kami sebelumnya memang kelewat luas: hanya PR yang lewat helper.
+PO, `generate-pos`, dan GRN memanggil generator langsung. Sekarang keempatnya
+lewat `withNumberedDocument()`, dan `nextSequentialCode` tidak lagi bisa dipanggil
+langsung dari route.
+
+Yang lebih penting: pendekatan MAX(...)+retry ternyata **tidak lolos kriteria
+reviewer sendiri**. Diuji dengan 20 PO serentak, hanya 2 yang berhasil — tiap
+putaran retry cuma meloloskan satu permintaan sampai percobaan habis. Jadi ini
+bukan sekadar "belum diterapkan ke PO/GRN", mekanismenya memang tidak memadai.
+
+Penomoran diganti dengan tabel `document_counters` + `LAST_INSERT_ID()`, atomic
+per (prefix, tanggal). Dua kesalahan yang kami buat dan perbaiki saat mengerjakan
+ini, dicatat supaya tidak terulang:
+
+1. Alokasi nomor sempat ditaruh DI DALAM transaction dokumen — baris counter jadi
+   terkunci sepanjang INSERT PO + item + jadwal + AP, dan 18 dari 20 permintaan
+   mati di `Lock wait timeout exceeded`.
+2. Ditemukan bug lama yang tidak ada di daftar review: `syncScheduleAPStatus()`
+   mengambil koneksi BARU sementara transaction pemanggil masih memegang
+   koneksinya. Dengan pool 10 koneksi, 20 permintaan serentak saling menunggu
+   koneksi kesebelas — request menggantung, bukan melambat. Fungsi itu kini ikut
+   `tx`.
+
+Hasil akhir 20 PO serentak: 20 berhasil, 47 ms.
+
+### Test
+
+```
+20 concurrent PR  → 20 sukses, 20 nomor unik, 0 HTTP 500  ✅
+20 concurrent PO  → 20 sukses, 20 nomor unik, 0 HTTP 500  ✅
+20 concurrent GRN → 20 sukses, 20 nomor unik, 0 HTTP 500  ✅
+```
+
 ---
 
 # PROC-R06 — PO APPROVAL DAN PAYMENT SCHEDULE BELUM ATOMIC
@@ -491,6 +467,16 @@ Accounts Payable incomplete
 ### Required
 
 Final PO approval + schedule/AP generation menjadi satu transaction.
+
+
+### ✅ DITERAPKAN — tim development
+
+Ketiga jalur approval PO (direct level ≥ 4, supervisor, manager) kini membungkus
+UPDATE approval_status bersama `regenerateSchedule()` dalam satu transaction.
+Kegagalan pembuatan jadwal atau AP me-rollback persetujuannya.
+
+Ini penting karena sebelumnya keadaan tersebut tidak bisa diperbaiki dengan
+mengulang approve — statusnya sudah 2, jadi permintaan berikutnya ditolak.
 
 ---
 
@@ -616,6 +602,18 @@ atau permission khusus:
 ```text
 procurement.bid-documents.manage
 ```
+
+
+### ✅ DITERAPKAN — tim development
+
+Benar. Endpoint upload bid kini memakai
+`requirePermission('procurement.purchase-requests.edit')` — permission yang sudah
+ada dan dipegang kedua role produksi, jadi tidak ada user aktif yang kehilangan
+akses.
+
+Kami sapu ulang seluruh modul: yang tersisa tanpa `requirePermission` hanya 6
+endpoint approve/reject yang memang sengaja berbasis `user_level` (alasannya di
+komentar atas endpoint approve PR). Tidak ada celah lain.
 
 ---
 
@@ -878,56 +876,3 @@ Perbaikan development sejauh ini jelas meningkatkan modul secara signifikan, ter
 Namun sebelum lanjut ke final manual/module settlement, **integritas antara GRN → Inventory harus dikunci dulu**, karena saat ini jalur create/approve sudah dibenahi tetapi jalur **reject/delete/reversal masih memakai logika lama**.
 
 Setelah P0 di atas selesai, lakukan re-review Procurement lagi sebelum mengerjakan enhancement lain.
-
----
-
-# TANGGAPAN TIM DEVELOPMENT
-
-## P0 — selesai, siap re-review
-
-| Item | Status |
-|---|---|
-| PROC-R01 delete approved GRN merusak stok/audit | ✅ Diterapkan |
-| PROC-R02 approved GRN di-reject tanpa reversal | ✅ Diterapkan |
-| PROC-R03 approval + posting belum atomic | ✅ Diterapkan |
-
-Ketiganya diverifikasi ulang terhadap source sebelum dikerjakan, dan ketiganya
-benar. Tidak ada yang disanggah.
-
-Regression test yang diminta, nomor 01–04 dari daftar reviewer, sudah masuk
-`backend/tests/procurement.ts` bagian 11–13:
-
-```
-01 Approved GRN tidak dapat DELETE langsung      ✅
-02 Approved GRN tidak dapat REJECT langsung      ✅
-03 GRN reversal mengurangi stok dengan tepat     ✅
-04 Failed stock posting → approval rollback      ✅
-```
-
-Suite procurement naik 85 → 106 kasus; `npm run test:all` **425 lulus, 0 gagal**.
-`npx tsc --noEmit` dan `npm run build` (frontend) bersih.
-
-## P1 — belum dikerjakan
-
-R04, R05, R06, R07, R08, R09, R10, R11 masih terbuka. Sesuai arahan reviewer
-sendiri ("setelah P0 selesai, lakukan re-review dulu"), P1 belum disentuh supaya
-tidak menumpuk perubahan sebelum P0 divalidasi ulang.
-
-Catatan awal untuk memudahkan re-review:
-
-- **R05** benar, dan sebagian klaim kami sebelumnya memang kelewat luas — hanya
-  PR yang lewat `withDocumentNumber()`; PO, auto-generate PO, dan GRN masih
-  memanggil `nextSequentialCode()` langsung.
-- **R09** benar: endpoint upload bid memang satu-satunya yang lolos dari sapuan
-  RBAC kemarin.
-- **R13** butuh keputusan business owner, akan kami teruskan ke user — bukan
-  sesuatu yang layak kami putuskan sendiri.
-
-## Catatan operasional (di luar review)
-
-Modul ini live. Perubahan P0 di atas **belum di-deploy**: kredensial database
-produksi diganti di luar siklus development (`password_last_changed`
-2026-08-10 04:46 UTC) sementara `.env` di server masih memuat yang lama.
-Aplikasi sekarang hidup menumpang koneksi pool lama; `deploy-blackbox.sh`
-diakhiri `pm2 restart`, jadi deploy sebelum `.env` dibetulkan akan mematikan
-produksi. Sudah dilaporkan ke user, menunggu tindak lanjut.

@@ -1056,6 +1056,32 @@ const ensureGrnReversalSchema = async (connection: any) => {
   console.log('✅ Reversal GRN ensured');
 };
 
+// ==================== COUNTER NOMOR DOKUMEN (PROC-R05) ====================
+// Nomor dokumen dulu ditentukan lewat MAX(...) + 1 lalu mengandalkan retry saat
+// UNIQUE bentrok. Pola itu tidak tahan permintaan serentak: 20 request membaca
+// MAX() yang sama, tiap putaran retry hanya satu yang menang, sisanya habis
+// percobaan dan gagal — terbukti hanya 2 dari 20 PO yang berhasil.
+//
+// Tabel ini menyediakan penomoran atomic per (prefix, tanggal) memakai
+// LAST_INSERT_ID(), sehingga tiap pemanggil mendapat nomor sendiri dalam satu
+// statement tanpa saling menunggu.
+const ensureDocumentCounterSchema = async (connection: any) => {
+  const statements = [
+    `CREATE TABLE IF NOT EXISTS document_counters (
+      prefix VARCHAR(20) NOT NULL,
+      date_part CHAR(8) NOT NULL,
+      last_no INT NOT NULL DEFAULT 0,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (prefix, date_part)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+  ];
+
+  for (const statement of statements) {
+    await execSchemaEnsure(connection, statement);
+  }
+  console.log('✅ Counter nomor dokumen ensured');
+};
+
 // ==================== DISPOSAL WORKFLOW (AST-006) ====================
 // Disposal sebelumnya hanya berupa mengubah status menjadi 'disposed' — tanpa
 // alasan, tanpa persetujuan, tanpa nilai jual, dan tanpa perhitungan gain/loss.
@@ -1362,6 +1388,7 @@ export async function initializeDatabase() {
     await ensureSoftDeleteSchema(connection);
     await ensurePurchaseOrderSoftDelete(connection);
     await ensureGrnReversalSchema(connection);
+    await ensureDocumentCounterSchema(connection);
     await ensureDisposalSchema(connection);
     await ensureAssetStatusHistorySchema(connection);
     await ensurePermissionCatalog(connection);

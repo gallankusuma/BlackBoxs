@@ -70,37 +70,75 @@ async function approverLevel(req: Request): Promise<number> {
  * penjaga sebenarnya — `withDocumentNumber` di bawah mengulang kalau bentrok.
  */
 const nextSequentialCode = async (
-  prefix: string, table: string, column: string
+  prefix: string, table: string, column: string, tx: TxRunner
 ): Promise<string> => {
   const datePart = new Date().toISOString().slice(0, 10).replace(/-/g, '');
   const like = `${prefix}-${datePart}-%`;
-  const row: any = await dbGet(
+
+  // Nomor diambil dari `document_counters` secara atomic. Versi sebelumnya
+  // membaca MAX(...) lalu menambah satu — dengan 20 permintaan serentak semuanya
+  // membaca angka yang sama, dan retry pada UNIQUE hanya meloloskan satu per
+  // putaran sampai percobaan habis (terukur: hanya 2 dari 20 PO berhasil).
+  //
+  // LAST_INSERT_ID() di bawah mengembalikan nilai yang di-set statement itu
+  // sendiri pada koneksi yang sama, jadi tiap pemanggil dapat nomor berbeda
+  // tanpa saling menunggu. Transaction dipakai semata untuk menjamin kedua
+  // statement berjalan pada satu koneksi.
+  // Seed dari dokumen yang sudah ada, supaya penomoran tidak mundur di database
+  // yang sudah berisi data — termasuk nomor yang dulu diisi manual.
+  const row: any = await tx.get(
     `SELECT MAX(CAST(SUBSTRING_INDEX(${column}, '-', -1) AS UNSIGNED)) AS maxNum
      FROM ${table} WHERE ${column} LIKE ?`,
     [like]
   );
-  const next = Number(row?.maxNum || 0) + 1;
+  const seed = Number(row?.maxNum || 0);
+
+  await tx.run(
+    `INSERT INTO document_counters (prefix, date_part, last_no)
+     VALUES (?, ?, LAST_INSERT_ID(? + 1))
+     ON DUPLICATE KEY UPDATE last_no = LAST_INSERT_ID(GREATEST(last_no, ?) + 1)`,
+    [prefix, datePart, seed, seed]
+  );
+
+  const got: any = await tx.get('SELECT LAST_INSERT_ID() AS n');
+  const next = Number(got?.n || seed + 1);
   return `${prefix}-${datePart}-${String(next).padStart(4, '0')}`;
 };
 
 /**
- * Jalankan `fn` dengan nomor dokumen, ulangi kalau UNIQUE INDEX menolak.
- * Pembacaan MAX(...) tidak bisa dibuat atomic tanpa lock, jadi penjaga
- * sebenarnya adalah constraint database — bentrok ditangani dengan mencoba
- * nomor berikutnya, bukan dibalas 500 mentah.
+ * Buat dokumen bernomor: alokasi nomor dulu (transaction pendek), lalu dokumennya
+ * (transaction sendiri).
+ *
+ * Pemisahan ini penting dan sempat salah dua kali:
+ *
+ * 1. MAX(...) + retry saat UNIQUE bentrok — tiap putaran retry hanya meloloskan
+ *    satu permintaan, jadi dari 20 PO serentak cuma 2 yang berhasil.
+ * 2. Alokasi counter DI DALAM transaction dokumen — baris counter jadi terkunci
+ *    sepanjang INSERT PO + item + jadwal pembayaran + AP. Ke-20 permintaan
+ *    antre berurutan dan 18 di antaranya mati di `Lock wait timeout exceeded`.
+ *
+ * Sekarang kunci counter hanya dipegang selama alokasi nomor (satu INSERT),
+ * lalu langsung dilepas. Kedua transaction berjalan berurutan, bukan bersamaan,
+ * jadi tetap satu koneksi per permintaan pada satu waktu.
+ *
+ * Nomor bisa berlubang kalau dokumennya gagal disimpan setelah nomor terbit —
+ * itu konsekuensi yang diterima, karena yang dijaga adalah keunikan, bukan
+ * kerapatan.
  */
-async function withDocumentNumber<T>(
+async function withNumberedDocument<T>(
   prefix: string, table: string, column: string,
-  fn: (code: string) => Promise<T>,
+  fn: (code: string, tx: TxRunner) => Promise<T>,
+  explicitNumber?: string | null,
 ): Promise<T> {
-  const MAX_ATTEMPTS = 8;
+  const MAX_ATTEMPTS = 5;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    const code = await nextSequentialCode(prefix, table, column);
+    const code = explicitNumber
+      || await withTransaction(tx => nextSequentialCode(prefix, table, column, tx));
     try {
-      return await fn(code);
+      return await withTransaction(tx => fn(code, tx));
     } catch (err: any) {
       const duplicate = err?.code === 'ER_DUP_ENTRY' && String(err.message).includes(column);
-      if (!duplicate || attempt === MAX_ATTEMPTS) throw err;
+      if (!duplicate || explicitNumber || attempt === MAX_ATTEMPTS) throw err;
       await new Promise(r => setTimeout(r, 10 + Math.random() * 40));
     }
   }
@@ -271,10 +309,17 @@ const normalizePaymentSchedules = (paymentSchedules: any[], defaults: any[]) => 
     .filter(schedule => schedule.amount > 0);
 };
 
-const syncScheduleAPStatus = async (scheduleId: number, apId: number) => {
-  const ap = await dbGet('SELECT amount, paid_amount, status FROM accounts_payable WHERE id = ?', [apId]) as any;
+// Ikut transaction pemanggil kalau ada. Tanpa ini, fungsi ini mengambil koneksi
+// BARU sementara transaction pemanggil masih memegang koneksinya sendiri. Saat
+// 20 permintaan serentak menghabiskan pool (10 koneksi), semuanya menunggu
+// koneksi kesebelas yang tidak akan pernah tersedia — request menggantung, bukan
+// sekadar melambat.
+const syncScheduleAPStatus = async (scheduleId: number, apId: number, tx?: TxRunner) => {
+  const get = tx ? tx.get : dbGet;
+  const run = tx ? tx.run : dbRun;
+  const ap = await get('SELECT amount, paid_amount, status FROM accounts_payable WHERE id = ?', [apId]) as any;
   if (!ap) return;
-  await dbRun(
+  await run(
     'UPDATE purchase_order_payment_schedules SET paid_amount = ?, status = ?, ap_id = ? WHERE id = ?',
     [Number(ap.paid_amount || 0), ap.status || 'open', apId, scheduleId]
   );
@@ -285,8 +330,15 @@ const upsertPaymentSchedules = async (params: {
   poData: any;
   items: any[];
   paymentSchedules?: any[];
+  // PROC-R04/R06: kalau dipanggil dari dalam transaction, seluruh query di sini
+  // harus ikut transaction yang sama — kalau tidak, jadwal pembayaran dan AP
+  // tetap tersimpan meski PO-nya di-rollback.
+  tx?: TxRunner;
 }) => {
-  const { poId, poData, items, paymentSchedules } = params;
+  const { poId, poData, items, paymentSchedules, tx } = params;
+  const run = tx ? tx.run : dbRun;
+  const all = tx ? tx.all : dbAll;
+  const get = tx ? tx.get : dbGet;
   const vendorId = Number(poData.vendor_id || 0) || null;
   const { contractTotal } = parsePOFinancials(
     poData.notes,
@@ -307,7 +359,7 @@ const upsertPaymentSchedules = async (params: {
   });
   // ALWAYS use backend-computed defaults — frontend payment_schedules can be stale due to browser/SW caching
   const schedules = defaults;
-  const existingSchedules = await dbAll('SELECT * FROM purchase_order_payment_schedules WHERE po_id = ? ORDER BY schedule_no ASC', [poId]);
+  const existingSchedules = await all('SELECT * FROM purchase_order_payment_schedules WHERE po_id = ? ORDER BY schedule_no ASC', [poId]);
   const existingByNo = new Map(existingSchedules.map(schedule => [Number(schedule.schedule_no), schedule]));
   const usedScheduleNos = new Set<number>();
 
@@ -315,7 +367,7 @@ const upsertPaymentSchedules = async (params: {
     usedScheduleNos.add(Number(schedule.schedule_no));
     const existing = existingByNo.get(Number(schedule.schedule_no)) as any;
     if (existing) {
-      await dbRun(
+      await run(
         `UPDATE purchase_order_payment_schedules
          SET label = ?, trigger_type = ?, percentage = ?, amount = ?, due_date = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
          WHERE id = ?`,
@@ -331,32 +383,32 @@ const upsertPaymentSchedules = async (params: {
       );
 
       if (existing.ap_id) {
-        const ap = await dbGet('SELECT id, paid_amount FROM accounts_payable WHERE id = ?', [existing.ap_id]) as any;
+        const ap = await get('SELECT id, paid_amount FROM accounts_payable WHERE id = ?', [existing.ap_id]) as any;
         if (ap) {
           const nextStatus = Number(ap.paid_amount || 0) >= Number(schedule.amount || 0)
             ? 'paid'
             : Number(ap.paid_amount || 0) > 0
               ? 'partial'
               : 'open';
-          await dbRun(
+          await run(
             'UPDATE accounts_payable SET due_date = ?, amount = ?, status = ?, po_id = ? WHERE id = ?',
             [schedule.due_date, Number(schedule.amount || 0), nextStatus, poId, existing.ap_id]
           );
-          await syncScheduleAPStatus(existing.id, existing.ap_id);
+          await syncScheduleAPStatus(existing.id, existing.ap_id, tx);
         }
       } else {
-        const apResult = await dbRun(
+        const apResult = await run(
           `INSERT INTO accounts_payable (po_id, vendor_id, po_schedule_id, invoice_number, invoice_date, due_date, amount, paid_amount, status, notes)
            VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'open', ?)`,
           [poId, vendorId || null, existing.id, null, null, schedule.due_date || new Date().toISOString().slice(0,10), Number(schedule.amount || 0), schedule.notes || `Auto-generated from PO schedule ${schedule.label}`]
         );
-        await dbRun('UPDATE purchase_order_payment_schedules SET ap_id = ? WHERE id = ?', [apResult.insertId, existing.id]);
-        await syncScheduleAPStatus(existing.id, apResult.insertId);
+        await run('UPDATE purchase_order_payment_schedules SET ap_id = ? WHERE id = ?', [apResult.insertId, existing.id]);
+        await syncScheduleAPStatus(existing.id, apResult.insertId, tx);
       }
       continue;
     }
 
-    const scheduleResult = await dbRun(
+    const scheduleResult = await run(
       `INSERT INTO purchase_order_payment_schedules (po_id, schedule_no, label, trigger_type, percentage, amount, due_date, status, notes)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?)`,
       [
@@ -370,25 +422,25 @@ const upsertPaymentSchedules = async (params: {
         schedule.notes,
       ]
     );
-    const apResult = await dbRun(
+    const apResult = await run(
       `INSERT INTO accounts_payable (po_id, vendor_id, po_schedule_id, invoice_number, invoice_date, due_date, amount, paid_amount, status, notes)
        VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'open', ?)`,
       [poId, vendorId || null, scheduleResult.insertId, null, null, schedule.due_date || new Date().toISOString().slice(0,10), Number(schedule.amount || 0), schedule.notes || `Auto-generated from PO schedule ${schedule.label}`]
     );
-    await dbRun('UPDATE purchase_order_payment_schedules SET ap_id = ? WHERE id = ?', [apResult.insertId, scheduleResult.insertId]);
-    await syncScheduleAPStatus(scheduleResult.insertId, apResult.insertId);
+    await run('UPDATE purchase_order_payment_schedules SET ap_id = ? WHERE id = ?', [apResult.insertId, scheduleResult.insertId]);
+    await syncScheduleAPStatus(scheduleResult.insertId, apResult.insertId, tx);
   }
 
   for (const existing of existingSchedules as any[]) {
     if (usedScheduleNos.has(Number(existing.schedule_no))) continue;
     if (existing.ap_id) {
-      const ap = await dbGet('SELECT paid_amount FROM accounts_payable WHERE id = ?', [existing.ap_id]) as any;
+      const ap = await get('SELECT paid_amount FROM accounts_payable WHERE id = ?', [existing.ap_id]) as any;
       if (ap && Number(ap.paid_amount || 0) > 0) {
         throw new Error(`Cannot remove payment schedule ${existing.label}: linked AP already has payments`);
       }
-      await dbRun('DELETE FROM accounts_payable WHERE id = ?', [existing.ap_id]);
+      await run('DELETE FROM accounts_payable WHERE id = ?', [existing.ap_id]);
     }
-    await dbRun('DELETE FROM purchase_order_payment_schedules WHERE id = ?', [existing.id]);
+    await run('DELETE FROM purchase_order_payment_schedules WHERE id = ?', [existing.id]);
   }
 };
 
@@ -613,26 +665,26 @@ router.post('/purchase-requests', authMiddleware, requirePermission('procurement
     // Nomor diterbitkan berurutan. Pembacaan MAX(...) tidak bisa dibuat atomic
     // tanpa lock, jadi penjaganya adalah UNIQUE INDEX: kalau bentrok, nomor
     // berikutnya dicoba — bukan dibalas 500 mentah ke pengguna.
-    const { result, number } = await withDocumentNumber(
+    const { result, number } = await withNumberedDocument(
       'PR', 'purchase_requests', 'pr_number',
-      async (code) => {
-        const docNumber = explicitNumber || code;
-        const r = await dbRun(
-      `INSERT INTO purchase_requests (pr_number, requestor_id, project_id, status, notes, reason, request_date, needed_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        docNumber,
-        validRequestor,
-        project_id || null,
-        (status || 'DRAFT').toUpperCase(),
-        notes || null,
-        reason || null,
-        normalizeDateOnly(request_date) || new Date().toISOString().slice(0, 10),
-        normalizeDateOnly(needed_by) || null,
-      ]
+      async (code, tx) => {
+        const r = await tx.run(
+          `INSERT INTO purchase_requests (pr_number, requestor_id, project_id, status, notes, reason, request_date, needed_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            code,
+            validRequestor,
+            project_id || null,
+            (status || 'DRAFT').toUpperCase(),
+            notes || null,
+            reason || null,
+            normalizeDateOnly(request_date) || new Date().toISOString().slice(0, 10),
+            normalizeDateOnly(needed_by) || null,
+          ]
         );
-        return { result: r, number: docNumber };
+        return { result: r, number: code };
       },
+      explicitNumber,
     );
     res.status(201).json({ message: 'Purchase request created', data: { id: result.insertId, pr_number: number } });
   } catch (error: any) {
@@ -1093,7 +1145,7 @@ router.delete('/purchase-requests/:prId/bids/:bidId', authMiddleware, requirePer
 });
 
 // POST /purchase-requests/:prId/bids/:bidId/upload - upload multiple quotation files
-router.post('/purchase-requests/:prId/bids/:bidId/upload', authMiddleware, bidUpload.array('file', 10), async (req: Request, res: Response) => {
+router.post('/purchase-requests/:prId/bids/:bidId/upload', authMiddleware, requirePermission('procurement.purchase-requests.edit'), bidUpload.array('file', 10), async (req: Request, res: Response) => {
   try {
     const { bidId } = req.params;
     const files = (req as any).files as Express.Multer.File[];
@@ -1337,7 +1389,6 @@ router.post('/purchase-requests/:prId/generate-pos', authMiddleware, requirePerm
     // Create one draft PO per winning vendor
     const createdPOs: any[] = [];
     for (const { bid, items } of vendorGroups) {
-      const poNumber = await nextSequentialCode('PO', 'purchase_orders', 'po_number');
       const vendorId = bid.vendor_id || bid.reg_vendor_id || null;
       const vendorName = bid.vendor_name || bid.reg_vendor_name || 'Unknown';
       const subTotal = items.reduce((sum: number, i: any) => sum + Number(i.total_price || 0), 0);
@@ -1362,21 +1413,33 @@ router.post('/purchase-requests/:prId/generate-pos', authMiddleware, requirePerm
         })),
       };
 
-      const poResult = await dbRun(
-        `INSERT INTO purchase_orders (po_number, pr_id, vendor_id, status, total_amount, notes, po_date)
-         VALUES (?, ?, ?, 'draft', ?, ?, DATE(NOW()))`,
-        [poNumber, prId, vendorId, subTotal, JSON.stringify(notesData)]
-      );
-      const poId = poResult.insertId;
+      // PROC-R04 + PROC-R05: satu PO hasil tabulasi = satu transaction, dengan
+      // nomor yang diulang kalau bentrok. Endpoint ini membuat BEBERAPA PO dalam
+      // satu permintaan, jadi tiap PO dibungkus sendiri — kegagalan pada PO
+      // vendor ketiga tidak menyisakan PO tanpa item, dan PO vendor sebelumnya
+      // yang sudah lengkap tetap sah.
+      const { poId, poNumber } = await withNumberedDocument(
+        'PO', 'purchase_orders', 'po_number',
+        async (code, tx) => {
+          const poResult = await tx.run(
+            `INSERT INTO purchase_orders (po_number, pr_id, vendor_id, status, total_amount, notes, po_date)
+             VALUES (?, ?, ?, 'draft', ?, ?, DATE(NOW()))`,
+            [code, prId, vendorId, subTotal, JSON.stringify(notesData)]
+          );
+          const newPoId = poResult.insertId;
 
-      // Insert PO items — both po_id and purchase_order_id to match existing schema
-      for (const item of items) {
-        await dbRun(
-          `INSERT INTO purchase_order_items (purchase_order_id, po_id, product_id, quantity, unit_price, uom, notes)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [poId, poId, item.product_id || null, Number(item.quantity), Number(item.unit_price), item.uom || '', item.item_name]
-        );
-      }
+          // Insert PO items — both po_id and purchase_order_id to match existing schema
+          for (const item of items) {
+            await tx.run(
+              `INSERT INTO purchase_order_items (purchase_order_id, po_id, product_id, quantity, unit_price, uom, notes)
+               VALUES (?, ?, ?, ?, ?, ?, ?)`,
+              [newPoId, newPoId, item.product_id || null, Number(item.quantity), Number(item.unit_price), item.uom || '', item.item_name]
+            );
+          }
+
+          return { poId: newPoId, poNumber: code };
+        }
+      );
 
       createdPOs.push({
         po_id: poId,
@@ -1637,84 +1700,92 @@ router.post('/purchase-orders', authMiddleware, requirePermission('procurement.p
       }
     }
 
-    const number = po_number || await nextSequentialCode('PO', 'purchase_orders', 'po_number');
     const { contractTotal } = parsePOFinancials(notes, items, Number(discount_percent || 0), Number(ppn_percent || 0));
-    
-    try {
-      // Insert order header
-      // If PR has a project_id, inherit it
-      let effectiveProjectId = project_id || null;
-      if (!effectiveProjectId && pr_id) {
-        const prRow = await dbGet('SELECT project_id FROM purchase_requests WHERE id = ?', [pr_id]) as any;
-        if (prRow?.project_id) effectiveProjectId = prRow.project_id;
-      }
 
-      const poResult = await dbRun(
-        `INSERT INTO purchase_orders (
+    try {
+      // PROC-R04 + PROC-R05: pembuatan PO kini satu transaction penuh, dan
+      // nomornya diterbitkan lewat helper yang mengulang saat UNIQUE bentrok.
+      //
+      // Sebelumnya header, item, jadwal pembayaran, dan AP di-INSERT berurutan
+      // dengan autocommit. Kalau item ketiga gagal, header dan dua item pertama
+      // sudah terlanjur tersimpan — PO setengah jadi yang tetap terlihat di
+      // daftar. Nomornya juga diambil langsung dari nextSequentialCode, jadi dua
+      // permintaan bersamaan bisa membaca MAX() yang sama lalu satu dibalas 500.
+      const { poId, number } = await withNumberedDocument(
+        'PO', 'purchase_orders', 'po_number',
+        async (code, tx) => {
+          {
+            // If PR has a project_id, inherit it
+            let effectiveProjectId = project_id || null;
+            if (!effectiveProjectId && pr_id) {
+              const prRow = await tx.get('SELECT project_id FROM purchase_requests WHERE id = ?', [pr_id]) as any;
+              if (prRow?.project_id) effectiveProjectId = prRow.project_id;
+            }
+
+            const poResult = await tx.run(
+              `INSERT INTO purchase_orders (
           po_number, po_date, vendor_id, pr_id, project_id, status, approval_status, expected_date, currency,
           payment_term, payment_term_2, address, type, item_type, contact_person, delivery_to,
           advance_payment, discount_percent, ppn_percent, total_amount, notes
         ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          number,
-          normalizeDateOnly(po_date || '') || new Date().toISOString().slice(0, 10),
-          vendor_id,
-          pr_id || null,
-          effectiveProjectId,
-          status || 'draft',
-          expected_date || null,
-          currency || 'IDR',
-          payment_term || null,
-          payment_term_2 || null,
-          address || null,
-          type || 'Local',
-          req.body.item_type || 'inventory',
-          contact_person || null,
-          delivery_to || null,
-          Number(advance_payment || 0),
-          Number(discount_percent || 0),
-          Number(ppn_percent || 0),
-          Number(contractTotal || 0),
-          notes || null,
-        ]
-      );
-      
-      // Get the inserted PO ID
-      const poId = poResult.insertId;
-      
-      // Insert items
-      for (const item of items) {
-        if (!item.quantity || Number(item.quantity) <= 0) {
-          throw new Error('Invalid item: quantity is required and must be > 0');
-        }
-        const itemProductId = item.product_id || null;
-        console.log(`[PO:create] Inserting item: product_id=${itemProductId}, qty=${item.quantity}, uom=${item.uom}, price=${item.unit_price}`);
-        try {
-          await dbRun(
-            'INSERT INTO purchase_order_items (purchase_order_id, po_id, product_id, quantity, uom, unit_price, currency, notes, proposal_item_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [poId, poId, itemProductId, item.quantity, item.uom || null, item.unit_price || 0, item.currency || currency || 'IDR', item.notes || null, item.proposal_item_id || null]
-          );
-        } catch (insertErr: any) {
-          console.error(`[PO:create] Failed inserting product_id=${itemProductId}:`, insertErr.message);
-          throw insertErr;
-        }
-      }
+              [
+                code,
+                normalizeDateOnly(po_date || '') || new Date().toISOString().slice(0, 10),
+                vendor_id,
+                pr_id || null,
+                effectiveProjectId,
+                status || 'draft',
+                expected_date || null,
+                currency || 'IDR',
+                payment_term || null,
+                payment_term_2 || null,
+                address || null,
+                type || 'Local',
+                req.body.item_type || 'inventory',
+                contact_person || null,
+                delivery_to || null,
+                Number(advance_payment || 0),
+                Number(discount_percent || 0),
+                Number(ppn_percent || 0),
+                Number(contractTotal || 0),
+                notes || null,
+              ]
+            );
 
-      await upsertPaymentSchedules({
-        poId,
-        poData: {
-          po_date,
-          expected_date,
-          payment_term,
-          vendor_id,
-          advance_payment,
-          discount_percent,
-          ppn_percent,
-          notes,
+            const newPoId = poResult.insertId;
+
+            for (const item of items) {
+              if (!item.quantity || Number(item.quantity) <= 0) {
+                throw new Error('Invalid item: quantity is required and must be > 0');
+              }
+              await tx.run(
+                'INSERT INTO purchase_order_items (purchase_order_id, po_id, product_id, quantity, uom, unit_price, currency, notes, proposal_item_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                [newPoId, newPoId, item.product_id || null, item.quantity, item.uom || null, item.unit_price || 0, item.currency || currency || 'IDR', item.notes || null, item.proposal_item_id || null]
+              );
+            }
+
+            await upsertPaymentSchedules({
+              poId: newPoId,
+              poData: {
+                po_date,
+                expected_date,
+                payment_term,
+                vendor_id,
+                advance_payment,
+                discount_percent,
+                ppn_percent,
+                notes,
+              },
+              items,
+              paymentSchedules: payment_schedules,
+              tx,
+            });
+
+            return { poId: newPoId, number: code };
+          }
         },
-        items,
-        paymentSchedules: payment_schedules,
-      });
+        po_number,
+      );
 
       res.status(201).json({ message: 'Purchase order created', data: { id: poId, po_number: number } });
     } catch (txErr: any) {
@@ -1903,46 +1974,61 @@ router.post('/purchase-orders/:id/approve', authMiddleware, async (req: Request,
     const approverRow = await dbGet('SELECT id FROM users WHERE id = ?', [userId]) as { id: number } | undefined;
     const approverId = approverRow ? userId : null;
 
-    // Helper: regenerate schedule after approval
-    const regenerateSchedule = async () => {
-      const items = await dbAll(
+    const regenerateSchedule = async (tx: TxRunner) => {
+      const items = await tx.all(
         'SELECT DISTINCT * FROM purchase_order_items WHERE purchase_order_id = ? OR po_id = ?',
         [poId, poId]
       ) as any[];
-      await upsertPaymentSchedules({ poId: Number(poId), poData: po, items });
+      await upsertPaymentSchedules({ poId: Number(poId), poData: po, items, tx });
     };
 
+    // PROC-R06: persetujuan PO dan pembuatan jadwal pembayaran + AP kini satu
+    // transaction.
+    //
+    // Sebelumnya UPDATE approval_status di-commit lebih dulu, baru
+    // regenerateSchedule() jalan terpisah. Kalau pembuatan jadwal atau AP gagal,
+    // PO tetap tercatat fully approved sementara jadwal pembayarannya tidak
+    // lengkap — dan approval tidak bisa diulang untuk memperbaikinya karena
+    // statusnya sudah 2.
+    let outcome: { message: string; approval_status: number } | null = null;
+
     if (userLevel >= 4 && currentStatus < 2) {
-      await dbRun(
-        'UPDATE purchase_orders SET approval_status = 2, approved_by_supervisor_id = ?, approved_by_manager_id = ?, approved_at_supervisor = CURRENT_TIMESTAMP, approved_at_manager = CURRENT_TIMESTAMP WHERE id = ?',
-        [approverId, approverId, poId]
-      );
-      await regenerateSchedule();
-      return res.json({ message: 'PO fully approved (DIRECT)', approval_status: 2 });
+      outcome = { message: 'PO fully approved (DIRECT)', approval_status: 2 };
+      await withTransaction(async tx => {
+        await tx.run(
+          'UPDATE purchase_orders SET approval_status = 2, approved_by_supervisor_id = ?, approved_by_manager_id = ?, approved_at_supervisor = CURRENT_TIMESTAMP, approved_at_manager = CURRENT_TIMESTAMP WHERE id = ?',
+          [approverId, approverId, poId]
+        );
+        await regenerateSchedule(tx);
+      });
+    } else if (userLevel === 2 && currentStatus === 0) {
+      outcome = { message: 'PO approved by supervisor (1/2)', approval_status: 1 };
+      await withTransaction(async tx => {
+        await tx.run(
+          'UPDATE purchase_orders SET approval_status = 1, approved_by_supervisor_id = ?, approved_at_supervisor = CURRENT_TIMESTAMP WHERE id = ?',
+          [approverId, poId]
+        );
+        await regenerateSchedule(tx);
+      });
+    } else if (userLevel === 3 && currentStatus === 1) {
+      outcome = { message: 'PO approved by manager (2/2)', approval_status: 2 };
+      await withTransaction(async tx => {
+        await tx.run(
+          'UPDATE purchase_orders SET approval_status = 2, approved_by_manager_id = ?, approved_at_manager = CURRENT_TIMESTAMP WHERE id = ?',
+          [approverId, poId]
+        );
+        await regenerateSchedule(tx);
+      });
     }
 
-    if (userLevel === 2 && currentStatus === 0) {
-      await dbRun(
-        'UPDATE purchase_orders SET approval_status = 1, approved_by_supervisor_id = ?, approved_at_supervisor = CURRENT_TIMESTAMP WHERE id = ?',
-        [approverId, poId]
-      );
-      await regenerateSchedule();
-      return res.json({ message: 'PO approved by supervisor (1/2)', approval_status: 1 });
+    if (!outcome) {
+      return res.status(400).json({
+        error: 'Cannot approve: insufficient level or invalid status',
+        debug: { userLevel, currentStatus, needLevel: currentStatus === 0 ? 2 : 3 }
+      });
     }
 
-    if (userLevel === 3 && currentStatus === 1) {
-      await dbRun(
-        'UPDATE purchase_orders SET approval_status = 2, approved_by_manager_id = ?, approved_at_manager = CURRENT_TIMESTAMP WHERE id = ?',
-        [approverId, poId]
-      );
-      await regenerateSchedule();
-      return res.json({ message: 'PO approved by manager (2/2)', approval_status: 2 });
-    }
-
-    return res.status(400).json({
-      error: 'Cannot approve: insufficient level or invalid status',
-      debug: { userLevel, currentStatus, needLevel: currentStatus === 0 ? 2 : 3 }
-    });
+    return res.json(outcome);
   } catch (error) {
     console.error('Error approving PO:', error);
     res.status(500).json({ error: 'Failed to approve purchase order' });
@@ -2123,8 +2209,6 @@ router.post('/goods-receipts', authMiddleware, requirePermission('procurement.gr
     const normalizedDate = normalizeDateOnly(received_date || received_at);
     if (!normalizedDate) return res.status(400).json({ error: 'received_date is required' });
 
-    const number = grn_number || await nextSequentialCode('GRN', 'goods_receipts', 'grn_number');
-    
     // Determine and validate received_by user ID
     let receiver = received_by || (req as any).userId || 1;
     
@@ -2156,14 +2240,22 @@ router.post('/goods-receipts', authMiddleware, requirePermission('procurement.gr
 
     console.log('🔍 GRN Create Debug:', { po_id, warehouse_id, receiver, date: normalizedDate });
 
-    const result = await dbRun(
-      `INSERT INTO goods_receipts 
-       (grn_number, po_id, warehouse_id, received_date, received_by, status, notes) 
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [number, po_id, warehouse_id, normalizedDate, receiver, status || 'DRAFT', notes || null]
+    // PROC-R05: nomor GRN lewat helper yang mengulang saat UNIQUE bentrok.
+    // Sebelumnya nomornya diambil langsung, jadi dua penerimaan bersamaan bisa
+    // membaca MAX() yang sama dan salah satunya dibalas 500.
+    const { grId, number } = await withNumberedDocument(
+      'GRN', 'goods_receipts', 'grn_number',
+      async (code, tx) => {
+        const result = await tx.run(
+          `INSERT INTO goods_receipts
+           (grn_number, po_id, warehouse_id, received_date, received_by, status, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [code, po_id, warehouse_id, normalizedDate, receiver, status || 'DRAFT', notes || null]
+        );
+        return { grId: result.insertId, number: code };
+      },
+      grn_number,
     );
-
-    const grId = result.insertId;
 
     res.status(201).json({ message: 'Goods receipt created', data: { id: grId, grn_number: number } });
   } catch (error: any) {
