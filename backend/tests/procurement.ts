@@ -119,6 +119,53 @@ async function main() {
   }, master);
   chk('GRN untuk PO yang sudah punya GRN ditolak', noWh.status, 400);
 
+  console.log('\n5. Menyimpan PO tidak boleh menghapus field yang tidak dikirim');
+  const poFull = await call('POST', '/procurement/purchase-orders', {
+    vendor_id: vendorId,
+    po_date: '2026-03-15',
+    status: 'submitted',
+    currency: 'USD',
+    type: 'Import',
+    payment_term: 'NET 30',
+    contact_person: 'Pak Budi',
+    delivery_to: 'Gudang Utama',
+    advance_payment: 30,
+    discount_percent: 5,
+    ppn_percent: 11,
+    items: [{ product_id: product.id, quantity: 4, unit_price: 100000, uom: 'pcs' }],
+  }, master);
+  const poFullId = poFull.json?.data?.id ?? poFull.json?.id;
+  chk('PO lengkap dibuat', !!poFullId, true);
+
+  const readPo = async (id: number) =>
+    (await call('GET', `/procurement/purchase-orders/${id}`, undefined, master)).json?.data;
+
+  const poBefore = await readPo(poFullId);
+  chk('diskon tersimpan', Number(poBefore?.discount_percent), 5);
+  chk('PPN tersimpan', Number(poBefore?.ppn_percent), 11);
+  chk('uang muka tersimpan', Number(poBefore?.advance_payment), 30);
+
+  // Payload minimal — persis kondisi yang dulu menghapus field finansial
+  const minimal = await call('PUT', `/procurement/purchase-orders/${poFullId}`,
+    { contact_person: 'Pak Andi' }, master);
+  chk('simpan sebagian berhasil', minimal.status, 200);
+
+  const poAfter = await readPo(poFullId);
+  chk('kontak berubah', poAfter?.contact_person, 'Pak Andi');
+  chk('diskon TIDAK jadi 0', Number(poAfter?.discount_percent), 5);
+  chk('PPN TIDAK jadi 0', Number(poAfter?.ppn_percent), 11);
+  chk('uang muka TIDAK jadi 0', Number(poAfter?.advance_payment), 30);
+  chk('tanggal PO TIDAK melompat ke hari ini',
+    String(poAfter?.po_date).slice(0, 10), '2026-03-15');
+  chk('mata uang tidak jadi IDR', poAfter?.currency, 'USD');
+  chk('tipe tidak jadi Local', poAfter?.type, 'Import');
+  chk('termin pembayaran tetap', poAfter?.payment_term, 'NET 30');
+
+  const itemsAfter = (await call('GET', `/procurement/purchase-orders/${poFullId}`, undefined, master))
+    .json?.data?.items || [];
+  chk('item PO tidak ikut terhapus', itemsAfter.length, 1);
+  chk('jumlah item tetap', Number(itemsAfter[0]?.quantity), 4);
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }

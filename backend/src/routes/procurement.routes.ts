@@ -1608,99 +1608,116 @@ router.post('/purchase-orders', authMiddleware, async (req: Request, res: Respon
 router.put('/purchase-orders/:id', authMiddleware, async (req: Request, res: Response) => {
   try {
     const {
-      vendor_id,
-      pr_id,
-      project_id,
-      status,
-      po_date,
-      expected_date,
-      currency,
-      payment_term,
-      payment_term_2,
-      address,
-      type,
-      item_type,
-      contact_person,
-      delivery_to,
-      advance_payment,
-      discount_percent,
-      ppn_percent,
-      notes,
-      items,
-      payment_schedules,
+      vendor_id, pr_id, project_id, status, po_date, expected_date, currency,
+      payment_term, payment_term_2, address, type, item_type, contact_person, delivery_to,
+      advance_payment, discount_percent, ppn_percent, notes, items, payment_schedules,
     } = req.body;
-    const { contractTotal } = parsePOFinancials(notes, items || [], Number(discount_percent || 0), Number(ppn_percent || 0));
-    
-    try {
-      // Update order header
-      await dbRun(
-        `UPDATE purchase_orders
-         SET vendor_id = ?, pr_id = ?, project_id = ?, status = ?, po_date = ?, expected_date = ?, currency = ?,
-             payment_term = ?, payment_term_2 = ?, address = ?, type = ?, item_type = ?, contact_person = ?, delivery_to = ?,
-             advance_payment = ?, discount_percent = ?, ppn_percent = ?, total_amount = ?, notes = ?,
-             updated_at = CURRENT_TIMESTAMP
-         WHERE id = ?`,
-        [
-          vendor_id,
-          pr_id || null,
-          project_id || null,
-          status,
-          normalizeDateOnly(po_date || '') || new Date().toISOString().slice(0, 10),
-          expected_date || null,
-          currency || 'IDR',
-          payment_term || null,
-          payment_term_2 || null,
-          address || null,
-          type || 'Local',
-          item_type || 'inventory',
-          contact_person || null,
-          delivery_to || null,
-          Number(advance_payment || 0),
-          Number(discount_percent || 0),
-          Number(ppn_percent || 0),
-          Number(contractTotal || 0),
-          notes || null,
-          req.params.id,
-        ]
+
+    const existing: any = await dbGet('SELECT * FROM purchase_orders WHERE id = ?', [req.params.id]);
+    if (!existing) return res.status(404).json({ error: 'Purchase order tidak ditemukan' });
+
+    // PARTIAL UPDATE. Handler lama melakukan replace penuh dengan pola
+    // `field || default`, sehingga field yang tidak dikirim klien tidak sekadar
+    // jadi NULL tetapi jatuh ke nilai default:
+    //   discount_percent / ppn_percent / advance_payment → 0
+    //   type → 'Local', item_type → 'inventory', currency → 'IDR'
+    //   po_date → TANGGAL HARI INI
+    // Artinya diskon, PPN, dan uang muka bisa hilang hanya karena form tidak
+    // menyertakannya, dan tanggal PO melompat ke hari ini.
+    const has = (k: string) => Object.prototype.hasOwnProperty.call(req.body, k);
+    const fields: string[] = [];
+    const values: any[] = [];
+    const set = (col: string, val: any) => { fields.push(`${col} = ?`); values.push(val); };
+
+    if (has('vendor_id')) set('vendor_id', vendor_id ?? null);
+    if (has('pr_id')) set('pr_id', pr_id ?? null);
+    if (has('project_id')) set('project_id', project_id ?? null);
+    if (has('status')) set('status', status);
+    if (has('po_date')) {
+      const d = normalizeDateOnly(po_date || '');
+      if (!d) return res.status(400).json({ error: 'po_date tidak valid' });
+      set('po_date', d);
+    }
+    if (has('expected_date')) set('expected_date', normalizeDateOnly(expected_date || '') || null);
+    if (has('currency')) set('currency', currency || 'IDR');
+    if (has('payment_term')) set('payment_term', payment_term ?? null);
+    if (has('payment_term_2')) set('payment_term_2', payment_term_2 ?? null);
+    if (has('address')) set('address', address ?? null);
+    if (has('type')) set('type', type || 'Local');
+    if (has('item_type')) set('item_type', item_type || 'inventory');
+    if (has('contact_person')) set('contact_person', contact_person ?? null);
+    if (has('delivery_to')) set('delivery_to', delivery_to ?? null);
+    if (has('advance_payment')) set('advance_payment', Number(advance_payment || 0));
+    if (has('discount_percent')) set('discount_percent', Number(discount_percent || 0));
+    if (has('ppn_percent')) set('ppn_percent', Number(ppn_percent || 0));
+    if (has('notes')) set('notes', notes ?? null);
+
+    // Total dihitung ulang hanya kalau ada yang mempengaruhinya. Kalau item
+    // tidak dikirim, dipakai item yang tersimpan supaya totalnya tetap benar.
+    const affectsTotal = has('items') || has('discount_percent') || has('ppn_percent') || has('notes');
+    if (affectsTotal) {
+      const itemsForTotal = Array.isArray(items) ? items : await dbAll(
+        'SELECT * FROM purchase_order_items WHERE purchase_order_id = ? OR po_id = ?',
+        [req.params.id, req.params.id]
       );
-      
-      if (items && Array.isArray(items)) {
-        // Delete existing items
-        await dbRun('DELETE FROM purchase_order_items WHERE purchase_order_id = ? OR po_id = ?', [req.params.id, req.params.id]);
-        
-        // Insert new items
+      const { contractTotal } = parsePOFinancials(
+        has('notes') ? notes : existing.notes,
+        itemsForTotal,
+        Number(has('discount_percent') ? discount_percent || 0 : existing.discount_percent || 0),
+        Number(has('ppn_percent') ? ppn_percent || 0 : existing.ppn_percent || 0),
+      );
+      set('total_amount', Number(contractTotal || 0));
+    }
+
+    set('updated_at', new Date());
+
+    await withTransaction(async tx => {
+      if (fields.length) {
+        await tx.run(`UPDATE purchase_orders SET ${fields.join(', ')} WHERE id = ?`,
+          [...values, req.params.id]);
+      }
+
+      // Item hanya disentuh kalau memang dikirim. Dulu DELETE + INSERT berjalan
+      // di luar transaction: kalau satu insert gagal setelah DELETE, PO
+      // kehilangan SELURUH itemnya secara permanen.
+      if (Array.isArray(items)) {
+        await tx.run('DELETE FROM purchase_order_items WHERE purchase_order_id = ? OR po_id = ?',
+          [req.params.id, req.params.id]);
         for (const item of items) {
-          await dbRun(
-            'INSERT INTO purchase_order_items (purchase_order_id, po_id, product_id, quantity, uom, unit_price, currency, notes, proposal_item_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [req.params.id, req.params.id, item.product_id, item.quantity, item.uom || null, item.unit_price || 0, item.currency || currency || 'IDR', item.notes || null, item.proposal_item_id || null]
+          await tx.run(
+            `INSERT INTO purchase_order_items
+              (purchase_order_id, po_id, product_id, quantity, uom, unit_price, currency, notes, proposal_item_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [req.params.id, req.params.id, item.product_id, item.quantity, item.uom || null,
+              item.unit_price || 0, item.currency || currency || existing.currency || 'IDR',
+              item.notes || null, item.proposal_item_id || null]
           );
         }
       }
+    });
 
+    if (Array.isArray(items) || payment_schedules) {
       await upsertPaymentSchedules({
         poId: Number(req.params.id),
         poData: {
-          po_date,
-          expected_date,
-          payment_term,
-          vendor_id,
-          advance_payment,
-          discount_percent,
-          ppn_percent,
-          notes,
+          po_date: has('po_date') ? po_date : existing.po_date,
+          expected_date: has('expected_date') ? expected_date : existing.expected_date,
+          payment_term: has('payment_term') ? payment_term : existing.payment_term,
+          vendor_id: has('vendor_id') ? vendor_id : existing.vendor_id,
+          advance_payment: has('advance_payment') ? advance_payment : existing.advance_payment,
+          discount_percent: has('discount_percent') ? discount_percent : existing.discount_percent,
+          ppn_percent: has('ppn_percent') ? ppn_percent : existing.ppn_percent,
+          notes: has('notes') ? notes : existing.notes,
         },
-        items: items || [],
+        items: Array.isArray(items) ? items : [],
         paymentSchedules: payment_schedules,
       });
-      
-      res.json({ message: 'Purchase order updated' });
-    } catch (err) {
-      console.error('[PO:update] error:', err);
-      throw err;
     }
-  } catch (error) {
-    console.error('Error updating purchase order:', error);
-    res.status(500).json({ error: 'Failed to update purchase order' });
+
+    res.json({ message: 'Purchase order updated' });
+  } catch (error: any) {
+    console.error('[PO:update]', error?.message || error);
+    res.status(500).json({ error: 'Gagal menyimpan purchase order' });
   }
 });
 
