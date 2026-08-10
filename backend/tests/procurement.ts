@@ -281,6 +281,41 @@ async function main() {
   const grnAfter = (await call('GET', `/procurement/goods-receipts/${grnKeepId}`, undefined, master)).json?.data;
   chk('item GRN TIDAK hilang', JSON.parse(grnAfter?.notes || '{}').items?.length, 1);
 
+  console.log('\n9. Menghapus PO tidak boleh menghapus jejak penerimaan & keuangan');
+  // PO yang sudah punya GRN: harus DITOLAK, bukan menyapu goods_receipts dan
+  // membuat stock_movements menggantung.
+  const poWithGrn = first.poId;
+  const refuse = await call('DELETE', `/procurement/purchase-orders/${poWithGrn}`, { reason: 'uji' }, master);
+  chk('PO yang sudah ada GRN-nya ditolak', refuse.status, 409);
+  chk('kode PO_HAS_TRAIL', refuse.json?.code, 'PO_HAS_TRAIL');
+  chk('jumlah GRN disebutkan', Number(refuse.json?.goods_receipts) >= 1, true);
+  chk('jumlah pergerakan stok disebutkan', Number(refuse.json?.stock_movements) >= 1, true);
+
+  // GRN-nya harus tetap ada
+  const grnStill = await call('GET', `/procurement/goods-receipts/${first.grnId}`, undefined, master);
+  chk('GRN tidak ikut terhapus', grnStill.status, 200);
+  chk('stok tetap 10 setelah percobaan hapus', await stockOf(product.id), 10);
+
+  // PO draft tanpa jejak: boleh dihapus, tapi logical
+  const poDraft = await call('POST', '/procurement/purchase-orders', {
+    vendor_id: vendorId, po_date: today(), status: 'draft',
+    items: [{ product_id: product.id, quantity: 1, unit_price: 1000, uom: 'pcs' }],
+  }, master);
+  const poDraftId = poDraft.json?.data?.id ?? poDraft.json?.id;
+
+  const del = await call('DELETE', `/procurement/purchase-orders/${poDraftId}`, { reason: 'Salah input' }, master);
+  chk('PO draft bisa dihapus', del.status, 200);
+  chk('hilang dari daftar', (await call('GET', `/procurement/purchase-orders/${poDraftId}`, undefined, master)).status, 404);
+  chk('menghapus dua kali ditolak',
+    (await call('DELETE', `/procurement/purchase-orders/${poDraftId}`, {}, master)).status, 409);
+
+  // Itemnya tetap ada di database, dan PO bisa dipulihkan
+  chk('PO bisa dipulihkan',
+    (await call('POST', `/procurement/purchase-orders/${poDraftId}/restore`, {}, master)).status, 200);
+  const restored = (await call('GET', `/procurement/purchase-orders/${poDraftId}`, undefined, master)).json?.data;
+  chk('PO kembali muncul', !!restored, true);
+  chk('item PO tetap utuh setelah dipulihkan', (restored?.items || []).length, 1);
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }

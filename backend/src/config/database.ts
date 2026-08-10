@@ -1002,6 +1002,33 @@ const ensureAssetStatusHistorySchema = async (connection: any) => {
   console.log('✅ Riwayat status aset ensured');
 };
 
+// ==================== SOFT DELETE PURCHASE ORDER ====================
+// `DELETE /purchase-orders/:id` menghapus permanen dan ikut menyapu tabel lain
+// secara manual: payment schedule, accounts_payable, grn_items, goods_receipts,
+// dan purchase_order_items. Setiap langkahnya dibungkus helper yang MENELAN
+// error, jadi kegagalan sebagian tidak terlihat sama sekali.
+//
+// Yang paling berbahaya: menghapus goods_receipts membuat baris stock_movements
+// menggantung — stok sudah terlanjur masuk ke gudang, tapi dokumen sumbernya
+// hilang dan penerimaannya tidak bisa ditelusuri lagi.
+//
+// Aman untuk sistem berjalan: kolom baru default 0, seluruh PO yang ada tetap
+// tampil seperti biasa.
+const ensurePurchaseOrderSoftDelete = async (connection: any) => {
+  const statements = [
+    `ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS is_deleted TINYINT(1) NOT NULL DEFAULT 0`,
+    `ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP NULL`,
+    `ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS deleted_by INT NULL`,
+    `ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS deletion_reason TEXT NULL`,
+    `CREATE INDEX idx_po_is_deleted ON purchase_orders (is_deleted)`,
+  ];
+
+  for (const statement of statements) {
+    await execSchemaEnsure(connection, statement);
+  }
+  console.log('✅ Soft delete purchase order ensured');
+};
+
 // ==================== DISPOSAL WORKFLOW (AST-006) ====================
 // Disposal sebelumnya hanya berupa mengubah status menjadi 'disposed' — tanpa
 // alasan, tanpa persetujuan, tanpa nilai jual, dan tanpa perhitungan gain/loss.
@@ -1306,6 +1333,7 @@ export async function initializeDatabase() {
     await ensureAssetDepreciationSchema(connection);
     await ensureDepreciationLedgerSchema(connection);
     await ensureSoftDeleteSchema(connection);
+    await ensurePurchaseOrderSoftDelete(connection);
     await ensureDisposalSchema(connection);
     await ensureAssetStatusHistorySchema(connection);
     await ensurePermissionCatalog(connection);

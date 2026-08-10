@@ -1442,6 +1442,7 @@ router.get('/purchase-orders', authMiddleware, async (req: Request, res: Respons
        LEFT JOIN vendors v ON po.vendor_id = v.id
        LEFT JOIN purchase_requests pr ON po.pr_id = pr.id
        LEFT JOIN client_projects cp ON po.project_id = cp.id
+       WHERE po.is_deleted = 0
        ORDER BY po.created_at DESC`
     );
     
@@ -1462,7 +1463,7 @@ router.get('/purchase-orders/:id', authMiddleware, async (req: Request, res: Res
        LEFT JOIN vendors v ON po.vendor_id = v.id
        LEFT JOIN purchase_requests pr ON po.pr_id = pr.id
        LEFT JOIN client_projects cp ON po.project_id = cp.id
-       WHERE po.id = ?`,
+       WHERE po.id = ? AND po.is_deleted = 0`,
       [req.params.id]
     );
     if (!order) return res.status(404).json({ error: 'Purchase order not found' });
@@ -1716,7 +1717,7 @@ router.put('/purchase-orders/:id', authMiddleware, async (req: Request, res: Res
       advance_payment, discount_percent, ppn_percent, notes, items, payment_schedules,
     } = req.body;
 
-    const existing: any = await dbGet('SELECT * FROM purchase_orders WHERE id = ?', [req.params.id]);
+    const existing: any = await dbGet('SELECT * FROM purchase_orders WHERE id = ? AND is_deleted = 0', [req.params.id]);
     if (!existing) return res.status(404).json({ error: 'Purchase order tidak ditemukan' });
 
     // PARTIAL UPDATE. Handler lama melakukan replace penuh dengan pola
@@ -1849,7 +1850,7 @@ router.post('/purchase-orders/:id/approve', authMiddleware, async (req: Request,
     const userLevel = await approverLevel(req);
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
-    const po = await dbGet('SELECT * FROM purchase_orders WHERE id = ?', [poId]) as any;
+    const po = await dbGet('SELECT * FROM purchase_orders WHERE id = ? AND is_deleted = 0', [poId]) as any;
     if (!po) return res.status(404).json({ error: 'Purchase order not found' });
 
     const currentStatus = po.approval_status || 0;
@@ -1924,63 +1925,109 @@ router.post('/purchase-orders/:id/reject', authMiddleware, async (req: Request, 
   }
 });
 
+// Menghapus PO kini LOGICAL. Versi lama menyapu tabel lain secara manual —
+// payment schedule, accounts_payable, grn_items, goods_receipts, dan item PO —
+// dengan helper yang menelan setiap error, sehingga kegagalan sebagian tidak
+// terlihat. Menghapus goods_receipts juga membuat baris stock_movements
+// menggantung: stok sudah masuk gudang tapi dokumen sumbernya lenyap.
 router.delete('/purchase-orders/:id', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const userId = (req as any).user?.userId;
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
-    // Check PO status
-    const po = await dbGet('SELECT id, status, approval_status FROM purchase_orders WHERE id = ?', [id]) as any;
+    const po: any = await dbGet(
+      'SELECT id, po_number, status, approval_status, is_deleted FROM purchase_orders WHERE id = ?', [id]
+    );
+    if (!po) return res.status(404).json({ error: 'Purchase order tidak ditemukan' });
+    if (po.is_deleted) return res.status(409).json({ error: 'Purchase order sudah dihapus' });
 
-    if (!po) {
-      return res.status(404).json({ error: 'Purchase order not found' });
-    }
-
-    // Allow delete if draft OR approval_status is 0 (pending)
     const approvalStatus = Number(po.approval_status || 0);
     if (po.status !== 'draft' && approvalStatus > 0) {
-      return res.status(400).json({ error: `Cannot delete: PO status is "${po.status}" with approval ${approvalStatus}/2. Reset approval first.` });
+      return res.status(400).json({
+        error: `Tidak bisa dihapus: status PO "${po.status}" dengan persetujuan ${approvalStatus}/2. Batalkan persetujuannya dulu.`,
+      });
     }
 
-    // Delete related records in correct order (child tables first)
-    // Use a helper to safely clean up FK references
-    const safeCleanup = async (sql: string, params: any[], label: string) => {
-      try {
-        await dbRun(sql, params);
-      } catch (e: any) {
-        console.warn(`Warning cleaning ${label}:`, e.message?.substring(0, 120));
-      }
-    };
+    // PO yang sudah punya jejak penerimaan atau keuangan tidak boleh dihapus
+    // sama sekali — menghapusnya membuat stok, hutang, dan pembayaran
+    // kehilangan dokumen sumbernya.
+    // Hutang (accounts_payable) dibuat OTOMATIS dari termin pembayaran begitu
+    // PO dibuat, jadi keberadaannya saja tidak boleh memblokir. Yang memblokir
+    // adalah hutang yang UANGNYA SUDAH KELUAR.
+    const trail: any = await dbGet(
+      `SELECT
+        (SELECT COUNT(*) FROM goods_receipts WHERE po_id = ?) AS grn,
+        (SELECT COUNT(*) FROM stock_movements WHERE reference_type = 'GRN'
+          AND reference_id IN (SELECT id FROM goods_receipts WHERE po_id = ?)) AS movements,
+        (SELECT COUNT(*) FROM accounts_payable WHERE po_id = ? AND COALESCE(paid_amount,0) > 0) AS paid_payables`,
+      [id, id, id]
+    );
+    const grnCount = Number(trail?.grn || 0);
+    const movementCount = Number(trail?.movements || 0);
+    const paidCount = Number(trail?.paid_payables || 0);
 
-    // 1. Delete payment schedules
-    await safeCleanup('DELETE FROM purchase_order_payment_schedules WHERE po_id = ?', [id], 'payment_schedules');
+    if (grnCount > 0 || movementCount > 0 || paidCount > 0) {
+      return res.status(409).json({
+        error: 'PO ini sudah punya jejak penerimaan atau pembayaran dan tidak boleh dihapus',
+        goods_receipts: grnCount,
+        stock_movements: movementCount,
+        paid_payables: paidCount,
+        hint: 'Batalkan penerimaan atau pembayarannya lebih dulu bila memang keliru',
+        code: 'PO_HAS_TRAIL',
+      });
+    }
 
-    // 2. Nullify/delete accounts_payable
-    await safeCleanup('DELETE FROM accounts_payable WHERE po_id = ?', [id], 'accounts_payable');
+    // Hutang & jadwal pembayaran yang belum dibayar DIBATALKAN, bukan dihapus —
+    // barisnya tetap ada untuk penelusuran, tapi tidak lagi muncul sebagai
+    // kewajiban yang harus dibayar.
+    await withTransaction(async tx => {
+      await tx.run(
+        `UPDATE purchase_orders
+         SET is_deleted = 1, deleted_at = NOW(), deleted_by = ?, deletion_reason = ?, status = 'cancelled'
+         WHERE id = ?`,
+        [userId, req.body?.reason || null, id]
+      );
+      await tx.run(
+        `UPDATE accounts_payable SET status = 'cancelled'
+         WHERE po_id = ? AND COALESCE(paid_amount,0) = 0`,
+        [id]
+      );
+    });
 
-    // 3. Nullify fund_requests
-    await safeCleanup('UPDATE fund_requests SET po_id = NULL WHERE po_id = ?', [id], 'fund_requests');
-
-    // 4. Nullify fund_request_items
-    await safeCleanup('UPDATE fund_request_items SET po_id = NULL WHERE po_id = ?', [id], 'fund_request_items');
-
-    // 4.5. Delete grn_items referencing the goods_receipts of this PO
-    await safeCleanup('DELETE FROM grn_items WHERE grn_id IN (SELECT id FROM goods_receipts WHERE po_id = ?)', [id], 'grn_items');
-
-    // 5. Delete goods_receipts referencing this PO
-    await safeCleanup('DELETE FROM goods_receipts WHERE po_id = ?', [id], 'goods_receipts');
-
-    // 6. Delete PO items
-    await safeCleanup('DELETE FROM purchase_order_items WHERE purchase_order_id = ? OR po_id = ?', [id, id], 'po_items');
-
-    // 7. Delete the PO itself
-    await dbRun('DELETE FROM purchase_orders WHERE id = ?', [id]);
-
-    res.json({ message: 'Purchase order deleted successfully' });
+    res.json({
+      message: `Purchase order ${po.po_number} dihapus. Item, jadwal pembayaran, dan dokumen terkaitnya tetap tersimpan.`,
+    });
   } catch (error: any) {
-    console.error('Error deleting PO:', error);
-    res.status(500).json({ error: 'Failed to delete purchase order: ' + (error.message || 'Unknown error') });
+    console.error('[PO:delete]', error?.message || error);
+    res.status(500).json({ error: 'Gagal menghapus purchase order' });
+  }
+});
+
+// POST /purchase-orders/:id/restore — pulihkan PO yang dihapus
+router.post('/purchase-orders/:id/restore', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const po: any = await dbGet('SELECT id, is_deleted FROM purchase_orders WHERE id = ?', [req.params.id]);
+    if (!po) return res.status(404).json({ error: 'Purchase order tidak ditemukan' });
+    if (!po.is_deleted) return res.status(409).json({ error: 'Purchase order tidak dalam keadaan terhapus' });
+
+    await withTransaction(async tx => {
+      await tx.run(
+        `UPDATE purchase_orders
+         SET is_deleted = 0, deleted_at = NULL, deleted_by = NULL, deletion_reason = NULL, status = 'draft'
+         WHERE id = ?`,
+        [req.params.id]
+      );
+      await tx.run(
+        `UPDATE accounts_payable SET status = 'open'
+         WHERE po_id = ? AND status = 'cancelled' AND COALESCE(paid_amount,0) = 0`,
+        [req.params.id]
+      );
+    });
+    res.json({ message: 'Purchase order dipulihkan sebagai draft' });
+  } catch (error: any) {
+    console.error('[PO:restore]', error?.message || error);
+    res.status(500).json({ error: 'Gagal memulihkan purchase order' });
   }
 });
 
