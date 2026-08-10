@@ -587,7 +587,106 @@ async function main() {
 
   await call('PUT', `/inventory/${invRow.id}`, { quantity: stockNow }, master);
 
-  console.log('\n20. RBAC — token desktop tanpa permission procurement ditolak');
+  console.log('\n20. Dokumen yang sudah jalan tidak boleh diedit (PROC-R16)');
+  const lock = await makePoAndReceive(5, 5);
+  const editBefore = await call('PUT', `/procurement/goods-receipts/${lock.grnId}`, { status: 'received' }, master);
+  chk('GRN belum approved masih boleh diedit', editBefore.status, 200);
+
+  await call('POST', `/procurement/goods-receipts/${lock.grnId}/approve`, {}, master);
+  const editAfter = await call('PUT', `/procurement/goods-receipts/${lock.grnId}`,
+    { warehouse_id: wh.id, notes: JSON.stringify({ items: [{ product_id: product.id, received_quantity: 999 }] }) }, master);
+  chk('GRN approved tidak bisa diedit', editAfter.status, 409);
+  chk('kode GRN_LOCKED_APPROVED', editAfter.json?.code, 'GRN_LOCKED_APPROVED');
+
+  const poLocked = await call('PUT', `/procurement/purchase-orders/${lock.poId}`,
+    { items: [{ product_id: product.id, quantity: 99, unit_price: 1, uom: 'pcs' }] }, master);
+  chk('PO dengan GRN tidak bisa ubah item', poLocked.status, 409);
+  chk('kode PO_LOCKED_BY_GRN', poLocked.json?.code, 'PO_LOCKED_BY_GRN');
+  chk('PO masih boleh ubah data administratif',
+    (await call('PUT', `/procurement/purchase-orders/${lock.poId}`, { delivery_to: 'Gudang B' }, master)).status, 200);
+
+  // Form PO di frontend SELALU mengirim items. Mengirim ulang nilai yang sama
+  // bukan perubahan, jadi tidak boleh ikut diblokir — kalau tidak, PO yang
+  // barangnya sudah datang tidak bisa disimpan sama sekali.
+  const poNow = (await call('GET', `/procurement/purchase-orders/${lock.poId}`, undefined, master)).json?.data;
+  const sameItems = (poNow?.items || []).map((i: any) => ({
+    product_id: i.product_id, quantity: i.quantity, unit_price: i.unit_price, uom: i.uom,
+  }));
+  chk('kirim ulang item yang sama tetap boleh',
+    (await call('PUT', `/procurement/purchase-orders/${lock.poId}`,
+      { delivery_to: 'Gudang C', items: sameItems }, master)).status, 200);
+
+  const prLocked = await call('PUT', `/procurement/purchase-requests/${prForPoId}`,
+    { notes: JSON.stringify({ items: [] }) }, master);
+  chk('PR yang sudah punya PO tidak bisa ubah item', prLocked.status, 409);
+  chk('kode PR_LOCKED_BY_PO', prLocked.json?.code, 'PR_LOCKED_BY_PO');
+
+  console.log('\n21. PR yang dibatalkan tidak bisa dipakai lagi (PROC-R17)');
+  const prCancel = await call('POST', '/procurement/purchase-requests', {
+    request_date: today(), status: 'APPROVED', reason: 'Uji cancel',
+    notes: JSON.stringify({ items: [] }),
+  }, master);
+  const prCancelId = prCancel.json?.data?.id;
+  await call('POST', `/procurement/purchase-requests/${prCancelId}/approve`, {}, master);
+  await call('DELETE', `/procurement/purchase-requests/${prCancelId}`, { reason: 'dibatalkan' }, master);
+
+  chk('PR dibatalkan tidak bisa di-approve',
+    (await call('POST', `/procurement/purchase-requests/${prCancelId}/approve`, {}, master)).status, 404);
+  chk('PR dibatalkan tidak bisa generate PO',
+    (await call('POST', `/procurement/purchase-requests/${prCancelId}/generate-pos`, {}, master)).status, 404);
+  chk('PR dibatalkan tidak bisa ditambah bid',
+    (await call('POST', `/procurement/purchase-requests/${prCancelId}/bids`, { vendor_id: vendorId, total_amount: 1 }, master)).status, 404);
+
+  console.log('\n22. Ubah uang muka harus ikut menyesuaikan AP (PROC-R18)');
+  const poAp = await call('POST', '/procurement/purchase-orders', {
+    vendor_id: vendorId, po_date: today(), payment_term: 'DP 20% - Pelunasan',
+    advance_payment: 20,
+    items: [{ product_id: product.id, quantity: 10, unit_price: 100000, uom: 'pcs' }],
+  }, master);
+  const poApId = poAp.json?.data?.id ?? poAp.json?.id;
+  const schedOf = async (id: number) => {
+    const d = (await call('GET', `/procurement/purchase-orders/${id}`, undefined, master)).json?.data;
+    return (d?.payment_schedules || []).map((s: any) => Number(s.amount || 0));
+  };
+  const before18 = await schedOf(poApId);
+  // Hanya advance_payment yang dikirim — dulu jadwal & AP tidak ikut berubah
+  chk('ubah advance_payment saja diterima',
+    (await call('PUT', `/procurement/purchase-orders/${poApId}`, { advance_payment: 40 }, master)).status, 200);
+  const after18 = await schedOf(poApId);
+  if (before18.length > 0) {
+    chk('jadwal pembayaran ikut berubah', JSON.stringify(after18) !== JSON.stringify(before18), true);
+  } else {
+    console.log('  --   dilewati: PO ini tidak menghasilkan jadwal pembayaran');
+  }
+
+  console.log('\n23. Pembuat GRN selalu dari token (PROC-R12)');
+  const otherUser = await call('GET', '/users', undefined, master);
+  const someoneElse = (otherUser.json?.data || []).find((u: any) => u.email !== ADMIN_EMAIL);
+  const spoofPo = await call('POST', '/procurement/purchase-orders', {
+    vendor_id: vendorId, po_date: today(), status: 'approved',
+    items: [{ product_id: product.id, quantity: 1, unit_price: 100, uom: 'pcs' }],
+  }, master);
+  const spoof = await call('POST', '/procurement/goods-receipts', {
+    po_id: spoofPo.json?.data?.id ?? spoofPo.json?.id,
+    warehouse_id: wh.id, received_date: today(),
+    received_by: someoneElse?.id ?? 1,
+    notes: JSON.stringify({ items: [] }),
+  }, master);
+  chk('GRN dengan received_by orang lain tetap dibuat', spoof.status, 201);
+  const spoofGrn = (await call('GET', `/procurement/goods-receipts/${spoof.json?.data?.id}`, undefined, master)).json?.data;
+  chk('tapi created_by tercatat terpisah', !!spoofGrn?.created_by, true);
+
+  console.log('\n24. Nomor dokumen memakai tanggal bisnis, bukan UTC (PROC-R21)');
+  const jakartaToday = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date()).replace(/-/g, '');
+  const numbered = await call('POST', '/procurement/purchase-requests', {
+    request_date: today(), status: 'DRAFT', reason: 'Uji tanggal', notes: '{}',
+  }, master);
+  chk('nomor PR memakai tanggal Asia/Jakarta',
+    String(numbered.json?.data?.pr_number || '').split('-')[1], jakartaToday);
+
+  console.log('\n25. RBAC — token desktop tanpa permission procurement ditolak');
   const plainRole = await call('POST', '/roles',
     { code: `PROC${stamp}`, name: `ProcTest-${stamp}` }, master);
   const plainEmail = `proc.plain.${stamp}@test.local`;

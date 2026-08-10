@@ -30,6 +30,22 @@ if (!fs.existsSync(prAttachDir)) {
 }
 const prAttachUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB max
 
+// PROC-R22: multer melempar errornya sendiri (mis. LIMIT_FILE_SIZE). Tanpa
+// handler ini error tersebut jatuh ke error handler global dan dibalas 500,
+// padahal berkas kebesaran adalah kesalahan permintaan — 413, bukan 500.
+// Mengikuti pola yang sudah dipakai modul Asset.
+const handleUploadErrors = (err: any, _req: Request, res: Response, next: any) => {
+  if (err instanceof multer.MulterError) {
+    const tooBig = err.code === 'LIMIT_FILE_SIZE';
+    return res.status(tooBig ? 413 : 400).json({
+      error: tooBig
+        ? 'Ukuran berkas melebihi batas 10 MB'
+        : `Upload ditolak: ${err.message}`,
+    });
+  }
+  next(err);
+};
+
 /**
  * PROC-R11: pastikan path yang diminta klien benar-benar berada di dalam folder
  * unggahan yang dituju.
@@ -88,10 +104,29 @@ async function approverLevel(req: Request): Promise<number> {
  * Sekarang: urut per hari, dengan pengaman UNIQUE INDEX di database sebagai
  * penjaga sebenarnya — `withDocumentNumber` di bawah mengulang kalau bentrok.
  */
+/**
+ * PROC-R21: tanggal pada nomor dokumen memakai zona waktu bisnis, bukan UTC.
+ *
+ * Sebelumnya `new Date().toISOString().slice(0, 10)` — itu UTC. Untuk pengguna
+ * WIB, dokumen yang dibuat 11 Agustus jam 01:00 WIB (= 10 Agustus 18:00 UTC)
+ * bernomor `PR-20260810-xxxx` padahal tanggal bisnisnya sudah 11 Agustus.
+ * Setiap malam antara pukul 00:00 dan 07:00 WIB nomornya salah tanggal.
+ *
+ * Zona waktunya bisa diatur lewat env `BUSINESS_TIMEZONE` kalau nanti dipakai
+ * di wilayah lain; defaultnya Asia/Jakarta.
+ */
+const BUSINESS_TIMEZONE = process.env.BUSINESS_TIMEZONE || 'Asia/Jakarta';
+
+const businessDatePart = (): string =>
+  new Intl.DateTimeFormat('en-CA', {
+    timeZone: BUSINESS_TIMEZONE,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date()).replace(/-/g, '');
+
 const nextSequentialCode = async (
   prefix: string, table: string, column: string, tx: TxRunner
 ): Promise<string> => {
-  const datePart = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const datePart = businessDatePart();
   const like = `${prefix}-${datePart}-%`;
 
   // Nomor diambil dari `document_counters` secara atomic. Versi sebelumnya
@@ -342,6 +377,24 @@ const syncScheduleAPStatus = async (scheduleId: number, apId: number, tx?: TxRun
     'UPDATE purchase_order_payment_schedules SET paid_amount = ?, status = ?, ap_id = ? WHERE id = ?',
     [Number(ap.paid_amount || 0), ap.status || 'open', apId, scheduleId]
   );
+};
+
+/**
+ * PROC-R17: satu pintu untuk membaca PR yang masih aktif.
+ *
+ * Daftar, detail, dan update memang sudah memfilter `is_deleted = 0`, tapi
+ * endpoint operasional berbasis `:prId` — approve, buat bid, pilih pemenang,
+ * generate PO, ringkasan bid, unggah lampiran — masih membaca PR apa adanya.
+ * Akibatnya PR yang sudah dibatalkan tetap bisa dipakai sebagai sumber PO lewat
+ * API, meski di layar sudah hilang.
+ */
+const getActivePurchaseRequest = async (
+  id: any,
+  columns: string = '*',
+  runner?: TxRunner,
+): Promise<any> => {
+  const get = runner ? runner.get : dbGet;
+  return get(`SELECT ${columns} FROM purchase_requests WHERE id = ? AND is_deleted = 0`, [id]);
 };
 
 const upsertPaymentSchedules = async (params: {
@@ -720,8 +773,47 @@ router.put('/purchase-requests/:id', authMiddleware, requirePermission('procurem
     const { status, notes, request_date, needed_by, reason, project_id,
             vendor_comparisons, selected_vendor_id } = req.body;
 
-    const existing: any = await dbGet('SELECT id FROM purchase_requests WHERE id = ? AND is_deleted = 0', [req.params.id]);
+    const existing: any = await dbGet('SELECT * FROM purchase_requests WHERE id = ? AND is_deleted = 0', [req.params.id]);
     if (!existing) return res.status(404).json({ error: 'Purchase request tidak ditemukan' });
+
+    // PROC-R16: PR yang sudah melahirkan PO tidak boleh lagi diubah data
+    // sumbernya. Item PR disimpan sebagai JSON di dalam `notes`, jadi mengedit
+    // notes = mengedit item yang sudah dipakai PO sebagai dasar pemesanan.
+    const prHasPo = await dbGet(
+      'SELECT id, po_number FROM purchase_orders WHERE pr_id = ? AND is_deleted = 0 LIMIT 1',
+      [req.params.id]
+    ) as any;
+
+    // Sama seperti PO: yang dilarang adalah MENGUBAH, bukan mengirim ulang nilai
+    // yang sama. Form PR selalu menyertakan notes, jadi memblokir berdasarkan
+    // kehadiran field akan membuat PR ber-PO tidak bisa disimpan sama sekali.
+    const sourceFields: [string, any][] = [
+      ['notes', existing.notes],
+      ['project_id', existing.project_id],
+      ['request_date', existing.request_date],
+      ['needed_by', existing.needed_by],
+    ];
+    const lockedPrFields = sourceFields
+      .filter(([k, current]) =>
+        Object.prototype.hasOwnProperty.call(req.body, k)
+        && String(req.body[k] ?? '') !== String(current ?? ''))
+      .map(([k]) => k);
+
+    if (prHasPo && lockedPrFields.length > 0) {
+      return res.status(409).json({
+        error: `PR ini sudah menerbitkan PO ${prHasPo.po_number || prHasPo.id}, jadi ${lockedPrFields.join(', ')} tidak bisa diubah lagi.`,
+        code: 'PR_LOCKED_BY_PO',
+        locked_fields: lockedPrFields,
+      });
+    }
+
+    if (Number(existing.approval_status || 0) >= 2 && lockedPrFields.length > 0) {
+      return res.status(409).json({
+        error: `PR ini sudah disetujui penuh, jadi ${lockedPrFields.join(', ')} tidak bisa diubah lagi. Reject dulu kalau memang perlu direvisi.`,
+        code: 'PR_LOCKED_APPROVED',
+        locked_fields: lockedPrFields,
+      });
+    }
 
     // PARTIAL UPDATE. Handler lama menimpa seluruh kolom dengan pola
     // `field || default`, padahal ITEM PR disimpan sebagai JSON di dalam
@@ -767,7 +859,7 @@ router.delete('/purchase-requests/:id', authMiddleware, requirePermission('procu
 
     // Check if any PO still references this PR
     const linkedPO = await dbGet(
-      'SELECT id, po_number FROM purchase_orders WHERE pr_id = ? LIMIT 1',
+      'SELECT id, po_number FROM purchase_orders WHERE pr_id = ? AND is_deleted = 0 LIMIT 1',
       [id]
     ) as any;
 
@@ -882,7 +974,7 @@ router.post('/purchase-requests/:id/approve', authMiddleware, async (req: Reques
 
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
-    const pr = await dbGet('SELECT approval_status FROM purchase_requests WHERE id = ?', [prId]) as any;
+    const pr = await getActivePurchaseRequest(prId, 'approval_status') as any;
     if (!pr) return res.status(404).json({ error: 'Purchase request not found' });
 
     const currentStatus = pr.approval_status || 0;
@@ -1003,7 +1095,7 @@ router.post('/purchase-requests/:prId/bids', authMiddleware, requirePermission('
     const { vendor_id, vendor_name, contact_person, phone, email, bid_date, delivery_time_days, notes, selected_items } = req.body;
 
     // Get PR to parse its items
-    const pr = await dbGet('SELECT * FROM purchase_requests WHERE id = ?', [prId]) as any;
+    const pr = await getActivePurchaseRequest(prId) as any;
     if (!pr) return res.status(404).json({ error: 'PR not found' });
 
     const finalVendorName = vendor_name || '';
@@ -1228,7 +1320,7 @@ router.delete('/purchase-requests/:prId/bids/:bidId', authMiddleware, requirePer
 });
 
 // POST /purchase-requests/:prId/bids/:bidId/upload - upload multiple quotation files
-router.post('/purchase-requests/:prId/bids/:bidId/upload', authMiddleware, requirePermission('procurement.purchase-requests.edit'), bidUpload.array('file', 10), async (req: Request, res: Response) => {
+router.post('/purchase-requests/:prId/bids/:bidId/upload', authMiddleware, requirePermission('procurement.purchase-requests.edit'), bidUpload.array('file', 10), handleUploadErrors, async (req: Request, res: Response) => {
   try {
     const { bidId } = req.params;
     const files = (req as any).files as Express.Multer.File[];
@@ -1245,29 +1337,39 @@ router.post('/purchase-requests/:prId/bids/:bidId/upload', authMiddleware, requi
       checked.push({ ext: verdict.ext!, buffer: file.buffer, originalname: file.originalname, size: file.size });
     }
 
-    const inserted: any[] = [];
+    // PROC-R22: baris database untuk seluruh berkas ditulis dalam SATU
+    // transaction. Sebelumnya tiap berkas di-INSERT sendiri-sendiri; kalau
+    // berkas kedua gagal, catch memang menghapus file fisiknya tapi baris
+    // database milik berkas pertama sudah terlanjur ter-commit — tersisa baris
+    // pr_bid_documents yang menunjuk ke file yang sudah tidak ada.
     const written: string[] = [];
+    let inserted: any[] = [];
     try {
-      for (const file of checked) {
-        const filename = storeValidatedFile(bidUploadDir, file.ext, file.buffer);
-        written.push(filename);
-        const filePath = '/uploads/bids/' + filename;
-        const result = await dbRun(
-          'INSERT INTO pr_bid_documents (bid_id, file_path, file_name, file_size) VALUES (?, ?, ?, ?)',
-          [bidId, filePath, file.originalname, file.size]
-        );
-        inserted.push({ id: result.insertId, file_path: filePath, file_name: file.originalname, file_size: file.size });
-      }
+      inserted = await withTransaction(async tx => {
+        const rows: any[] = [];
+        for (const file of checked) {
+          const filename = storeValidatedFile(bidUploadDir, file.ext, file.buffer);
+          written.push(filename);
+          const filePath = '/uploads/bids/' + filename;
+          const result = await tx.run(
+            'INSERT INTO pr_bid_documents (bid_id, file_path, file_name, file_size) VALUES (?, ?, ?, ?)',
+            [bidId, filePath, file.originalname, file.size]
+          );
+          rows.push({ id: result.insertId, file_path: filePath, file_name: file.originalname, file_size: file.size });
+        }
+
+        if (rows.length > 0) {
+          await tx.run('UPDATE pr_bids SET quotation_file = ? WHERE id = ?',
+            [rows[rows.length - 1].file_path, bidId]);
+        }
+        return rows;
+      });
     } catch (err) {
       for (const filename of written) removeStoredFile(bidUploadDir, filename);
       throw err;
     }
 
-    // Keep backward compat: update quotation_file with last file
-    if (inserted.length > 0) {
-      await dbRun('UPDATE pr_bids SET quotation_file = ? WHERE id = ?', [inserted[inserted.length - 1].file_path, bidId]);
-    }
-
+    // quotation_file sudah ikut diperbarui di dalam transaction di atas.
     res.json({ message: `${inserted.length} file(s) uploaded`, files: inserted });
   } catch (error) {
     console.error('Error uploading bid file:', error);
@@ -1453,7 +1555,7 @@ router.post('/purchase-requests/:prId/generate-pos', authMiddleware, requirePerm
     const userId = (req as any).user?.userId;
 
     // Validate PR is approved
-    const pr = await dbGet('SELECT * FROM purchase_requests WHERE id = ?', [prId]) as any;
+    const pr = await getActivePurchaseRequest(prId) as any;
     if (!pr) return res.status(404).json({ error: 'PR not found' });
     if ((pr.approval_status || 0) < 2) {
       return res.status(400).json({ error: 'PR belum diapprove. Approve PR terlebih dahulu sebelum generate PO.' });
@@ -1461,7 +1563,7 @@ router.post('/purchase-requests/:prId/generate-pos', authMiddleware, requirePerm
 
     // Check if PR already has POs (prevent duplicate generation)
     if (pr.status === 'PO_GENERATED') {
-      const existingPOs = await dbAll('SELECT id, po_number FROM purchase_orders WHERE pr_id = ?', [prId]) as any[];
+      const existingPOs = await dbAll('SELECT id, po_number FROM purchase_orders WHERE pr_id = ? AND is_deleted = 0', [prId]) as any[];
       if (existingPOs.length > 0) {
         return res.status(400).json({
           error: `PR ini sudah memiliki ${existingPOs.length} PO (${existingPOs.map((p:any) => p.po_number).join(', ')}). Hapus PO yang ada terlebih dahulu jika ingin generate ulang.`,
@@ -1493,6 +1595,7 @@ router.post('/purchase-requests/:prId/generate-pos', authMiddleware, requirePerm
 
     // Create one draft PO per winning vendor
     const createdPOs: any[] = [];
+    const skipped: any[] = [];
     for (const { bid, items } of vendorGroups) {
       const vendorId = bid.vendor_id || bid.reg_vendor_id || null;
       const vendorName = bid.vendor_name || bid.reg_vendor_name || 'Unknown';
@@ -1519,32 +1622,51 @@ router.post('/purchase-requests/:prId/generate-pos', authMiddleware, requirePerm
       };
 
       // PROC-R04 + PROC-R05: satu PO hasil tabulasi = satu transaction, dengan
-      // nomor yang diulang kalau bentrok. Endpoint ini membuat BEBERAPA PO dalam
-      // satu permintaan, jadi tiap PO dibungkus sendiri — kegagalan pada PO
-      // vendor ketiga tidak menyisakan PO tanpa item, dan PO vendor sebelumnya
-      // yang sudah lengkap tetap sah.
-      const { poId, poNumber } = await withNumberedDocument(
-        'PO', 'purchase_orders', 'po_number',
-        async (code, tx) => {
-          const poResult = await tx.run(
-            `INSERT INTO purchase_orders (po_number, pr_id, vendor_id, status, total_amount, notes, po_date)
-             VALUES (?, ?, ?, 'draft', ?, ?, DATE(NOW()))`,
-            [code, prId, vendorId, subTotal, JSON.stringify(notesData)]
-          );
-          const newPoId = poResult.insertId;
-
-          // Insert PO items — both po_id and purchase_order_id to match existing schema
-          for (const item of items) {
-            await tx.run(
-              `INSERT INTO purchase_order_items (purchase_order_id, po_id, product_id, quantity, unit_price, uom, notes)
-               VALUES (?, ?, ?, ?, ?, ?, ?)`,
-              [newPoId, newPoId, item.product_id || null, Number(item.quantity), Number(item.unit_price), item.uom || '', item.item_name]
+      // nomor yang diulang kalau bentrok.
+      //
+      // PROC-R19: tiap PO menyimpan `source_bid_id`, dan UNIQUE (pr_id,
+      // source_bid_id) membuat percobaan kedua untuk bid yang sama ditolak
+      // database. Jadi kalau vendor ketiga gagal dan user menekan generate lagi,
+      // vendor A dan B TIDAK mendapat PO kedua — hanya vendor yang belum
+      // berhasil yang diproses.
+      let poId: number;
+      let poNumber: string;
+      try {
+        const made = await withNumberedDocument(
+          'PO', 'purchase_orders', 'po_number',
+          async (code, tx) => {
+            const poResult = await tx.run(
+              `INSERT INTO purchase_orders (po_number, pr_id, vendor_id, status, total_amount, notes, po_date, source_bid_id)
+               VALUES (?, ?, ?, 'draft', ?, ?, DATE(NOW()), ?)`,
+              [code, prId, vendorId, subTotal, JSON.stringify(notesData), bid.id]
             );
-          }
+            const newPoId = poResult.insertId;
 
-          return { poId: newPoId, poNumber: code };
+            // Insert PO items — both po_id and purchase_order_id to match existing schema
+            for (const item of items) {
+              await tx.run(
+                `INSERT INTO purchase_order_items (purchase_order_id, po_id, product_id, quantity, unit_price, uom, notes)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                [newPoId, newPoId, item.product_id || null, Number(item.quantity), Number(item.unit_price), item.uom || '', item.item_name]
+              );
+            }
+
+            return { poId: newPoId, poNumber: code };
+          }
+        );
+        poId = made.poId;
+        poNumber = made.poNumber;
+      } catch (err: any) {
+        if (err?.code === 'ER_DUP_ENTRY' && String(err.message).includes('uniq_po_pr_bid')) {
+          const already = await dbGet(
+            'SELECT id, po_number FROM purchase_orders WHERE pr_id = ? AND source_bid_id = ?',
+            [prId, bid.id]
+          ) as any;
+          skipped.push({ vendor_name: vendorName, po_number: already?.po_number, po_id: already?.id });
+          continue;
         }
-      );
+        throw err;
+      }
 
       createdPOs.push({
         po_id: poId,
@@ -1560,8 +1682,11 @@ router.post('/purchase-requests/:prId/generate-pos', authMiddleware, requirePerm
     await dbRun("UPDATE purchase_requests SET status = 'PO_GENERATED' WHERE id = ?", [prId]);
 
     res.status(201).json({
-      message: `${createdPOs.length} draft PO berhasil dibuat`,
+      message: skipped.length > 0
+        ? `${createdPOs.length} draft PO dibuat, ${skipped.length} vendor sudah punya PO sebelumnya`
+        : `${createdPOs.length} draft PO berhasil dibuat`,
       data: createdPOs,
+      skipped,
     });
   } catch (error: any) {
     console.error('Error generating POs from bid:', error);
@@ -1574,7 +1699,7 @@ router.get('/purchase-requests/:prId/bid-progress', authMiddleware, requirePermi
   try {
     const { prId } = req.params;
 
-    const pr = await dbGet('SELECT notes FROM purchase_requests WHERE id = ?', [prId]) as any;
+    const pr = await getActivePurchaseRequest(prId, 'notes') as any;
     if (!pr) return res.json({ total_items: 0, items_with_winner: 0, percentage: 0, has_winner: false });
 
     let totalItems = 0;
@@ -1718,7 +1843,7 @@ router.post('/purchase-orders', authMiddleware, requirePermission('procurement.p
 
     // Validate PR if provided (approval_status = 2)
     if (pr_id) {
-      const pr = await dbGet('SELECT approval_status, status, notes FROM purchase_requests WHERE id = ?', [pr_id]) as any;
+      const pr = await getActivePurchaseRequest(pr_id, 'approval_status, status, notes') as any;
       if (!pr) {
         return res.status(400).json({ error: 'PR not found' });
       }
@@ -1728,7 +1853,7 @@ router.post('/purchase-orders', authMiddleware, requirePermission('procurement.p
 
       // Check if PR already has POs generated
       if (pr.status === 'PO_GENERATED') {
-        const existingPOs = await dbAll('SELECT id, po_number FROM purchase_orders WHERE pr_id = ?', [pr_id]) as any[];
+        const existingPOs = await dbAll('SELECT id, po_number FROM purchase_orders WHERE pr_id = ? AND is_deleted = 0', [pr_id]) as any[];
         if (existingPOs.length > 0) {
           return res.status(400).json({
             error: `PR ini sudah memiliki ${existingPOs.length} PO (${existingPOs.map((p:any) => p.po_number).join(', ')}). PR tidak bisa digunakan lagi untuk PO baru.`,
@@ -1823,7 +1948,7 @@ router.post('/purchase-orders', authMiddleware, requirePermission('procurement.p
             // If PR has a project_id, inherit it
             let effectiveProjectId = project_id || null;
             if (!effectiveProjectId && pr_id) {
-              const prRow = await tx.get('SELECT project_id FROM purchase_requests WHERE id = ?', [pr_id]) as any;
+              const prRow = await getActivePurchaseRequest(pr_id, 'project_id', tx) as any;
               if (prRow?.project_id) effectiveProjectId = prRow.project_id;
             }
 
@@ -1915,6 +2040,88 @@ router.put('/purchase-orders/:id', authMiddleware, requirePermission('procuremen
 
     const existing: any = await dbGet('SELECT * FROM purchase_orders WHERE id = ? AND is_deleted = 0', [req.params.id]);
     if (!existing) return res.status(404).json({ error: 'Purchase order tidak ditemukan' });
+
+    // PROC-R16: begitu transaksi turunan berjalan, field yang mendasarinya
+    // dikunci. PO tidak dibekukan total — perubahan administratif seperti alamat
+    // atau contact person tetap boleh, karena itu yang dipakai user sehari-hari.
+    // Yang dilarang adalah mengubah dasar dari transaksi yang SUDAH terjadi.
+    const activeGrnForPo = await dbGet(
+      `SELECT id, grn_number FROM goods_receipts
+       WHERE po_id = ?
+         AND (approval_status IS NULL OR approval_status != -1)
+         AND (is_reversed IS NULL OR is_reversed = 0)
+       LIMIT 1`,
+      [req.params.id]
+    ) as any;
+
+    const paidForPo = await dbGet(
+      'SELECT COALESCE(SUM(paid_amount), 0) AS total FROM accounts_payable WHERE po_id = ?',
+      [req.params.id]
+    ) as any;
+    const alreadyPaid = Number(paidForPo?.total || 0) > 0;
+
+    const hasField = (k: string) => Object.prototype.hasOwnProperty.call(req.body, k);
+
+    // Yang dilarang adalah MENGUBAH field terkunci, bukan sekadar mengirimnya.
+    // Form PO di frontend selalu menyertakan seluruh isi termasuk `items`, jadi
+    // menolak berdasarkan "field ada di payload" akan memblokir bahkan
+    // perubahan alamat pengiriman pada PO yang barangnya sudah datang.
+    const scalarChanged = (k: string, current: any) =>
+      hasField(k) && String(req.body[k] ?? '') !== String(current ?? '');
+
+    const canonicalItems = (rows: any[]) => JSON.stringify(
+      (rows || [])
+        .map((i: any) => [
+          i.product_id ?? null,
+          Number(i.quantity || 0),
+          Number(i.unit_price || 0),
+          i.uom || '',
+        ])
+        .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
+    );
+
+    let itemsChanged = false;
+    if (Array.isArray(items)) {
+      const currentItems = await dbAll(
+        'SELECT product_id, quantity, unit_price, uom FROM purchase_order_items WHERE purchase_order_id = ? OR po_id = ?',
+        [req.params.id, req.params.id]
+      ) as any[];
+      itemsChanged = canonicalItems(items) !== canonicalItems(currentItems);
+    }
+
+    const blocked: string[] = [];
+
+    if (activeGrnForPo) {
+      // Barangnya sudah diterima — vendor, item, dan kuantitasnya tidak boleh
+      // berubah, karena GRN merujuk ke apa yang tertulis di PO ini.
+      if (scalarChanged('vendor_id', existing.vendor_id)) blocked.push('vendor_id');
+      if (itemsChanged) blocked.push('items');
+    }
+
+    if (alreadyPaid) {
+      // Uangnya sudah keluar — nilai kontraknya tidak boleh berubah lagi.
+      const financial: [string, any][] = [
+        ['advance_payment', existing.advance_payment],
+        ['discount_percent', existing.discount_percent],
+        ['ppn_percent', existing.ppn_percent],
+        ['payment_term', existing.payment_term],
+        ['payment_term_2', existing.payment_term_2],
+      ];
+      for (const [f, current] of financial) {
+        if (scalarChanged(f, current) && !blocked.includes(f)) blocked.push(f);
+      }
+      if (itemsChanged && !blocked.includes('items')) blocked.push('items');
+    }
+
+    if (blocked.length > 0) {
+      return res.status(409).json({
+        error: activeGrnForPo
+          ? `PO ini sudah punya penerimaan barang (${activeGrnForPo.grn_number || activeGrnForPo.id}), jadi ${blocked.join(', ')} tidak bisa diubah lagi.`
+          : `PO ini sudah memiliki pembayaran tercatat, jadi ${blocked.join(', ')} tidak bisa diubah lagi.`,
+        code: activeGrnForPo ? 'PO_LOCKED_BY_GRN' : 'PO_LOCKED_BY_PAYMENT',
+        locked_fields: blocked,
+      });
+    }
 
     // PARTIAL UPDATE. Handler lama melakukan replace penuh dengan pola
     // `field || default`, sehingga field yang tidak dikirim klien tidak sekadar
@@ -2012,25 +2219,48 @@ router.put('/purchase-orders/:id', authMiddleware, requirePermission('procuremen
           );
         }
       }
-    });
 
-    if (Array.isArray(items) || payment_schedules) {
-      await upsertPaymentSchedules({
-        poId: Number(req.params.id),
-        poData: {
-          po_date: has('po_date') ? po_date : existing.po_date,
-          expected_date: has('expected_date') ? expected_date : existing.expected_date,
-          payment_term: has('payment_term') ? payment_term : existing.payment_term,
-          vendor_id: has('vendor_id') ? vendor_id : existing.vendor_id,
-          advance_payment: has('advance_payment') ? advance_payment : existing.advance_payment,
-          discount_percent: has('discount_percent') ? discount_percent : existing.discount_percent,
-          ppn_percent: has('ppn_percent') ? ppn_percent : existing.ppn_percent,
-          notes: has('notes') ? notes : existing.notes,
-        },
-        items: Array.isArray(items) ? items : [],
-        paymentSchedules: payment_schedules,
-      });
-    }
+      // PROC-R18: jadwal pembayaran + AP disinkronkan DI DALAM transaction yang
+      // sama, dan pemicunya bukan hanya `items`.
+      //
+      // Dulu syaratnya `Array.isArray(items) || payment_schedules`, padahal
+      // nilai jadwal juga ditentukan oleh payment_term, po_date, expected_date,
+      // advance_payment, discount_percent, ppn_percent, notes (total kontrak),
+      // dan vendor. Mengirim `{ advance_payment: 40 }` saja mengubah uang muka
+      // di PO tapi meninggalkan AP di angka lama.
+      //
+      // Sinkronisasinya juga dulu dipanggil SETELAH transaction selesai,
+      // sehingga PO bisa berubah sementara AP gagal berubah.
+      const affectsPaymentSchedule = ['items', 'payment_term', 'po_date', 'expected_date',
+        'advance_payment', 'discount_percent', 'ppn_percent', 'notes', 'vendor_id']
+        .some(k => has(k)) || !!payment_schedules;
+
+      if (affectsPaymentSchedule) {
+        // Kalau `items` tidak dikirim, jadwal tetap harus dihitung dari item yang
+        // tersimpan — bukan dari array kosong, yang akan membuat total jadi nol.
+        const itemsForSchedule = Array.isArray(items) ? items : await tx.all(
+          'SELECT * FROM purchase_order_items WHERE purchase_order_id = ? OR po_id = ?',
+          [req.params.id, req.params.id]
+        ) as any[];
+
+        await upsertPaymentSchedules({
+          poId: Number(req.params.id),
+          poData: {
+            po_date: has('po_date') ? po_date : existing.po_date,
+            expected_date: has('expected_date') ? expected_date : existing.expected_date,
+            payment_term: has('payment_term') ? payment_term : existing.payment_term,
+            vendor_id: has('vendor_id') ? vendor_id : existing.vendor_id,
+            advance_payment: has('advance_payment') ? advance_payment : existing.advance_payment,
+            discount_percent: has('discount_percent') ? discount_percent : existing.discount_percent,
+            ppn_percent: has('ppn_percent') ? ppn_percent : existing.ppn_percent,
+            notes: has('notes') ? notes : existing.notes,
+          },
+          items: itemsForSchedule,
+          paymentSchedules: payment_schedules,
+          tx,
+        });
+      }
+    });
 
     res.json({ message: 'Purchase order updated' });
   } catch (error: any) {
@@ -2347,14 +2577,20 @@ router.post('/goods-receipts', authMiddleware, requirePermission('procurement.gr
     const normalizedDate = normalizeDateOnly(received_date || received_at);
     if (!normalizedDate) return res.status(400).json({ error: 'received_date is required' });
 
-    // Determine and validate received_by user ID
-    let receiver = received_by || (req as any).userId || 1;
-    
-    // Verify user exists in database
+    // PROC-R12: penerima barang boleh berbeda dari pembuat dokumen — itu memang
+    // realitas gudang. Yang tidak boleh adalah pembuatnya tidak tercatat.
+    //
+    // Dulu `received_by` diambil dari body kalau ada, dan hanya dicek "user ini
+    // ada atau tidak". Jadi user A bisa membuat GRN yang seluruhnya tercatat
+    // atas nama user B, tanpa jejak siapa yang sebenarnya menginput. Sekarang
+    // `created_by` SELALU dari token dan tidak bisa dikirim klien.
+    const creator = (req as any).user?.userId || null;
+
+    let receiver = received_by || creator || 1;
     const userExists = await dbGet('SELECT id FROM users WHERE id = ?', [receiver]);
     if (!userExists) {
-      console.warn(`⚠️ User ID ${receiver} not found, using default admin (ID: 1)`);
-      receiver = 1;
+      console.warn(`⚠️ User ID ${receiver} not found, memakai pembuat dokumen`);
+      receiver = creator || 1;
     }
     
     // Universal Rule: Prevent creating a new GRN if an active GRN already exists for this PO.
@@ -2400,9 +2636,9 @@ router.post('/goods-receipts', authMiddleware, requirePermission('procurement.gr
 
         const result = await tx.run(
           `INSERT INTO goods_receipts
-           (grn_number, po_id, warehouse_id, received_date, received_by, status, notes)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [code, po_id, warehouse_id, normalizedDate, receiver, status || 'DRAFT', notes || null]
+           (grn_number, po_id, warehouse_id, received_date, received_by, created_by, status, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [code, po_id, warehouse_id, normalizedDate, receiver, creator, status || 'DRAFT', notes || null]
         );
         return { grId: result.insertId, number: code };
       },
@@ -2430,8 +2666,31 @@ router.put('/goods-receipts/:id', authMiddleware, requirePermission('procurement
     const { id } = req.params;
     const { warehouse_id, status, received_date, received_at, notes } = req.body;
 
-    const existing: any = await dbGet('SELECT id FROM goods_receipts WHERE id = ?', [id]);
+    const existing: any = await dbGet('SELECT * FROM goods_receipts WHERE id = ?', [id]);
     if (!existing) return res.status(404).json({ error: 'Goods receipt tidak ditemukan' });
+
+    // PROC-R16: GRN yang stoknya sudah masuk TIDAK boleh diedit.
+    //
+    // Tanpa ini, GRN approved di gudang A qty 10 bisa diubah jadi gudang B
+    // qty 100 — sementara stock_movements-nya tetap mencatat gudang A +10.
+    // Dokumen dan kartu stok jadi menggambarkan dua transaksi berbeda.
+    //
+    // Koreksi GRN yang sudah diposting adalah reversal + GRN baru, bukan edit
+    // transaksi lama.
+    if (Number(existing.is_reversed) === 1) {
+      return res.status(409).json({
+        error: 'GRN ini sudah direversal dan disimpan sebagai jejak audit, jadi tidak bisa diubah.',
+        code: 'GRN_REVERSED',
+      });
+    }
+
+    if (Number(existing.approval_status) === 2) {
+      return res.status(409).json({
+        error: 'GRN ini sudah disetujui dan stoknya sudah masuk, jadi tidak bisa diubah. Lakukan reversal lalu buat GRN baru.',
+        code: 'GRN_LOCKED_APPROVED',
+        reversal_endpoint: `/api/procurement/goods-receipts/${id}/reverse`,
+      });
+    }
 
     // PARTIAL UPDATE — alasan sama seperti PR: item GRN disimpan sebagai JSON
     // di dalam kolom `notes`, dan `status || 'DRAFT'` mengembalikan GRN yang
@@ -3589,9 +3848,9 @@ router.post('/material-prices/:id/select', authMiddleware, requirePermission('pr
 });
 
 // ─── PR Item Attachment Upload ─────────────────────────────
-router.post('/purchase-requests/:id/item-attachment', authMiddleware, requirePermission('procurement.purchase-requests.edit'), prAttachUpload.single('file'), async (req: Request, res: Response) => {
+router.post('/purchase-requests/:id/item-attachment', authMiddleware, requirePermission('procurement.purchase-requests.edit'), prAttachUpload.single('file'), handleUploadErrors, async (req: Request, res: Response) => {
   try {
-    const pr = await dbGet('SELECT id FROM purchase_requests WHERE id = ?', [req.params.id]);
+    const pr = await getActivePurchaseRequest(req.params.id, 'id');
     if (!pr) return res.status(404).json({ error: 'Purchase Request not found' });
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 

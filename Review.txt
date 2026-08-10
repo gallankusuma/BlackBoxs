@@ -252,6 +252,34 @@ Reversal
 
 bukan edit transaksi lama.
 
+
+### ✅ DITERAPKAN — tim development
+
+- **GRN**: `approval_status = 2` atau `is_reversed = 1` → 409
+  (`GRN_LOCKED_APPROVED` / `GRN_REVERSED`), diarahkan ke reversal + GRN baru.
+- **PO**: ada GRN aktif → `vendor_id` dan `items` terkunci
+  (`PO_LOCKED_BY_GRN`); AP sudah dibayar → `advance_payment`,
+  `discount_percent`, `ppn_percent`, `payment_term`, `payment_term_2`, `items`
+  terkunci (`PO_LOCKED_BY_PAYMENT`).
+- **PR**: sudah menerbitkan PO → `PR_LOCKED_BY_PO`; sudah disetujui penuh →
+  `PR_LOCKED_APPROVED`. Field terkuncinya `notes` (item PR ada di dalamnya),
+  `project_id`, `request_date`, `needed_by`.
+
+Satu keputusan desain yang perlu kami jelaskan: **yang dikunci adalah PERUBAHAN
+nilai, bukan kehadiran field di payload.**
+
+Implementasi pertama kami menolak begitu `items` ada di request. Waktu diperiksa
+ke frontend, `PurchaseOrders.vue` ternyata SELALU mengirim seluruh isi form
+termasuk `items` pada setiap simpan. Artinya versi itu akan membuat PO yang
+barangnya sudah datang mustahil disimpan sama sekali — termasuk sekadar mengubah
+alamat pengiriman. Untuk modul yang sudah live itu bukan penguncian, itu
+kerusakan.
+
+Sekarang nilai yang dikirim dibandingkan dengan yang tersimpan (item
+dinormalisasi ke bentuk kanonik lalu diurutkan). Mengirim ulang item yang sama
+lolos; mengubah qty, harga, atau vendor ditolak. Perubahan administratif tetap
+jalan. Keduanya ada tesnya.
+
 ---
 
 # PROC-R17 — SOFT-DELETED PR BELUM BENAR-BENAR TERKUNCI
@@ -335,6 +363,25 @@ historical/cancelled PO
 ```
 
 Historical PO tetap tersimpan untuk audit tetapi jangan salah dianggap active downstream document.
+
+
+### ✅ DITERAPKAN — tim development
+
+Benar di kedua sisi, dan kami sudah verifikasi langsung di source.
+
+Helper `getActivePurchaseRequest(id, columns, tx?)` dibuat sesuai saran, dipakai
+di seluruh endpoint operasional: approve PR, buat bid, pilih pemenang, ringkasan
+bid, generate PO, bid progress, unggah lampiran, dan pembacaan PR di dalam
+`POST /purchase-orders`. Endpoint restore sengaja TIDAK memakainya — tugasnya
+memang membaca PR yang terhapus.
+
+Masalah kedua juga diperbaiki: `SELECT ... FROM purchase_orders WHERE pr_id = ?`
+di `generate-pos`, di PO create, dan di pengecekan hapus PR kini menyertakan
+`AND is_deleted = 0`. PO yang sudah dibatalkan tidak lagi dihitung sebagai PO
+aktif milik PR, sehingga PR-nya bisa di-generate ulang.
+
+Tes bagian 21: PR yang dibatalkan tidak bisa di-approve, tidak bisa generate PO,
+tidak bisa ditambah bid — ketiganya 404.
 
 ---
 
@@ -422,6 +469,25 @@ COMMIT
 
 Jika `items` tidak ada pada payload, ambil current items dari database.
 
+
+### ✅ DITERAPKAN — tim development
+
+`affectsPaymentSchedule` didefinisikan persis seperti daftar reviewer: `items`,
+`payment_term`, `po_date`, `expected_date`, `advance_payment`,
+`discount_percent`, `ppn_percent`, `notes`, `vendor_id`, plus
+`payment_schedules`.
+
+Sinkronisasinya juga dipindah KE DALAM transaction update — sebelumnya dipanggil
+setelah transaction selesai, jadi "PO berubah tapi AP gagal berubah" memang
+mungkin terjadi.
+
+Saran "kalau `items` tidak ada pada payload, ambil current items dari database"
+diikuti. Ini penting: memakai array kosong akan membuat total kontrak jadi nol
+dan menghapus seluruh jadwal.
+
+Tes bagian 22 mengirim `{ advance_payment: 40 }` saja pada PO ber-DP 20% lalu
+memastikan jadwal pembayarannya benar-benar berubah.
+
 ---
 
 # PROC-R19 — GENERATE-PO MULTI VENDOR BELUM IDEMPOTENT
@@ -502,6 +568,23 @@ dan enforce uniqueness:
 
 Retry hanya melanjutkan yang belum berhasil.
 
+
+### ✅ DITERAPKAN — tim development (Option B)
+
+Kami pilih Option B (idempotency), bukan all-or-nothing. Alasannya: kalau vendor
+C gagal karena datanya memang bermasalah, Option A akan membuang PO vendor A dan
+B yang sudah benar dan memaksa seluruhnya diulang. Option B menyimpan yang sudah
+berhasil dan hanya melanjutkan sisanya — itu yang lebih sesuai dengan cara orang
+memakai tombol generate.
+
+`purchase_orders.source_bid_id` ditambah, dengan UNIQUE `(pr_id, source_bid_id)`.
+Percobaan kedua untuk bid yang sama ditolak database, ditangkap sebagai
+`ER_DUP_ENTRY`, dan vendor itu masuk daftar `skipped` di respons — bukan error.
+
+UNIQUE-nya sengaja mengizinkan banyak baris ber-`source_bid_id` NULL: seluruh PO
+lama dan PO yang dibuat manual tidak punya nilai ini, dan MySQL tidak menganggap
+NULL sebagai duplikat. Jadi tidak ada data berjalan yang terganggu.
+
 ---
 
 # PROC-R20 — REVERSAL DAPAT MEMBUAT NEGATIVE STOCK
@@ -557,6 +640,17 @@ Jika affected row = 0:
 
 Lalu user harus melakukan stock correction sesuai approval flow.
 
+
+### ✅ DITERAPKAN — tim development
+
+Persis seperti SQL yang reviewer sarankan: `UPDATE ... WHERE ... AND quantity >= ?`,
+dan `affectedRows === 0` → 409 `INSUFFICIENT_STOCK_FOR_REVERSAL`.
+
+Responsnya menyertakan `needed` dan `available` supaya user tahu berapa yang
+kurang tanpa harus menebak. Karena seluruh reversal ada dalam satu transaction
+(lihat R14), penolakan ini me-rollback juga pengurangan stok item lain yang
+sudah sempat diproses — tidak ada reversal separuh jalan.
+
 ---
 
 # PROC-R21 — DOCUMENT NUMBER MASIH MENGGUNAKAN UTC DATE
@@ -604,6 +698,15 @@ Asia/Jakarta
 
 atau gunakan database business date yang sudah dikonfigurasi timezone-nya.
 
+
+### ✅ DITERAPKAN — tim development
+
+`businessDatePart()` memakai `Intl.DateTimeFormat` dengan `timeZone`, default
+`Asia/Jakarta`, bisa ditimpa lewat env `BUSINESS_TIMEZONE`.
+
+Dampaknya nyata: setiap dokumen yang dibuat antara 00:00 dan 07:00 WIB selama ini
+bernomor tanggal kemarin.
+
 ---
 
 # PROC-R22 — UPLOAD SECURITY SUDAH BAGUS, TAPI TRANSACTION CLEANUP BELUM SEMPURNA
@@ -643,6 +746,17 @@ Selain itu Procurement multer memiliki size limit tetapi belum terlihat error ha
 
 bukan generic 500.
 
+
+### ✅ DITERAPKAN — tim development
+
+Seluruh INSERT `pr_bid_documents` untuk satu permintaan kini dalam satu
+`withTransaction`, termasuk update `pr_bids.quotation_file` yang sebelumnya
+dijalankan terpisah setelahnya. Kalau ada yang gagal, baris database di-rollback
+dan berkas fisik yang sudah ditulis dihapus di `catch`.
+
+`handleUploadErrors` ditambahkan pada kedua endpoint upload mengikuti pola modul
+Asset: `LIMIT_FILE_SIZE` → **413**, MulterError lain → 400, bukan 500 generik.
+
 ---
 
 # PROC-R12 — received_by MASIH DAPAT DISPOOF
@@ -668,6 +782,21 @@ received_by = explicit receiver
 ```
 
 dan jika receiver boleh berbeda, berikan business rule/permission khusus.
+
+
+### ✅ DITERAPKAN — tim development
+
+Diperbaiki persis seperti rekomendasi: `created_by` dan `received_by` dipisah.
+
+Ternyata `goods_receipts` **tidak punya kolom `created_by` sama sekali** — itu
+sebabnya penginput dokumen tidak pernah tercatat. Kolomnya ditambahkan lewat
+`ensureGrnCreatedBy()`.
+
+Sekarang `created_by` SELALU diambil dari token dan tidak bisa dikirim klien.
+`received_by` tetap boleh diisi orang lain, karena penerima barang di gudang
+memang sering bukan penginput dokumen — yang penting jejak penginputnya ada.
+Kalau nanti bisnis ingin membatasi itu pun, sekarang datanya sudah tersedia untuk
+diaudit.
 
 ---
 

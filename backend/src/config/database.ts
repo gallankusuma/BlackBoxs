@@ -1103,6 +1103,50 @@ const ensurePurchaseRequestSoftDelete = async (connection: any) => {
   console.log('✅ Soft delete purchase request ensured');
 };
 
+// ==================== IDEMPOTENSI GENERATE PO (PROC-R19) ====================
+// `generate-pos` membuat satu PO per vendor pemenang, masing-masing dalam
+// transaction sendiri, sementara status PR baru diubah jadi PO_GENERATED setelah
+// SELURUH loop selesai. Kalau vendor ketiga gagal, PO vendor A dan B sudah
+// ter-commit tapi PR belum bertanda — user menekan ulang dan A serta B dapat PO
+// kedua.
+//
+// Kolom `source_bid_id` + UNIQUE (pr_id, source_bid_id) membuat percobaan kedua
+// untuk bid yang sama ditolak database, sehingga retry hanya melanjutkan vendor
+// yang belum berhasil.
+//
+// UNIQUE-nya sengaja mengizinkan banyak baris dengan source_bid_id NULL: seluruh
+// PO lama (dan PO yang dibuat manual) tidak punya nilai ini, dan di MySQL NULL
+// tidak dianggap duplikat. Jadi data berjalan tidak terganggu.
+const ensureGeneratedPoIdempotency = async (connection: any) => {
+  const statements = [
+    `ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS source_bid_id INT NULL`,
+    `CREATE UNIQUE INDEX uniq_po_pr_bid ON purchase_orders (pr_id, source_bid_id)`,
+  ];
+
+  for (const statement of statements) {
+    await execSchemaEnsure(connection, statement);
+  }
+  console.log('✅ Idempotensi generate PO ensured');
+};
+
+// ==================== PENCATAT GRN (PROC-R12) ====================
+// `goods_receipts` hanya punya `received_by`, dan nilainya boleh dikirim klien.
+// Artinya user A bisa membuat GRN yang seluruhnya tercatat atas nama user B,
+// tanpa jejak siapa yang sebenarnya menginput.
+//
+// Penerima barang memang boleh berbeda dari penginput — itu realitas gudang —
+// jadi solusinya bukan melarang `received_by`, melainkan mencatat keduanya.
+const ensureGrnCreatedBy = async (connection: any) => {
+  const statements = [
+    `ALTER TABLE goods_receipts ADD COLUMN IF NOT EXISTS created_by INT NULL`,
+  ];
+
+  for (const statement of statements) {
+    await execSchemaEnsure(connection, statement);
+  }
+  console.log('✅ Kolom pencatat GRN ensured');
+};
+
 // ==================== DISPOSAL WORKFLOW (AST-006) ====================
 // Disposal sebelumnya hanya berupa mengubah status menjadi 'disposed' — tanpa
 // alasan, tanpa persetujuan, tanpa nilai jual, dan tanpa perhitungan gain/loss.
@@ -1411,6 +1455,8 @@ export async function initializeDatabase() {
     await ensureGrnReversalSchema(connection);
     await ensureDocumentCounterSchema(connection);
     await ensurePurchaseRequestSoftDelete(connection);
+    await ensureGeneratedPoIdempotency(connection);
+    await ensureGrnCreatedBy(connection);
     await ensureDisposalSchema(connection);
     await ensureAssetStatusHistorySchema(connection);
     await ensurePermissionCatalog(connection);
