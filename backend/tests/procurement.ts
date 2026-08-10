@@ -166,6 +166,52 @@ async function main() {
   chk('item PO tidak ikut terhapus', itemsAfter.length, 1);
   chk('jumlah item tetap', Number(itemsAfter[0]?.quantity), 4);
 
+  console.log('\n6. Level persetujuan dibaca dari database, bukan dari token');
+  // Skenario nyata: user login dulu (token merekam level lama), BARU levelnya
+  // dinaikkan admin. Dulu ia tetap tidak bisa approve sampai token 7 hari
+  // kedaluwarsa. Sekarang perubahan level langsung berlaku.
+  const approverEmail = `approver.${stamp}@test.local`;
+  const approver = await call('POST', '/users', {
+    name: 'Uji Approver', email: approverEmail, password: 'secret123', user_level: 1,
+  }, master);
+  const approverId = approver.json?.data?.id;
+  chk('user uji dibuat dengan level 1', approver.status, 201);
+
+  const approverToken: string = (await call('POST', '/auth/login',
+    { email: approverEmail, password: 'secret123' })).json?.token;
+  chk('user uji bisa login', !!approverToken, true);
+
+  const prForApproval = await call('POST', '/procurement/purchase-requests', {
+    requestor_id: approverId,
+    request_date: today(),
+    notes: JSON.stringify({ items: [], noteText: `Uji approval ${stamp}` }),
+  }, master);
+  const prId = prForApproval.json?.data?.id ?? prForApproval.json?.id;
+  chk('PR uji dibuat', !!prId, true);
+
+  // Dengan level 1, belum boleh menyetujui
+  chk('level 1 tidak bisa approve',
+    (await call('POST', `/procurement/purchase-requests/${prId}/approve`, {}, approverToken)).status, 400);
+
+  // Admin menaikkan levelnya jadi supervisor — TOKEN TIDAK BERUBAH
+  await call('PUT', `/users/${approverId}`, { user_level: 2 }, master);
+
+  const afterPromotion = await call('POST', `/procurement/purchase-requests/${prId}/approve`, {}, approverToken);
+  chk('setelah dinaikkan, token LAMA langsung bisa approve', afterPromotion.status, 200);
+  chk('status approval maju', Number(afterPromotion.json?.approval_status), 1);
+
+  // Diturunkan lagi — harus langsung kehilangan hak
+  await call('PUT', `/users/${approverId}`, { user_level: 1 }, master);
+  chk('setelah diturunkan, token lama langsung kehilangan hak',
+    (await call('POST', `/procurement/purchase-requests/${prId}/approve`, {}, approverToken)).status, 400);
+
+  // Akun dinonaktifkan → gagal tertutup
+  await call('PUT', `/users/${approverId}`, { user_level: 4, is_active: false }, master);
+  chk('akun nonaktif tidak bisa approve meski level tinggi',
+    (await call('POST', `/procurement/purchase-requests/${prId}/approve`, {}, approverToken)).status, 400);
+
+  await call('DELETE', `/users/${approverId}`, undefined, master);
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }

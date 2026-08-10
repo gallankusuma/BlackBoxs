@@ -35,6 +35,27 @@ const prAttachStorage = multer.diskStorage({
 });
 const prAttachUpload = multer({ storage: prAttachStorage, limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB max
 
+
+/**
+ * Level persetujuan dibaca dari DATABASE, bukan dari isi token.
+ *
+ * Sebelumnya seluruh endpoint approval memakai `req.user?.userLevel`, yaitu
+ * nilai yang ikut ditandatangani saat login dan berlaku 7 hari. Akibatnya:
+ * orang yang baru dinaikkan jadi Manager TIDAK BISA menyetujui sampai token
+ * lamanya kedaluwarsa atau ia login ulang — dan sebaliknya, yang sudah
+ * diturunkan MASIH BISA menyetujui selama tokennya belum habis.
+ *
+ * Default 0 (bukan 1) supaya user tanpa level gagal tertutup, bukan diberi
+ * hak paling rendah secara diam-diam.
+ */
+async function approverLevel(req: Request): Promise<number> {
+  const userId = (req as any).userId ?? (req as any).user?.userId;
+  if (!userId) return 0;
+  const row: any = await dbGet('SELECT user_level, is_active FROM users WHERE id = ?', [userId]);
+  if (!row || row.is_active === 0) return 0;
+  return Number(row.user_level || 0);
+}
+
 const generateCode = (prefix: string) => {
   const now = new Date();
   const datePart = now.toISOString().slice(0, 10).replace(/-/g, '');
@@ -637,7 +658,7 @@ router.post('/purchase-requests/:id/approve', authMiddleware, async (req: Reques
   try {
     const prId = req.params.id;
     const userId = (req as any).user?.userId;
-    const userLevel = (req as any).user?.userLevel || 1;
+    const userLevel = await approverLevel(req);
 
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
@@ -689,7 +710,7 @@ router.post('/purchase-requests/:id/reject', authMiddleware, async (req: Request
   try {
     const prId = req.params.id;
     const userId = (req as any).user?.userId;
-    const userLevel = (req as any).user?.userLevel || 1;
+    const userLevel = await approverLevel(req);
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
     // Only level 2+ can reject back to pending
@@ -1743,7 +1764,7 @@ router.post('/purchase-orders/:id/approve', authMiddleware, async (req: Request,
   try {
     const poId = req.params.id;
     const userId = (req as any).user?.userId;
-    const userLevel = (req as any).user?.userLevel || 1;
+    const userLevel = await approverLevel(req);
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
     const po = await dbGet('SELECT * FROM purchase_orders WHERE id = ?', [poId]) as any;
@@ -1803,7 +1824,7 @@ router.post('/purchase-orders/:id/reject', authMiddleware, async (req: Request, 
   try {
     const poId = req.params.id;
     const userId = (req as any).user?.userId;
-    const userLevel = (req as any).user?.userLevel || 1;
+    const userLevel = await approverLevel(req);
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
     if (userLevel >= 2) {
@@ -2050,7 +2071,7 @@ router.post('/goods-receipts/:id/approve', authMiddleware, async (req: Request, 
   try {
     const { id } = req.params;
     let userId = (req as any).user?.userId;
-    const userLevel = (req as any).user?.userLevel || 1;
+    const userLevel = await approverLevel(req);
 
     console.log('[GRN Approve] Request:', { id, userId, userLevel });
 
@@ -2187,7 +2208,7 @@ router.post('/goods-receipts/:id/approve', authMiddleware, async (req: Request, 
 router.post('/goods-receipts/:id/reject', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const userLevel = (req as any).user?.userLevel || 1;
+    const userLevel = await approverLevel(req);
     if (userLevel < 2) return res.status(400).json({ error: 'Insufficient level to reject' });
 
     await dbRun(
