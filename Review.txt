@@ -509,6 +509,22 @@ PO with payment
 → formal cancellation/reversal
 ```
 
+
+### ✅ DITERAPKAN — tim development
+
+Reject di modul ini artinya "kembalikan ke antrean persetujuan", jadi memang
+tidak boleh dipakai kalau dokumen turunannya sudah jalan.
+
+- Reject PR ditolak 409 `PR_HAS_PO` kalau sudah ada PO aktif yang merujuknya.
+  Tanpa ini, PR jadi pending sementara PO turunannya tetap berjalan — sumbernya
+  seolah belum disetujui padahal barangnya sudah dipesan.
+- Reject PO ditolak 409 `PO_HAS_GRN` kalau ada GRN aktif (yang direversal dan
+  yang di-reject tidak dihitung), dan 409 `PO_HAS_PAYMENT` kalau
+  `accounts_payable.paid_amount` sudah terisi.
+
+Formal cancellation untuk PO berbayar sudah tersedia lebih dulu lewat soft
+delete PO yang menolak `PO_HAS_TRAIL`.
+
 ---
 
 # PROC-R08 — DELETE PR MASIH HARD DELETE
@@ -558,6 +574,24 @@ punya downstream transaction
 ```
 
 jangan dapat dihapus permanen.
+
+
+### ✅ DITERAPKAN — tim development
+
+`is_deleted`, `deleted_at`, `deleted_by`, `deletion_reason` ditambahkan lewat
+`ensurePurchaseRequestSoftDelete()` — kolom baru, default 0, tidak ada data lama
+yang diubah.
+
+Aturannya: PR yang sudah disetujui **atau** sudah punya penawaran vendor hanya
+bisa dibatalkan dengan alasan (soft delete). PR draft tanpa penawaran masih boleh
+dihapus permanen, tapi kini dalam satu transaction dan tanpa `safeCleanup` —
+penghapusan separuh jalan tidak lagi mungkin dilaporkan sukses.
+
+Empat query PR (daftar, detail, riwayat, update) ikut memfilter `is_deleted = 0`,
+dan ada `POST /purchase-requests/:id/restore` sejajar dengan PO.
+
+Frontend `PurchaseRequests.vue` menangkap `REASON_REQUIRED` lalu meminta alasan,
+supaya user tidak mentok di pesan error.
 
 ---
 
@@ -656,6 +690,23 @@ malicious file detection
 
 Gunakan utility upload yang sama dengan Asset Management agar security standard konsisten.
 
+
+### ✅ DITERAPKAN — tim development
+
+Kedua uploader (bid quotation & PR attachment) pindah ke `memoryStorage`, lalu
+memakai `validateUpload()` + `storeValidatedFile()` dari
+`backend/src/utils/file-validation.ts` — utilitas yang sama dengan modul Asset.
+
+Artinya berlaku: whitelist ekstensi (pdf/jpg/png/docx/xlsx), MIME harus cocok
+dengan ekstensi, **isi berkas dicek magic byte**, nama berkas diganti UUID, dan
+limit 10 MB tetap.
+
+Pada unggahan bid (multi-file) seluruh berkas divalidasi dulu sebelum satu pun
+ditulis, dan kalau INSERT DB gagal berkas yang terlanjur ditulis dihapus lagi.
+
+Diverifikasi di tes bagian 16: HTML ditolak, SVG ditolak, berkas bernama `.pdf`
+tapi isinya HTML ditolak, PDF asli diterima.
+
 ---
 
 # PROC-R11 — PATH VALIDATION DELETE ATTACHMENT LEMAH
@@ -700,6 +751,26 @@ uploads/pr-attachments
 ```
 
 Lebih baik lagi client hanya mengirim **document ID**, bukan filesystem path.
+
+
+### ✅ DITERAPKAN — tim development
+
+Benar — `/uploads/pr-attachments/../../../../etc/passwd` lolos pemeriksaan
+substring.
+
+Helper `resolveInsideUploadDir()` me-resolve path lalu memastikan hasilnya berada
+di dalam direktori unggahan, memakai `base + path.sep` supaya folder bernama
+mirip (`pr-attachments-lain`) tidak ikut lolos. Dipakai di dua tempat: hapus PR
+attachment dan hapus dokumen bid.
+
+Catatan implementasi: versi pertama kami mengambil `path.basename()` dari input.
+Itu membuat traversal mustahil lolos, tapi berarti path jahat diterima diam-diam
+seolah sah dan endpoint tetap membalas 200. Diubah supaya path di-resolve apa
+adanya dan yang keluar dari folder **ditolak 400**.
+
+Saran reviewer agar klien mengirim document ID belum dikerjakan — kontrak
+`file_path` masih dipakai frontend yang berjalan, jadi perubahan itu kami pisah
+supaya tidak mencampur perbaikan keamanan dengan perubahan kontrak API.
 
 ---
 

@@ -1082,6 +1082,27 @@ const ensureDocumentCounterSchema = async (connection: any) => {
   console.log('✅ Counter nomor dokumen ensured');
 };
 
+// ==================== SOFT DELETE PURCHASE REQUEST (PROC-R08) ====================
+// PO sudah memakai logical delete, tapi PR masih dihapus permanen berikut bid,
+// bid item, dan itemnya — sebagian lewat helper yang menelan error, jadi
+// penghapusan separuh jalan pun tetap dilaporkan sukses. PR yang sudah disetujui
+// atau sudah punya penawaran vendor adalah dokumen yang dirujuk keputusan
+// pengadaan; menghapusnya permanen menghilangkan dasar keputusan itu.
+const ensurePurchaseRequestSoftDelete = async (connection: any) => {
+  const statements = [
+    `ALTER TABLE purchase_requests ADD COLUMN IF NOT EXISTS is_deleted TINYINT(1) NOT NULL DEFAULT 0`,
+    `ALTER TABLE purchase_requests ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP NULL`,
+    `ALTER TABLE purchase_requests ADD COLUMN IF NOT EXISTS deleted_by INT NULL`,
+    `ALTER TABLE purchase_requests ADD COLUMN IF NOT EXISTS deletion_reason TEXT NULL`,
+    `CREATE INDEX idx_pr_is_deleted ON purchase_requests (is_deleted)`,
+  ];
+
+  for (const statement of statements) {
+    await execSchemaEnsure(connection, statement);
+  }
+  console.log('✅ Soft delete purchase request ensured');
+};
+
 // ==================== DISPOSAL WORKFLOW (AST-006) ====================
 // Disposal sebelumnya hanya berupa mengubah status menjadi 'disposed' — tanpa
 // alasan, tanpa persetujuan, tanpa nilai jual, dan tanpa perhitungan gain/loss.
@@ -1389,6 +1410,7 @@ export async function initializeDatabase() {
     await ensurePurchaseOrderSoftDelete(connection);
     await ensureGrnReversalSchema(connection);
     await ensureDocumentCounterSchema(connection);
+    await ensurePurchaseRequestSoftDelete(connection);
     await ensureDisposalSchema(connection);
     await ensureAssetStatusHistorySchema(connection);
     await ensurePermissionCatalog(connection);

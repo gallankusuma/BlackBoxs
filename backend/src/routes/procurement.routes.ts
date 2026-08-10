@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { dbAll, dbGet, dbRun, withTransaction, TxRunner } from '../config/database';
 import { authMiddleware } from '../middleware/auth';
 import { requirePermission } from '../middleware/permission';
+import { validateUpload, storeValidatedFile, removeStoredFile } from '../utils/file-validation';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
@@ -13,28 +14,46 @@ const bidUploadDir = path.join(__dirname, '../../uploads/bids');
 if (!fs.existsSync(bidUploadDir)) {
   fs.mkdirSync(bidUploadDir, { recursive: true });
 }
-const bidStorage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, bidUploadDir),
-  filename: (_req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, 'bid-' + uniqueSuffix + path.extname(file.originalname));
-  }
-});
-const bidUpload = multer({ storage: bidStorage, limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB max
+// PROC-R10: unggahan procurement mengikuti standar modul Asset.
+//
+// Dulu berkas ditulis langsung ke disk dengan ekstensi dari `originalname`,
+// tanpa filter tipe sama sekali — `.html`, `.svg` beriskrip, atau `.sh` bisa
+// masuk lalu dilayani balik oleh static server. Sekarang berkas ditahan di
+// memori dulu, tipenya ditentukan dari MAGIC BYTES isinya (bukan dari nama atau
+// MIME yang sepenuhnya dikendalikan klien), baru ditulis dengan nama UUID.
+const bidUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB max
 
 // Multer setup for PR item attachment uploads
 const prAttachDir = path.join(__dirname, '../../uploads/pr-attachments');
 if (!fs.existsSync(prAttachDir)) {
   fs.mkdirSync(prAttachDir, { recursive: true });
 }
-const prAttachStorage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, prAttachDir),
-  filename: (_req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, 'pr-item-' + uniqueSuffix + path.extname(file.originalname));
-  }
-});
-const prAttachUpload = multer({ storage: prAttachStorage, limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB max
+const prAttachUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB max
+
+/**
+ * PROC-R11: pastikan path yang diminta klien benar-benar berada di dalam folder
+ * unggahan yang dituju.
+ *
+ * Pemeriksaan lama hanya `filePath.includes('/pr-attachments/')`, lalu langsung
+ * `path.join(__dirname, '../../', filePath)`. Substring itu tidak menghalangi
+ * `..`: `/uploads/pr-attachments/../../../../etc/passwd` lolos pemeriksaan dan
+ * di-resolve ke luar folder unggahan.
+ *
+ * Di sini path di-resolve dulu, baru dibandingkan dengan direktori dasarnya —
+ * memakai pemisah path supaya `uploads/pr-attachments-lain` tidak ikut lolos.
+ */
+const projectRoot = path.join(__dirname, '../../');
+
+const resolveInsideUploadDir = (baseDir: string, requestedPath: string): string | null => {
+  if (!requestedPath) return null;
+  const base = path.resolve(baseDir);
+  // Path di-resolve APA ADANYA, bukan diambil basename-nya. Mengambil basename
+  // memang membuat traversal mustahil lolos, tapi berarti path jahat diterima
+  // diam-diam seolah sah. Lebih benar ditolak terang-terangan.
+  const target = path.resolve(projectRoot, requestedPath.replace(/^\/+/, ''));
+  if (!target.startsWith(base + path.sep)) return null;
+  return target;
+};
 
 
 /**
@@ -601,6 +620,7 @@ router.get('/purchase-requests', authMiddleware, requirePermission('procurement.
        FROM purchase_requests pr
        LEFT JOIN users u ON pr.requestor_id = u.id
        LEFT JOIN client_projects cp ON pr.project_id = cp.id
+       WHERE pr.is_deleted = 0
        ORDER BY pr.created_at DESC`,
       []
     );
@@ -622,7 +642,7 @@ router.get('/purchase-requests/:id', authMiddleware, requirePermission('procurem
        FROM purchase_requests pr
        LEFT JOIN users u ON pr.requestor_id = u.id
        LEFT JOIN client_projects cp ON pr.project_id = cp.id
-       WHERE pr.id = ?`,
+       WHERE pr.id = ? AND pr.is_deleted = 0`,
       [req.params.id]
     );
     if (!pr) return res.status(404).json({ error: 'Purchase request not found' });
@@ -700,7 +720,7 @@ router.put('/purchase-requests/:id', authMiddleware, requirePermission('procurem
     const { status, notes, request_date, needed_by, reason, project_id,
             vendor_comparisons, selected_vendor_id } = req.body;
 
-    const existing: any = await dbGet('SELECT id FROM purchase_requests WHERE id = ?', [req.params.id]);
+    const existing: any = await dbGet('SELECT id FROM purchase_requests WHERE id = ? AND is_deleted = 0', [req.params.id]);
     if (!existing) return res.status(404).json({ error: 'Purchase request tidak ditemukan' });
 
     // PARTIAL UPDATE. Handler lama menimpa seluruh kolom dengan pola
@@ -757,28 +777,53 @@ router.delete('/purchase-requests/:id', authMiddleware, requirePermission('procu
       });
     }
 
-    // Safe cleanup helper
-    const safeCleanup = async (sql: string, params: any[], label: string) => {
-      try { await dbRun(sql, params); } catch (e: any) {
-        console.warn(`Warning cleaning ${label}:`, e.message?.substring(0, 120));
+    if (Number(pr.is_deleted) === 1) {
+      return res.status(404).json({ error: 'PR sudah dihapus' });
+    }
+
+    // PROC-R08: PR tidak lagi dihapus permanen.
+    //
+    // Versi lama menghapus pr_bid_items, pr_bids, purchase_request_items, lalu
+    // PR-nya — tiga yang pertama lewat safeCleanup yang MENELAN error, sehingga
+    // penghapusan separuh jalan tetap dilaporkan sukses. PR yang sudah disetujui
+    // atau sudah punya penawaran vendor adalah dasar keputusan pengadaan;
+    // hilangnya membuat PO turunannya tidak bisa dipertanggungjawabkan.
+    const approved = Number(pr.approval_status || 0) >= 1
+      || ['APPROVED', 'PO_GENERATED'].includes(String(pr.status || '').toUpperCase());
+
+    const bidCount = await dbGet('SELECT COUNT(*) AS cnt FROM pr_bids WHERE pr_id = ?', [id]) as any;
+    const hasBids = Number(bidCount?.cnt || 0) > 0;
+
+    if (approved || hasBids) {
+      const reason = String(req.body?.reason || '').trim();
+      if (!reason) {
+        return res.status(400).json({
+          error: 'PR ini sudah disetujui atau sudah punya penawaran vendor, jadi hanya bisa dibatalkan dengan alasan — bukan dihapus permanen.',
+          code: 'REASON_REQUIRED',
+          approved,
+          bids: Number(bidCount?.cnt || 0),
+        });
       }
-    };
 
-    // 1. Delete bid items for all bids of this PR
-    await safeCleanup(
-      'DELETE FROM pr_bid_items WHERE bid_id IN (SELECT id FROM pr_bids WHERE pr_id = ?)', 
-      [id], 'pr_bid_items'
-    );
+      await dbRun(
+        `UPDATE purchase_requests
+         SET is_deleted = 1, deleted_at = CURRENT_TIMESTAMP, deleted_by = ?, deletion_reason = ?
+         WHERE id = ?`,
+        [(req as any).user?.userId || null, reason, id]
+      );
 
-    // 2. Delete bids (including winner) for this PR
-    await safeCleanup('DELETE FROM pr_bids WHERE pr_id = ?', [id], 'pr_bids');
+      return res.json({ message: 'Purchase request dibatalkan (soft delete)', soft_deleted: true });
+    }
 
-    // 3. Delete the PR items
-    await safeCleanup('DELETE FROM purchase_request_items WHERE purchase_request_id = ?', [id], 'pr_items');
+    // PR draft tanpa penawaran: aman dihapus, tapi dalam satu transaction dan
+    // tanpa menelan error.
+    await withTransaction(async tx => {
+      await tx.run('DELETE FROM pr_bid_items WHERE bid_id IN (SELECT id FROM pr_bids WHERE pr_id = ?)', [id]);
+      await tx.run('DELETE FROM pr_bids WHERE pr_id = ?', [id]);
+      await tx.run('DELETE FROM purchase_request_items WHERE purchase_request_id = ?', [id]);
+      await tx.run('DELETE FROM purchase_requests WHERE id = ?', [id]);
+    });
 
-    // 4. Delete the PR itself
-    await dbRun(`DELETE FROM purchase_requests WHERE id = ?`, [id]);
-    
     res.json({ message: 'Purchase request deleted successfully' });
   } catch (error: any) {
     console.error('Error deleting purchase request:', error);
@@ -786,6 +831,27 @@ router.delete('/purchase-requests/:id', authMiddleware, requirePermission('procu
       return res.status(400).json({ error: 'Tidak dapat menghapus PR ini karena masih digunakan di modul lain.' });
     }
     res.status(500).json({ error: 'Failed to delete purchase request: ' + (error.message || 'Unknown error') });
+  }
+});
+
+router.post('/purchase-requests/:id/restore', authMiddleware, requirePermission('procurement.purchase-requests.delete'), async (req: Request, res: Response) => {
+  try {
+    const pr = await dbGet('SELECT id, is_deleted FROM purchase_requests WHERE id = ?', [req.params.id]) as any;
+    if (!pr) return res.status(404).json({ error: 'PR not found' });
+    if (Number(pr.is_deleted) !== 1) {
+      return res.status(400).json({ error: 'PR ini tidak dalam status terhapus' });
+    }
+
+    await dbRun(
+      `UPDATE purchase_requests
+       SET is_deleted = 0, deleted_at = NULL, deleted_by = NULL, deletion_reason = NULL
+       WHERE id = ?`,
+      [req.params.id]
+    );
+    res.json({ message: 'Purchase request dipulihkan' });
+  } catch (error) {
+    console.error('Error restoring purchase request:', error);
+    res.status(500).json({ error: 'Gagal memulihkan purchase request' });
   }
 });
 
@@ -868,15 +934,32 @@ router.post('/purchase-requests/:id/reject', authMiddleware, async (req: Request
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
     // Only level 2+ can reject back to pending
-    if (userLevel >= 2) {
-      await dbRun(
-        'UPDATE purchase_requests SET approval_status = 0, approved_by_supervisor_id = NULL, approved_by_manager_id = NULL, approved_at_supervisor = NULL, approved_at_manager = NULL WHERE id = ?',
-        [prId]
-      );
-      return res.json({ message: 'PR rejected and reset to pending', approval_status: 0 });
+    if (userLevel < 2) return res.status(400).json({ error: 'Cannot reject: insufficient level' });
+
+    // PROC-R07: PR yang sudah melahirkan PO tidak boleh dikembalikan ke pending.
+    //
+    // Reject di sini artinya "kembalikan ke antrean persetujuan". Kalau PO-nya
+    // sudah terbit, PR-nya jadi pending sementara PO turunannya tetap berjalan —
+    // dokumen sumber seolah belum disetujui padahal barangnya sudah dipesan.
+    const linkedPO = await dbGet(
+      'SELECT id, po_number FROM purchase_orders WHERE pr_id = ? AND is_deleted = 0 LIMIT 1',
+      [prId]
+    ) as any;
+
+    if (linkedPO) {
+      return res.status(409).json({
+        error: `PR ini sudah menerbitkan PO ${linkedPO.po_number || linkedPO.id}, jadi tidak bisa dikembalikan ke pending. Batalkan PO tersebut lebih dulu.`,
+        code: 'PR_HAS_PO',
+        po_id: linkedPO.id,
+        po_number: linkedPO.po_number,
+      });
     }
 
-    return res.status(400).json({ error: 'Cannot reject: insufficient level' });
+    await dbRun(
+      'UPDATE purchase_requests SET approval_status = 0, approved_by_supervisor_id = NULL, approved_by_manager_id = NULL, approved_at_supervisor = NULL, approved_at_manager = NULL WHERE id = ?',
+      [prId]
+    );
+    return res.json({ message: 'PR rejected and reset to pending', approval_status: 0 });
   } catch (error) {
     console.error('Error rejecting PR:', error);
     res.status(500).json({ error: 'Failed to reject purchase request' });
@@ -1151,14 +1234,33 @@ router.post('/purchase-requests/:prId/bids/:bidId/upload', authMiddleware, requi
     const files = (req as any).files as Express.Multer.File[];
     if (!files || files.length === 0) return res.status(400).json({ error: 'No file uploaded' });
 
-    const inserted: any[] = [];
+    // Validasi SEMUA berkas dulu sebelum menulis apa pun — kalau satu ditolak,
+    // tidak ada berkas separuh yang terlanjur mendarat di disk.
+    const checked: { ext: string; buffer: Buffer; originalname: string; size: number }[] = [];
     for (const file of files) {
-      const filePath = '/uploads/bids/' + file.filename;
-      const result = await dbRun(
-        'INSERT INTO pr_bid_documents (bid_id, file_path, file_name, file_size) VALUES (?, ?, ?, ?)',
-        [bidId, filePath, file.originalname, file.size]
-      );
-      inserted.push({ id: result.insertId, file_path: filePath, file_name: file.originalname, file_size: file.size });
+      const verdict = validateUpload(file.originalname, file.mimetype, file.buffer);
+      if (!verdict.ok) {
+        return res.status(400).json({ error: `${file.originalname}: ${verdict.error}` });
+      }
+      checked.push({ ext: verdict.ext!, buffer: file.buffer, originalname: file.originalname, size: file.size });
+    }
+
+    const inserted: any[] = [];
+    const written: string[] = [];
+    try {
+      for (const file of checked) {
+        const filename = storeValidatedFile(bidUploadDir, file.ext, file.buffer);
+        written.push(filename);
+        const filePath = '/uploads/bids/' + filename;
+        const result = await dbRun(
+          'INSERT INTO pr_bid_documents (bid_id, file_path, file_name, file_size) VALUES (?, ?, ?, ?)',
+          [bidId, filePath, file.originalname, file.size]
+        );
+        inserted.push({ id: result.insertId, file_path: filePath, file_name: file.originalname, file_size: file.size });
+      }
+    } catch (err) {
+      for (const filename of written) removeStoredFile(bidUploadDir, filename);
+      throw err;
     }
 
     // Keep backward compat: update quotation_file with last file
@@ -1206,9 +1308,12 @@ router.delete('/purchase-requests/:prId/bids/:bidId/documents/:docId', authMiddl
     const doc = await dbGet('SELECT file_path FROM pr_bid_documents WHERE id = ? AND bid_id = ?', [docId, bidId]) as any;
     if (!doc) return res.status(404).json({ error: 'Document not found' });
 
-    // Delete physical file
-    const fullPath = path.join(__dirname, '../..', doc.file_path);
-    try { require('fs').unlinkSync(fullPath); } catch { /* file may not exist */ }
+    // Delete physical file. Path-nya berasal dari database, tapi tetap dikurung
+    // ke folder bids — baris lama di tabel bisa saja memuat path warisan.
+    const fullPath = resolveInsideUploadDir(bidUploadDir, doc.file_path);
+    if (fullPath) {
+      try { fs.unlinkSync(fullPath); } catch { /* file may not exist */ }
+    }
 
     await dbRun('DELETE FROM pr_bid_documents WHERE id = ?', [docId]);
 
@@ -2042,15 +2147,48 @@ router.post('/purchase-orders/:id/reject', authMiddleware, async (req: Request, 
     const userLevel = await approverLevel(req);
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
-    if (userLevel >= 2) {
-      await dbRun(
-        'UPDATE purchase_orders SET approval_status = 0, approved_by_supervisor_id = NULL, approved_by_manager_id = NULL, approved_at_supervisor = NULL, approved_at_manager = NULL WHERE id = ?',
-        [poId]
-      );
-      return res.json({ message: 'PO rejected and reset to pending', approval_status: 0 });
+    if (userLevel < 2) return res.status(400).json({ error: 'Cannot reject: insufficient level' });
+
+    // PROC-R07: PO yang sudah punya penerimaan barang atau sudah dibayar tidak
+    // boleh dikembalikan ke pending. Barangnya sudah masuk gudang / uangnya
+    // sudah keluar — mengembalikan status persetujuan tidak membatalkan apa pun,
+    // hanya membuat catatannya bertentangan.
+    const activeGrn = await dbGet(
+      `SELECT id, grn_number FROM goods_receipts
+       WHERE po_id = ?
+         AND (approval_status IS NULL OR approval_status != -1)
+         AND (is_reversed IS NULL OR is_reversed = 0)
+       LIMIT 1`,
+      [poId]
+    ) as any;
+
+    if (activeGrn) {
+      return res.status(409).json({
+        error: `PO ini sudah punya penerimaan barang (${activeGrn.grn_number || activeGrn.id}). Reversal GRN-nya dulu sebelum mengubah status persetujuan PO.`,
+        code: 'PO_HAS_GRN',
+        grn_id: activeGrn.id,
+        grn_number: activeGrn.grn_number,
+      });
     }
 
-    return res.status(400).json({ error: 'Cannot reject: insufficient level' });
+    const paid = await dbGet(
+      'SELECT COALESCE(SUM(paid_amount), 0) AS total FROM accounts_payable WHERE po_id = ?',
+      [poId]
+    ) as any;
+
+    if (Number(paid?.total || 0) > 0) {
+      return res.status(409).json({
+        error: 'PO ini sudah memiliki pembayaran tercatat, jadi status persetujuannya tidak bisa dikembalikan ke pending.',
+        code: 'PO_HAS_PAYMENT',
+        paid_amount: Number(paid.total),
+      });
+    }
+
+    await dbRun(
+      'UPDATE purchase_orders SET approval_status = 0, approved_by_supervisor_id = NULL, approved_by_manager_id = NULL, approved_at_supervisor = NULL, approved_at_manager = NULL WHERE id = ?',
+      [poId]
+    );
+    return res.json({ message: 'PO rejected and reset to pending', approval_status: 0 });
   } catch (error) {
     console.error('Error rejecting PO:', error);
     res.status(500).json({ error: 'Failed to reject purchase order' });
@@ -2953,7 +3091,7 @@ router.get('/procurement-history', authMiddleware, requirePermission('procuremen
              NULL as items_summary
       FROM purchase_requests pr
       LEFT JOIN users u ON pr.requestor_id = u.id
-      WHERE 1=1
+      WHERE pr.is_deleted = 0
     `;
     const prParams: any[] = [];
     if (start_date) {
@@ -3399,7 +3537,12 @@ router.post('/purchase-requests/:id/item-attachment', authMiddleware, requirePer
     const pr = await dbGet('SELECT id FROM purchase_requests WHERE id = ?', [req.params.id]);
     if (!pr) return res.status(404).json({ error: 'Purchase Request not found' });
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-    const filePath = '/uploads/pr-attachments/' + req.file.filename;
+
+    const verdict = validateUpload(req.file.originalname, req.file.mimetype, req.file.buffer);
+    if (!verdict.ok) return res.status(400).json({ error: verdict.error });
+
+    const filename = storeValidatedFile(prAttachDir, verdict.ext!, req.file.buffer);
+    const filePath = '/uploads/pr-attachments/' + filename;
     res.json({ file_path: filePath, original_name: req.file.originalname });
   } catch (error) {
     console.error('Error uploading PR item attachment:', error);
@@ -3412,9 +3555,13 @@ router.delete('/purchase-requests/:id/item-attachment', authMiddleware, requireP
   try {
     const filePath = req.query.file_path as string;
     if (!filePath) return res.status(400).json({ error: 'file_path query param required' });
-    // Only allow deleting from pr-attachments directory
     if (!filePath.includes('/pr-attachments/')) return res.status(400).json({ error: 'Invalid file path' });
-    const absPath = path.join(__dirname, '../../', filePath);
+
+    // PROC-R11: cek substring saja tidak cukup — path di-resolve dulu dan
+    // dipastikan benar-benar berada di dalam folder pr-attachments.
+    const absPath = resolveInsideUploadDir(prAttachDir, filePath);
+    if (!absPath) return res.status(400).json({ error: 'Invalid file path' });
+
     if (fs.existsSync(absPath)) {
       fs.unlinkSync(absPath);
     }

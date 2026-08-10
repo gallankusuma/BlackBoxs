@@ -444,7 +444,91 @@ async function main() {
   chk('persetujuan DIBATALKAN, tidak tersimpan sebagai approved', Number(rolled?.approval_status) === 2, false);
   chk('stok tidak berubah', await stockOf(product.id), stockBeforeFail);
 
-  console.log('\n14. RBAC — token desktop tanpa permission procurement ditolak');
+  console.log('\n14. Reject tidak boleh mengabaikan dokumen turunan (PROC-R07)');
+  const prForPo = await call('POST', '/procurement/purchase-requests', {
+    request_date: today(), status: 'APPROVED', reason: 'Uji downstream',
+    notes: JSON.stringify({ items: [{ product_id: product.id, quantity: 2, uom: 'pcs' }] }),
+  }, master);
+  const prForPoId = prForPo.json?.data?.id;
+  await call('POST', `/procurement/purchase-requests/${prForPoId}/approve`, {}, master);
+  const poFromPr = await call('POST', '/procurement/purchase-orders', {
+    vendor_id: vendorId, po_date: today(), pr_id: prForPoId,
+    items: [{ product_id: product.id, quantity: 2, unit_price: 5000, uom: 'pcs' }],
+  }, master);
+  const poFromPrId = poFromPr.json?.data?.id;
+
+  const rejPrWithPo = await call('POST', `/procurement/purchase-requests/${prForPoId}/reject`, {}, master);
+  chk('PR yang sudah menerbitkan PO tidak bisa di-reject', rejPrWithPo.status, 409);
+  chk('kode PR_HAS_PO', rejPrWithPo.json?.code, 'PR_HAS_PO');
+
+  await call('POST', `/procurement/purchase-orders/${poFromPrId}/approve`, {}, master);
+  const grnForPo = await call('POST', '/procurement/goods-receipts', {
+    po_id: poFromPrId, warehouse_id: wh.id, received_date: today(),
+    notes: JSON.stringify({ items: [{ product_id: product.id, received_quantity: 2 }] }),
+  }, master);
+  chk('GRN dibuat untuk PO tersebut', grnForPo.status < 300, true);
+
+  const rejPoWithGrn = await call('POST', `/procurement/purchase-orders/${poFromPrId}/reject`, {}, master);
+  chk('PO yang sudah punya GRN tidak bisa di-reject', rejPoWithGrn.status, 409);
+  chk('kode PO_HAS_GRN', rejPoWithGrn.json?.code, 'PO_HAS_GRN');
+
+  console.log('\n15. PR bukan draft dibatalkan lewat soft delete (PROC-R08)');
+  const prSoft = await call('POST', '/procurement/purchase-requests', {
+    request_date: today(), status: 'APPROVED', reason: 'Uji soft delete',
+    notes: JSON.stringify({ items: [] }),
+  }, master);
+  const prSoftId = prSoft.json?.data?.id;
+  await call('POST', `/procurement/purchase-requests/${prSoftId}/approve`, {}, master);
+
+  const delNoReason = await call('DELETE', `/procurement/purchase-requests/${prSoftId}`, undefined, master);
+  chk('hapus tanpa alasan ditolak', delNoReason.status, 400);
+  chk('kode REASON_REQUIRED', delNoReason.json?.code, 'REASON_REQUIRED');
+
+  const delSoft = await call('DELETE', `/procurement/purchase-requests/${prSoftId}`, { reason: 'Dibatalkan user' }, master);
+  chk('dengan alasan → soft delete', delSoft.status, 200);
+  chk('ditandai soft delete', delSoft.json?.soft_deleted, true);
+  chk('hilang dari detail', (await call('GET', `/procurement/purchase-requests/${prSoftId}`, undefined, master)).status, 404);
+  const prList = (await call('GET', '/procurement/purchase-requests', undefined, master)).json?.data || [];
+  chk('hilang dari daftar', prList.some((x: any) => Number(x.id) === Number(prSoftId)), false);
+
+  chk('bisa dipulihkan',
+    (await call('POST', `/procurement/purchase-requests/${prSoftId}/restore`, {}, master)).status, 200);
+  chk('muncul lagi setelah dipulihkan',
+    (await call('GET', `/procurement/purchase-requests/${prSoftId}`, undefined, master)).status, 200);
+
+  console.log('\n16. Unggahan procurement divalidasi isinya (PROC-R10/R11)');
+  const bid = await call('POST', `/procurement/purchase-requests/${prForPoId}/bids`, {
+    vendor_id: vendorId, total_amount: 1000,
+  }, master);
+  const bidId = bid.json?.data?.id ?? bid.json?.id;
+
+  const upload = async (filename: string, mime: string, bytes: number[]) => {
+    const form = new FormData();
+    form.append('file', new Blob([new Uint8Array(bytes)], { type: mime }), filename);
+    const r = await fetch(`${API}/procurement/purchase-requests/${prForPoId}/bids/${bidId}/upload`, {
+      method: 'POST', headers: { Authorization: `Bearer ${master}` }, body: form,
+    });
+    return { status: r.status, json: await r.json().catch(() => ({})) };
+  };
+
+  if (bidId) {
+    const html = await upload('jahat.html', 'text/html', [...Buffer.from('<script>alert(1)</script>')]);
+    chk('unggahan HTML ditolak', html.status, 400);
+    const svg = await upload('gambar.svg', 'image/svg+xml', [...Buffer.from('<svg onload="alert(1)">')]);
+    chk('unggahan SVG ditolak', svg.status, 400);
+    // Nama .pdf tapi isinya bukan PDF — magic byte yang menentukan
+    const fakePdf = await upload('palsu.pdf', 'application/pdf', [...Buffer.from('<html>bukan pdf</html>')]);
+    chk('berkas menyamar sebagai PDF ditolak', fakePdf.status, 400);
+    const realPdf = await upload('asli.pdf', 'application/pdf', [0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34]);
+    chk('PDF asli diterima', realPdf.status, 200);
+  }
+
+  const traversal = await call('DELETE',
+    `/procurement/purchase-requests/${prForPoId}/item-attachment?file_path=${encodeURIComponent('/uploads/pr-attachments/../../../../etc/passwd')}`,
+    undefined, master);
+  chk('path traversal saat hapus attachment ditolak', traversal.status, 400);
+
+  console.log('\n17. RBAC — token desktop tanpa permission procurement ditolak');
   const plainRole = await call('POST', '/roles',
     { code: `PROC${stamp}`, name: `ProcTest-${stamp}` }, master);
   const plainEmail = `proc.plain.${stamp}@test.local`;

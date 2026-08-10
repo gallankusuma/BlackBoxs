@@ -1324,6 +1324,21 @@ const deletePR = async (id: number) => {
     await api.delete(`/procurement/purchase-requests/${id}`);
     successMsg.value = 'PR deleted successfully.';
   } catch (error: any) {
+    // PR yang sudah disetujui atau sudah punya penawaran vendor tidak dihapus
+    // permanen — backend memintanya dibatalkan dengan alasan (soft delete).
+    if (error?.response?.data?.code === 'REASON_REQUIRED') {
+      const reason = prompt('PR ini sudah disetujui / sudah ada penawaran vendor, jadi akan dibatalkan (bukan dihapus permanen).\n\nAlasan pembatalan:');
+      if (reason === null) return;
+      if (!reason.trim()) { alert('Alasan wajib diisi.'); return; }
+      try {
+        await api.delete(`/procurement/purchase-requests/${id}`, { data: { reason: reason.trim() } });
+        successMsg.value = 'PR dibatalkan.';
+        return;
+      } catch (e: any) {
+        alert(e?.response?.data?.error || 'Gagal membatalkan purchase request');
+        return;
+      }
+    }
     console.error('Delete PR error:', error);
     alert(error?.response?.data?.error || 'Failed to delete purchase request');
   } finally {
