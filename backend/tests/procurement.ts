@@ -212,6 +212,28 @@ async function main() {
 
   await call('DELETE', `/users/${approverId}`, undefined, master);
 
+  console.log('\n7. Nomor dokumen berurutan & aman saat bersamaan');
+  const mkPr = () => call('POST', '/procurement/purchase-requests', {
+    request_date: today(),
+    notes: JSON.stringify({ items: [], noteText: `Uji nomor ${stamp}` }),
+  }, master);
+
+  const one = await mkPr();
+  const two = await mkPr();
+  const numOne = one.json?.data?.pr_number || '';
+  const numTwo = two.json?.data?.pr_number || '';
+  chk('format nomor berurutan (PR-YYYYMMDD-NNNN)', /^PR-\d{8}-\d{4}$/.test(numOne), true);
+  chk('nomor berikutnya naik satu',
+    Number(numTwo.split('-')[2]) - Number(numOne.split('-')[2]), 1);
+
+  // 15 permintaan bersamaan — dulu tabrakan acak membalas 500 ke pengguna
+  const burst = await Promise.all(Array.from({ length: 15 }, () => mkPr()));
+  const created = burst.filter(r => r.status === 201);
+  chk('15 PR bersamaan semuanya berhasil', created.length, 15);
+  chk('tidak ada yang balas 500', burst.filter(r => r.status === 500).length, 0);
+  const numbers = created.map(r => r.json?.data?.pr_number);
+  chk('tidak ada nomor duplikat', new Set(numbers).size, 15);
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }

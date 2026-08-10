@@ -56,12 +56,57 @@ async function approverLevel(req: Request): Promise<number> {
   return Number(row.user_level || 0);
 }
 
-const generateCode = (prefix: string) => {
-  const now = new Date();
-  const datePart = now.toISOString().slice(0, 10).replace(/-/g, '');
-  const rand = Math.floor(1000 + Math.random() * 9000);
-  return `${prefix}-${datePart}-${rand}`;
+/**
+ * Nomor dokumen berurutan per hari (AST-009 versi procurement).
+ *
+ * Versi lama memakai 4 digit ACAK: `PR-20260315-4821`. Hanya ada 9.000
+ * kemungkinan per hari, jadi dengan ~30 dokumen sehari peluang tabrakan sudah
+ * di atas 4 persen. Kolomnya UNIQUE, sehingga tabrakan tidak menghasilkan
+ * duplikat melainkan ERROR 500 saat pengguna menekan simpan. Nomornya juga
+ * terlihat melompat-lompat karena memang acak.
+ *
+ * Sekarang: urut per hari, dengan pengaman UNIQUE INDEX di database sebagai
+ * penjaga sebenarnya — `withDocumentNumber` di bawah mengulang kalau bentrok.
+ */
+const nextSequentialCode = async (
+  prefix: string, table: string, column: string
+): Promise<string> => {
+  const datePart = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const like = `${prefix}-${datePart}-%`;
+  const row: any = await dbGet(
+    `SELECT MAX(CAST(SUBSTRING_INDEX(${column}, '-', -1) AS UNSIGNED)) AS maxNum
+     FROM ${table} WHERE ${column} LIKE ?`,
+    [like]
+  );
+  const next = Number(row?.maxNum || 0) + 1;
+  return `${prefix}-${datePart}-${String(next).padStart(4, '0')}`;
 };
+
+/**
+ * Jalankan `fn` dengan nomor dokumen, ulangi kalau UNIQUE INDEX menolak.
+ * Pembacaan MAX(...) tidak bisa dibuat atomic tanpa lock, jadi penjaga
+ * sebenarnya adalah constraint database — bentrok ditangani dengan mencoba
+ * nomor berikutnya, bukan dibalas 500 mentah.
+ */
+async function withDocumentNumber<T>(
+  prefix: string, table: string, column: string,
+  fn: (code: string) => Promise<T>,
+): Promise<T> {
+  const MAX_ATTEMPTS = 8;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const code = await nextSequentialCode(prefix, table, column);
+    try {
+      return await fn(code);
+    } catch (err: any) {
+      const duplicate = err?.code === 'ER_DUP_ENTRY' && String(err.message).includes(column);
+      if (!duplicate || attempt === MAX_ATTEMPTS) throw err;
+      await new Promise(r => setTimeout(r, 10 + Math.random() * 40));
+    }
+  }
+  throw new Error('Gagal menerbitkan nomor dokumen');
+}
+
+// Dipertahankan untuk pemakaian yang tidak menyentuh kolom unik
 
 const normalizeDateOnly = (value?: string | null | any): string | null => {
   if (!value) return null;
@@ -538,7 +583,7 @@ router.get('/purchase-requests/:id', authMiddleware, async (req: Request, res: R
 router.post('/purchase-requests', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { pr_number, requester_id, status, notes, department, request_date, needed_by, reason, project_id } = req.body;
-    const number = pr_number || generateCode('PR');
+    const explicitNumber = pr_number || null;
     const userIdFromToken = (req as any).user?.userId;
 
     // Determine requester - prefer explicit ID from body, fallback to token
@@ -564,11 +609,18 @@ router.post('/purchase-requests', authMiddleware, async (req: Request, res: Resp
 
     console.log('Creating PR - requested by:', userIdFromToken, 'valid requestor:', validRequestor);
 
-    const result = await dbRun(
+    // Nomor diterbitkan berurutan. Pembacaan MAX(...) tidak bisa dibuat atomic
+    // tanpa lock, jadi penjaganya adalah UNIQUE INDEX: kalau bentrok, nomor
+    // berikutnya dicoba — bukan dibalas 500 mentah ke pengguna.
+    const { result, number } = await withDocumentNumber(
+      'PR', 'purchase_requests', 'pr_number',
+      async (code) => {
+        const docNumber = explicitNumber || code;
+        const r = await dbRun(
       `INSERT INTO purchase_requests (pr_number, requestor_id, project_id, status, notes, reason, request_date, needed_by)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        number,
+        docNumber,
         validRequestor,
         project_id || null,
         (status || 'DRAFT').toUpperCase(),
@@ -577,6 +629,9 @@ router.post('/purchase-requests', authMiddleware, async (req: Request, res: Resp
         normalizeDateOnly(request_date) || new Date().toISOString().slice(0, 10),
         normalizeDateOnly(needed_by) || null,
       ]
+        );
+        return { result: r, number: docNumber };
+      },
     );
     res.status(201).json({ message: 'Purchase request created', data: { id: result.insertId, pr_number: number } });
   } catch (error: any) {
@@ -1235,7 +1290,7 @@ router.post('/purchase-requests/:prId/generate-pos', authMiddleware, async (req:
     // Create one draft PO per winning vendor
     const createdPOs: any[] = [];
     for (const { bid, items } of vendorGroups) {
-      const poNumber = generateCode('PO');
+      const poNumber = await nextSequentialCode('PO', 'purchase_orders', 'po_number');
       const vendorId = bid.vendor_id || bid.reg_vendor_id || null;
       const vendorName = bid.vendor_name || bid.reg_vendor_name || 'Unknown';
       const subTotal = items.reduce((sum: number, i: any) => sum + Number(i.total_price || 0), 0);
@@ -1534,7 +1589,7 @@ router.post('/purchase-orders', authMiddleware, async (req: Request, res: Respon
       }
     }
 
-    const number = po_number || generateCode('PO');
+    const number = po_number || await nextSequentialCode('PO', 'purchase_orders', 'po_number');
     const { contractTotal } = parsePOFinancials(notes, items, Number(discount_percent || 0), Number(ppn_percent || 0));
     
     try {
@@ -1948,7 +2003,7 @@ router.post('/goods-receipts', authMiddleware, async (req: Request, res: Respons
     const normalizedDate = normalizeDateOnly(received_date || received_at);
     if (!normalizedDate) return res.status(400).json({ error: 'received_date is required' });
 
-    const number = grn_number || generateCode('GRN');
+    const number = grn_number || await nextSequentialCode('GRN', 'goods_receipts', 'grn_number');
     
     // Determine and validate received_by user ID
     let receiver = received_by || (req as any).userId || 1;
