@@ -1,949 +1,778 @@
-# PROCUREMENT MODULE — RE-REVIEW HASIL REVISI
+# PROCUREMENT MODULE — RE-REVIEW ROUND 2
 
-**Repository:** `gallankusuma/BlackBoxs`
-**Branch:** `main`
-**Reviewed main:** `4b50b0aa5cca3438d56473539527ee80e9316205`
+**Reviewed commit:** `fd5413bf86a23c487900f87b4e15bfe8ba977da7`
 
 ## Reviewer Verdict
 
-**CHANGES REQUIRED 🔴**
+**CHANGES REQUIRED**
 
-Belum disarankan menetapkan Procurement sebagai **SETTLED**.
-
----
-
-# A. REVISI YANG SUDAH VERIFIED ✅
-
-| Area                       | Hasil      |
-| -------------------------- | ---------- |
-| GRN approval menambah stok | ✅ Verified |
-| GRN posting idempotent     | ✅ Verified |
-| Update PO partial          | ✅ Verified |
-| Update PR partial          | ✅ Verified |
-| Update GRN partial         | ✅ Verified |
-| Approval level dari DB     | ✅ Verified |
-| PO soft delete             | ✅ Verified |
-| Proteksi `items: []`       | ✅ Verified |
-| RBAC mayoritas endpoint    | ✅ Verified |
-| PR concurrent numbering    | ✅ Verified |
-
-Test Procurement sekarang memang sudah mencakup alur PO → GRN → Inventory, partial update, soft delete PO, empty-item protection dan RBAC.
+Revisi PROC-R01 s.d. PROC-R11 secara umum sudah berhasil. Namun ditemukan concurrency dan lifecycle gap baru yang perlu ditutup sebelum Procurement dinyatakan SETTLED.
 
 ---
 
-# PROC-R01 — DELETE APPROVED GRN DAPAT MERUSAK STOCK
+# PROC-R14 — CONCURRENT GRN REVERSAL DAPAT MEMBALIK STOK DUA KALI
 
 **Severity: P0 — Critical**
-**Status: OPEN**
+**Status: NEW / OPEN**
 
-Ini temuan paling serius.
+Current reversal melakukan:
 
-Posting stok baru sudah menggunakan:
+1. `SELECT GRN`
+2. cek `is_reversed`
+3. ambil `stock_movements`
+4. baru membuka transaction
+5. kurangi stok
+6. insert reversal movement
+7. set `is_reversed = 1`
 
-```text
-inventory_stocks.quantity
-```
+Masalahnya, langkah 1–3 dilakukan **di luar transaction**.
 
-dan `stock_movements`.
-
-Tetapi endpoint:
-
-```text
-DELETE /goods-receipts/:id
-```
-
-masih mencoba reversal menggunakan kode lama:
-
-```sql
-UPDATE inventory
-SET quantity_on_hand = ...
-```
-
-Padahal implementasi posting GRN sendiri menjelaskan bahwa tabel/kolom lama tersebut tidak sesuai dengan schema aktual.
-
-Lebih berbahaya lagi, reversal dibungkus:
-
-```ts
-safeCleanup(...)
-```
-
-yang **menelan error**.
-
-Setelah reversal gagal, backend tetap:
+Dua request reversal yang masuk hampir bersamaan dapat melakukan:
 
 ```text
-DELETE stock_movements
-DELETE grn_items
-DELETE goods_receipts
+Request A → is_reversed = 0
+Request B → is_reversed = 0
+
+A → stock -10
+A → is_reversed = 1
+
+B → stock -10 lagi
+B → is_reversed = 1
 ```
 
-Sehingga dapat terjadi:
+Reversal sequential memang sudah dites, tetapi concurrent reversal belum.
 
-```text
-Stock tetap +10
+## Required Fix
 
-tetapi:
-GRN hilang
-stock movement hilang
-audit trail hilang
-```
-
-Ini berpotensi menghasilkan stok tanpa dokumen sumber.
-
-### Required fix
-
-Approved GRN **jangan hard delete**.
-
-Gunakan workflow:
-
-```text
-Approved GRN
-      ↓
-Reversal Request
-      ↓
-Stock Reversal
-      ↓
-Reverse Movement
-      ↓
-GRN status = reversed/cancelled
-```
-
-Semua dalam **satu transaction**.
-
-### Acceptance Criteria
-
-Setelah GRN +10 direverse:
-
-```text
-inventory stock = stock sebelumnya
-original GRN tetap ada
-original movement tetap ada
-reverse movement tercatat -10
-reversal reason tercatat
-reversed_by tercatat
-```
-
----
-
-# PROC-R02 — APPROVED GRN DAPAT DI-REJECT TANPA REVERSAL STOCK
-
-**Severity: P0 — Critical**
-**Status: OPEN**
-
-Endpoint:
-
-```text
-POST /goods-receipts/:id/reject
-```
-
-hanya mengecek:
-
-```text
-userLevel >= 2
-```
-
-lalu langsung mengubah:
-
-```text
-approval_status = -1
-status = rejected
-```
-
-Tidak ada pengecekan apakah GRN tersebut **sudah fully approved dan stok sudah diposting**.
-
-Skenario:
-
-```text
-PO
- ↓
-GRN qty 10
- ↓
-Approved
- ↓
-Stock +10
- ↓
-Reject GRN
- ↓
-status = rejected
-```
-
-Stock masih +10.
-
-Lebih berbahaya lagi, create GRN menganggap `approval_status = -1` sudah tidak aktif.
-
-Jadi PO yang sama kemudian dapat dibuatkan GRN baru.
-
-Potensi:
-
-```text
-GRN #1 → Stock +10 → Reject
-GRN #2 → Stock +10
-
-Actual stock = +20
-```
-
-padahal barang sebenarnya mungkin hanya datang 10.
-
-### Required fix
-
-Fully approved GRN tidak boleh menggunakan endpoint reject biasa.
-
-Gunakan:
-
-```text
-Pending → Reject
-
-Approved → Reversal
-```
-
-### Acceptance Criteria
-
-```text
-approval_status 0/1 → reject allowed
-approval_status 2 → reject returns 409
-```
-
-dan arahkan ke reversal workflow.
-
----
-
-# PROC-R03 — APPROVAL GRN DAN STOCK POSTING BELUM ATOMIC
-
-**Severity: P1 — High**
-**Status: OPEN**
-
-Saat GRN fully approved:
-
-1. `goods_receipts.approval_status = 2`
-2. COMMIT
-3. baru kemudian `applyGrnToInventory()` dalam transaction lain.
-
-Kode bahkan mengembalikan pesan:
-
-```text
-Persetujuan tersimpan, tetapi posting stok gagal
-```
-
-Artinya secara desain masih memungkinkan:
-
-```text
-GRN = Approved
-Stock = belum masuk
-```
-
-### Required
-
-Full approval dan stock posting harus satu atomic transaction:
+Masukkan seluruh pemeriksaan ke transaction:
 
 ```text
 BEGIN
 
-UPDATE GRN approval
+SELECT goods_receipts
+FOR UPDATE
+
+cek is_reversed
+
+SELECT stock_movements
 
 UPDATE inventory_stocks
 
-INSERT stock_movements
+INSERT reversal movements
+
+UPDATE goods_receipts
 
 COMMIT
 ```
 
-Jika salah satu gagal:
+Tambahkan idempotency protection.
+
+## Acceptance Test
+
+Jalankan dua reversal bersamaan:
 
 ```text
-ROLLBACK semuanya
-```
-
-### Acceptance Criteria
-
-Tidak boleh ada kondisi:
-
-```text
-GRN approved
-AND
-stock movement absent
-```
-
----
-
-# PROC-R04 — PO CREATE BELUM TRANSACTIONAL
-
-**Severity: P1 — High**
-**Status: OPEN**
-
-Create PO sekarang melakukan:
-
-```text
-INSERT purchase_orders
-↓
-INSERT item 1
-↓
-INSERT item 2
-↓
-...
-↓
-create payment schedules
-↓
-create Accounts Payable
-```
-
-tetapi keseluruhan proses **belum dibungkus satu database transaction**.
-
-Jika item ketiga gagal:
-
-```text
-PO header sudah tersimpan
-item pertama sudah tersimpan
-item kedua sudah tersimpan
-```
-
-Kemudian API error.
-
-User bisa mencoba kembali dan membuat masalah baru.
-
-### Required
-
-```text
-BEGIN
-
-INSERT PO
-INSERT PO ITEMS
-INSERT PAYMENT SCHEDULE
-INSERT ACCOUNTS PAYABLE
-
-COMMIT
-```
-
-Error:
-
-```text
-ROLLBACK
-```
-
-
-### ✅ DITERAPKAN — tim development
-
-Create PO kini satu `withTransaction`: header, item, jadwal pembayaran, dan AP
-berhasil bersama atau tidak sama sekali. `upsertPaymentSchedules()` diberi
-parameter `tx` opsional supaya ikut transaction pemanggil — tanpa itu, jadwal dan
-AP tetap tersimpan meski PO-nya di-rollback.
-
-Endpoint `generate-pos` (satu PO per vendor pemenang) juga dibungkus, per PO.
-Kegagalan pada vendor ketiga tidak lagi menyisakan PO tanpa item, dan PO vendor
-sebelumnya yang sudah lengkap tetap sah.
-
-Tes bagian 7b: item kedua memakai product_id tidak ada → FK gagal → jumlah PO
-tidak bertambah sama sekali.
-
----
-
-# PROC-R05 — PERBAIKAN NOMOR DOKUMEN BELUM LENGKAP
-
-**Severity: P1 — High**
-**Status: PARTIAL**
-
-PR sudah benar menggunakan:
-
-```ts
-withDocumentNumber()
-```
-
-dengan retry saat UNIQUE collision.
-
-Tetapi PO create masih menggunakan:
-
-```ts
-await nextSequentialCode(...)
-```
-
-langsung.
-
-GRN create juga masih:
-
-```ts
-await nextSequentialCode(...)
-```
-
-Dan `generate-pos` juga menggunakan generator langsung.
-
-Jadi klaim bahwa concurrency protection sudah diterapkan ke seluruh PR/PO/GRN belum sepenuhnya sesuai source.
-
-Test concurrency yang ada juga baru membuktikan **15 PR paralel**, belum PO dan GRN.
-
-### Required
-
-Semua document creation wajib melalui helper yang sama:
-
-```text
-PR
-PO
-Auto-generated PO
-GRN
-```
-
-### Test
-
-```text
-20 concurrent PR
-20 concurrent PO
-20 concurrent GRN
+Promise.all([
+    reverse(grnId),
+    reverse(grnId)
+])
 ```
 
 Expected:
 
 ```text
-20 success
-20 unique number
-0 HTTP 500
-```
+1 request → 200
+1 request → 409
 
-
-### ✅ DITERAPKAN — tim development
-
-Benar, dan klaim kami sebelumnya memang kelewat luas: hanya PR yang lewat helper.
-PO, `generate-pos`, dan GRN memanggil generator langsung. Sekarang keempatnya
-lewat `withNumberedDocument()`, dan `nextSequentialCode` tidak lagi bisa dipanggil
-langsung dari route.
-
-Yang lebih penting: pendekatan MAX(...)+retry ternyata **tidak lolos kriteria
-reviewer sendiri**. Diuji dengan 20 PO serentak, hanya 2 yang berhasil — tiap
-putaran retry cuma meloloskan satu permintaan sampai percobaan habis. Jadi ini
-bukan sekadar "belum diterapkan ke PO/GRN", mekanismenya memang tidak memadai.
-
-Penomoran diganti dengan tabel `document_counters` + `LAST_INSERT_ID()`, atomic
-per (prefix, tanggal). Dua kesalahan yang kami buat dan perbaiki saat mengerjakan
-ini, dicatat supaya tidak terulang:
-
-1. Alokasi nomor sempat ditaruh DI DALAM transaction dokumen — baris counter jadi
-   terkunci sepanjang INSERT PO + item + jadwal + AP, dan 18 dari 20 permintaan
-   mati di `Lock wait timeout exceeded`.
-2. Ditemukan bug lama yang tidak ada di daftar review: `syncScheduleAPStatus()`
-   mengambil koneksi BARU sementara transaction pemanggil masih memegang
-   koneksinya. Dengan pool 10 koneksi, 20 permintaan serentak saling menunggu
-   koneksi kesebelas — request menggantung, bukan melambat. Fungsi itu kini ikut
-   `tx`.
-
-Hasil akhir 20 PO serentak: 20 berhasil, 47 ms.
-
-### Test
-
-```
-20 concurrent PR  → 20 sukses, 20 nomor unik, 0 HTTP 500  ✅
-20 concurrent PO  → 20 sukses, 20 nomor unik, 0 HTTP 500  ✅
-20 concurrent GRN → 20 sukses, 20 nomor unik, 0 HTTP 500  ✅
+stock hanya berkurang satu kali
+hanya satu reversal tercatat
 ```
 
 ---
 
-# PROC-R06 — PO APPROVAL DAN PAYMENT SCHEDULE BELUM ATOMIC
+# PROC-R15 — DUA GRN BISA DIBUAT BERSAMAAN UNTUK PO YANG SAMA
 
-**Severity: P1 — High**
-**Status: OPEN**
+**Severity: P0 — Critical**
+**Status: NEW / OPEN**
 
-Approval PO melakukan:
-
-```text
-UPDATE approval_status
-```
-
-kemudian:
+Saat create GRN backend melakukan:
 
 ```text
-regenerateSchedule()
+SELECT active GRN
 ```
 
-Jika payment schedule/AP gagal dibuat, approval PO sudah telanjur tersimpan.
+sebelum masuk transaction pembuatan dokumen.
 
-Potential state:
+Dua request bersamaan terhadap PO yang sama dapat melakukan:
 
 ```text
-PO = fully approved
+Request A → tidak menemukan GRN
+Request B → tidak menemukan GRN
 
-tetapi:
-
-Payment Schedule incomplete
-Accounts Payable incomplete
+A → INSERT GRN
+B → INSERT GRN
 ```
 
-### Required
+Document counter tidak menyelesaikan masalah ini karena counter hanya menjamin:
 
-Final PO approval + schedule/AP generation menjadi satu transaction.
+```text
+GRN number unique
+```
 
+bukan:
 
-### ✅ DITERAPKAN — tim development
+```text
+satu active GRN per PO
+```
 
-Ketiga jalur approval PO (direct level ≥ 4, supervisor, manager) kini membungkus
-UPDATE approval_status bersama `regenerateSchedule()` dalam satu transaction.
-Kegagalan pembuatan jadwal atau AP me-rollback persetujuannya.
+Test concurrency sekarang membuat 20 GRN untuk **20 PO berbeda**, bukan 20 request pada satu PO.
 
-Ini penting karena sebelumnya keadaan tersebut tidak bisa diperbaiki dengan
-mengulang approve — statusnya sudah 2, jadi permintaan berikutnya ditolak.
+## Required Fix
+
+Di transaction create GRN:
+
+```sql
+SELECT id
+FROM purchase_orders
+WHERE id = ?
+FOR UPDATE;
+```
+
+Setelah memperoleh lock:
+
+```text
+validasi PO
+cek active GRN lagi
+INSERT GRN
+```
+
+## Acceptance Test
+
+20 create GRN paralel terhadap PO yang sama:
+
+```text
+1 berhasil
+19 ditolak
+active GRN count = 1
+```
 
 ---
 
-# PROC-R07 — PR/PO REJECT BELUM MEMERIKSA DOWNSTREAM DOCUMENT
+# PROC-R16 — DOKUMEN APPROVED MASIH DAPAT DIEDIT
 
 **Severity: P1 — High**
-**Status: OPEN**
+**Status: NEW / OPEN**
 
-PR yang sudah fully approved masih dapat di-reset menjadi pending melalui endpoint reject tanpa memeriksa apakah sudah mempunyai PO.
+Ini gap lifecycle yang cukup serius.
 
-Demikian juga PO approval dapat di-reset tanpa business validation yang cukup terhadap:
+## GRN
 
-```text
-GRN
-Stock Movement
-Payment
-Accounts Payable
-```
-
-### Recommended lifecycle
+`PUT /goods-receipts/:id` masih dapat mengubah:
 
 ```text
-PR approved + PO exists
-→ tidak boleh reject biasa
-
-PO approved + GRN exists
-→ tidak boleh reject biasa
-
-PO with payment
-→ formal cancellation/reversal
+warehouse_id
+status
+received_date
+notes/items
 ```
 
+meskipun GRN sudah approved dan stok telah diposting.
 
-### ✅ DITERAPKAN — tim development
+Contoh:
 
-Reject di modul ini artinya "kembalikan ke antrean persetujuan", jadi memang
-tidak boleh dipakai kalau dokumen turunannya sudah jalan.
+```text
+GRN approved:
+Warehouse A
+Qty = 10
 
-- Reject PR ditolak 409 `PR_HAS_PO` kalau sudah ada PO aktif yang merujuknya.
-  Tanpa ini, PR jadi pending sementara PO turunannya tetap berjalan — sumbernya
-  seolah belum disetujui padahal barangnya sudah dipesan.
-- Reject PO ditolak 409 `PO_HAS_GRN` kalau ada GRN aktif (yang direversal dan
-  yang di-reject tidak dihitung), dan 409 `PO_HAS_PAYMENT` kalau
-  `accounts_payable.paid_amount` sudah terisi.
+Stock Movement:
+Warehouse A +10
 
-Formal cancellation untuk PO berbayar sudah tersedia lebih dulu lewat soft
-delete PO yang menolak `PO_HAS_TRAIL`.
+setelah itu GRN diedit menjadi:
+Warehouse B
+Qty = 100
+```
+
+Dokumen GRN dan stock movement tidak lagi merepresentasikan transaksi yang sama.
+
+## PO
+
+Approved PO juga masih dapat diedit:
+
+```text
+vendor
+item
+quantity
+price
+discount
+PPN
+payment terms
+```
+
+bahkan ketika downstream transaction sudah mulai berjalan.
+
+## PR
+
+PR yang sudah approved/PO generated masih dapat diubah melalui normal update.
+
+## Required Lifecycle
+
+### PR
+
+```text
+Draft → editable
+Submitted → limited
+Approved → financial/source data locked
+PO Generated → locked
+```
+
+### PO
+
+```text
+Draft → editable
+Approved → controlled amendment only
+GRN exists → item/vendor/qty locked
+Payment exists → financial field locked
+```
+
+### GRN
+
+```text
+Draft/Received → editable
+Approved → LOCKED
+Reversed → LOCKED
+```
+
+Correction GRN approved:
+
+```text
+Reversal
+→ New GRN
+```
+
+bukan edit transaksi lama.
 
 ---
 
-# PROC-R08 — DELETE PR MASIH HARD DELETE
+# PROC-R17 — SOFT-DELETED PR BELUM BENAR-BENAR TERKUNCI
 
 **Severity: P1 — High**
-**Status: OPEN**
+**Status: OPEN / AST-R08 PARTIAL**
 
-PO sudah diperbaiki menjadi logical delete.
-
-Tetapi PR masih:
+List/detail/update utama sudah memfilter:
 
 ```text
-DELETE pr_bid_items
-DELETE pr_bids
-DELETE purchase_request_items
-DELETE purchase_requests
+is_deleted = 0
 ```
 
-dan beberapa proses cleanup menggunakan helper yang **menelan error**.
+Tetapi beberapa endpoint berbasis `:prId` masih mengambil PR tanpa filter `is_deleted`.
 
-Jadi procurement sekarang tidak konsisten:
+Contoh:
 
 ```text
-PO → audit-friendly soft delete ✅
-
-PR → permanent hard delete ❌
+PR approval
+bid creation
+bid selection
+bid winner
+bid summary
+generate PO
+bid progress
 ```
 
-### Required
-
-Implement:
+Bahkan `POST /purchase-orders` dengan `pr_id` juga membaca PR tanpa memastikan:
 
 ```text
-is_deleted
-deleted_at
-deleted_by
-deletion_reason
+PR.is_deleted = 0
 ```
 
-PR yang:
+Akibatnya secara API PR yang sudah dibatalkan masih berpotensi digunakan sebagai sumber PO.
+
+## Masalah kedua
+
+`generate-pos` dan normal PO creation mencari existing PO:
+
+```sql
+WHERE pr_id = ?
+```
+
+tanpa filter `is_deleted = 0`.
+
+Jadi:
 
 ```text
-approved
-punya bid
-punya vendor comparison
-punya downstream transaction
+PR
+↓
+PO dibuat
+↓
+PO dibatalkan / soft delete
+↓
+Generate PO ulang
 ```
 
-jangan dapat dihapus permanen.
+dapat tetap dianggap:
 
+```text
+"PR sudah memiliki PO"
+```
 
-### ✅ DITERAPKAN — tim development
+meskipun PO tersebut sudah dibatalkan dan disembunyikan.
 
-`is_deleted`, `deleted_at`, `deleted_by`, `deletion_reason` ditambahkan lewat
-`ensurePurchaseRequestSoftDelete()` — kolom baru, default 0, tidak ada data lama
-yang diubah.
+## Required Fix
 
-Aturannya: PR yang sudah disetujui **atau** sudah punya penawaran vendor hanya
-bisa dibatalkan dengan alasan (soft delete). PR draft tanpa penawaran masih boleh
-dihapus permanen, tapi kini dalam satu transaction dan tanpa `safeCleanup` —
-penghapusan separuh jalan tidak lagi mungkin dilaporkan sukses.
+Buat helper terpusat:
 
-Empat query PR (daftar, detail, riwayat, update) ikut memfilter `is_deleted = 0`,
-dan ada `POST /purchase-requests/:id/restore` sejajar dengan PO.
+```text
+getActivePurchaseRequest()
+```
 
-Frontend `PurchaseRequests.vue` menangkap `REASON_REQUIRED` lalu meminta alasan,
-supaya user tidak mentok di pesan error.
+dan gunakan di seluruh endpoint operational.
+
+Bedakan:
+
+```text
+active PO
+historical/cancelled PO
+```
+
+Historical PO tetap tersimpan untuk audit tetapi jangan salah dianggap active downstream document.
 
 ---
 
-# PROC-R09 — BID UPLOAD MELEWATI RBAC
+# PROC-R18 — UPDATE PO DAPAT MEMBUAT AP / PAYMENT SCHEDULE TIDAK SINKRON
 
 **Severity: P1 — High**
-**Status: OPEN**
+**Status: NEW / OPEN**
 
-Mayoritas endpoint Procurement sudah menggunakan `requirePermission()`.
+Pada update PO, payment schedule hanya disinkronkan ketika:
+
+```ts
+Array.isArray(items) || payment_schedules
+```
+
+Padahal schedule juga dipengaruhi oleh:
+
+```text
+payment_term
+po_date
+expected_date
+advance_payment
+discount_percent
+ppn_percent
+notes / contract total
+vendor
+```
+
+Contoh:
+
+```text
+PO total = 100 juta
+Advance = 20%
+AP Down Payment = 20 juta
+```
+
+kemudian user mengubah hanya:
+
+```json
+{
+  "advance_payment": 40
+}
+```
+
+PO menjadi 40% advance, tetapi AP/schedule berpotensi masih 20 juta.
+
+Lebih jauh, header/item update disimpan dalam transaction, sedangkan `upsertPaymentSchedules()` pada update masih dipanggil setelah transaction tersebut selesai.
+
+Jadi masih mungkin:
+
+```text
+PO berhasil berubah
+AP gagal berubah
+```
+
+## Required Fix
+
+Definisikan:
+
+```text
+affectsPaymentSchedule =
+items
+payment_term
+po_date
+expected_date
+advance_payment
+discount_percent
+ppn_percent
+notes
+vendor_id
+```
+
+Kemudian:
+
+```text
+BEGIN
+
+UPDATE PO
+UPDATE ITEMS
+RECALCULATE TOTAL
+UPDATE PAYMENT SCHEDULE
+UPDATE ACCOUNTS PAYABLE
+
+COMMIT
+```
+
+Jika `items` tidak ada pada payload, ambil current items dari database.
+
+---
+
+# PROC-R19 — GENERATE-PO MULTI VENDOR BELUM IDEMPOTENT
+
+**Severity: P1 — High**
+**Status: NEW / OPEN**
+
+Pada `generate-pos`, setiap PO vendor dibuat dalam transaction masing-masing.
+
+Contoh terdapat 3 vendor:
+
+```text
+Vendor A → PO berhasil
+Vendor B → PO berhasil
+Vendor C → ERROR
+```
+
+PO A dan B sudah ter-commit.
 
 Tetapi:
 
 ```text
-POST
-/purchase-requests/:prId/bids/:bidId/upload
+PR status = PO_GENERATED
 ```
 
-masih hanya:
+baru di-update setelah seluruh loop berhasil.
 
-```ts
-authMiddleware
-```
-
-tanpa:
-
-```ts
-requirePermission(...)
-```
-
-Artinya authenticated desktop user tanpa hak Procurement masih berpotensi upload quotation.
-
-### Required
-
-Minimal:
+Jika vendor C gagal:
 
 ```text
-procurement.purchase-requests.edit
+PR tetap belum PO_GENERATED
+A dan B sudah punya PO
 ```
 
-atau permission khusus:
+User retry:
 
 ```text
-procurement.bid-documents.manage
+A → PO kedua
+B → PO kedua
+...
 ```
 
+berpotensi menghasilkan duplicate procurement.
 
-### ✅ DITERAPKAN — tim development
+## Required Fix
 
-Benar. Endpoint upload bid kini memakai
-`requirePermission('procurement.purchase-requests.edit')` — permission yang sudah
-ada dan dipegang kedua role produksi, jadi tidak ada user aktif yang kehilangan
-akses.
+Pilihan terbaik:
 
-Kami sapu ulang seluruh modul: yang tersisa tanpa `requirePermission` hanya 6
-endpoint approve/reject yang memang sengaja berbasis `user_level` (alasannya di
-komentar atas endpoint approve PR). Tidak ada celah lain.
+### Option A — All-or-Nothing
+
+Seluruh generate:
+
+```text
+PO A
+PO B
+PO C
+PR status
+```
+
+satu business transaction.
+
+atau:
+
+### Option B — Idempotency
+
+Simpan relasi eksplisit:
+
+```text
+source_pr_id
+source_bid_id
+```
+
+dan enforce uniqueness:
+
+```text
+(PR, Bid/Vendor)
+```
+
+Retry hanya melanjutkan yang belum berhasil.
 
 ---
 
-# PROC-R10 — SECURITY UPLOAD QUOTATION & PR ATTACHMENT
+# PROC-R20 — REVERSAL DAPAT MEMBUAT NEGATIVE STOCK
 
 **Severity: P1 — High**
-**Status: OPEN**
+**Status: NEW / OPEN**
 
-Modul Asset sebelumnya sudah diperbaiki dengan:
+Current reversal:
+
+```sql
+UPDATE inventory_stocks
+SET quantity = quantity - ?
+```
+
+tanpa pemeriksaan stock saat ini.
+
+Skenario:
 
 ```text
-MIME validation
-magic-byte validation
-extension allowlist
-random filename
-size limit
+GRN masuk +10
+
+kemudian:
+Production issue -8
+
+Current stock = 2
+
+User reverse GRN 10
 ```
 
-Procurement belum mengikuti standard tersebut.
-
-Saat ini bid dan PR attachment menggunakan:
-
-```ts
-multer.diskStorage
-path.extname(file.originalname)
-```
-
-hanya dengan limit 10 MB.
-
-Tidak ada:
+hasil:
 
 ```text
-MIME whitelist
-magic-byte validation
-extension whitelist
-malicious file detection
+Stock = -8
 ```
 
-### Required
+Jika negative inventory tidak diizinkan oleh business rule, reversal harus ditolak.
 
-Gunakan utility upload yang sama dengan Asset Management agar security standard konsisten.
+## Recommended
 
+```sql
+UPDATE inventory_stocks
+SET quantity = quantity - ?
+WHERE product_id = ?
+  AND warehouse_id = ?
+  AND quantity >= ?;
+```
 
-### ✅ DITERAPKAN — tim development
+Jika affected row = 0:
 
-Kedua uploader (bid quotation & PR attachment) pindah ke `memoryStorage`, lalu
-memakai `validateUpload()` + `storeValidatedFile()` dari
-`backend/src/utils/file-validation.ts` — utilitas yang sama dengan modul Asset.
+```text
+409 INSUFFICIENT_STOCK_FOR_REVERSAL
+```
 
-Artinya berlaku: whitelist ekstensi (pdf/jpg/png/docx/xlsx), MIME harus cocok
-dengan ekstensi, **isi berkas dicek magic byte**, nama berkas diganti UUID, dan
-limit 10 MB tetap.
-
-Pada unggahan bid (multi-file) seluruh berkas divalidasi dulu sebelum satu pun
-ditulis, dan kalau INSERT DB gagal berkas yang terlanjur ditulis dihapus lagi.
-
-Diverifikasi di tes bagian 16: HTML ditolak, SVG ditolak, berkas bernama `.pdf`
-tapi isinya HTML ditolak, PDF asli diterima.
+Lalu user harus melakukan stock correction sesuai approval flow.
 
 ---
 
-# PROC-R11 — PATH VALIDATION DELETE ATTACHMENT LEMAH
-
-**Severity: P1 — High**
-**Status: OPEN**
-
-Delete PR attachment hanya memeriksa:
-
-```ts
-filePath.includes('/pr-attachments/')
-```
-
-kemudian melakukan:
-
-```ts
-fs.unlinkSync(...)
-```
-
-String check tersebut belum cukup untuk mencegah path traversal.
-
-Contoh kelas input:
-
-```text
-/pr-attachments/../../...
-```
-
-dapat tetap lolos pemeriksaan substring.
-
-### Required
-
-Gunakan:
-
-```text
-path.resolve()
-```
-
-lalu pastikan resolved path benar-benar berada di dalam:
-
-```text
-uploads/pr-attachments
-```
-
-Lebih baik lagi client hanya mengirim **document ID**, bukan filesystem path.
-
-
-### ✅ DITERAPKAN — tim development
-
-Benar — `/uploads/pr-attachments/../../../../etc/passwd` lolos pemeriksaan
-substring.
-
-Helper `resolveInsideUploadDir()` me-resolve path lalu memastikan hasilnya berada
-di dalam direktori unggahan, memakai `base + path.sep` supaya folder bernama
-mirip (`pr-attachments-lain`) tidak ikut lolos. Dipakai di dua tempat: hapus PR
-attachment dan hapus dokumen bid.
-
-Catatan implementasi: versi pertama kami mengambil `path.basename()` dari input.
-Itu membuat traversal mustahil lolos, tapi berarti path jahat diterima diam-diam
-seolah sah dan endpoint tetap membalas 200. Diubah supaya path di-resolve apa
-adanya dan yang keluar dari folder **ditolak 400**.
-
-Saran reviewer agar klien mengirim document ID belum dikerjakan — kontrak
-`file_path` masih dipakai frontend yang berjalan, jadi perubahan itu kami pisah
-supaya tidak mencampur perbaikan keamanan dengan perubahan kontrak API.
-
----
-
-# PROC-R12 — `received_by` GRN DAPAT DIISI USER LAIN
+# PROC-R21 — DOCUMENT NUMBER MASIH MENGGUNAKAN UTC DATE
 
 **Severity: P2 — Medium**
-**Status: OPEN**
+**Status: NEW**
 
-GRN create menggunakan:
+Counter sudah concurrency-safe. Itu sudah bagus.
+
+Tetapi tanggal nomor masih dibuat dengan:
+
+```ts
+new Date().toISOString().slice(0, 10)
+```
+
+yang berarti UTC.
+
+Untuk server/users WIB:
+
+```text
+11 Aug 2026 01:00 WIB
+=
+10 Aug 2026 18:00 UTC
+```
+
+nomor dapat menjadi:
+
+```text
+PR-20260810-xxxx
+```
+
+padahal tanggal bisnis sudah:
+
+```text
+11 Aug 2026
+```
+
+## Required
+
+Gunakan satu business timezone yang eksplisit, misalnya:
+
+```text
+Asia/Jakarta
+```
+
+atau gunakan database business date yang sudah dikonfigurasi timezone-nya.
+
+---
+
+# PROC-R22 — UPLOAD SECURITY SUDAH BAGUS, TAPI TRANSACTION CLEANUP BELUM SEMPURNA
+
+**Severity: P2 — Medium**
+
+Magic-byte/MIME/extension protection sudah verified. 👍
+
+Tetapi pada multi-file bid:
+
+```text
+File 1 → write disk
+DB row 1 → insert
+
+File 2 → write disk
+DB row 2 → gagal
+```
+
+catch menghapus physical files, tetapi DB row pertama yang sudah ter-insert belum otomatis rollback.
+
+Akibatnya dapat ada:
+
+```text
+pr_bid_documents row
+→ file fisik sudah dihapus
+```
+
+## Required
+
+DB insert multi-file harus transaction.
+
+Selain itu Procurement multer memiliki size limit tetapi belum terlihat error handler khusus seperti modul Asset; upload terlalu besar sebaiknya menghasilkan:
+
+```text
+413 Payload Too Large
+```
+
+bukan generic 500.
+
+---
+
+# PROC-R12 — received_by MASIH DAPAT DISPOOF
+
+**Severity: P2 — Medium**
+**Status: STILL OPEN**
+
+Current create GRN:
 
 ```text
 received_by dari body
-OR
-user dari token
+atau
+current user
 ```
 
-Jika `received_by` berisi user valid lain, backend menerimanya.
+User A masih dapat mengirim ID User B apabila ID tersebut valid.
 
-Artinya user A secara teknis dapat membuat GRN yang tercatat:
+Recommended:
 
 ```text
-received_by = User B
+created_by = current authenticated user
+received_by = explicit receiver
 ```
 
-### Recommended
-
-Pisahkan:
-
-```text
-created_by   = selalu dari token
-received_by  = actual receiver
-```
-
-Jika `received_by` boleh berbeda, harus ada permission khusus atau business rule eksplisit.
+dan jika receiver boleh berbeda, berikan business rule/permission khusus.
 
 ---
 
-# PROC-R13 — MULTIPLE/PARTIAL RECEIPT BELUM DIDUKUNG
+# PROC-R13 — PARTIAL DELIVERY
 
-**Severity: P2 — Business Gap**
-**Status: NEED BUSINESS DECISION**
+**Severity: Business Gap**
+**Status: DECISION REQUIRED**
 
-Sekarang satu PO hanya boleh memiliki satu active GRN. Test juga secara eksplisit mengikuti rule tersebut.
+Saat ini sistem tetap menerapkan satu active GRN per PO.
 
-Untuk Procurement nyata sering terjadi:
-
-```text
-PO qty 100
-
-Delivery 1 = 30
-Delivery 2 = 40
-Delivery 3 = 30
-```
-
-Model saat ini tidak mendukung pola tersebut secara natural.
-
-### Recommended To-Be
+Namun proses procurement nyata dapat berupa:
 
 ```text
-PO Item
-Ordered Qty: 100
+PO qty = 100
 
-GRN #1: 30
-GRN #2: 40
-GRN #3: 30
-
-Received total: 100
-Outstanding: 0
+GRN 1 = 30
+GRN 2 = 40
+GRN 3 = 30
 ```
 
-Ini perlu keputusan business owner karena merupakan perluasan workflow, bukan bug teknis murni.
+Jika perusahaan membutuhkan partial delivery, model perlu diubah menjadi:
+
+```text
+ordered_qty
+received_qty
+outstanding_qty
+```
+
+per PO item.
+
+Ini bukan blocker teknis jika business memang menetapkan satu PO = satu GRN.
 
 ---
 
-# STATUS HASIL REVISI
+# STATUS REVIEW
 
-## VERIFIED ✅
-
-* GRN posting sekarang masuk `inventory_stocks`
-* repeated approval tidak double-post
-* stock receipt terakumulasi
-* PO partial update
-* PR partial update
-* GRN partial update
-* approver level realtime dari DB
-* PO soft delete
-* protection accidental empty items
-* mayoritas RBAC
-
-## PARTIAL ⚠️
-
-* Sequential document numbering
-* RBAC Procurement
-* PO lifecycle
-* GRN lifecycle
-
-## OPEN BLOCKER 🔴
-
-1. Approved GRN delete corrupts inventory/audit
-2. Approved GRN reject tidak reverse stock
-3. GRN approval + stock posting tidak atomic
-4. PO creation tidak atomic
-5. PO/GRN numbering masih race-prone
-6. PO approval + AP schedule tidak atomic
-7. Reject tidak memeriksa downstream document
-8. PR masih hard delete
-9. Bid upload melewati RBAC
-10. Procurement upload belum secure
-11. Attachment deletion path validation lemah
-
----
-
-# PRIORITAS KE TIM DEVELOPMENT
-
-## P0 — Kerjakan Pertama
+## Verified / Closed
 
 ```text
-PROC-R01 GRN deletion
-PROC-R02 approved GRN rejection
-PROC-R03 atomic GRN approval/posting
+PROC-R01 ✅
+PROC-R02 ✅
+PROC-R03 ✅
+PROC-R04 ✅
+PROC-R05 ✅
+PROC-R06 ✅
+PROC-R07 ✅
+PROC-R09 ✅
+PROC-R10 core ✅
+PROC-R11 ✅
 ```
 
-Karena tiga area tersebut dapat menghasilkan:
+## Partial / Open
 
 ```text
-stok ≠ dokumen procurement
+PROC-R08 ⚠️
+PROC-R12 ⚠️
+PROC-R13 Business Decision
+```
+
+## New Blockers
+
+```text
+PROC-R14 P0 — concurrent double reversal
+PROC-R15 P0 — duplicate active GRN under concurrency
+
+PROC-R16 P1 — approved document mutability
+PROC-R17 P1 — cancelled PR still actionable
+PROC-R18 P1 — PO/AP schedule reconciliation
+PROC-R19 P1 — generate-pos idempotency
+PROC-R20 P1 — negative stock reversal
+```
+
+## Medium
+
+```text
+PROC-R21 — business timezone numbering
+PROC-R22 — upload DB/file atomic cleanup
 ```
 
 ---
 
-## P1 — Sesudah P0
+# TEST WAJIB DITAMBAHKAN
 
 ```text
-PROC-R04 PO transaction
-PROC-R05 numbering
-PROC-R06 PO approval/AP atomic
-PROC-R07 downstream lifecycle guards
-PROC-R08 PR soft delete
-PROC-R09 RBAC upload
-PROC-R10 upload security
-PROC-R11 attachment path protection
+01. Dua concurrent reversal → hanya satu berhasil
+02. Dua puluh create GRN pada PO yang sama → hanya satu active GRN
+03. Approved GRN tidak bisa edit notes/items/warehouse
+04. PO dengan GRN tidak bisa edit vendor/item/qty/financial field
+05. PR PO_GENERATED tidak bisa edit source items
+06. Cancelled PR tidak bisa approve
+07. Cancelled PR tidak bisa generate PO
+08. Cancelled PR tidak bisa ditambah bid
+09. PO cancelled tidak dianggap active PO saat reissue
+10. Ubah advance_payment → AP schedule ikut berubah
+11. Ubah discount/PPN → AP amount reconcile
+12. Failure tengah generate-pos tidak membuat duplicate saat retry
+13. Reversal dengan current stock < reversal qty → ditolak
+14. Nomor dokumen sekitar 00:00–06:59 WIB menggunakan tanggal WIB
+15. Multi-file upload gagal di file kedua → tidak ada orphan DB/file
 ```
 
----
+# FINAL VERDICT
 
-# TEST REGRESSION WAJIB
+**PROCUREMENT: CHANGES REQUIRED**
 
-Tambahkan minimal:
+Perbaikan terakhir sangat signifikan dan sebagian besar finding sebelumnya sudah terverifikasi.
 
-```text
-01 Approved GRN tidak dapat DELETE langsung
-02 Approved GRN tidak dapat REJECT langsung
-03 GRN reversal mengurangi stok dengan tepat
-04 Failed stock posting → approval rollback
-05 Failed PO item insert → PO header rollback
-06 Failed AP creation → PO approval rollback
-07 20 concurrent PO → unique numbers
-08 20 concurrent GRN → unique numbers
-09 PR dengan PO tidak dapat reject
-10 PO dengan GRN tidak dapat reject
-11 user tanpa procurement permission tidak dapat upload bid
-12 HTML/SVG/executable upload ditolak
-13 path traversal attachment delete ditolak
-```
-
----
-
-# FINAL REVIEW DECISION
-
-**PROCUREMENT = NOT SETTLED**
-
-Perbaikan development sejauh ini jelas meningkatkan modul secara signifikan, terutama masalah utama GRN yang sebelumnya tidak pernah menambah stok.
-
-Namun sebelum lanjut ke final manual/module settlement, **integritas antara GRN → Inventory harus dikunci dulu**, karena saat ini jalur create/approve sudah dibenahi tetapi jalur **reject/delete/reversal masih memakai logika lama**.
-
-Setelah P0 di atas selesai, lakukan re-review Procurement lagi sebelum mengerjakan enhancement lain.
+Namun sebelum modul dinyatakan **SETTLED**, dua concurrency blocker `PROC-R14` dan `PROC-R15`, lalu lifecycle/data-integrity P1 `PROC-R16`–`PROC-R20` sebaiknya ditutup terlebih dahulu.

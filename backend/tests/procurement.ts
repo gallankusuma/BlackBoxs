@@ -528,7 +528,66 @@ async function main() {
     undefined, master);
   chk('path traversal saat hapus attachment ditolak', traversal.status, 400);
 
-  console.log('\n17. RBAC — token desktop tanpa permission procurement ditolak');
+  console.log('\n17. Dua reversal bersamaan hanya boleh berhasil sekali (PROC-R14)');
+  const race = await makePoAndReceive(9, 9);
+  await call('POST', `/procurement/goods-receipts/${race.grnId}/approve`, {}, master);
+  const stockBeforeRace = await stockOf(product.id);
+
+  const twoReversals = await Promise.all([
+    call('POST', `/procurement/goods-receipts/${race.grnId}/reverse`, { reason: 'balapan A' }, master),
+    call('POST', `/procurement/goods-receipts/${race.grnId}/reverse`, { reason: 'balapan B' }, master),
+  ]);
+  chk('tepat satu reversal berhasil', twoReversals.filter(r => r.status === 200).length, 1);
+  chk('yang lain ditolak 409', twoReversals.filter(r => r.status === 409).length, 1);
+  chk('stok hanya berkurang SEKALI', await stockOf(product.id), stockBeforeRace - 9);
+
+  const revMoves = (await call('GET', `/procurement/goods-receipts/${race.grnId}`, undefined, master)).json?.data;
+  chk('GRN ditandai reversed sekali', Number(revMoves?.is_reversed), 1);
+
+  console.log('\n18. Dua puluh GRN bersamaan pada PO yang sama (PROC-R15)');
+  const onePo = await call('POST', '/procurement/purchase-orders', {
+    vendor_id: vendorId, po_date: today(), status: 'approved',
+    items: [{ product_id: product.id, quantity: 5, unit_price: 1000, uom: 'pcs' }],
+  }, master);
+  const onePoId = onePo.json?.data?.id ?? onePo.json?.id;
+
+  const grnRace = await Promise.all(Array.from({ length: 20 }, (_, i) =>
+    call('POST', '/procurement/goods-receipts', {
+      po_id: onePoId, warehouse_id: wh.id, received_date: today(),
+      notes: JSON.stringify({ items: [{ product_id: product.id, received_quantity: 1, remarks: `race-${i}` }] }),
+    }, master)));
+
+  chk('tepat satu GRN dibuat', grnRace.filter(r => r.status === 201).length, 1);
+  chk('sisanya ditolak', grnRace.filter(r => r.status >= 400).length, 19);
+  chk('tidak ada yang balas 500', grnRace.filter(r => r.status === 500).length, 0);
+
+  const grnsForPo = ((await call('GET', '/procurement/goods-receipts', undefined, master)).json?.data || [])
+    .filter((g: any) => Number(g.po_id) === Number(onePoId) && Number(g.is_reversed || 0) === 0);
+  chk('hanya satu GRN aktif untuk PO itu', grnsForPo.length, 1);
+
+  console.log('\n19. Reversal ditolak kalau stok sudah terpakai (PROC-R20)');
+  const used = await makePoAndReceive(4, 4);
+  await call('POST', `/procurement/goods-receipts/${used.grnId}/approve`, {}, master);
+  // Simulasikan barang yang sudah terpakai: sisakan stok di bawah jumlah GRN
+  const invRows: any[] = (await call('GET', '/inventory', undefined, master)).json?.data || [];
+  const invRow = invRows.find((x: any) => Number(x.product_id) === Number(product.id));
+  const stockNow = Number(invRow?.quantity_on_hand ?? 0);
+  await call('PUT', `/inventory/${invRow.id}`, { quantity: 2 }, master);
+
+  const insufficient = await call('POST', `/procurement/goods-receipts/${used.grnId}/reverse`,
+    { reason: 'stok sudah terpakai' }, master);
+  chk('reversal ditolak saat stok kurang', insufficient.status, 409);
+  chk('kode INSUFFICIENT_STOCK_FOR_REVERSAL', insufficient.json?.code, 'INSUFFICIENT_STOCK_FOR_REVERSAL');
+
+  const stillThere = (await call('GET', `/procurement/goods-receipts/${used.grnId}`, undefined, master)).json?.data;
+  chk('GRN tidak ikut ditandai reversed', Number(stillThere?.is_reversed || 0), 0);
+  const afterFail: any[] = (await call('GET', '/inventory', undefined, master)).json?.data || [];
+  chk('stok tidak berubah oleh reversal yang gagal',
+    Number(afterFail.find((x: any) => Number(x.product_id) === Number(product.id))?.quantity_on_hand ?? -1), 2);
+
+  await call('PUT', `/inventory/${invRow.id}`, { quantity: stockNow }, master);
+
+  console.log('\n20. RBAC — token desktop tanpa permission procurement ditolak');
   const plainRole = await call('POST', '/roles',
     { code: `PROC${stamp}`, name: `ProcTest-${stamp}` }, master);
   const plainEmail = `proc.plain.${stamp}@test.local`;

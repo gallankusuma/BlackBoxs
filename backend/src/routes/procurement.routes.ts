@@ -2362,28 +2362,42 @@ router.post('/goods-receipts', authMiddleware, requirePermission('procurement.gr
     // jadi PO-nya memang perlu bisa dibuatkan GRN pengganti. GRN yang di-reject
     // aman dihitung tidak aktif karena reject kini mustahil terjadi setelah stok
     // masuk (lihat PROC-R02).
-    const activeGRN = await dbGet(
-      `SELECT id, grn_number FROM goods_receipts
-       WHERE po_id = ?
-         AND (approval_status IS NULL OR approval_status != -1)
-         AND (is_reversed IS NULL OR is_reversed = 0)`,
-      [po_id]
-    ) as any;
-
-    if (activeGRN) {
-      return res.status(400).json({
-        error: `PO ini sudah terikat dengan GRN (${activeGRN.grn_number}). Anda tidak dapat membuat GRN baru untuk PO ini kecuali GRN sebelumnya di-reject atau direversal.`
-      });
-    }
-
     console.log('🔍 GRN Create Debug:', { po_id, warehouse_id, receiver, date: normalizedDate });
 
     // PROC-R05: nomor GRN lewat helper yang mengulang saat UNIQUE bentrok.
-    // Sebelumnya nomornya diambil langsung, jadi dua penerimaan bersamaan bisa
-    // membaca MAX() yang sama dan salah satunya dibalas 500.
-    const { grId, number } = await withNumberedDocument(
+    // PROC-R15: pemeriksaan "satu GRN aktif per PO" dipindah KE DALAM transaction,
+    // didahului lock pada baris PO-nya.
+    //
+    // Sebelumnya pemeriksaan itu dilakukan di luar transaction, jadi dua
+    // permintaan bersamaan untuk PO yang sama sama-sama tidak menemukan GRN aktif
+    // lalu keduanya menyisipkan GRN. Counter nomor tidak menolong di sini — yang
+    // dijaminnya nomor GRN unik, bukan jumlah GRN aktif per PO.
+    //
+    // `SELECT ... FOR UPDATE` pada purchase_orders membuat permintaan kedua
+    // menunggu sampai yang pertama commit, sehingga pemeriksaan ulang di
+    // dalamnya melihat GRN yang baru dibuat.
+    const created = await withNumberedDocument(
       'GRN', 'goods_receipts', 'grn_number',
       async (code, tx) => {
+        const po = await tx.get('SELECT id FROM purchase_orders WHERE id = ? FOR UPDATE', [po_id]) as any;
+        if (!po) return { conflict: 'PO tidak ditemukan' as string };
+
+        // GRN yang direversal ikut dihitung tidak aktif — stoknya sudah
+        // dikembalikan, jadi PO-nya memang perlu bisa dibuatkan GRN pengganti.
+        const activeGRN = await tx.get(
+          `SELECT id, grn_number FROM goods_receipts
+           WHERE po_id = ?
+             AND (approval_status IS NULL OR approval_status != -1)
+             AND (is_reversed IS NULL OR is_reversed = 0)`,
+          [po_id]
+        ) as any;
+
+        if (activeGRN) {
+          return {
+            conflict: `PO ini sudah terikat dengan GRN (${activeGRN.grn_number}). Anda tidak dapat membuat GRN baru untuk PO ini kecuali GRN sebelumnya di-reject atau direversal.`,
+          };
+        }
+
         const result = await tx.run(
           `INSERT INTO goods_receipts
            (grn_number, po_id, warehouse_id, received_date, received_by, status, notes)
@@ -2395,7 +2409,11 @@ router.post('/goods-receipts', authMiddleware, requirePermission('procurement.gr
       grn_number,
     );
 
-    res.status(201).json({ message: 'Goods receipt created', data: { id: grId, grn_number: number } });
+    if ('conflict' in created) {
+      return res.status(400).json({ error: created.conflict, code: 'GRN_ALREADY_EXISTS' });
+    }
+
+    res.status(201).json({ message: 'Goods receipt created', data: { id: created.grId, grn_number: created.number } });
   } catch (error: any) {
     console.error('❌ Error creating goods receipt:', error);
     console.error('Error details:', { message: error.message, code: error.code, sql: error.sql });
@@ -2710,39 +2728,67 @@ router.post('/goods-receipts/:id/reverse', authMiddleware, requirePermission('pr
       return res.status(400).json({ error: 'Alasan reversal wajib diisi', code: 'REASON_REQUIRED' });
     }
 
-    const grn = await dbGet('SELECT * FROM goods_receipts WHERE id = ?', [id]) as any;
-    if (!grn) return res.status(404).json({ error: 'GRN not found' });
+    // PROC-R14: SELURUH pemeriksaan berada di dalam transaction, dengan baris GRN
+    // dikunci FOR UPDATE.
+    //
+    // Sebelumnya SELECT GRN, cek is_reversed, dan pembacaan stock_movements
+    // dilakukan di luar transaction. Dua permintaan reversal yang datang hampir
+    // bersamaan sama-sama membaca is_reversed = 0, lalu keduanya mengurangi stok
+    // — barang yang masuk sekali dikembalikan dua kali.
+    //
+    // PROC-R20: pengurangan stok diberi syarat `quantity >= ?`. Kalau barangnya
+    // sudah terpakai sebagian, reversal ditolak alih-alih membuat stok negatif.
+    const outcome = await withTransaction(async tx => {
+      const grn = await tx.get('SELECT * FROM goods_receipts WHERE id = ? FOR UPDATE', [id]) as any;
+      if (!grn) return { error: 404 as const, body: { error: 'GRN not found' } };
 
-    if (Number(grn.is_reversed) === 1) {
-      return res.status(409).json({ error: 'GRN ini sudah direversal', code: 'ALREADY_REVERSED' });
-    }
+      if (Number(grn.is_reversed) === 1) {
+        return { error: 409 as const, body: { error: 'GRN ini sudah direversal', code: 'ALREADY_REVERSED' } };
+      }
 
-    const movements = await dbAll(
-      `SELECT product_id, warehouse_id, quantity FROM stock_movements
-       WHERE reference_type = ? AND reference_id = ?`,
-      ['GRN', id]
-    ) as any[];
+      const movements = await tx.all(
+        `SELECT product_id, warehouse_id, quantity FROM stock_movements
+         WHERE reference_type = ? AND reference_id = ?`,
+        ['GRN', id]
+      ) as any[];
 
-    if (movements.length === 0) {
-      return res.status(409).json({
-        error: 'GRN ini belum pernah memposting stok, jadi tidak ada yang perlu direversal. Gunakan reject atau hapus.',
-        code: 'NOTHING_TO_REVERSE',
-      });
-    }
+      if (movements.length === 0) {
+        return {
+          error: 409 as const,
+          body: {
+            error: 'GRN ini belum pernah memposting stok, jadi tidak ada yang perlu direversal. Gunakan reject atau hapus.',
+            code: 'NOTHING_TO_REVERSE',
+          },
+        };
+      }
 
-    const grnLabel = grn.grn_number || grn.gr_number || `GRN-${id}`;
-    const reversed = await withTransaction(async tx => {
+      const grnLabel = grn.grn_number || grn.gr_number || `GRN-${id}`;
       let count = 0;
       for (const mv of movements) {
         const qty = Number(mv.quantity || 0);
         if (!mv.product_id || qty <= 0) continue;
 
-        await tx.run(
+        const dec = await tx.run(
           `UPDATE inventory_stocks
            SET quantity = quantity - ?, last_updated = CURRENT_TIMESTAMP
-           WHERE product_id = ? AND warehouse_id = ?`,
-          [qty, mv.product_id, mv.warehouse_id]
+           WHERE product_id = ? AND warehouse_id = ? AND quantity >= ?`,
+          [qty, mv.product_id, mv.warehouse_id, qty]
         );
+
+        if (dec.affectedRows === 0) {
+          const current = await tx.get(
+            'SELECT quantity FROM inventory_stocks WHERE product_id = ? AND warehouse_id = ?',
+            [mv.product_id, mv.warehouse_id]
+          ) as any;
+          throw Object.assign(new Error('INSUFFICIENT_STOCK_FOR_REVERSAL'), {
+            insufficient: {
+              product_id: mv.product_id,
+              warehouse_id: mv.warehouse_id,
+              needed: qty,
+              available: Number(current?.quantity || 0),
+            },
+          });
+        }
 
         // Arah dibawa movement_type, besarannya tetap positif — mengikuti
         // konvensi modul inventory/warehouse.
@@ -2763,16 +2809,27 @@ router.post('/goods-receipts/:id/reverse', authMiddleware, requirePermission('pr
         [userId || null, reason, id]
       );
 
-      return count;
+      return { ok: true as const, count };
     });
+
+    if ('error' in outcome) return res.status(outcome.error).json(outcome.body);
 
     const data = await dbGet('SELECT * FROM goods_receipts WHERE id = ?', [id]);
     res.json({
       message: 'GRN berhasil direversal, stok dikembalikan ke posisi sebelumnya',
       data,
-      reversed_items: reversed,
+      reversed_items: outcome.count,
     });
   } catch (error: any) {
+    // PROC-R20: stok sudah terpakai sebagian, jadi reversal penuh akan membuatnya
+    // negatif. Ditolak, bukan dipaksakan — koreksinya lewat stock adjustment.
+    if (error?.message === 'INSUFFICIENT_STOCK_FOR_REVERSAL') {
+      return res.status(409).json({
+        error: 'Stok barang ini sudah berkurang sejak GRN diposting, jadi reversal penuh akan membuat stok negatif. Lakukan stock adjustment lebih dulu.',
+        code: 'INSUFFICIENT_STOCK_FOR_REVERSAL',
+        detail: error.insufficient,
+      });
+    }
     console.error('Error reversing GRN:', error);
     res.status(500).json({ error: 'Gagal melakukan reversal GRN' });
   }
