@@ -644,15 +644,42 @@ router.post('/purchase-requests', authMiddleware, async (req: Request, res: Resp
 
 router.put('/purchase-requests/:id', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const { status, notes, department, request_date, needed_by, reason, project_id, vendor_comparisons, selected_vendor_id } = req.body;
-    await dbRun(
-      'UPDATE purchase_requests SET status = ?, notes = ?, reason = ?, project_id = ?, request_date = ?, needed_by = ?, vendor_comparisons = ?, selected_vendor_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-      [(status || 'DRAFT').toUpperCase(), notes || null, reason || null, project_id || null, normalizeDateOnly(request_date) || null, normalizeDateOnly(needed_by) || null, vendor_comparisons ? JSON.stringify(vendor_comparisons) : null, selected_vendor_id || null, req.params.id]
-    );
+    const { status, notes, request_date, needed_by, reason, project_id,
+            vendor_comparisons, selected_vendor_id } = req.body;
+
+    const existing: any = await dbGet('SELECT id FROM purchase_requests WHERE id = ?', [req.params.id]);
+    if (!existing) return res.status(404).json({ error: 'Purchase request tidak ditemukan' });
+
+    // PARTIAL UPDATE. Handler lama menimpa seluruh kolom dengan pola
+    // `field || default`, padahal ITEM PR disimpan sebagai JSON di dalam
+    // kolom `notes`. Menyimpan PR tanpa menyertakan notes akan menghapus
+    // seluruh itemnya, dan `status || 'DRAFT'` mengembalikan PR yang sudah
+    // disetujui menjadi DRAFT.
+    const has = (k: string) => Object.prototype.hasOwnProperty.call(req.body, k);
+    const fields: string[] = [];
+    const values: any[] = [];
+    const set = (col: string, val: any) => { fields.push(`${col} = ?`); values.push(val); };
+
+    if (has('status') && status) set('status', String(status).toUpperCase());
+    if (has('notes')) set('notes', notes ?? null);
+    if (has('reason')) set('reason', reason ?? null);
+    if (has('project_id')) set('project_id', project_id ?? null);
+    if (has('request_date')) set('request_date', normalizeDateOnly(request_date) || null);
+    if (has('needed_by')) set('needed_by', normalizeDateOnly(needed_by) || null);
+    if (has('vendor_comparisons')) {
+      set('vendor_comparisons', vendor_comparisons ? JSON.stringify(vendor_comparisons) : null);
+    }
+    if (has('selected_vendor_id')) set('selected_vendor_id', selected_vendor_id ?? null);
+
+    if (!fields.length) return res.json({ message: 'Tidak ada perubahan' });
+
+    set('updated_at', new Date());
+    values.push(req.params.id);
+    await dbRun(`UPDATE purchase_requests SET ${fields.join(', ')} WHERE id = ?`, values);
     res.json({ message: 'Purchase request updated' });
-  } catch (error) {
-    console.error('Error updating purchase request:', error);
-    res.status(500).json({ error: 'Failed to update purchase request' });
+  } catch (error: any) {
+    console.error('[PR:update]', error?.message || error);
+    res.status(500).json({ error: 'Gagal menyimpan purchase request' });
   }
 });
 
@@ -2054,15 +2081,31 @@ router.put('/goods-receipts/:id', authMiddleware, async (req: Request, res: Resp
   try {
     const { id } = req.params;
     const { warehouse_id, status, received_date, received_at, notes } = req.body;
-    const normalizedDate = normalizeDateOnly(received_date || received_at);
 
-    await dbRun(
-      `UPDATE goods_receipts 
-       SET warehouse_id = ?, status = ?, received_date = ?, notes = ? 
-       WHERE id = ?`,
-      [warehouse_id, status || 'DRAFT', normalizedDate, notes || null, id]
-    );
+    const existing: any = await dbGet('SELECT id FROM goods_receipts WHERE id = ?', [id]);
+    if (!existing) return res.status(404).json({ error: 'Goods receipt tidak ditemukan' });
 
+    // PARTIAL UPDATE — alasan sama seperti PR: item GRN disimpan sebagai JSON
+    // di dalam kolom `notes`, dan `status || 'DRAFT'` mengembalikan GRN yang
+    // sudah disetujui menjadi DRAFT.
+    const has = (k: string) => Object.prototype.hasOwnProperty.call(req.body, k);
+    const fields: string[] = [];
+    const values: any[] = [];
+    const set = (col: string, val: any) => { fields.push(`${col} = ?`); values.push(val); };
+
+    if (has('warehouse_id')) set('warehouse_id', warehouse_id ?? null);
+    if (has('status') && status) set('status', status);
+    if (has('received_date') || has('received_at')) {
+      const d = normalizeDateOnly(received_date || received_at);
+      if (!d) return res.status(400).json({ error: 'received_date tidak valid' });
+      set('received_date', d);
+    }
+    if (has('notes')) set('notes', notes ?? null);
+
+    if (!fields.length) return res.json({ message: 'Tidak ada perubahan' });
+
+    values.push(id);
+    await dbRun(`UPDATE goods_receipts SET ${fields.join(', ')} WHERE id = ?`, values);
     res.json({ message: 'Goods receipt updated' });
   } catch (error: any) {
     console.error('Error updating goods receipt:', error);

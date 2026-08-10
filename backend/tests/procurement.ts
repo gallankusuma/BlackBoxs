@@ -234,6 +234,53 @@ async function main() {
   const numbers = created.map(r => r.json?.data?.pr_number);
   chk('tidak ada nomor duplikat', new Set(numbers).size, 15);
 
+  console.log('\n8. Menyimpan PR/GRN tidak boleh menghapus item di dalam notes');
+  // Item PR dan GRN disimpan sebagai JSON di kolom `notes`. Dulu menyimpan
+  // sebagian akan menimpanya jadi NULL — seluruh item hilang — dan status
+  // yang sudah disetujui kembali jadi DRAFT.
+  const prNotes = JSON.stringify({
+    items: [{ product_id: product.id, quantity: 9, uom: 'pcs' }],
+    noteText: `Uji notes ${stamp}`,
+  });
+  const prKeep = await call('POST', '/procurement/purchase-requests', {
+    request_date: today(), status: 'SUBMITTED', notes: prNotes, reason: 'Kebutuhan proyek',
+  }, master);
+  const prKeepId = prKeep.json?.data?.id ?? prKeep.json?.id;
+
+  const readPr = async (id: number) =>
+    (await call('GET', `/procurement/purchase-requests/${id}`, undefined, master)).json?.data;
+
+  const prBefore = await readPr(prKeepId);
+  chk('item PR tersimpan di notes', JSON.parse(prBefore?.notes || '{}').items?.length, 1);
+
+  // Simpan hanya satu field
+  chk('simpan sebagian PR berhasil',
+    (await call('PUT', `/procurement/purchase-requests/${prKeepId}`, { reason: 'Direvisi' }, master)).status, 200);
+
+  const prAfter = await readPr(prKeepId);
+  chk('alasan berubah', prAfter?.reason, 'Direvisi');
+  chk('item PR TIDAK hilang', JSON.parse(prAfter?.notes || '{}').items?.length, 1);
+  chk('jumlah item tetap', JSON.parse(prAfter?.notes || '{}').items?.[0]?.quantity, 9);
+  chk('status TIDAK kembali jadi DRAFT', String(prAfter?.status).toUpperCase(), 'SUBMITTED');
+
+  // GRN: hal yang sama
+  const grnKeepPo = await call('POST', '/procurement/purchase-orders', {
+    vendor_id: vendorId, po_date: today(), status: 'approved',
+    items: [{ product_id: product.id, quantity: 2, unit_price: 1000, uom: 'pcs' }],
+  }, master);
+  const grnKeep = await call('POST', '/procurement/goods-receipts', {
+    po_id: grnKeepPo.json?.data?.id ?? grnKeepPo.json?.id,
+    warehouse_id: wh.id, received_date: today(), status: 'received',
+    notes: JSON.stringify({ items: [{ product_id: product.id, received_quantity: 2 }] }),
+  }, master);
+  const grnKeepId = grnKeep.json?.data?.id ?? grnKeep.json?.id;
+
+  chk('simpan sebagian GRN berhasil',
+    (await call('PUT', `/procurement/goods-receipts/${grnKeepId}`, { status: 'received' }, master)).status, 200);
+
+  const grnAfter = (await call('GET', `/procurement/goods-receipts/${grnKeepId}`, undefined, master)).json?.data;
+  chk('item GRN TIDAK hilang', JSON.parse(grnAfter?.notes || '{}').items?.length, 1);
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }
