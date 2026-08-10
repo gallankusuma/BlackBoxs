@@ -1785,6 +1785,24 @@ router.put('/purchase-orders/:id', authMiddleware, async (req: Request, res: Res
       // di luar transaction: kalau satu insert gagal setelah DELETE, PO
       // kehilangan SELURUH itemnya secara permanen.
       if (Array.isArray(items)) {
+        // Pengaman: mengirim daftar item KOSONG untuk PO yang masih punya item
+        // hampir pasti bug klien (mis. filter yang keliru membuang semuanya),
+        // bukan maksud pengguna. Backend menolak, kecuali diminta eksplisit
+        // lewat ?clear_items=1. Tanpa ini, satu bug di frontend cukup untuk
+        // mengosongkan PO tanpa jejak.
+        if (items.length === 0) {
+          const current: any = await tx.get(
+            'SELECT COUNT(*) AS c FROM purchase_order_items WHERE purchase_order_id = ? OR po_id = ?',
+            [req.params.id, req.params.id]
+          );
+          if (Number(current?.c || 0) > 0 && req.query.clear_items !== '1') {
+            throw Object.assign(
+              new Error('Daftar item kosong padahal PO ini masih punya item — dibatalkan untuk mencegah kehilangan data'),
+              { statusCode: 409, code: 'REFUSED_EMPTY_ITEMS', existing_items: Number(current.c) }
+            );
+          }
+        }
+
         await tx.run('DELETE FROM purchase_order_items WHERE purchase_order_id = ? OR po_id = ?',
           [req.params.id, req.params.id]);
         for (const item of items) {
@@ -1820,6 +1838,14 @@ router.put('/purchase-orders/:id', authMiddleware, async (req: Request, res: Res
 
     res.json({ message: 'Purchase order updated' });
   } catch (error: any) {
+    if (error?.statusCode === 409) {
+      return res.status(409).json({
+        error: error.message,
+        existing_items: error.existing_items,
+        hint: 'Kalau memang ingin mengosongkan itemnya, ulangi dengan ?clear_items=1',
+        code: error.code,
+      });
+    }
     console.error('[PO:update]', error?.message || error);
     res.status(500).json({ error: 'Gagal menyimpan purchase order' });
   }

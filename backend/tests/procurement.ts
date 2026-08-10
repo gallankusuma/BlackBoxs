@@ -316,6 +316,31 @@ async function main() {
   chk('PO kembali muncul', !!restored, true);
   chk('item PO tetap utuh setelah dipulihkan', (restored?.items || []).length, 1);
 
+  console.log('\n10. Pengaman: daftar item kosong tidak boleh mengosongkan PO');
+  const poGuard = await call('POST', '/procurement/purchase-orders', {
+    vendor_id: vendorId, po_date: today(), status: 'draft',
+    items: [
+      { product_id: product.id, quantity: 3, unit_price: 1000, uom: 'pcs' },
+      { product_id: product.id, quantity: 2, unit_price: 1500, uom: 'pcs' },
+    ],
+  }, master);
+  const poGuardId = poGuard.json?.data?.id ?? poGuard.json?.id;
+
+  const itemsOf = async (id: number) =>
+    ((await call('GET', `/procurement/purchase-orders/${id}`, undefined, master)).json?.data?.items || []).length;
+  chk('PO punya 2 item', await itemsOf(poGuardId), 2);
+
+  const emptied = await call('PUT', `/procurement/purchase-orders/${poGuardId}`, { items: [] }, master);
+  chk('kirim item kosong ditolak', emptied.status, 409);
+  chk('kode REFUSED_EMPTY_ITEMS', emptied.json?.code, 'REFUSED_EMPTY_ITEMS');
+  chk('jumlah item existing disebutkan', Number(emptied.json?.existing_items), 2);
+  chk('item PO TIDAK terhapus', await itemsOf(poGuardId), 2);
+
+  // Kalau memang disengaja, tetap bisa
+  chk('bisa dikosongkan kalau eksplisit',
+    (await call('PUT', `/procurement/purchase-orders/${poGuardId}?clear_items=1`, { items: [] }, master)).status, 200);
+  chk('item terhapus setelah diminta eksplisit', await itemsOf(poGuardId), 0);
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }
