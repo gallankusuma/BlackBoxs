@@ -341,7 +341,71 @@ async function main() {
     (await call('PUT', `/procurement/purchase-orders/${poGuardId}?clear_items=1`, { items: [] }, master)).status, 200);
   chk('item terhapus setelah diminta eksplisit', await itemsOf(poGuardId), 0);
 
-  console.log('\n11. RBAC — token desktop tanpa permission procurement ditolak');
+  console.log('\n11. GRN yang stoknya sudah masuk tidak boleh dihapus atau di-reject');
+  const lc = await makePoAndReceive(6, 6);
+  chk('GRN disetujui', (await call('POST', `/procurement/goods-receipts/${lc.grnId}/approve`, {}, master)).status, 200);
+  const stockAfterPost = await stockOf(product.id);
+
+  const delApproved = await call('DELETE', `/procurement/goods-receipts/${lc.grnId}`, undefined, master);
+  chk('hapus GRN approved ditolak 409', delApproved.status, 409);
+  chk('diarahkan ke reversal', delApproved.json?.code, 'GRN_APPROVED_USE_REVERSAL');
+
+  const rejApproved = await call('POST', `/procurement/goods-receipts/${lc.grnId}/reject`, {}, master);
+  chk('reject GRN approved ditolak 409', rejApproved.status, 409);
+  chk('kode GRN_ALREADY_POSTED', rejApproved.json?.code, 'GRN_ALREADY_POSTED');
+  chk('stok tidak berubah oleh dua percobaan itu', await stockOf(product.id), stockAfterPost);
+
+  console.log('\n12. Reversal mengembalikan stok dan menyisakan jejak');
+  chk('reversal tanpa alasan ditolak',
+    (await call('POST', `/procurement/goods-receipts/${lc.grnId}/reverse`, {}, master)).status, 400);
+
+  const rev = await call('POST', `/procurement/goods-receipts/${lc.grnId}/reverse`,
+    { reason: 'Barang tidak sesuai spesifikasi' }, master);
+  chk('reversal berhasil', rev.status, 200);
+  chk('stok kembali ke posisi sebelum GRN', await stockOf(product.id), stockAfterPost - 6);
+
+  const revGrn = (await call('GET', `/procurement/goods-receipts/${lc.grnId}`, undefined, master)).json?.data;
+  chk('GRN asli TETAP ada', !!revGrn, true);
+  chk('ditandai reversed', Number(revGrn?.is_reversed), 1);
+  chk('alasan tercatat', revGrn?.reversal_reason, 'Barang tidak sesuai spesifikasi');
+  chk('pelaku tercatat', !!revGrn?.reversed_by, true);
+
+  chk('reversal kedua ditolak',
+    (await call('POST', `/procurement/goods-receipts/${lc.grnId}/reverse`, { reason: 'lagi' }, master)).status, 409);
+  chk('GRN reversed tidak bisa di-approve ulang',
+    (await call('POST', `/procurement/goods-receipts/${lc.grnId}/approve`, {}, master)).status, 409);
+  chk('GRN reversed tidak bisa dihapus',
+    (await call('DELETE', `/procurement/goods-receipts/${lc.grnId}`, undefined, master)).status, 409);
+
+  const replacement = await call('POST', '/procurement/goods-receipts', {
+    po_id: lc.poId, warehouse_id: wh.id, received_date: today(),
+    notes: JSON.stringify({ items: [{ product_id: product.id, received_quantity: 6 }] }),
+  }, master);
+  chk('PO boleh dibuatkan GRN pengganti setelah reversal', replacement.status < 300, true);
+
+  console.log('\n13. Posting stok gagal harus me-rollback persetujuannya');
+  const badPo = await call('POST', '/procurement/purchase-orders', {
+    vendor_id: vendorId, po_date: today(), status: 'approved',
+    items: [{ product_id: product.id, quantity: 1, unit_price: 1000, uom: 'pcs' }],
+  }, master);
+  // product_id yang tidak ada memicu pelanggaran foreign key saat posting stok
+  const badGrn = await call('POST', '/procurement/goods-receipts', {
+    po_id: badPo.json?.data?.id ?? badPo.json?.id,
+    warehouse_id: wh.id, received_date: today(),
+    notes: JSON.stringify({ items: [{ product_id: 999999999, received_quantity: 5 }] }),
+  }, master);
+  const badGrnId = badGrn.json?.data?.id ?? badGrn.json?.id;
+  const stockBeforeFail = await stockOf(product.id);
+
+  const failApprove = await call('POST', `/procurement/goods-receipts/${badGrnId}/approve`, {}, master);
+  chk('approve gagal dilaporkan sebagai error', failApprove.status, 500);
+  chk('kode STOCK_POSTING_FAILED', failApprove.json?.code, 'STOCK_POSTING_FAILED');
+
+  const rolled = (await call('GET', `/procurement/goods-receipts/${badGrnId}`, undefined, master)).json?.data;
+  chk('persetujuan DIBATALKAN, tidak tersimpan sebagai approved', Number(rolled?.approval_status) === 2, false);
+  chk('stok tidak berubah', await stockOf(product.id), stockBeforeFail);
+
+  console.log('\n14. RBAC — token desktop tanpa permission procurement ditolak');
   const plainRole = await call('POST', '/roles',
     { code: `PROC${stamp}`, name: `ProcTest-${stamp}` }, master);
   const plainEmail = `proc.plain.${stamp}@test.local`;

@@ -1029,6 +1029,33 @@ const ensurePurchaseOrderSoftDelete = async (connection: any) => {
   console.log('✅ Soft delete purchase order ensured');
 };
 
+// ==================== GRN REVERSAL (PROC-R01/R02) ====================
+// GRN yang sudah disetujui penuh sudah menambah stok. Dulu satu-satunya cara
+// membatalkannya adalah DELETE — yang mencoba mengurangi stok lewat tabel
+// `inventory` (tidak pernah ada di schema), errornya ditelan, lalu GRN,
+// grn_items, dan stock_movements tetap dihapus. Hasilnya stok naik tanpa
+// dokumen sumber sama sekali.
+//
+// Kolom di bawah membuat pembatalan menjadi reversal yang tercatat: dokumen
+// aslinya tetap ada, movement pembalik dicatat terpisah, dan alasannya wajib.
+//
+// Aman untuk sistem berjalan: kolom baru, default 0 — seluruh GRN lama tetap
+// terbaca sebagai "belum direversal" dan tidak ada data yang diubah.
+const ensureGrnReversalSchema = async (connection: any) => {
+  const statements = [
+    `ALTER TABLE goods_receipts ADD COLUMN IF NOT EXISTS is_reversed TINYINT(1) NOT NULL DEFAULT 0`,
+    `ALTER TABLE goods_receipts ADD COLUMN IF NOT EXISTS reversed_at TIMESTAMP NULL`,
+    `ALTER TABLE goods_receipts ADD COLUMN IF NOT EXISTS reversed_by INT NULL`,
+    `ALTER TABLE goods_receipts ADD COLUMN IF NOT EXISTS reversal_reason TEXT NULL`,
+    `CREATE INDEX idx_grn_is_reversed ON goods_receipts (is_reversed)`,
+  ];
+
+  for (const statement of statements) {
+    await execSchemaEnsure(connection, statement);
+  }
+  console.log('✅ Reversal GRN ensured');
+};
+
 // ==================== DISPOSAL WORKFLOW (AST-006) ====================
 // Disposal sebelumnya hanya berupa mengubah status menjadi 'disposed' — tanpa
 // alasan, tanpa persetujuan, tanpa nilai jual, dan tanpa perhitungan gain/loss.
@@ -1334,6 +1361,7 @@ export async function initializeDatabase() {
     await ensureDepreciationLedgerSchema(connection);
     await ensureSoftDeleteSchema(connection);
     await ensurePurchaseOrderSoftDelete(connection);
+    await ensureGrnReversalSchema(connection);
     await ensureDisposalSchema(connection);
     await ensureAssetStatusHistorySchema(connection);
     await ensurePermissionCatalog(connection);

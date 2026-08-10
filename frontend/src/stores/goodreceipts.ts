@@ -11,10 +11,16 @@ export interface GoodReceipt {
   warehouse_name?: string;
   received_by: number;
   received_by_name?: string;
-  status: 'draft' | 'received' | 'approved';
+  status: 'draft' | 'received' | 'approved' | 'rejected' | 'reversed';
   approval_status?: number; // 0=pending,1=supervisor,2=manager/director full
   approved_by_supervisor_id?: number | null;
   approved_by_manager_id?: number | null;
+  // Reversal GRN (PROC-R01/R02): GRN yang stoknya sudah masuk dibatalkan lewat
+  // reversal, bukan delete — dokumen aslinya tetap tersimpan sebagai jejak.
+  is_reversed?: number;
+  reversed_at?: string | null;
+  reversed_by?: number | null;
+  reversal_reason?: string | null;
   received_date?: string;
   received_at?: string;
   notes: string;

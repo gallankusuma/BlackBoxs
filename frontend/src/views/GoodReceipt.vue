@@ -74,13 +74,30 @@
                   Approve
                 </button>
                 <button
-                  v-if="canRejectGRN(gr)"
+                  v-if="canRejectGRN(gr) && Number(gr.approval_status) !== 2"
                   @click="rejectGRN(gr.id)"
                   class="inline-flex items-center px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700"
                   :disabled="submitting"
                 >
                   Reject
                 </button>
+                <!-- GRN yang sudah approved berarti stoknya sudah masuk. Membatalkannya
+                     harus lewat reversal supaya stok ikut dikembalikan dan jejaknya tersimpan. -->
+                <button
+                  v-if="canReverseGRN(gr)"
+                  @click="reverseGRN(gr.id)"
+                  class="inline-flex items-center px-3 py-1 bg-amber-600 text-white rounded hover:bg-amber-700"
+                  :disabled="submitting"
+                >
+                  Reversal
+                </button>
+                <span
+                  v-if="Number(gr.is_reversed) === 1"
+                  class="px-2 py-1 text-xs rounded bg-gray-200 text-gray-700"
+                  :title="gr.reversal_reason || ''"
+                >
+                  Reversed
+                </span>
                 <button @click="viewGRN(gr)" class="text-blue-600 hover:text-blue-900">View</button>
                 <button
                   v-if="gr.status === 'draft' || (gr.approval_status || 0) === 0"
@@ -633,6 +650,33 @@ const updateGRN = async () => {
     await fetchData();
   } catch (error: any) {
     alert(error?.response?.data?.error || 'Failed to update GRN');
+  } finally {
+    submitting.value = false;
+  }
+};
+
+// Hanya GRN yang benar-benar sudah memposting stok dan belum pernah direversal.
+// Hak yang dipakai backend adalah procurement.grn.delete — sama dengan hak hapus
+// GRN sebelumnya, jadi tidak ada orang yang kehilangan atau mendapat akses baru.
+const canReverseGRN = (gr: any) => {
+  return Number(gr.approval_status) === 2 && Number(gr.is_reversed) !== 1;
+};
+
+const reverseGRN = async (id: number) => {
+  const reason = prompt('Alasan reversal (wajib diisi):');
+  if (reason === null) return;
+  if (!reason.trim()) {
+    alert('Alasan reversal wajib diisi.');
+    return;
+  }
+
+  submitting.value = true;
+  try {
+    const res = await api.post(`/procurement/goods-receipts/${id}/reverse`, { reason: reason.trim() });
+    successMsg.value = `GRN direversal, stok dikembalikan (${res.data?.reversed_items ?? 0} item)`;
+    await fetchData();
+  } catch (error: any) {
+    alert(error?.response?.data?.error || 'Gagal melakukan reversal GRN');
   } finally {
     submitting.value = false;
   }

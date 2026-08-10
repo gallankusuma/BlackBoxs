@@ -2135,15 +2135,22 @@ router.post('/goods-receipts', authMiddleware, requirePermission('procurement.gr
       receiver = 1;
     }
     
-    // Universal Rule: Prevent creating a new GRN if an active (non-rejected) GRN already exists for this PO
+    // Universal Rule: Prevent creating a new GRN if an active GRN already exists for this PO.
+    // GRN yang direversal ikut dihitung tidak aktif — stoknya sudah dikembalikan,
+    // jadi PO-nya memang perlu bisa dibuatkan GRN pengganti. GRN yang di-reject
+    // aman dihitung tidak aktif karena reject kini mustahil terjadi setelah stok
+    // masuk (lihat PROC-R02).
     const activeGRN = await dbGet(
-      'SELECT id, grn_number FROM goods_receipts WHERE po_id = ? AND (approval_status IS NULL OR approval_status != -1)',
+      `SELECT id, grn_number FROM goods_receipts
+       WHERE po_id = ?
+         AND (approval_status IS NULL OR approval_status != -1)
+         AND (is_reversed IS NULL OR is_reversed = 0)`,
       [po_id]
     ) as any;
-    
+
     if (activeGRN) {
-      return res.status(400).json({ 
-        error: `PO ini sudah terikat dengan GRN (${activeGRN.grn_number}). Anda tidak dapat membuat GRN baru untuk PO ini kecuali GRN sebelumnya di-reject.` 
+      return res.status(400).json({
+        error: `PO ini sudah terikat dengan GRN (${activeGRN.grn_number}). Anda tidak dapat membuat GRN baru untuk PO ini kecuali GRN sebelumnya di-reject atau direversal.`
       });
     }
 
@@ -2213,40 +2220,44 @@ router.delete('/goods-receipts/:id', authMiddleware, requirePermission('procurem
     const grn = await dbGet(`SELECT * FROM goods_receipts WHERE id = ?`, [id]) as any;
     if (!grn) return res.status(404).json({ error: 'GRN not found' });
 
-    // Safe cleanup helper
-    const safeCleanup = async (sql: string, params: any[], label: string) => {
-      try { await dbRun(sql, params); } catch (e: any) {
-        console.warn(`Warning cleaning ${label}:`, e.message?.substring(0, 120));
-      }
-    };
+    // PROC-R01: GRN yang stoknya sudah masuk TIDAK BOLEH dihapus.
+    //
+    // Versi sebelumnya mencoba membalik stok lewat `UPDATE inventory SET
+    // quantity_on_hand = ...`. Tabel `inventory` tidak ada di schema — posting
+    // memakai `inventory_stocks`. Query itu selalu gagal, errornya ditelan
+    // safeCleanup, lalu stock_movements, grn_items, dan GRN tetap dihapus.
+    // Hasil akhirnya: stok tetap bertambah sementara seluruh dokumen sumber dan
+    // jejak auditnya lenyap.
+    //
+    // Sekarang pembatalan stok yang sudah masuk hanya lewat reversal, yang
+    // meninggalkan dokumen asli tetap utuh.
+    const posted = await dbGet(
+      'SELECT COUNT(*) AS cnt FROM stock_movements WHERE reference_type = ? AND reference_id = ?',
+      ['GRN', id]
+    ) as any;
 
-    // If GRN was approved (inventory was updated), reverse the stock
-    if (Number(grn.approval_status) === 2) {
-      // Get items to reverse inventory
-      const grnItems = await dbAll(
-        'SELECT * FROM grn_items WHERE grn_id = ?', [id]
-      ) as any[];
-
-      for (const item of grnItems) {
-        if (item.product_id && (item.received_quantity || 0) > 0) {
-          // Reduce inventory
-          await safeCleanup(
-            'UPDATE inventory SET quantity_on_hand = GREATEST(0, quantity_on_hand - ?), quantity_available = GREATEST(0, quantity_available - ?) WHERE product_id = ?',
-            [item.received_quantity, item.received_quantity, item.product_id],
-            'inventory_reverse'
-          );
-        }
-      }
+    if (Number(grn.is_reversed) === 1) {
+      return res.status(409).json({
+        error: 'GRN yang sudah direversal disimpan sebagai jejak audit dan tidak bisa dihapus.',
+        code: 'GRN_REVERSED',
+      });
     }
 
-    // 1. Delete stock movements referencing this GRN
-    await safeCleanup('DELETE FROM stock_movements WHERE reference_type = ? AND reference_id = ?', ['GRN', id], 'stock_movements');
+    if (Number(grn.approval_status) === 2 || Number(posted?.cnt || 0) > 0) {
+      return res.status(409).json({
+        error: 'GRN ini sudah disetujui dan stoknya sudah masuk. Gunakan reversal untuk membatalkannya, bukan hapus.',
+        code: 'GRN_APPROVED_USE_REVERSAL',
+        reversal_endpoint: `/api/procurement/goods-receipts/${id}/reverse`,
+      });
+    }
 
-    // 2. Delete GRN items
-    await safeCleanup('DELETE FROM grn_items WHERE grn_id = ?', [id], 'grn_items');
-
-    // 3. Delete the GRN itself
-    await dbRun(`DELETE FROM goods_receipts WHERE id = ?`, [id]);
+    // Sisanya GRN yang belum pernah memposting stok — aman dihapus, tapi dalam
+    // satu transaction dan tanpa menelan error, supaya tidak ada penghapusan
+    // separuh jalan.
+    await withTransaction(async tx => {
+      await tx.run('DELETE FROM grn_items WHERE grn_id = ?', [id]);
+      await tx.run('DELETE FROM goods_receipts WHERE id = ?', [id]);
+    });
 
     res.json({ message: 'Goods receipt deleted successfully' });
   } catch (error: any) {
@@ -2280,6 +2291,13 @@ router.post('/goods-receipts/:id/approve', authMiddleware, async (req: Request, 
 
     if (!grn) return res.status(404).json({ error: 'GRN not found' });
 
+    if (Number(grn.is_reversed) === 1) {
+      return res.status(409).json({
+        error: 'GRN ini sudah direversal dan tidak bisa disetujui lagi. Buat GRN baru untuk penerimaan penggantinya.',
+        code: 'GRN_REVERSED',
+      });
+    }
+
     let currentStatus = Number(grn.approval_status || 0);
     console.log('[GRN Approve] Current status:', currentStatus);
 
@@ -2292,57 +2310,34 @@ router.post('/goods-receipts/:id/approve', authMiddleware, async (req: Request, 
       items = [];
     }
 
-    // If rejected (-1), reset to pending (0) first
-    if (currentStatus === -1) {
-      console.log('[GRN Approve] Resetting rejected GRN to pending');
-      await dbRun(
-        `UPDATE goods_receipts
-         SET approval_status = 0, status = 'received',
-             approved_by_supervisor_id = NULL,
-             approved_by_manager_id = NULL,
-             approved_at_supervisor = NULL,
-             approved_at_manager = NULL
-         WHERE id = ?`,
-        [id]
-      );
-      currentStatus = 0; // Update the variable
-    }
+    // Tentukan dulu transisi yang sah — sebelum menyentuh database sama sekali.
+    let nextSql: string;
+    let nextParams: any[];
 
-    // Director/Master (>=4): direct full approval
+    const resetRejected = currentStatus === -1;
+    if (resetRejected) currentStatus = 0;
+
     if (userLevel >= 4 && currentStatus < 2) {
-      console.log('[GRN Approve] Director/Master approval');
-      await dbRun(
-        `UPDATE goods_receipts
-         SET approval_status = 2, status = 'approved',
-             approved_by_supervisor_id = ?,
-             approved_by_manager_id = ?,
-             approved_at_supervisor = CURRENT_TIMESTAMP,
-             approved_at_manager = CURRENT_TIMESTAMP
-         WHERE id = ?`,
-        [userId, userId, id]
-      );
+      // Director/Master: langsung approve penuh
+      nextSql = `UPDATE goods_receipts
+                 SET approval_status = 2, status = 'approved',
+                     approved_by_supervisor_id = ?, approved_by_manager_id = ?,
+                     approved_at_supervisor = CURRENT_TIMESTAMP,
+                     approved_at_manager = CURRENT_TIMESTAMP
+                 WHERE id = ?`;
+      nextParams = [userId, userId, id];
     } else if (userLevel === 2 && currentStatus === 0) {
-      console.log('[GRN Approve] Supervisor approval');
-      // Supervisor: 0 -> 1
-      await dbRun(
-        `UPDATE goods_receipts
-         SET approval_status = 1, status = 'received',
-             approved_by_supervisor_id = ?,
-             approved_at_supervisor = CURRENT_TIMESTAMP
-         WHERE id = ?`,
-        [userId, id]
-      );
+      nextSql = `UPDATE goods_receipts
+                 SET approval_status = 1, status = 'received',
+                     approved_by_supervisor_id = ?, approved_at_supervisor = CURRENT_TIMESTAMP
+                 WHERE id = ?`;
+      nextParams = [userId, id];
     } else if (userLevel === 3 && currentStatus === 1) {
-      console.log('[GRN Approve] Manager approval');
-      // Manager: 1 -> 2
-      await dbRun(
-        `UPDATE goods_receipts
-         SET approval_status = 2, status = 'approved',
-             approved_by_manager_id = ?,
-             approved_at_manager = CURRENT_TIMESTAMP
-         WHERE id = ?`,
-        [userId, id]
-      );
+      nextSql = `UPDATE goods_receipts
+                 SET approval_status = 2, status = 'approved',
+                     approved_by_manager_id = ?, approved_at_manager = CURRENT_TIMESTAMP
+                 WHERE id = ?`;
+      nextParams = [userId, id];
     } else {
       console.log('[GRN Approve] Insufficient permissions', { userLevel, currentStatus });
       return res.status(400).json({
@@ -2351,27 +2346,40 @@ router.post('/goods-receipts/:id/approve', authMiddleware, async (req: Request, 
       });
     }
 
-    // Posting stok saat GRN akhirnya disetujui penuh.
-    // Dulu loop INSERT stock_movements ada DI SINI dan applyGrnToInventory
-    // menyisipkan lagi baris yang sama — dua sumber untuk data yang sama.
-    // Sekarang seluruhnya jadi tanggung jawab applyGrnToInventory, dalam satu
-    // transaction, sehingga kartu stok dan saldo stok tidak bisa berbeda.
-    const updated = await dbGet('SELECT * FROM goods_receipts WHERE id = ?', [id]) as any;
+    // PROC-R03: persetujuan dan posting stok kini SATU transaction.
+    //
+    // Sebelumnya UPDATE approval di-commit lebih dulu (autocommit), baru posting
+    // stok dijalankan di transaction terpisah. Kalau posting gagal, API membalas
+    // 500 tapi GRN sudah terlanjur berstatus approved — persis kondisi yang
+    // dilarang: "GRN approved, stock movement absent". Sekarang kegagalan
+    // posting me-rollback persetujuannya juga.
     let stockResult: { posted: number; skipped: boolean } | null = null;
+    try {
+      stockResult = await withTransaction(async tx => {
+        if (resetRejected) {
+          await tx.run(
+            `UPDATE goods_receipts
+             SET approval_status = 0, status = 'received',
+                 approved_by_supervisor_id = NULL, approved_by_manager_id = NULL,
+                 approved_at_supervisor = NULL, approved_at_manager = NULL
+             WHERE id = ?`,
+            [id]
+          );
+        }
 
-    if (Number(updated.approval_status) === 2) {
-      try {
-        stockResult = await withTransaction(tx => applyGrnToInventory(updated, items, tx));
-      } catch (err: any) {
-        // Kegagalan posting stok TIDAK lagi disembunyikan. Dulu errornya hanya
-        // dicatat di log dan API tetap membalas sukses, sehingga barang tampak
-        // sudah diterima padahal stoknya tidak pernah bertambah.
-        console.error('[GRN Approve] Posting stok gagal:', err?.message || err);
-        return res.status(500).json({
-          error: 'Persetujuan tersimpan, tetapi posting stok gagal: ' + (err?.message || 'kesalahan tidak diketahui'),
-          code: 'STOCK_POSTING_FAILED',
-        });
-      }
+        await tx.run(nextSql, nextParams);
+
+        const updated = await tx.get('SELECT * FROM goods_receipts WHERE id = ?', [id]);
+        if (Number(updated.approval_status) !== 2) return null;
+
+        return applyGrnToInventory(updated, items, tx);
+      });
+    } catch (err: any) {
+      console.error('[GRN Approve] Posting stok gagal, persetujuan dibatalkan:', err?.message || err);
+      return res.status(500).json({
+        error: 'Posting stok gagal, persetujuan dibatalkan. Silakan coba lagi.',
+        code: 'STOCK_POSTING_FAILED',
+      });
     }
 
     const finalData = await dbGet(
@@ -2402,8 +2410,35 @@ router.post('/goods-receipts/:id/reject', authMiddleware, async (req: Request, r
     const userLevel = await approverLevel(req);
     if (userLevel < 2) return res.status(400).json({ error: 'Insufficient level to reject' });
 
+    const grn = await dbGet('SELECT * FROM goods_receipts WHERE id = ?', [id]) as any;
+    if (!grn) return res.status(404).json({ error: 'GRN not found' });
+
+    // PROC-R02: GRN yang sudah disetujui penuh berarti stoknya SUDAH masuk.
+    //
+    // Dulu endpoint ini langsung menyetel approval_status = -1 tanpa melihat
+    // status sebelumnya, sehingga stok tetap +10 sementara GRN-nya berubah jadi
+    // "rejected". Lebih buruk lagi, GRN ber-status -1 dianggap tidak aktif oleh
+    // create GRN, jadi PO yang sama bisa dibuatkan GRN kedua — barang datang 10,
+    // stok tercatat 20.
+    //
+    // Membalikkan stok yang sudah masuk adalah pekerjaan reversal, bukan reject.
+    if (Number(grn.approval_status) === 2 && Number(grn.is_reversed) !== 1) {
+      return res.status(409).json({
+        error: 'GRN ini sudah disetujui penuh dan stoknya sudah masuk. Gunakan reversal untuk membatalkannya, bukan reject.',
+        code: 'GRN_ALREADY_POSTED',
+        reversal_endpoint: `/api/procurement/goods-receipts/${id}/reverse`,
+      });
+    }
+
+    if (Number(grn.is_reversed) === 1) {
+      return res.status(409).json({
+        error: 'GRN ini sudah direversal.',
+        code: 'GRN_REVERSED',
+      });
+    }
+
     await dbRun(
-      `UPDATE goods_receipts 
+      `UPDATE goods_receipts
        SET approval_status = -1, status = 'rejected',
            approved_by_supervisor_id = NULL, approved_by_manager_id = NULL,
            approved_at_supervisor = NULL, approved_at_manager = NULL
@@ -2416,6 +2451,100 @@ router.post('/goods-receipts/:id/reject', authMiddleware, async (req: Request, r
   } catch (error: any) {
     console.error('Error rejecting GRN:', error);
     res.status(500).json({ error: 'Failed to reject GRN' });
+  }
+});
+
+/**
+ * PROC-R01/R02 — Reversal GRN.
+ *
+ * Satu-satunya jalan sah membatalkan GRN yang stoknya sudah masuk. Dokumen
+ * aslinya (GRN, grn_items, stock_movements inbound) sengaja TIDAK dihapus —
+ * yang dicatat adalah movement pembalik, sehingga kartu stok tetap bisa
+ * menjelaskan dari mana angkanya datang.
+ *
+ * Jumlah yang dibalik dibaca dari `stock_movements` yang benar-benar terposting,
+ * bukan dari item di notes. Kalau item di notes sempat diedit setelah approval,
+ * membalik berdasarkan notes akan mengurangi jumlah yang salah.
+ *
+ * Hak aksesnya sama dengan hak hapus GRN: siapa pun yang sebelumnya boleh
+ * menghapus GRN (dan dengan itu merusak stok diam-diam) sekarang hanya bisa
+ * melakukan reversal yang tercatat. Tidak ada yang kehilangan akses.
+ */
+router.post('/goods-receipts/:id/reverse', authMiddleware, requirePermission('procurement.grn.delete'), async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const userId = (req as any).user?.userId;
+    const reason = String(req.body?.reason || '').trim();
+
+    if (!reason) {
+      return res.status(400).json({ error: 'Alasan reversal wajib diisi', code: 'REASON_REQUIRED' });
+    }
+
+    const grn = await dbGet('SELECT * FROM goods_receipts WHERE id = ?', [id]) as any;
+    if (!grn) return res.status(404).json({ error: 'GRN not found' });
+
+    if (Number(grn.is_reversed) === 1) {
+      return res.status(409).json({ error: 'GRN ini sudah direversal', code: 'ALREADY_REVERSED' });
+    }
+
+    const movements = await dbAll(
+      `SELECT product_id, warehouse_id, quantity FROM stock_movements
+       WHERE reference_type = ? AND reference_id = ?`,
+      ['GRN', id]
+    ) as any[];
+
+    if (movements.length === 0) {
+      return res.status(409).json({
+        error: 'GRN ini belum pernah memposting stok, jadi tidak ada yang perlu direversal. Gunakan reject atau hapus.',
+        code: 'NOTHING_TO_REVERSE',
+      });
+    }
+
+    const grnLabel = grn.grn_number || grn.gr_number || `GRN-${id}`;
+    const reversed = await withTransaction(async tx => {
+      let count = 0;
+      for (const mv of movements) {
+        const qty = Number(mv.quantity || 0);
+        if (!mv.product_id || qty <= 0) continue;
+
+        await tx.run(
+          `UPDATE inventory_stocks
+           SET quantity = quantity - ?, last_updated = CURRENT_TIMESTAMP
+           WHERE product_id = ? AND warehouse_id = ?`,
+          [qty, mv.product_id, mv.warehouse_id]
+        );
+
+        // Arah dibawa movement_type, besarannya tetap positif — mengikuti
+        // konvensi modul inventory/warehouse.
+        await tx.run(
+          `INSERT INTO stock_movements
+            (product_id, warehouse_id, quantity, movement_type, reference_type, reference_id, notes, created_at)
+           VALUES (?, ?, ?, 'outbound', 'GRN_REVERSAL', ?, ?, CURRENT_TIMESTAMP)`,
+          [mv.product_id, mv.warehouse_id, qty, id, `Reversal ${grnLabel} - ${reason}`]
+        );
+        count++;
+      }
+
+      await tx.run(
+        `UPDATE goods_receipts
+         SET is_reversed = 1, reversed_at = CURRENT_TIMESTAMP, reversed_by = ?,
+             reversal_reason = ?, status = 'reversed'
+         WHERE id = ?`,
+        [userId || null, reason, id]
+      );
+
+      return count;
+    });
+
+    const data = await dbGet('SELECT * FROM goods_receipts WHERE id = ?', [id]);
+    res.json({
+      message: 'GRN berhasil direversal, stok dikembalikan ke posisi sebelumnya',
+      data,
+      reversed_items: reversed,
+    });
+  } catch (error: any) {
+    console.error('Error reversing GRN:', error);
+    res.status(500).json({ error: 'Gagal melakukan reversal GRN' });
   }
 });
 

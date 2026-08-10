@@ -1,367 +1,559 @@
-# REVIEW MODUL ASSET MANAGEMENT
+# PROCUREMENT MODULE — RE-REVIEW HASIL REVISI
 
-## Development Action List — BlackBox ERP
+**Repository:** `gallankusuma/BlackBoxs`
+**Branch:** `main`
+**Reviewed main:** `4b50b0aa5cca3438d56473539527ee80e9316205`
 
-**Tanggal review:** 4 Agustus 2026
-**Commit:** `10f33813053f245b962dbbdb693c8b2c833cfb25`
-**Status modul:** **CHANGES REQUIRED**
-**Reviewer:** Tim Reviewer
-**Tujuan:** Menyelesaikan Asset Management sampai layak dijadikan acuan flowchart final, architecture code table, dan user manual.
+## Reviewer Verdict
 
----
+**CHANGES REQUIRED 🔴**
 
-# 1. Ruang Lingkup Modul
-
-Berdasarkan source code saat ini, Asset Management mencakup:
-
-1. Asset Category
-2. Production Line
-3. P&ID
-4. Asset Register
-5. Perhitungan depresiasi
-6. Dokumen aset
-7. Riwayat maintenance
-8. Riwayat pembelian atau penambahan nilai
-9. Status aset:
-
-   * Active
-   * Idle
-   * Under Maintenance
-   * Disposed
-
-Komponen utama berada pada:
-
-| Layer                  | File                                          |
-| ---------------------- | --------------------------------------------- |
-| Database schema        | `backend/src/config/database.ts`              |
-| Backend API            | `backend/src/routes/asset.routes.ts`          |
-| Authentication         | `backend/src/middleware/auth.ts`              |
-| Asset register         | `frontend/src/views/AssetList.vue`            |
-| Asset detail           | `frontend/src/views/AssetDetail.vue`          |
-| Production line        | `frontend/src/views/ProductionLines.vue`      |
-| Production line detail | `frontend/src/views/ProductionLineDetail.vue` |
-| P&ID detail            | `frontend/src/views/PnidDetail.vue`           |
-| Frontend routing       | `frontend/src/router/index.ts`                |
+Belum disarankan menetapkan Procurement sebagai **SETTLED**.
 
 ---
 
-# 2. Flowchart As-Is
+# A. REVISI YANG SUDAH VERIFIED ✅
 
-```mermaid
-flowchart TD
-    A[User Login] --> B[Asset Management]
-    B --> C[Asset Register dan KPI]
-    B --> D[Production Line]
-    D --> E[P&ID]
+| Area                       | Hasil      |
+| -------------------------- | ---------- |
+| GRN approval menambah stok | ✅ Verified |
+| GRN posting idempotent     | ✅ Verified |
+| Update PO partial          | ✅ Verified |
+| Update PR partial          | ✅ Verified |
+| Update GRN partial         | ✅ Verified |
+| Approval level dari DB     | ✅ Verified |
+| PO soft delete             | ✅ Verified |
+| Proteksi `items: []`       | ✅ Verified |
+| RBAC mayoritas endpoint    | ✅ Verified |
+| PR concurrent numbering    | ✅ Verified |
 
-    C --> F[Tambah Aset]
-    E --> F
-
-    F --> G[Pilih Kategori]
-    G --> H{Kategori membutuhkan Production Line?}
-
-    H -->|Ya| I[Pilih Line atau P&ID]
-    H -->|Tidak| J[Isi Lokasi]
-
-    I --> K[Isi Informasi Pembelian]
-    J --> K
-
-    K --> L[Isi Umur Ekonomis dan Nilai Residu]
-    L --> M[Generate Asset Code]
-    M --> N[Simpan Aset]
-
-    N --> O[Asset Detail]
-    O --> P[Ubah Data Aset]
-    O --> Q[Upload Dokumen]
-    O --> R[Tambah Maintenance]
-    O --> S[Tambah Riwayat Pembelian]
-    O --> T[Ubah Status]
-    O --> U[Hapus Aset]
-
-    P --> V[Hitung Ulang Nilai Buku Secara Dinamis]
-    S --> O
-    R --> O
-```
-
-## Catatan flow saat ini
-
-Flow tersebut belum memiliki:
-
-* Approval registrasi dan perubahan aset
-* Assignment penanggung jawab
-* Riwayat perpindahan aset
-* Proses kapitalisasi
-* Approval disposal
-* Disposal proceeds dan gain/loss
-* Period closing depresiasi
-* Audit trail perubahan nilai finansial
-* Permission berdasarkan role
+Test Procurement sekarang memang sudah mencakup alur PO → GRN → Inventory, partial update, soft delete PO, empty-item protection dan RBAC.
 
 ---
 
-# 3. Flowchart To-Be yang Direkomendasikan
+# PROC-R01 — DELETE APPROVED GRN DAPAT MERUSAK STOCK
 
-```mermaid
-flowchart TD
-    A[User Login] --> B{Memiliki Permission Asset?}
-    B -->|Tidak| C[403 Forbidden]
-    B -->|Ya| D[Asset Register]
+**Severity: P0 — Critical**
+**Status: OPEN**
 
-    D --> E[Tambah Aset]
-    E --> F{Sumber Aset}
+Ini temuan paling serius.
 
-    F -->|Procurement| G[Pilih PO atau GRN]
-    F -->|Manual| H[Masukkan Dokumen Perolehan]
-
-    G --> I[Validasi Data Perolehan]
-    H --> I
-
-    I --> J[Pilih Kategori]
-    J --> K{Aset Dapat Didepresiasi?}
-
-    K -->|Tidak| L[Non-Depreciable Asset]
-    K -->|Ya| M[Isi Tanggal Siap Digunakan]
-    M --> N[Pilih Metode dan Umur Ekonomis]
-
-    L --> O[Validasi Lokasi, Custodian dan Cost Center]
-    N --> O
-
-    O --> P[Generate Asset Code secara Atomic]
-    P --> Q[Approval Kapitalisasi]
-    Q -->|Rejected| R[Draft atau Revisi]
-    Q -->|Approved| S[Status Active]
-
-    S --> T[Depreciation Schedule]
-    S --> U[Maintenance]
-    S --> V[Transfer Aset]
-    S --> W[Capital Addition]
-    S --> X[Disposal Request]
-
-    U --> Y[Maintenance History dan Cost]
-    V --> Z[Transfer History]
-    W --> AA[Update Capitalized Value]
-    AA --> T
-
-    X --> AB[Disposal Approval]
-    AB -->|Approved| AC[Catat Proceeds dan Gain/Loss]
-    AC --> AD[Status Disposed dan Record Dikunci]
-
-    T --> AE[Monthly Depreciation Ledger]
-    AE --> AF[Period Closing]
-```
-
----
-
-# 4. Development Action List
-
-## AST-001 — Backend RBAC belum diterapkan
-
-**Severity:** P0 — Critical
-**Status:** Open
-
-Seluruh endpoint Asset Management hanya menggunakan `authMiddleware`. Setiap user desktop yang memiliki JWT dapat:
-
-* Membuat dan menghapus production line
-* Membuat dan menghapus P&ID
-* Membuat, mengubah, dan menghapus aset
-* Mengubah harga perolehan
-* Mengubah umur ekonomis dan nilai residu
-* Menghapus dokumen
-* Menghapus maintenance
-* Menghapus riwayat penambahan nilai
-
-Tidak ada pemeriksaan permission seperti `assets.create`, `assets.edit`, atau `assets.dispose`.
-
-### Tindakan
-
-Tambahkan permission minimal:
+Posting stok baru sudah menggunakan:
 
 ```text
-assets.view
-assets.create
-assets.edit
-assets.delete
-assets.dispose
-assets.documents.manage
-assets.maintenance.view
-assets.maintenance.manage
-assets.financial.view
-assets.financial.manage
-assets.master.manage
+inventory_stocks.quantity
 ```
 
-Gunakan middleware:
+dan `stock_movements`.
+
+Tetapi endpoint:
+
+```text
+DELETE /goods-receipts/:id
+```
+
+masih mencoba reversal menggunakan kode lama:
+
+```sql
+UPDATE inventory
+SET quantity_on_hand = ...
+```
+
+Padahal implementasi posting GRN sendiri menjelaskan bahwa tabel/kolom lama tersebut tidak sesuai dengan schema aktual.
+
+Lebih berbahaya lagi, reversal dibungkus:
 
 ```ts
-authMiddleware,
-requirePermission('assets.create')
+safeCleanup(...)
 ```
 
-### Acceptance criteria
+yang **menelan error**.
 
-* User Viewer hanya dapat menggunakan endpoint GET.
-* Asset Officer dapat membuat dan memperbarui data operasional.
-* Maintenance Officer hanya mengelola maintenance.
-* Finance hanya mengelola nilai finansial dan depresiasi.
-* Disposal hanya dapat dilakukan role berwenang.
-* Akses tidak sesuai menghasilkan HTTP `403`.
-* Permission diverifikasi backend, bukan hanya menyembunyikan tombol frontend.
-
----
-
-## AST-002 — Menyimpan detail aset dapat menghapus P&ID dan spec
-
-**Severity:** P0 — Critical
-**Status:** Open
-
-Endpoint `PUT /assets/:id` melakukan full replacement terhadap:
+Setelah reversal gagal, backend tetap:
 
 ```text
-pnid_id
-spec
-production_line_id
+DELETE stock_movements
+DELETE grn_items
+DELETE goods_receipts
 ```
 
-Namun `editForm` di `AssetDetail.vue` tidak membawa `pnid_id` maupun `spec`.
-
-Akibatnya, ketika user hanya mengganti nama atau status:
-
-* `pnid_id` dapat berubah menjadi `NULL`
-* `spec` dapat berubah menjadi `{}`
-
-Aset kemudian hilang dari daftar P&ID dan spesifikasi lama terhapus.
-
-### Tindakan
-
-Pilih salah satu:
-
-1. Ubah endpoint menjadi `PATCH` dan hanya update field yang dikirim; atau
-2. Frontend wajib mengirim seluruh data existing; atau
-3. Backend mengambil data existing lalu melakukan merge.
-
-Pendekatan yang direkomendasikan:
-
-```ts
-PATCH /api/assets/:id
-```
-
-### Acceptance criteria
-
-* Mengubah nama tidak mengubah `pnid_id`.
-* Mengubah status tidak menghapus `spec`.
-* Mengubah harga tidak mengubah lokasi atau P&ID.
-* Automated test memastikan field yang tidak dikirim tetap utuh.
-
----
-
-## AST-003 — Metode saldo menurun belum diimplementasikan
-
-**Severity:** P1 — High
-**Status:** Open
-
-Frontend menyediakan:
+Sehingga dapat terjadi:
 
 ```text
-straight_line
-declining_balance
+Stock tetap +10
+
+tetapi:
+GRN hilang
+stock movement hilang
+audit trail hilang
 ```
 
-Tetapi fungsi `calcDepreciation()` selalu menggunakan rumus garis lurus dan tidak membaca `depreciation_method`.
+Ini berpotensi menghasilkan stok tanpa dokumen sumber.
 
-### Risiko
+### Required fix
 
-User dapat memilih saldo menurun, tetapi hasilnya tetap garis lurus. Laporan aset menjadi menyesatkan.
+Approved GRN **jangan hard delete**.
 
-### Tindakan
-
-Pilih salah satu:
-
-* Implementasikan saldo menurun lengkap beserta rate; atau
-* Hapus pilihan saldo menurun sampai implementasinya tersedia.
-
-Tambahkan unit test untuk setiap metode.
-
-### Acceptance criteria
-
-* Metode yang dipilih menghasilkan rumus yang sesuai.
-* Saldo menurun memiliki rate yang jelas.
-* Nilai buku tidak turun melewati nilai residu.
-* Perhitungan dapat diuji pada tanggal tertentu menggunakan parameter `as_of_date`.
-
----
-
-## AST-004 — Penambahan nilai tidak masuk ke basis depresiasi
-
-**Severity:** P1 — High
-**Status:** Open
-
-Frontend menyebut fitur:
-
-> Riwayat Pembelian / Penambahan Nilai
-
-Namun perhitungan depresiasi hanya membaca `assets.purchase_price`. Data pada `asset_purchase_history.amount` tidak menambah:
-
-* Nilai perolehan
-
-* Depreciable amount
-
-* Nilai buku
-
-* Nilai KPI summary
-
-### Tindakan
-
-Tambahkan klasifikasi:
+Gunakan workflow:
 
 ```text
-capital_addition
-expense
-replacement
-improvement
+Approved GRN
+      ↓
+Reversal Request
+      ↓
+Stock Reversal
+      ↓
+Reverse Movement
+      ↓
+GRN status = reversed/cancelled
 ```
 
-Hanya transaksi `capital_addition` yang menambah nilai aset.
+Semua dalam **satu transaction**.
 
-Tentukan juga:
+### Acceptance Criteria
 
-* Tanggal kapitalisasi
-* Sisa umur ekonomis atau umur baru
-* Approval
-* Sumber PO/GRN
-* Depresiasi atas penambahan nilai
+Setelah GRN +10 direverse:
 
-### Acceptance criteria
+```text
+inventory stock = stock sebelumnya
+original GRN tetap ada
+original movement tetap ada
+reverse movement tercatat -10
+reversal reason tercatat
+reversed_by tercatat
+```
 
-* Capital addition menambah total capitalized cost.
-* Maintenance expense tidak menambah nilai aset.
-* Nilai buku dan depresiasi menggunakan basis terbaru.
-* Histori sebelum kapitalisasi tidak berubah.
-* Transaksi memiliki referensi PO/GRN apabila berasal dari procurement.
+### ✅ DITERAPKAN — tim development
+
+Temuan terverifikasi penuh, termasuk satu detail yang memperburuk: tabel
+`inventory` **tidak ada sama sekali** di schema (dicek via INFORMATION_SCHEMA —
+yang ada hanya `inventory_stocks`, `stock_movements`, `grn_items`,
+`goods_receipts`). Jadi reversal itu bukan sekadar salah tabel, tapi *dipastikan
+selalu gagal*, ditelan `safeCleanup`, lalu dokumennya tetap dihapus.
+
+Perubahan di `backend/src/routes/procurement.routes.ts`:
+
+- `DELETE /goods-receipts/:id` menolak GRN yang `approval_status = 2` **atau**
+  yang punya baris `stock_movements` → 409 `GRN_APPROVED_USE_REVERSAL`, disertai
+  pointer ke endpoint reversal. GRN yang sudah direversal juga tidak bisa
+  dihapus (409 `GRN_REVERSED`) karena disimpan sebagai jejak audit.
+- GRN yang belum pernah memposting stok tetap bisa dihapus, tapi kini dalam satu
+  `withTransaction` dan **tanpa** `safeCleanup` — tidak ada lagi error yang ditelan.
+- Endpoint baru `POST /goods-receipts/:id/reverse`, satu transaction: kurangi
+  `inventory_stocks`, catat movement pembalik, tandai GRN reversed. Alasan wajib.
+- Jumlah yang dibalik dibaca dari `stock_movements` yang benar-benar terposting,
+  bukan dari item di `notes` — kalau notes sempat diedit setelah approval,
+  membalik berdasarkan notes akan mengurangi angka yang salah.
+- Movement pembalik memakai `movement_type = 'outbound'` dengan quantity positif,
+  bukan `-10`. Alasannya konvensi modul lain (`warehouse.routes.ts:92`) menaruh
+  arah di `movement_type` dan besaran positif di `quantity`; menyimpan negatif
+  akan double-negate di sana. `reference_type = 'GRN_REVERSAL'` sengaja dibedakan
+  dari `'GRN'` supaya cek idempotensi posting tidak terganggu.
+
+Schema: `ensureGrnReversalSchema()` di `config/database.ts` menambah
+`is_reversed`, `reversed_at`, `reversed_by`, `reversal_reason`. Kolom baru dengan
+default 0 — tidak ada data lama yang diubah.
+
+Frontend `GoodReceipt.vue`: tombol **Reversal** untuk GRN approved (minta alasan),
+badge "Reversed", dan tombol Reject disembunyikan untuk status 2.
+
+Acceptance criteria diverifikasi otomatis (bagian 12 `tests/procurement.ts`):
+stok kembali ke posisi sebelumnya, GRN asli tetap ada, alasan & pelaku tercatat,
+reversal kedua ditolak 409.
 
 ---
 
-## AST-005 — Penghapusan permanen merusak audit trail
+# PROC-R02 — APPROVED GRN DAPAT DI-REJECT TANPA REVERSAL STOCK
 
-**Severity:** P1 — High
-**Status:** Open
+**Severity: P0 — Critical**
+**Status: OPEN**
 
-Endpoint berikut melakukan hard delete:
+Endpoint:
 
-```http
-DELETE /api/assets/:id
+```text
+POST /goods-receipts/:id/reject
 ```
 
-Database menggunakan cascade untuk dokumen, maintenance, dan purchase history. UI bahkan menjelaskan bahwa seluruh histori ikut terhapus.
+hanya mengecek:
 
-### Risiko
+```text
+userLevel >= 2
+```
 
-* Jejak aset perusahaan hilang permanen.
-* Histori maintenance dan nilai finansial tidak dapat diaudit.
-* Aset yang sudah pernah digunakan atau didepresiasi dapat dihapus.
+lalu langsung mengubah:
 
-### Tindakan
+```text
+approval_status = -1
+status = rejected
+```
+
+Tidak ada pengecekan apakah GRN tersebut **sudah fully approved dan stok sudah diposting**.
+
+Skenario:
+
+```text
+PO
+ ↓
+GRN qty 10
+ ↓
+Approved
+ ↓
+Stock +10
+ ↓
+Reject GRN
+ ↓
+status = rejected
+```
+
+Stock masih +10.
+
+Lebih berbahaya lagi, create GRN menganggap `approval_status = -1` sudah tidak aktif.
+
+Jadi PO yang sama kemudian dapat dibuatkan GRN baru.
+
+Potensi:
+
+```text
+GRN #1 → Stock +10 → Reject
+GRN #2 → Stock +10
+
+Actual stock = +20
+```
+
+padahal barang sebenarnya mungkin hanya datang 10.
+
+### Required fix
+
+Fully approved GRN tidak boleh menggunakan endpoint reject biasa.
 
 Gunakan:
+
+```text
+Pending → Reject
+
+Approved → Reversal
+```
+
+### Acceptance Criteria
+
+```text
+approval_status 0/1 → reject allowed
+approval_status 2 → reject returns 409
+```
+
+dan arahkan ke reversal workflow.
+
+### ✅ DITERAPKAN — tim development
+
+Terverifikasi, termasuk rantai eskalasinya. Baris yang membuat double-stock
+mungkin terjadi memang ada: create GRN menganggap GRN ber-`approval_status = -1`
+sebagai tidak aktif, sehingga PO yang sama bisa dibuatkan GRN kedua.
+
+- `POST /goods-receipts/:id/reject` sekarang membaca GRN dulu. Kalau
+  `approval_status = 2` dan belum direversal → 409 `GRN_ALREADY_POSTED` +
+  `reversal_endpoint`. GRN yang sudah direversal → 409 `GRN_REVERSED`.
+- Aturan "satu GRN aktif per PO" ditambah `AND (is_reversed IS NULL OR
+  is_reversed = 0)`, supaya PO bisa dibuatkan GRN pengganti setelah reversal.
+  GRN ber-status `-1` tetap dihitung tidak aktif — kini aman, karena reject
+  mustahil terjadi setelah stok masuk.
+- `POST /goods-receipts/:id/approve` menolak GRN yang sudah direversal
+  (409 `GRN_REVERSED`), supaya tidak bisa "dihidupkan" lagi dan memposting ulang.
+
+Tes bagian 11 & 12 membuktikan reject GRN approved → 409, stok tidak berubah, dan
+GRN pengganti baru boleh dibuat setelah reversal.
+
+---
+
+# PROC-R03 — APPROVAL GRN DAN STOCK POSTING BELUM ATOMIC
+
+**Severity: P1 — High**
+**Status: OPEN**
+
+Saat GRN fully approved:
+
+1. `goods_receipts.approval_status = 2`
+2. COMMIT
+3. baru kemudian `applyGrnToInventory()` dalam transaction lain.
+
+Kode bahkan mengembalikan pesan:
+
+```text
+Persetujuan tersimpan, tetapi posting stok gagal
+```
+
+Artinya secara desain masih memungkinkan:
+
+```text
+GRN = Approved
+Stock = belum masuk
+```
+
+### Required
+
+Full approval dan stock posting harus satu atomic transaction:
+
+```text
+BEGIN
+
+UPDATE GRN approval
+
+UPDATE inventory_stocks
+
+INSERT stock_movements
+
+COMMIT
+```
+
+Jika salah satu gagal:
+
+```text
+ROLLBACK semuanya
+```
+
+### Acceptance Criteria
+
+Tidak boleh ada kondisi:
+
+```text
+GRN approved
+AND
+stock movement absent
+```
+
+### ✅ DITERAPKAN — tim development
+
+Kritik ini tepat sasaran. Perbaikan sebelumnya berhenti setengah jalan: kegagalan
+posting memang berhenti dilaporkan sebagai sukses, tapi persetujuannya sudah
+telanjur ter-commit, jadi state terlarang itu tetap bisa terjadi.
+
+`POST /goods-receipts/:id/approve` sekarang satu `withTransaction`: transisi
+approval divalidasi dulu tanpa menyentuh DB, lalu reset-rejected + UPDATE approval
++ `applyGrnToInventory()` dijalankan pada `tx` yang sama. Kegagalan posting
+me-rollback persetujuannya.
+
+Pesan `"Persetujuan tersimpan, tetapi posting stok gagal"` sudah dihapus — kalimat
+itu memang mendeskripsikan state yang tidak boleh ada lagi. Sekarang:
+`"Posting stok gagal, persetujuan dibatalkan. Silakan coba lagi."`
+
+Tes bagian 13 memicu kegagalan nyata (product_id tidak ada → pelanggaran FK di
+`inventory_stocks`) lalu membuktikan `approval_status ≠ 2` dan stok tidak berubah.
+
+---
+
+# PROC-R04 — PO CREATE BELUM TRANSACTIONAL
+
+**Severity: P1 — High**
+**Status: OPEN**
+
+Create PO sekarang melakukan:
+
+```text
+INSERT purchase_orders
+↓
+INSERT item 1
+↓
+INSERT item 2
+↓
+...
+↓
+create payment schedules
+↓
+create Accounts Payable
+```
+
+tetapi keseluruhan proses **belum dibungkus satu database transaction**.
+
+Jika item ketiga gagal:
+
+```text
+PO header sudah tersimpan
+item pertama sudah tersimpan
+item kedua sudah tersimpan
+```
+
+Kemudian API error.
+
+User bisa mencoba kembali dan membuat masalah baru.
+
+### Required
+
+```text
+BEGIN
+
+INSERT PO
+INSERT PO ITEMS
+INSERT PAYMENT SCHEDULE
+INSERT ACCOUNTS PAYABLE
+
+COMMIT
+```
+
+Error:
+
+```text
+ROLLBACK
+```
+
+---
+
+# PROC-R05 — PERBAIKAN NOMOR DOKUMEN BELUM LENGKAP
+
+**Severity: P1 — High**
+**Status: PARTIAL**
+
+PR sudah benar menggunakan:
+
+```ts
+withDocumentNumber()
+```
+
+dengan retry saat UNIQUE collision.
+
+Tetapi PO create masih menggunakan:
+
+```ts
+await nextSequentialCode(...)
+```
+
+langsung.
+
+GRN create juga masih:
+
+```ts
+await nextSequentialCode(...)
+```
+
+Dan `generate-pos` juga menggunakan generator langsung.
+
+Jadi klaim bahwa concurrency protection sudah diterapkan ke seluruh PR/PO/GRN belum sepenuhnya sesuai source.
+
+Test concurrency yang ada juga baru membuktikan **15 PR paralel**, belum PO dan GRN.
+
+### Required
+
+Semua document creation wajib melalui helper yang sama:
+
+```text
+PR
+PO
+Auto-generated PO
+GRN
+```
+
+### Test
+
+```text
+20 concurrent PR
+20 concurrent PO
+20 concurrent GRN
+```
+
+Expected:
+
+```text
+20 success
+20 unique number
+0 HTTP 500
+```
+
+---
+
+# PROC-R06 — PO APPROVAL DAN PAYMENT SCHEDULE BELUM ATOMIC
+
+**Severity: P1 — High**
+**Status: OPEN**
+
+Approval PO melakukan:
+
+```text
+UPDATE approval_status
+```
+
+kemudian:
+
+```text
+regenerateSchedule()
+```
+
+Jika payment schedule/AP gagal dibuat, approval PO sudah telanjur tersimpan.
+
+Potential state:
+
+```text
+PO = fully approved
+
+tetapi:
+
+Payment Schedule incomplete
+Accounts Payable incomplete
+```
+
+### Required
+
+Final PO approval + schedule/AP generation menjadi satu transaction.
+
+---
+
+# PROC-R07 — PR/PO REJECT BELUM MEMERIKSA DOWNSTREAM DOCUMENT
+
+**Severity: P1 — High**
+**Status: OPEN**
+
+PR yang sudah fully approved masih dapat di-reset menjadi pending melalui endpoint reject tanpa memeriksa apakah sudah mempunyai PO.
+
+Demikian juga PO approval dapat di-reset tanpa business validation yang cukup terhadap:
+
+```text
+GRN
+Stock Movement
+Payment
+Accounts Payable
+```
+
+### Recommended lifecycle
+
+```text
+PR approved + PO exists
+→ tidak boleh reject biasa
+
+PO approved + GRN exists
+→ tidak boleh reject biasa
+
+PO with payment
+→ formal cancellation/reversal
+```
+
+---
+
+# PROC-R08 — DELETE PR MASIH HARD DELETE
+
+**Severity: P1 — High**
+**Status: OPEN**
+
+PO sudah diperbaiki menjadi logical delete.
+
+Tetapi PR masih:
+
+```text
+DELETE pr_bid_items
+DELETE pr_bids
+DELETE purchase_request_items
+DELETE purchase_requests
+```
+
+dan beberapa proses cleanup menggunakan helper yang **menelan error**.
+
+Jadi procurement sekarang tidak konsisten:
+
+```text
+PO → audit-friendly soft delete ✅
+
+PR → permanent hard delete ❌
+```
+
+### Required
+
+Implement:
 
 ```text
 is_deleted
@@ -370,643 +562,372 @@ deleted_by
 deletion_reason
 ```
 
-Aturan:
+PR yang:
 
-* Draft yang belum pernah digunakan boleh dihapus.
-* Aset aktif tidak boleh hard delete.
-* Aset berhistori harus melalui disposal.
-* Hard delete hanya untuk administrator database dan bukan melalui UI normal.
+```text
+approved
+punya bid
+punya vendor comparison
+punya downstream transaction
+```
 
-### Acceptance criteria
-
-* Aset aktif tidak dapat dihapus permanen.
-* Data disposed tetap tersedia dalam laporan histori.
-* Dokumen dan maintenance tetap tersimpan.
-* Penghapusan logical tercatat di audit log.
+jangan dapat dihapus permanen.
 
 ---
 
-## AST-006 — Disposal belum menjadi proses bisnis
+# PROC-R09 — BID UPLOAD MELEWATI RBAC
 
-**Severity:** P1 — High
-**Status:** Open
+**Severity: P1 — High**
+**Status: OPEN**
 
-Disposal saat ini hanya dilakukan dengan mengganti:
+Mayoritas endpoint Procurement sudah menggunakan `requirePermission()`.
 
-```text
-status = disposed
-```
-
-Field `disposed_date` tersedia di backend, tetapi tidak tersedia sebagai input yang jelas di halaman detail.
-
-Belum ada:
-
-* Disposal reason
-* Approval
-* Disposal method
-* Sale proceeds
-* Buyer
-* Write-off value
-* Gain/loss
-* Supporting document
-* Approved by
-
-Selain itu, apabila `disposed_date` kosong, fungsi depresiasi masih menggunakan tanggal hari ini.
-
-### Tindakan
-
-Buat workflow disposal terpisah:
+Tetapi:
 
 ```text
-Active
-→ Disposal Requested
-→ Approved/Rejected
-→ Disposed
+POST
+/purchase-requests/:prId/bids/:bidId/upload
 ```
 
-### Acceptance criteria
-
-* Status disposed wajib memiliki tanggal disposal.
-* Depresiasi berhenti pada tanggal disposal.
-* Proceeds dan gain/loss dihitung.
-* Aset disposed tidak dapat dikembalikan menjadi active tanpa reversal resmi.
-* Disposal memiliki approval dan audit trail.
-
----
-
-## AST-007 — Link download dokumen berpotensi selalu 401
-
-**Severity:** P1 — High
-**Status:** Open
-
-Route download menggunakan `downloadAuthMiddleware`, yang memerlukan:
-
-* Authorization header; atau
-* Query token
-
-Namun frontend membuat URL:
+masih hanya:
 
 ```ts
-`${api.defaults.baseURL}/assets/documents/${docId}/download`
+authMiddleware
 ```
 
-URL tersebut tidak menyertakan token. Anchor browser juga tidak menggunakan interceptor Axios.
-
-### Tindakan
-
-Pendekatan yang direkomendasikan:
+tanpa:
 
 ```ts
-const response = await api.get(url, {
-  responseType: 'blob'
-});
+requirePermission(...)
 ```
 
-Kemudian buat temporary object URL di browser.
+Artinya authenticated desktop user tanpa hak Procurement masih berpotensi upload quotation.
 
-Alternatif kedua adalah signed URL berumur pendek. Jangan menempatkan JWT utama berumur tujuh hari di URL.
+### Required
 
-### Acceptance criteria
-
-* Download berhasil untuk user berwenang.
-* User tanpa token menerima `401`.
-* User tanpa permission menerima `403`.
-* JWT utama tidak tampil pada URL dan browser history.
-* Test mencakup download dokumen aset.
-
----
-
-## AST-008 — Upload dokumen belum aman
-
-**Severity:** P1 — High
-**Status:** Open
-
-Multer asset document belum memiliki:
-
-* Batas ukuran file
-* Whitelist MIME
-* Whitelist ekstensi
-* Pemeriksaan magic bytes
-* Malware scanning
-* Cleanup file jika insert database gagal
-
-Ekstensi server diambil dari `originalname`.
-
-### Tindakan
-
-Terapkan minimal:
+Minimal:
 
 ```text
-PDF
-JPG/JPEG
-PNG
-DOCX
-XLSX
+procurement.purchase-requests.edit
 ```
 
-Tambahkan:
-
-* Ukuran maksimum
-* Validasi MIME dan magic bytes
-* UUID filename
-* Cleanup apabila database gagal
-* `Content-Disposition: attachment` untuk format yang tidak perlu dirender
-* Audit upload dan download
-
-### Acceptance criteria
-
-* Script, executable, SVG aktif, dan HTML ditolak.
-* File melebihi batas menerima HTTP `413` atau `400`.
-* File dengan ekstensi palsu ditolak.
-* Tidak ada orphan file saat insert database gagal.
-
----
-
-## AST-009 — Generator asset code masih rentan race condition
-
-**Severity:** P1 — High
-**Status:** Open
-
-Kode aset menggunakan:
-
-```sql
-MAX(...) + 1
-```
-
-Walaupun lebih baik daripada `COUNT(*) + 1`, dua request bersamaan masih dapat memperoleh nomor yang sama.
-
-### Tindakan
-
-Gunakan salah satu:
-
-* Sequence table dengan row lock
-* Database-generated sequence
-* Transaction dan `SELECT ... FOR UPDATE`
-* Retry ketika unique constraint gagal
-
-### Acceptance criteria
-
-* Minimal 20 concurrent create request tidak menghasilkan nomor duplikat.
-* Nomor tetap berurutan sesuai kebijakan.
-* Duplicate key ditangani dengan retry, bukan HTTP `500` mentah.
-
----
-
-## AST-010 — Model depresiasi belum membedakan aset depreciable dan non-depreciable
-
-**Severity:** P1 — High
-**Status:** Open
-
-Master kategori mencakup `LAND/Tanah`, tetapi setiap aset dengan harga dan tanggal pembelian diproses oleh fungsi depresiasi yang sama. Master kategori hanya memiliki `requires_production_line` dan belum memiliki aturan depresiasi.
-
-### Tindakan
-
-Tambahkan pada kategori atau aset:
+atau permission khusus:
 
 ```text
-is_depreciable
-default_useful_life_years
-default_depreciation_method
-default_depreciation_rate
+procurement.bid-documents.manage
 ```
 
-Tambahkan juga:
+---
+
+# PROC-R10 — SECURITY UPLOAD QUOTATION & PR ATTACHMENT
+
+**Severity: P1 — High**
+**Status: OPEN**
+
+Modul Asset sebelumnya sudah diperbaiki dengan:
 
 ```text
-acquisition_date
-in_service_date
-depreciation_start_date
+MIME validation
+magic-byte validation
+extension allowlist
+random filename
+size limit
 ```
 
-Depresiasi seharusnya mengikuti tanggal siap digunakan sesuai kebijakan perusahaan, bukan selalu tanggal pembelian.
+Procurement belum mengikuti standard tersebut.
 
-### Acceptance criteria
+Saat ini bid dan PR attachment menggunakan:
 
-* Tanah dapat ditandai non-depreciable.
-* Aset non-depreciable memiliki depresiasi nol.
-* Tanggal pembelian dan tanggal mulai depresiasi dipisahkan.
-* Default kategori dapat dioverride hanya oleh role berwenang.
+```ts
+multer.diskStorage
+path.extname(file.originalname)
+```
 
----
+hanya dengan limit 10 MB.
 
-## AST-011 — Nilai historis berubah ketika master diedit
-
-**Severity:** P1 — High
-**Status:** Open
-
-Depresiasi dihitung secara dinamis dari nilai master saat halaman dibuka.
-
-Apabila user mengganti:
-
-* Harga pembelian
-* Tanggal pembelian
-* Umur ekonomis
-* Nilai residu
-
-maka nilai historis seluruh periode ikut berubah secara retroaktif.
-
-### Tindakan
-
-Tambahkan:
-
-* Depreciation schedule
-* Monthly depreciation ledger
-* Posting status
-* Financial period
-* Period locking
-* Adjustment atau reversal mechanism
-
-### Acceptance criteria
-
-* Periode yang sudah ditutup tidak berubah.
-* Perubahan estimasi berlaku prospektif.
-* Adjustment memiliki alasan dan user pembuat.
-* Laporan bulan sebelumnya dapat direproduksi.
-
----
-
-## AST-012 — Status lifecycle tidak divalidasi
-
-**Severity:** P2 — Medium
-**Status:** Open
-
-Backend menerima string status dari request tanpa state transition validation.
-
-Kemungkinan kondisi:
-
-* Active langsung menjadi disposed
-* Disposed kembali menjadi active
-* Disposed tanpa tanggal
-* Active memiliki disposed date
-* Under maintenance tanpa maintenance record
-
-### Tindakan
-
-Gunakan state machine:
+Tidak ada:
 
 ```text
-draft
-active
-idle
-under_maintenance
-disposal_requested
-disposed
+MIME whitelist
+magic-byte validation
+extension whitelist
+malicious file detection
 ```
 
-### Acceptance criteria
+### Required
 
-* Transition tidak valid menghasilkan HTTP `409` atau `400`.
-* Disposal wajib melewati workflow.
-* Status maintenance dapat terhubung ke maintenance work order.
-* Perubahan status tercatat.
+Gunakan utility upload yang sama dengan Asset Management agar security standard konsisten.
 
 ---
 
-## AST-013 — Penghapusan Production Line dan P&ID belum aman
+# PROC-R11 — PATH VALIDATION DELETE ATTACHMENT LEMAH
 
-**Severity:** P2 — Medium
-**Status:** Open
+**Severity: P1 — High**
+**Status: OPEN**
 
-P&ID dihapus melalui dua query:
+Delete PR attachment hanya memeriksa:
 
-1. Melepas seluruh asset dari P&ID
-2. Menghapus P&ID
+```ts
+filePath.includes('/pr-attachments/')
+```
 
-Kedua query tidak menggunakan transaction.
+kemudian melakukan:
 
-Production Line langsung dihapus tanpa memeriksa apakah masih digunakan.
+```ts
+fs.unlinkSync(...)
+```
 
-### Tindakan
+String check tersebut belum cukup untuk mencegah path traversal.
 
-* Gunakan soft delete untuk master.
-* Blokir deaktivasi apabila masih digunakan, atau minta proses reassignment.
-* Gunakan transaction jika perlu melepas relasi.
-* Tampilkan jumlah aset yang terdampak.
-
-### Acceptance criteria
-
-* Production Line yang memiliki aset tidak dapat dihapus sembarangan.
-* Tidak ada kondisi aset terlepas tetapi P&ID gagal dihapus.
-* Master nonaktif tetap dapat ditampilkan dalam histori lama.
-
----
-
-## AST-014 — Validasi backend belum memadai
-
-**Severity:** P2 — Medium
-**Status:** Open
-
-Backend belum memvalidasi secara ketat:
-
-* Harga negatif
-* Nilai residu negatif
-* Nilai residu lebih besar dari harga
-* Umur ekonomis nol atau negatif
-* Maintenance cost negatif
-* Capital addition negatif
-* Status tidak dikenal
-* Metode depresiasi tidak dikenal
-* Tanggal tidak valid
-* Foreign key tidak ditemukan
-* P&ID tidak sesuai production line
-* Asset child record dibuat untuk asset yang tidak ada
-
-Error database dikembalikan menggunakan `error.message`.
-
-### Tindakan
-
-Gunakan validation schema seperti Zod atau `express-validator`.
-
-### Acceptance criteria
-
-* Input tidak valid menerima HTTP `400`.
-* Resource tidak ditemukan menerima HTTP `404`.
-* Conflict menerima HTTP `409`.
-* Pesan SQL mentah tidak dikirim kepada client.
-* Seluruh numeric financial field memiliki batas minimum.
-
----
-
-## AST-015 — Tag P&ID dan relasi line belum memiliki aturan uniqueness
-
-**Severity:** P2 — Medium
-**Status:** Open
-
-Belum terlihat validasi bahwa:
-
-* P&ID harus berasal dari production line yang sesuai
-* Tag equipment unik dalam satu P&ID atau line
-* Code production line unik
-* Code P&ID unik dalam production line
-
-### Tindakan
-
-Tambahkan unique constraint:
+Contoh kelas input:
 
 ```text
-production_lines.code
-(production_line_id, pnids.code)
-(pnid_id, assets.pnid_tag)
+/pr-attachments/../../...
 ```
 
-### Acceptance criteria
+dapat tetap lolos pemeriksaan substring.
 
-* Tag duplikat ditolak dengan HTTP `409`.
-* P&ID tidak dapat dipasangkan ke line lain.
-* Constraint diterapkan di database dan backend.
+### Required
 
----
-
-## AST-016 — Maintenance masih berupa histori sederhana
-
-**Severity:** P2 — Medium
-**Status:** Open
-
-Fitur maintenance saat ini hanya menyimpan:
-
-* Tipe
-* Deskripsi
-* Cost
-* Pelaksana
-* Vendor
-* Tanggal
-* Next due date
-
-Belum ada:
-
-* Work order number
-* Planned versus actual date
-* Status pekerjaan
-* Downtime
-* Root cause
-* Spare part usage
-* Attachment
-* Approval
-* Reminder next due date
-
-### Rekomendasi scope
-
-Untuk Asset Management versi pertama, minimal implementasikan:
+Gunakan:
 
 ```text
-scheduled
-in_progress
-completed
-cancelled
+path.resolve()
 ```
 
-Tambahkan reminder untuk `next_due_date`.
-
-### Acceptance criteria
-
-* Preventive maintenance yang jatuh tempo dapat dilihat.
-* Maintenance selesai memiliki actual completion date.
-* Aset dapat otomatis berstatus under maintenance selama pekerjaan aktif.
-* Biaya dan downtime dapat dilaporkan.
-
----
-
-## AST-017 — Integrasi Procurement belum berjalan
-
-**Severity:** P2 — Medium
-**Status:** Open
-
-Schema memiliki `purchase_order_item_id`, tetapi frontend tidak pernah mengirim field tersebut. Vendor juga masih berupa free text.
-
-### Tindakan
-
-Hubungkan asset acquisition dengan:
+lalu pastikan resolved path benar-benar berada di dalam:
 
 ```text
-Purchase Order
-Goods Receipt
-Supplier
-Invoice
+uploads/pr-attachments
 ```
 
-### Acceptance criteria
-
-* Asset dapat dibuat dari item GRN yang dikategorikan sebagai fixed asset.
-* Harga, vendor, dan tanggal perolehan diambil dari transaksi sumber.
-* Satu item procurement tidak dapat dikapitalisasi dua kali.
-* Link menuju PO/GRN dapat dibuka dari asset detail.
+Lebih baik lagi client hanya mengirim **document ID**, bukan filesystem path.
 
 ---
 
-## AST-018 — Belum ada location, custodian, dan transfer history
+# PROC-R12 — `received_by` GRN DAPAT DIISI USER LAIN
 
-**Severity:** P2 — Medium
-**Status:** Open
+**Severity: P2 — Medium**
+**Status: OPEN**
 
-Perubahan `location` dan `production_line_id` hanya menimpa nilai lama.
-
-Belum tersedia:
-
-* Site
-* Department
-* Cost center
-* Custodian atau PIC
-* Transfer date
-* Transfer reason
-* Approved by
-* Transfer history
-
-### Tindakan
-
-Tambahkan tabel:
+GRN create menggunakan:
 
 ```text
-asset_assignments
-asset_transfers
+received_by dari body
+OR
+user dari token
 ```
 
-### Acceptance criteria
+Jika `received_by` berisi user valid lain, backend menerimanya.
 
-* Lokasi terkini dapat diketahui.
-* Riwayat perpindahan tidak hilang.
-* Setiap aset memiliki PIC atau unit penanggung jawab.
-* Transfer harus disetujui sesuai permission.
+Artinya user A secara teknis dapat membuat GRN yang tercatat:
 
----
+```text
+received_by = User B
+```
 
-## AST-019 — UI master belum lengkap
+### Recommended
 
-**Severity:** P3 — Low/Medium
-**Status:** Open
+Pisahkan:
 
-Backend memiliki endpoint update Production Line dan P&ID, tetapi frontend saat ini terutama menyediakan tambah dan hapus. Tidak ada form edit yang jelas.
+```text
+created_by   = selalu dari token
+received_by  = actual receiver
+```
 
-Asset detail juga belum menyediakan pilihan P&ID yang aman saat memindahkan aset.
-
-### Acceptance criteria
-
-* Production Line dapat diedit dan dinonaktifkan.
-* P&ID dapat diedit dan dinonaktifkan.
-* Asset dapat dipindahkan ke P&ID lain melalui proses transfer.
-* Semua tombol mengikuti permission user.
+Jika `received_by` boleh berbeda, harus ada permission khusus atau business rule eksplisit.
 
 ---
 
-## AST-020 — Belum ada automated test khusus Asset Management
+# PROC-R13 — MULTIPLE/PARTIAL RECEIPT BELUM DIDUKUNG
 
-**Severity:** P1 — High
-**Status:** Open
+**Severity: P2 — Business Gap**
+**Status: NEED BUSINESS DECISION**
 
-Test yang masuk repository masih berfokus pada authentication, mobile scope, WebAuthn, Material Request, dan endpoint security. Belum terdapat test Asset Management.
+Sekarang satu PO hanya boleh memiliki satu active GRN. Test juga secara eksplisit mengikuti rule tersebut.
 
-### Minimum test
+Untuk Procurement nyata sering terjadi:
 
-1. Create asset berhasil.
-2. Concurrent create tidak menghasilkan duplicate asset code.
-3. Edit nama tidak menghapus P&ID dan spec.
-4. Straight-line depreciation benar.
-5. Declining-balance benar atau ditolak jika belum didukung.
-6. Non-depreciable asset menghasilkan depresiasi nol.
-7. Capital addition memperbarui basis.
-8. Disposed asset berhenti terdepresiasi.
-9. Viewer tidak dapat membuat atau menghapus aset.
-10. Upload file berbahaya ditolak.
-11. Download membutuhkan autentikasi.
-12. Hard delete aset aktif ditolak.
-13. Master yang sedang digunakan tidak dapat dihapus.
-14. Invalid numeric dan date menerima HTTP `400`.
+```text
+PO qty 100
 
----
+Delivery 1 = 30
+Delivery 2 = 40
+Delivery 3 = 30
+```
 
-# 5. Urutan Implementasi
+Model saat ini tidak mendukung pola tersebut secara natural.
 
-## Sprint Asset 1 — Correctness dan Security
+### Recommended To-Be
 
-1. AST-001 — RBAC
-2. AST-002 — Preserve P&ID dan spec
-3. AST-007 — Perbaiki download
-4. AST-008 — Amankan upload
-5. AST-009 — Atomic asset code
-6. AST-014 — Backend validation
-7. AST-020 — Automated test dasar
+```text
+PO Item
+Ordered Qty: 100
 
-## Sprint Asset 2 — Financial Asset
+GRN #1: 30
+GRN #2: 40
+GRN #3: 30
 
-1. AST-003 — Metode depresiasi
-2. AST-004 — Capital addition
-3. AST-010 — Depreciable category dan in-service date
-4. AST-011 — Depreciation ledger dan period lock
-5. AST-006 — Disposal workflow
+Received total: 100
+Outstanding: 0
+```
 
-## Sprint Asset 3 — Lifecycle
-
-1. AST-005 — Soft delete dan audit trail
-2. AST-012 — Status state machine
-3. AST-013 — Master deletion safety
-4. AST-015 — Relasi dan uniqueness
-5. AST-017 — Procurement integration
-6. AST-018 — Custodian dan transfer
-
-## Sprint Asset 4 — Maintenance dan UX
-
-1. AST-016 — Maintenance workflow
-2. AST-019 — Penyempurnaan UI master
-3. Pagination, search, filter, dan export
+Ini perlu keputusan business owner karena merupakan perluasan workflow, bukan bug teknis murni.
 
 ---
 
-# 6. Settlement Gate Modul Asset Management
+# STATUS HASIL REVISI
 
-Modul dapat dinyatakan **settled** apabila:
+## VERIFIED ✅
 
-| Gate               | Syarat                                         |
-| ------------------ | ---------------------------------------------- |
-| Security           | RBAC diterapkan pada seluruh endpoint asset    |
-| Data integrity     | Edit tidak menghapus relasi atau spec          |
-| Financial accuracy | Metode depresiasi dan basis kapitalisasi benar |
-| Lifecycle          | Disposal dan status memiliki aturan            |
-| Audit              | Aset aktif tidak dapat hard delete             |
-| Documents          | Upload dan download aman                       |
-| Concurrency        | Asset code aman terhadap request bersamaan     |
-| Validation         | Input invalid tidak masuk database             |
-| Testing            | Seluruh acceptance test utama lulus            |
-| Documentation      | Flowchart final sesuai perilaku aplikasi       |
+* GRN posting sekarang masuk `inventory_stocks`
+* repeated approval tidak double-post
+* stock receipt terakumulasi
+* PO partial update
+* PR partial update
+* GRN partial update
+* approver level realtime dari DB
+* PO soft delete
+* protection accidental empty items
+* mayoritas RBAC
+
+## PARTIAL ⚠️
+
+* Sequential document numbering
+* RBAC Procurement
+* PO lifecycle
+* GRN lifecycle
+
+## OPEN BLOCKER 🔴
+
+1. Approved GRN delete corrupts inventory/audit
+2. Approved GRN reject tidak reverse stock
+3. GRN approval + stock posting tidak atomic
+4. PO creation tidak atomic
+5. PO/GRN numbering masih race-prone
+6. PO approval + AP schedule tidak atomic
+7. Reject tidak memeriksa downstream document
+8. PR masih hard delete
+9. Bid upload melewati RBAC
+10. Procurement upload belum secure
+11. Attachment deletion path validation lemah
 
 ---
 
-# 7. Architecture Code Matrix Sementara
+# PRIORITAS KE TIM DEVELOPMENT
 
-| Component                  | Tanggung Jawab Saat Ini                                         | Catatan Review                                           |
-| -------------------------- | --------------------------------------------------------------- | -------------------------------------------------------- |
-| `database.ts`              | Membuat tabel Asset Management dan seed category                | Perlu constraint, ledger, assignment, transfer, disposal |
-| `asset.routes.ts`          | Seluruh API, depresiasi, dokumen, maintenance, purchase history | Terlalu banyak tanggung jawab dalam satu route           |
-| `auth.ts`                  | JWT admin dan download auth                                     | Belum ada permission guard                               |
-| `AssetList.vue`            | Register, KPI, create, delete                                   | Delete terlalu mudah; belum ada pagination               |
-| `ProductionLines.vue`      | Tambah dan hapus production line                                | Belum ada edit/deactivate                                |
-| `ProductionLineDetail.vue` | Daftar dan tambah P&ID                                          | Delete belum aman                                        |
-| `PnidDetail.vue`           | Daftar dan quick-create asset                                   | Quick-create belum menangkap data aset lengkap           |
-| `AssetDetail.vue`          | Edit, dokumen, maintenance, purchase history                    | Risiko menghapus P&ID/spec; download bermasalah          |
-| `router/index.ts`          | Routing halaman Asset Management                                | Hanya memeriksa login, belum permission                  |
+## P0 — Kerjakan Pertama
+
+```text
+PROC-R01 GRN deletion
+PROC-R02 approved GRN rejection
+PROC-R03 atomic GRN approval/posting
+```
+
+Karena tiga area tersebut dapat menghasilkan:
+
+```text
+stok ≠ dokumen procurement
+```
 
 ---
 
-# 8. Keputusan Review
+## P1 — Sesudah P0
 
-**Status: CHANGES REQUIRED**
+```text
+PROC-R04 PO transaction
+PROC-R05 numbering
+PROC-R06 PO approval/AP atomic
+PROC-R07 downstream lifecycle guards
+PROC-R08 PR soft delete
+PROC-R09 RBAC upload
+PROC-R10 upload security
+PROC-R11 attachment path protection
+```
 
-Modul Asset Management sudah memiliki fondasi yang cukup baik untuk Asset Register dasar, tetapi belum siap dijadikan modul final karena terdapat risiko:
+---
 
-* Kehilangan relasi dan spesifikasi
-* Kesalahan depresiasi
-* Perubahan nilai historis
-* Penghapusan audit trail
-* Dokumen tidak aman
-* Tidak adanya RBAC
-* Tidak adanya test khusus asset
+# TEST REGRESSION WAJIB
 
-Manual book final belum dikunci pada tahap ini. Setelah seluruh blocker selesai dan telah diverifikasi ulang, dokumentasi modul akan ditutup dengan:
+Tambahkan minimal:
 
-1. Flowchart final
-2. Role and permission matrix
-3. Business rule table
-4. Database relationship/ERD
-5. API reference
-6. Architecture code table
-7. User manual langkah demi langkah
-8. Troubleshooting
-9. Acceptance test result
+```text
+01 Approved GRN tidak dapat DELETE langsung
+02 Approved GRN tidak dapat REJECT langsung
+03 GRN reversal mengurangi stok dengan tepat
+04 Failed stock posting → approval rollback
+05 Failed PO item insert → PO header rollback
+06 Failed AP creation → PO approval rollback
+07 20 concurrent PO → unique numbers
+08 20 concurrent GRN → unique numbers
+09 PR dengan PO tidak dapat reject
+10 PO dengan GRN tidak dapat reject
+11 user tanpa procurement permission tidak dapat upload bid
+12 HTML/SVG/executable upload ditolak
+13 path traversal attachment delete ditolak
+```
+
+---
+
+# FINAL REVIEW DECISION
+
+**PROCUREMENT = NOT SETTLED**
+
+Perbaikan development sejauh ini jelas meningkatkan modul secara signifikan, terutama masalah utama GRN yang sebelumnya tidak pernah menambah stok.
+
+Namun sebelum lanjut ke final manual/module settlement, **integritas antara GRN → Inventory harus dikunci dulu**, karena saat ini jalur create/approve sudah dibenahi tetapi jalur **reject/delete/reversal masih memakai logika lama**.
+
+Setelah P0 di atas selesai, lakukan re-review Procurement lagi sebelum mengerjakan enhancement lain.
+
+---
+
+# TANGGAPAN TIM DEVELOPMENT
+
+## P0 — selesai, siap re-review
+
+| Item | Status |
+|---|---|
+| PROC-R01 delete approved GRN merusak stok/audit | ✅ Diterapkan |
+| PROC-R02 approved GRN di-reject tanpa reversal | ✅ Diterapkan |
+| PROC-R03 approval + posting belum atomic | ✅ Diterapkan |
+
+Ketiganya diverifikasi ulang terhadap source sebelum dikerjakan, dan ketiganya
+benar. Tidak ada yang disanggah.
+
+Regression test yang diminta, nomor 01–04 dari daftar reviewer, sudah masuk
+`backend/tests/procurement.ts` bagian 11–13:
+
+```
+01 Approved GRN tidak dapat DELETE langsung      ✅
+02 Approved GRN tidak dapat REJECT langsung      ✅
+03 GRN reversal mengurangi stok dengan tepat     ✅
+04 Failed stock posting → approval rollback      ✅
+```
+
+Suite procurement naik 85 → 106 kasus; `npm run test:all` **425 lulus, 0 gagal**.
+`npx tsc --noEmit` dan `npm run build` (frontend) bersih.
+
+## P1 — belum dikerjakan
+
+R04, R05, R06, R07, R08, R09, R10, R11 masih terbuka. Sesuai arahan reviewer
+sendiri ("setelah P0 selesai, lakukan re-review dulu"), P1 belum disentuh supaya
+tidak menumpuk perubahan sebelum P0 divalidasi ulang.
+
+Catatan awal untuk memudahkan re-review:
+
+- **R05** benar, dan sebagian klaim kami sebelumnya memang kelewat luas — hanya
+  PR yang lewat `withDocumentNumber()`; PO, auto-generate PO, dan GRN masih
+  memanggil `nextSequentialCode()` langsung.
+- **R09** benar: endpoint upload bid memang satu-satunya yang lolos dari sapuan
+  RBAC kemarin.
+- **R13** butuh keputusan business owner, akan kami teruskan ke user — bukan
+  sesuatu yang layak kami putuskan sendiri.
+
+## Catatan operasional (di luar review)
+
+Modul ini live. Perubahan P0 di atas **belum di-deploy**: kredensial database
+produksi diganti di luar siklus development (`password_last_changed`
+2026-08-10 04:46 UTC) sementara `.env` di server masih memuat yang lama.
+Aplikasi sekarang hidup menumpang koneksi pool lama; `deploy-blackbox.sh`
+diakhiri `pm2 restart`, jadi deploy sebelum `.env` dibetulkan akan mematikan
+produksi. Sudah dilaporkan ke user, menunggu tindak lanjut.
