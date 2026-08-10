@@ -277,9 +277,17 @@ async function createAsset() {
 }
 
 async function deleteAsset(a: any) {
-  if (!confirm(`Hapus aset "${a.name}"? Data dokumen, riwayat perbaikan & pembelian ikut terhapus.`)) return;
+  // Penghapusan kini logical (AST-005): dokumen, maintenance, dan riwayat
+  // finansialnya TETAP tersimpan dan asetnya bisa dipulihkan. Teks lama
+  // menjanjikan penghapusan permanen — itu sudah tidak benar.
+  const reason = prompt(
+    `Hapus aset "${a.name}" dari daftar?\n\n` +
+    'Dokumen, riwayat perbaikan, dan riwayat pembelian TETAP tersimpan, ' +
+    'dan aset ini bisa dipulihkan kembali.\n\nAlasan penghapusan:'
+  );
+  if (reason === null) return;
   try {
-    await api.delete(`/assets/${a.id}`);
+    await api.delete(`/assets/${a.id}`, { data: { reason: reason || null } });
     await loadAll();
   } catch (e: any) {
     alert(e?.response?.data?.error || 'Gagal menghapus aset');

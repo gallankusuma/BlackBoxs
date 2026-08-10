@@ -134,10 +134,37 @@ router.put('/production-lines/:id', authMiddleware, requirePermission('assets.ma
   }
 });
 
+// AST-013 — master dinonaktifkan, bukan dihapus permanen, dan hanya kalau
+// sudah tidak dipakai. Menghapus line yang masih punya aset membuat aset
+// tersebut kehilangan induknya, dan histori lama jadi tidak bisa dibaca.
 router.delete('/production-lines/:id', authMiddleware, requirePermission('assets.master.manage', 'assets.manage'), async (req: Request, res: Response) => {
   try {
-    await dbRun('DELETE FROM production_lines WHERE id = ?', [req.params.id]);
-    res.json({ message: 'Deleted' });
+    const line: any = await dbGet('SELECT id, is_active FROM production_lines WHERE id = ?', [req.params.id]);
+    if (!line) return res.status(404).json({ error: 'Production line tidak ditemukan' });
+
+    const usage: any = await dbGet(
+      `SELECT
+        (SELECT COUNT(*) FROM assets WHERE production_line_id = ? AND is_deleted = 0) AS assets,
+        (SELECT COUNT(*) FROM pnids WHERE production_line_id = ? AND is_active = 1) AS pnids`,
+      [req.params.id, req.params.id]
+    );
+    const assetCount = Number(usage?.assets || 0);
+    const pnidCount = Number(usage?.pnids || 0);
+
+    if (assetCount > 0 || pnidCount > 0) {
+      return res.status(409).json({
+        error: 'Production line masih dipakai dan tidak bisa dinonaktifkan',
+        assets: assetCount,
+        pnids: pnidCount,
+        hint: assetCount > 0
+          ? `Pindahkan dulu ${assetCount} aset ke line lain`
+          : `Nonaktifkan dulu ${pnidCount} P&ID di bawahnya`,
+        code: 'MASTER_IN_USE',
+      });
+    }
+
+    await dbRun('UPDATE production_lines SET is_active = 0 WHERE id = ?', [req.params.id]);
+    res.json({ message: 'Production line dinonaktifkan' });
   } catch (error: any) {
     serverError(res, 'asset', error);
   }
@@ -147,7 +174,7 @@ router.delete('/production-lines/:id', authMiddleware, requirePermission('assets
 router.get('/production-lines/:lineId/pnids', authMiddleware, requirePermission('assets.view', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     const rows = await dbAll(
-      `SELECT p.*, (SELECT COUNT(*) FROM assets a WHERE a.pnid_id = p.id) as asset_count
+      `SELECT p.*, (SELECT COUNT(*) FROM assets a WHERE a.pnid_id = p.id AND a.is_deleted = 0) as asset_count
        FROM pnids p WHERE p.production_line_id = ? AND p.is_active = 1 ORDER BY p.code`,
       [req.params.lineId]
     );
@@ -199,11 +226,39 @@ router.put('/pnids/:id', authMiddleware, requirePermission('assets.master.manage
   }
 });
 
+// Dulu dua query terpisah tanpa transaction: kalau query kedua gagal, aset
+// sudah terlanjur terlepas dari P&ID yang ternyata masih ada.
 router.delete('/pnids/:id', authMiddleware, requirePermission('assets.master.manage', 'assets.manage'), async (req: Request, res: Response) => {
   try {
-    await dbRun('UPDATE assets SET pnid_id = NULL WHERE pnid_id = ?', [req.params.id]);
-    await dbRun('DELETE FROM pnids WHERE id = ?', [req.params.id]);
-    res.json({ message: 'Deleted' });
+    const pnid: any = await dbGet('SELECT id FROM pnids WHERE id = ?', [req.params.id]);
+    if (!pnid) return res.status(404).json({ error: 'P&ID tidak ditemukan' });
+
+    const usage: any = await dbGet(
+      'SELECT COUNT(*) AS c FROM assets WHERE pnid_id = ? AND is_deleted = 0', [req.params.id]
+    );
+    const assetCount = Number(usage?.c || 0);
+
+    // Melepas aset dari P&ID adalah kehilangan informasi, jadi harus disengaja
+    if (assetCount > 0 && req.query.detach_assets !== '1') {
+      return res.status(409).json({
+        error: `P&ID ini masih dipakai ${assetCount} aset`,
+        assets: assetCount,
+        hint: 'Pindahkan asetnya dulu, atau ulangi dengan ?detach_assets=1 untuk melepaskannya',
+        code: 'MASTER_IN_USE',
+      });
+    }
+
+    await withTransaction(async tx => {
+      if (assetCount > 0) {
+        await tx.run('UPDATE assets SET pnid_id = NULL WHERE pnid_id = ?', [req.params.id]);
+      }
+      await tx.run('UPDATE pnids SET is_active = 0 WHERE id = ?', [req.params.id]);
+    });
+
+    res.json({
+      message: 'P&ID dinonaktifkan',
+      detached_assets: assetCount,
+    });
   } catch (error: any) {
     serverError(res, 'asset', error);
   }
@@ -215,7 +270,7 @@ router.get('/summary', authMiddleware, requirePermission('assets.view', 'assets.
     const rows = await dbAll(
       `SELECT a.*, c.name as category_name, c.code as category_code, c.is_depreciable
        FROM assets a JOIN asset_categories c ON a.category_id = c.id
-       WHERE a.status != 'disposed'`,
+       WHERE a.status != 'disposed' AND a.is_deleted = 0`,
       []
     );
     const summaryAdditions = await capitalAdditionsByAsset(rows.map((r: any) => r.id));
@@ -250,14 +305,18 @@ router.get('/summary', authMiddleware, requirePermission('assets.view', 'assets.
 router.get('/', authMiddleware, requirePermission('assets.view', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     const { category_id, category_code, production_line_id, pnid_id, status } = req.query;
-    const where: string[] = [];
+    // Aset yang di-soft-delete disembunyikan, kecuali diminta eksplisit lewat
+    // ?include_deleted=1 (untuk halaman pemulihan).
+    const where: string[] = [
+      req.query.include_deleted === '1' ? 'a.is_deleted = 1' : 'a.is_deleted = 0',
+    ];
     const params: any[] = [];
     if (category_id) { where.push('a.category_id = ?'); params.push(category_id); }
     if (category_code) { where.push('c.code = ?'); params.push(category_code); }
     if (production_line_id) { where.push('a.production_line_id = ?'); params.push(production_line_id); }
     if (pnid_id) { where.push('a.pnid_id = ?'); params.push(pnid_id); }
     if (status) { where.push('a.status = ?'); params.push(status); }
-    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const whereSql = `WHERE ${where.join(' AND ')}`;
 
     const rows = await dbAll(
       `SELECT a.*, c.name as category_name, c.code as category_code, c.is_depreciable,
@@ -292,7 +351,7 @@ router.get('/:id', authMiddleware, requirePermission('assets.view', 'assets.mana
        JOIN asset_categories c ON a.category_id = c.id
        LEFT JOIN production_lines p ON a.production_line_id = p.id
        LEFT JOIN pnids q ON a.pnid_id = q.id
-       WHERE a.id = ?`,
+       WHERE a.id = ? AND a.is_deleted = 0`,
       [req.params.id]
     );
     if (!row) return res.status(404).json({ error: 'Asset not found' });
@@ -393,7 +452,7 @@ const updateAsset = async (req: Request, res: Response) => {
 
     const has = (k: string) => Object.prototype.hasOwnProperty.call(req.body, k);
 
-    const current: any = await dbGet('SELECT * FROM assets WHERE id = ?', [req.params.id]);
+    const current: any = await dbGet('SELECT * FROM assets WHERE id = ? AND is_deleted = 0', [req.params.id]);
     if (!current) return res.status(404).json({ error: 'Aset tidak ditemukan' });
 
     const invalid = validateAssetInput(req.body, current);
@@ -488,10 +547,56 @@ const assetEditGuard = [authMiddleware, requirePermission('assets.edit', 'assets
 router.patch('/:id', ...assetEditGuard, updateAsset);
 router.put('/:id', ...assetEditGuard, updateAsset);
 
+// AST-005 — penghapusan aset kini LOGICAL, bukan permanen.
+// `DELETE FROM assets` ikut menghapus 5 tabel anak lewat ON DELETE CASCADE:
+// dokumen, maintenance, riwayat pembelian, ledger depresiasi, dan riwayat
+// disposal. Seluruh jejak finansial aset hilang dalam satu klik.
 router.delete('/:id', authMiddleware, requirePermission('assets.delete', 'assets.manage'), async (req: Request, res: Response) => {
   try {
-    await dbRun('DELETE FROM assets WHERE id = ?', [req.params.id]);
-    res.json({ message: 'Deleted' });
+    const asset: any = await dbGet('SELECT id, status, is_deleted FROM assets WHERE id = ?', [req.params.id]);
+    if (!asset) return res.status(404).json({ error: 'Aset tidak ditemukan' });
+    if (asset.is_deleted) return res.status(409).json({ error: 'Aset sudah dihapus' });
+
+    // Aset yang punya jejak finansial harus lewat disposal, bukan dihapus —
+    // menghapusnya membuat laporan periode sebelumnya tidak bisa direproduksi.
+    const history: any = await dbGet(
+      `SELECT
+        (SELECT COUNT(*) FROM asset_depreciation_ledger WHERE asset_id = ?) AS ledger,
+        (SELECT COUNT(*) FROM asset_disposals WHERE asset_id = ? AND status = 'approved') AS disposals`,
+      [req.params.id, req.params.id]
+    );
+    if (Number(history?.ledger || 0) > 0) {
+      return res.status(409).json({
+        error: 'Aset ini sudah masuk ledger depresiasi periode tertutup dan tidak boleh dihapus',
+        hint: 'Gunakan alur disposal bila aset sudah tidak dipakai',
+        code: 'HAS_POSTED_LEDGER',
+      });
+    }
+
+    await dbRun(
+      `UPDATE assets SET is_deleted = 1, deleted_at = NOW(), deleted_by = ?, deletion_reason = ?
+       WHERE id = ?`,
+      [(req as any).user?.userId || null, req.body?.reason || null, req.params.id]
+    );
+    res.json({ message: 'Aset dihapus (logical). Dokumen, maintenance, dan riwayat finansialnya tetap tersimpan.' });
+  } catch (error: any) {
+    serverError(res, 'asset', error);
+  }
+});
+
+// POST /assets/:id/restore — pulihkan aset yang dihapus
+router.post('/:id/restore', authMiddleware, requirePermission('assets.delete', 'assets.manage'), async (req: Request, res: Response) => {
+  try {
+    const asset: any = await dbGet('SELECT id, is_deleted FROM assets WHERE id = ?', [req.params.id]);
+    if (!asset) return res.status(404).json({ error: 'Aset tidak ditemukan' });
+    if (!asset.is_deleted) return res.status(409).json({ error: 'Aset tidak dalam keadaan terhapus' });
+
+    await dbRun(
+      `UPDATE assets SET is_deleted = 0, deleted_at = NULL, deleted_by = NULL, deletion_reason = NULL
+       WHERE id = ?`,
+      [req.params.id]
+    );
+    res.json({ message: 'Aset dipulihkan' });
   } catch (error: any) {
     serverError(res, 'asset', error);
   }
@@ -547,7 +652,7 @@ router.post('/:id/documents', authMiddleware, requirePermission('assets.document
     const { originalname, mimetype, buffer, size } = req.file;
 
     // Aset harus ada dulu — mencegah dokumen yatim untuk asset_id ngawur
-    const asset = await dbGet('SELECT id FROM assets WHERE id = ?', [req.params.id]);
+    const asset = await dbGet('SELECT id FROM assets WHERE id = ? AND is_deleted = 0', [req.params.id]);
     if (!asset) return res.status(404).json({ error: 'Aset tidak ditemukan' });
 
     const check = validateUpload(originalname, mimetype, buffer);
@@ -629,7 +734,7 @@ router.get('/:id/maintenance', authMiddleware, requirePermission('assets.mainten
 router.post('/:id/maintenance', authMiddleware, requirePermission('assets.maintenance.manage', 'assets.manage'), async (req: Request, res: Response) => {
   try {
     // Child record untuk aset yang tidak ada harus 404, bukan 500 dari FK
-    const asset = await dbGet('SELECT id FROM assets WHERE id = ?', [req.params.id]);
+    const asset = await dbGet('SELECT id FROM assets WHERE id = ? AND is_deleted = 0', [req.params.id]);
     if (!asset) return res.status(404).json({ error: 'Aset tidak ditemukan' });
 
     const invalidMaintenance = validateMaintenanceInput(req.body);
@@ -692,7 +797,7 @@ router.get('/:id/purchase-history', authMiddleware, requirePermission('assets.fi
 
 router.post('/:id/purchase-history', authMiddleware, requirePermission('assets.financial.manage', 'assets.manage'), async (req: Request, res: Response) => {
   try {
-    const asset = await dbGet('SELECT id FROM assets WHERE id = ?', [req.params.id]);
+    const asset = await dbGet('SELECT id FROM assets WHERE id = ? AND is_deleted = 0', [req.params.id]);
     if (!asset) return res.status(404).json({ error: 'Aset tidak ditemukan' });
 
     const invalidEntry = validatePurchaseHistoryInput(req.body);
@@ -759,7 +864,7 @@ const DISPOSAL_METHODS_LIST = ['sold', 'scrapped', 'donated', 'traded_in', 'lost
 async function bookValueAt(assetId: number, date: string): Promise<number> {
   const row: any = await dbGet(
     `SELECT a.*, c.is_depreciable FROM assets a
-     JOIN asset_categories c ON a.category_id = c.id WHERE a.id = ?`,
+     JOIN asset_categories c ON a.category_id = c.id WHERE a.id = ? AND a.is_deleted = 0`,
     [assetId]
   );
   if (!row) return 0;
@@ -794,7 +899,7 @@ router.get('/:id/disposals', authMiddleware, requirePermission('assets.view', 'a
 router.post('/:id/disposal-request', authMiddleware, requirePermission('assets.dispose', 'assets.manage'),
   async (req: Request, res: Response) => {
   try {
-    const asset: any = await dbGet('SELECT id, status FROM assets WHERE id = ?', [req.params.id]);
+    const asset: any = await dbGet('SELECT id, status FROM assets WHERE id = ? AND is_deleted = 0', [req.params.id]);
     if (!asset) return res.status(404).json({ error: 'Aset tidak ditemukan' });
     if (asset.status === 'disposed') return res.status(409).json({ error: 'Aset sudah disposed' });
     if (asset.status === 'disposal_requested') {
@@ -1016,7 +1121,8 @@ router.post('/depreciation/periods/close', authMiddleware, requirePermission('as
     }
 
     const assets = await dbAll(
-      `SELECT a.*, c.is_depreciable FROM assets a JOIN asset_categories c ON a.category_id = c.id`
+      `SELECT a.*, c.is_depreciable FROM assets a JOIN asset_categories c ON a.category_id = c.id
+       WHERE a.is_deleted = 0`
     ) as any[];
     const additions = await capitalAdditionsByAsset(assets.map(a => a.id));
     const userId = (req as any).user?.userId || null;

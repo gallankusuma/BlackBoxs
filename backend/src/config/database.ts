@@ -954,6 +954,29 @@ const ensureDepreciationLedgerSchema = async (connection: any) => {
   console.log('✅ Ledger depresiasi & period lock ensured');
 };
 
+// ==================== SOFT DELETE ASET & MASTER (AST-005, AST-013) ====================
+// `DELETE FROM assets` menghapus permanen, dan lima tabel anak ikut terhapus
+// lewat ON DELETE CASCADE: dokumen, maintenance, riwayat pembelian, ledger
+// depresiasi, dan riwayat disposal. Seluruh jejak finansial aset hilang dalam
+// satu klik, tanpa bisa dipulihkan.
+//
+// Aman untuk sistem berjalan: kolom baru default 0 (tidak terhapus), jadi
+// seluruh aset yang ada sekarang tetap tampil seperti biasa.
+const ensureSoftDeleteSchema = async (connection: any) => {
+  const statements = [
+    `ALTER TABLE assets ADD COLUMN IF NOT EXISTS is_deleted TINYINT(1) NOT NULL DEFAULT 0`,
+    `ALTER TABLE assets ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP NULL`,
+    `ALTER TABLE assets ADD COLUMN IF NOT EXISTS deleted_by INT NULL`,
+    `ALTER TABLE assets ADD COLUMN IF NOT EXISTS deletion_reason TEXT NULL`,
+    `CREATE INDEX idx_assets_is_deleted ON assets (is_deleted)`,
+  ];
+
+  for (const statement of statements) {
+    await execSchemaEnsure(connection, statement);
+  }
+  console.log('✅ Soft delete aset ensured');
+};
+
 // ==================== DISPOSAL WORKFLOW (AST-006) ====================
 // Disposal sebelumnya hanya berupa mengubah status menjadi 'disposed' — tanpa
 // alasan, tanpa persetujuan, tanpa nilai jual, dan tanpa perhitungan gain/loss.
@@ -1257,6 +1280,7 @@ export async function initializeDatabase() {
     await ensureMobilePinSchema(connection);
     await ensureAssetDepreciationSchema(connection);
     await ensureDepreciationLedgerSchema(connection);
+    await ensureSoftDeleteSchema(connection);
     await ensureDisposalSchema(connection);
     await ensurePermissionCatalog(connection);
     await ensureMasterUserRow(connection);

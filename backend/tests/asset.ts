@@ -521,7 +521,76 @@ async function main() {
 
   await call('DELETE', `/assets/${dateId}`, undefined, master);
 
-  console.log('\n14. Bersih-bersih');
+  console.log('\n14. AST-005 — penghapusan aset tidak lagi permanen');
+  const delAsset = await call('POST', '/assets', {
+    category_id: machCat.id, name: 'Mesin Hapus',
+    purchase_date: '2020-01-01', purchase_price: 50_000_000, useful_life_years: 5,
+  }, master);
+  const delId = delAsset.json?.id;
+
+  // Beri jejak: dokumen + maintenance + riwayat pembelian
+  const fd = new FormData();
+  fd.append('file', new Blob([Buffer.from('%PDF-1.4\ntest', 'latin1')], { type: 'application/pdf' }), 'bukti.pdf');
+  await fetch(`${API}/assets/${delId}/documents`, {
+    method: 'POST', headers: { Authorization: `Bearer ${master}` }, body: fd,
+  });
+  await call('POST', `/assets/${delId}/maintenance`, { performed_at: '2024-01-01', cost: 500_000 }, master);
+  await call('POST', `/assets/${delId}/purchase-history`, { amount: 1_000_000, purchase_date: '2024-01-01' }, master);
+
+  const del = await call('DELETE', `/assets/${delId}`, { reason: 'Salah input' }, master);
+  chk('penghapusan berhasil', del.status, 200);
+  chk('aset hilang dari daftar', (await call('GET', `/assets/${delId}`, undefined, master)).status, 404);
+  chk('menghapus dua kali ditolak', (await call('DELETE', `/assets/${delId}`, {}, master)).status, 409);
+
+  // Inti AST-005: jejaknya TIDAK ikut terhapus
+  const rows: any = await call('GET', `/assets?include_deleted=1`, undefined, master);
+  const deletedRow = (rows.json?.data || []).find((a: any) => a.id === delId);
+  chk('aset masih ada di database', !!deletedRow, true);
+  chk('alasan penghapusan tercatat', deletedRow?.deletion_reason, 'Salah input');
+  chk('siapa yang menghapus tercatat', !!deletedRow?.deleted_by, true);
+
+  const restore = await call('POST', `/assets/${delId}/restore`, {}, master);
+  chk('aset bisa dipulihkan', restore.status, 200);
+  const restored = (await call('GET', `/assets/${delId}`, undefined, master)).json?.data;
+  chk('aset kembali muncul', !!restored, true);
+  chk('dokumen tetap utuh',
+    ((await call('GET', `/assets/${delId}/documents`, undefined, master)).json?.data || []).length, 1);
+  chk('maintenance tetap utuh',
+    ((await call('GET', `/assets/${delId}/maintenance`, undefined, master)).json?.data || []).length, 1);
+  chk('riwayat pembelian tetap utuh',
+    ((await call('GET', `/assets/${delId}/purchase-history`, undefined, master)).json?.data || []).length, 1);
+
+  await call('DELETE', `/assets/${delId}`, { reason: 'bersih-bersih' }, master);
+
+  console.log('\n15. AST-013 — menghapus master yang masih dipakai');
+  const lineC = await call('POST', '/assets/production-lines',
+    { code: `LN${stamp}C`, name: `Line Uji C ${stamp}` }, master);
+  const pnidC = await call('POST', `/assets/production-lines/${lineC.json?.id}/pnids`,
+    { code: `PID-${stamp}C`, title: 'P&ID Uji C' }, master);
+  const attached = await call('POST', '/assets', {
+    category_id: machCat.id, name: 'Aset Menempel', pnid_id: pnidC.json?.id,
+  }, master);
+
+  const lineBusy = await call('DELETE', `/assets/production-lines/${lineC.json?.id}`, undefined, master);
+  chk('line yang masih dipakai ditolak', lineBusy.status, 409);
+  chk('jumlah terdampak disebutkan', lineBusy.json?.assets >= 1, true);
+
+  const pnidBusy = await call('DELETE', `/assets/pnids/${pnidC.json?.id}`, undefined, master);
+  chk('P&ID yang masih dipakai ditolak', pnidBusy.status, 409);
+  chk('jumlah aset disebutkan', Number(pnidBusy.json?.assets), 1);
+
+  // Lepas asetnya secara sengaja
+  const detach = await call('DELETE', `/assets/pnids/${pnidC.json?.id}?detach_assets=1`, undefined, master);
+  chk('bisa dilepas kalau disengaja', detach.status, 200);
+  chk('jumlah yang dilepas dilaporkan', Number(detach.json?.detached_assets), 1);
+  chk('aset tetap ada, hanya lepas dari P&ID',
+    (await call('GET', `/assets/${attached.json?.id}`, undefined, master)).json?.data?.pnid_id, null);
+
+  await call('DELETE', `/assets/${attached.json?.id}`, { reason: 'bersih-bersih' }, master);
+  chk('line bisa dinonaktifkan setelah kosong',
+    (await call('DELETE', `/assets/production-lines/${lineC.json?.id}`, undefined, master)).status, 200);
+
+  console.log('\n16. Bersih-bersih');
   await call('DELETE', `/assets/${assetId}`, undefined, master);
   await call('DELETE', `/assets/pnids/${pnidId}`, undefined, master);
   await call('DELETE', `/assets/pnids/${pnid2.json?.id}`, undefined, master);

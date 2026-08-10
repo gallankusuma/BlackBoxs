@@ -293,11 +293,43 @@ Ada tes regresinya, termasuk simulasi siklus buka → simpan yang dulu menggeser
 
 ---
 
-## Sisa: Sprint Asset 3 dan 4
+# Sprint Asset 3
 
-**Status: Terbuka.** AST-005, 012, 013, 015, 016, 017, 018, 019.
+Urutan dalam sprint ini disusun sendiri berdasarkan tingkat kerusakan yang sedang berjalan, bukan urutan nomor: **AST-005 + AST-013 lebih dulu** karena keduanya soal penghapusan data yang tidak bisa dipulihkan.
 
-**Sprint Asset 1 dan 2 tuntas.**
+## AST-005 — Penghapusan permanen merusak audit trail
+
+**Status: Diterapkan** — [config/database.ts](backend/src/config/database.ts), [asset.routes.ts](backend/src/routes/asset.routes.ts), [AssetList.vue](frontend/src/views/AssetList.vue)
+
+Diverifikasi ke database: `DELETE FROM assets` memicu `ON DELETE CASCADE` pada **lima tabel** — `asset_documents`, `asset_maintenance_logs`, `asset_purchase_history`, `asset_disposals`, dan `asset_depreciation_ledger`. Seluruh jejak finansial aset hilang permanen dalam satu klik. Ledger depresiasi ikut terhapus membuat laporan periode tertutup tidak lagi bisa direproduksi.
+
+Penghapusan sekarang **logical**: `is_deleted`, `deleted_at`, `deleted_by`, `deletion_reason`. Aset hilang dari daftar dan detailnya membalas 404, tapi seluruh data anaknya utuh dan asetnya bisa dipulihkan lewat `POST /assets/:id/restore`.
+
+Satu penolakan keras dipertahankan: aset yang **sudah masuk ledger periode tertutup tidak boleh dihapus sama sekali** (`409`), karena menghapusnya membuat laporan periode itu tidak konsisten. Diarahkan ke alur disposal.
+
+Aman untuk sistem berjalan: kolom baru default `0`, jadi seluruh aset yang ada tetap tampil seperti biasa.
+
+Teks konfirmasi di UI juga diperbaiki — sebelumnya menjanjikan "dokumen, riwayat perbaikan & pembelian ikut terhapus", yang kini tidak benar lagi. Sekarang meminta alasan penghapusan.
+
+## AST-013 — Penghapusan Production Line dan P&ID belum aman
+
+**Status: Diterapkan** — [asset.routes.ts](backend/src/routes/asset.routes.ts)
+
+Dua masalah terpisah, keduanya ditutup:
+
+**Production line** dihapus tanpa memeriksa apakah masih dipakai. Sekarang dicek jumlah aset dan P&ID di bawahnya; kalau masih ada, dibalas `409` **beserta jumlahnya** dan saran tindakan. Kalau sudah kosong, master-nya **dinonaktifkan** (`is_active = 0`), bukan dihapus — supaya histori lama tetap bisa dibaca.
+
+**P&ID** dihapus lewat dua query tanpa transaction: melepas aset dari P&ID, lalu menghapus P&ID-nya. Kalau query kedua gagal, aset sudah terlanjur terlepas dari P&ID yang ternyata masih ada. Sekarang dibungkus `withTransaction`, dan melepas aset harus **disengaja** lewat `?detach_assets=1` — tanpa itu dibalas `409` beserta jumlah aset terdampak.
+
+Diverifikasi 20 kasus, termasuk: dokumen/maintenance/riwayat pembelian tetap utuh setelah aset dihapus lalu dipulihkan, dan master yang masih dipakai menolak dinonaktifkan sambil menyebut berapa yang terdampak.
+
+---
+
+## Sisa: Sprint Asset 3 (lanjutan) dan 4
+
+**Status: Terbuka.** AST-012, 015, 016, 017, 018, 019.
+
+Urutan berikutnya: **AST-012** (state machine status) → **AST-015** (unique constraint) → **AST-018** (custodian & transfer) → **AST-017** (integrasi procurement) → **AST-016** (maintenance workflow) → **AST-019** (UI master).
 
 ---
 
@@ -307,7 +339,7 @@ Ada tes regresinya, termasuk simulasi siklus buka → simpan yang dulu menggeser
 cd backend && npm run test:all
 ```
 
-289 kasus dalam 6 suite, semua lulus:
+308 kasus dalam 6 suite, semua lulus:
 
 | Suite | Kasus |
 |---|---|
@@ -315,7 +347,7 @@ cd backend && npm run test:all
 | `npm run test:http` | 36 |
 | `npm run test:pin` | 28 |
 | `npm run test:rbac` | 45 |
-| `npm run test:asset` | 135 |
+| `npm run test:asset` | 154 |
 | `npm run test:depreciation` | 26 |
 
 `tsc --noEmit` dan `vue-tsc --noEmit` bersih.
