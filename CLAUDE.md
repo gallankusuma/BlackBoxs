@@ -84,7 +84,15 @@ router.post('/', authMiddleware, requirePermission('admin.users.create'), handle
 - `user_level >= 10` (master) melewati semua pemeriksaan. Hanya master yang boleh memberikan level ≥ 10 ke user lain — tanpa batasan itu, pemegang `admin.users.edit` bisa mengangkat dirinya sendiri.
 - Role **Admin** dijamin selalu punya seluruh permission lewat `ensureAdminRoleHasAllPermissions()` saat boot. Kalau menambah permission baru di `ensure*Schema`, mapping ke Admin terjadi otomatis — tanpa ini, admin justru terkunci dari fitur yang baru diproteksi.
 
-Sudah ditegakkan di `user.routes.ts`, `role.routes.ts`, `permissions.routes.ts`. Modul lain (finance approve, HR payroll, procurement, inventory) **belum** — pekerjaan yang masih terbuka.
+Sudah ditegakkan di `user.routes.ts`, `role.routes.ts`, `permissions.routes.ts`, `asset.routes.ts`, dan `procurement.routes.ts`. Modul lain (finance approve, HR payroll, inventory) **belum** — pekerjaan yang masih terbuka.
+
+⚠️ **Endpoint approval procurement sengaja masih pakai `approverLevel()`, bukan `requirePermission`.** Role `Manager Finannce & Acc` di produksi (2 user aktif) tidak punya satu pun permission `procurement.*.approve*`; mereka menyetujui lewat `user_level`. Menggemboknya dengan permission akan langsung mencabut hak approve mereka. Urutan yang benar untuk memindahkannya: petakan dulu permission approve ke role di produksi → verifikasi → baru pasang `requirePermission`.
+
+Sebelum menggembok endpoint modul yang sudah live, **cek dulu apakah role produksi memang memegang permission-nya** — kalau tidak, user aktif langsung kena 403:
+
+```bash
+ssh root@76.13.22.155 "cd /var/www/erp-genjaya/backend && set -a && . ./.env && set +a && mysql -u \"\$DB_USER\" -p\"\$DB_PASSWORD\" \"\$DB_NAME\" -t -e \"SELECT u.username, u.user_level, r.name role, (SELECT COUNT(*) FROM role_permissions rp JOIN permissions p ON p.id=rp.permission_id WHERE rp.role_id=r.id) perms FROM users u LEFT JOIN roles r ON r.id=u.role_id WHERE u.is_active=1\""
+```
 
 Di frontend: desktop pakai `api` dari [lib/api.ts](frontend/src/lib/api.ts), mobile pakai `mobileApi` dari [lib/mobileApi.ts](frontend/src/lib/mobileApi.ts). **Jangan** lewatkan `/webauthn/auth/verify` ke `mobileApi` — endpoint itu membalas 401 saat sidik jari tidak cocok, dan interceptor akan salah mengartikannya sebagai sesi habis lalu menendang user ke login.
 

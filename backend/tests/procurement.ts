@@ -341,6 +341,48 @@ async function main() {
     (await call('PUT', `/procurement/purchase-orders/${poGuardId}?clear_items=1`, { items: [] }, master)).status, 200);
   chk('item terhapus setelah diminta eksplisit', await itemsOf(poGuardId), 0);
 
+  console.log('\n11. RBAC — token desktop tanpa permission procurement ditolak');
+  const plainRole = await call('POST', '/roles',
+    { code: `PROC${stamp}`, name: `ProcTest-${stamp}` }, master);
+  const plainEmail = `proc.plain.${stamp}@test.local`;
+  const plainUser = await call('POST', '/users', {
+    name: 'Tanpa Hak Procurement', email: plainEmail, password: 'secret123',
+    role_id: plainRole.json?.data?.id, user_level: 1,
+  }, master);
+  const plainToken: string = (await call('POST', '/auth/login',
+    { email: plainEmail, password: 'secret123' })).json?.token;
+  chk('user tanpa permission bisa login', !!plainToken, true);
+
+  for (const [label, method, path] of [
+    ['lihat daftar PO', 'GET', '/procurement/purchase-orders'],
+    ['buat PO', 'POST', '/procurement/purchase-orders'],
+    ['ubah PO', 'PUT', `/procurement/purchase-orders/${poGuardId}`],
+    ['hapus PO', 'DELETE', `/procurement/purchase-orders/${poGuardId}`],
+    ['lihat daftar PR', 'GET', '/procurement/purchase-requests'],
+    ['buat PR', 'POST', '/procurement/purchase-requests'],
+    ['lihat GRN', 'GET', '/procurement/goods-receipts'],
+    ['buat GRN', 'POST', '/procurement/goods-receipts'],
+    ['lihat vendor', 'GET', '/procurement/vendors'],
+    ['buat vendor', 'POST', '/procurement/vendors'],
+    ['harga vendor', 'GET', '/procurement/vendor-prices'],
+    ['riwayat procurement', 'GET', '/procurement/procurement-history'],
+  ] as const) {
+    chk(label, (await call(method, path, method === 'GET' ? undefined : {}, plainToken)).status, 403);
+  }
+
+  console.log('\n   Master tetap bisa — proteksi tidak mengunci yang berwenang');
+  for (const [label, path] of [
+    ['daftar PO', '/procurement/purchase-orders'],
+    ['daftar PR', '/procurement/purchase-requests'],
+    ['daftar GRN', '/procurement/goods-receipts'],
+    ['daftar vendor', '/procurement/vendors'],
+  ] as const) {
+    chk(`master → ${label}`, (await call('GET', path, undefined, master)).status, 200);
+  }
+
+  await call('DELETE', `/users/${plainUser.json?.data?.id}`, undefined, master);
+  await call('DELETE', `/roles/${plainRole.json?.data?.id}`, undefined, master);
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }
