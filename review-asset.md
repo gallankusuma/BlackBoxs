@@ -325,11 +325,36 @@ Diverifikasi 20 kasus, termasuk: dokumen/maintenance/riwayat pembelian tetap utu
 
 ---
 
+## AST-012 — Status lifecycle tidak divalidasi
+
+**Status: Diterapkan** — [utils/asset-validation.ts](backend/src/utils/asset-validation.ts), [asset.routes.ts](backend/src/routes/asset.routes.ts), [config/database.ts](backend/src/config/database.ts)
+
+State machine diterapkan sesuai daftar reviewer:
+
+| Dari | Boleh ke |
+|---|---|
+| `draft` | active |
+| `active` | idle, under_maintenance |
+| `idle` | active, under_maintenance |
+| `under_maintenance` | active, idle |
+| `disposal_requested` | — (hanya lewat alur disposal) |
+| `disposed` | — (hanya lewat pembatalan resmi) |
+
+Transisi tidak valid dibalas `409` beserta daftar transisi yang diperbolehkan. Dua kondisi tidak konsisten yang disebut reviewer juga ditutup: aset `disposed` tanpa tanggal disposal (sudah sejak AST-014), dan kebalikannya — **aset yang masih hidup tetapi punya tanggal disposal**, yang membuat depresiasi berhenti diam-diam.
+
+Tabel `asset_status_history` mencatat setiap perpindahan: dari status apa, ke apa, oleh siapa, kapan, beserta catatan opsional. Dibaca lewat `GET /assets/:id/status-history`.
+
+Satu catatan urutan pemeriksaan: guard alur disposal dan state machine sengaja dijalankan **sebelum** validasi field. Tanpa itu, mencoba mengaktifkan kembali aset disposed akan dibalas "aset aktif tidak boleh punya tanggal disposal" — benar secara teknis, tapi menyesatkan; yang dibutuhkan pengguna adalah arahan ke endpoint pembatalan.
+
+**Belum termasuk:** kaitan `under_maintenance` dengan work order maintenance. Acceptance criteria reviewer menulis "*dapat* terhubung", dan struktur work order-nya sendiri baru dibuat di AST-016 — jadi ditunda ke sana, bukan dilewati.
+
+---
+
 ## Sisa: Sprint Asset 3 (lanjutan) dan 4
 
-**Status: Terbuka.** AST-012, 015, 016, 017, 018, 019.
+**Status: Terbuka.** AST-015, 016, 017, 018, 019.
 
-Urutan berikutnya: **AST-012** (state machine status) → **AST-015** (unique constraint) → **AST-018** (custodian & transfer) → **AST-017** (integrasi procurement) → **AST-016** (maintenance workflow) → **AST-019** (UI master).
+⚠️ **Pengerjaan modul Asset Management dijeda di sini** atas arahan pemilik project — modul Procurement sudah live dan ada keluhan bug dari pengguna, jadi itu didahulukan. Sisa butir asset dilanjutkan setelahnya.
 
 ---
 
@@ -339,7 +364,7 @@ Urutan berikutnya: **AST-012** (state machine status) → **AST-015** (unique co
 cd backend && npm run test:all
 ```
 
-308 kasus dalam 6 suite, semua lulus:
+319 kasus dalam 6 suite, semua lulus:
 
 | Suite | Kasus |
 |---|---|
@@ -347,7 +372,7 @@ cd backend && npm run test:all
 | `npm run test:http` | 36 |
 | `npm run test:pin` | 28 |
 | `npm run test:rbac` | 45 |
-| `npm run test:asset` | 154 |
+| `npm run test:asset` | 165 |
 | `npm run test:depreciation` | 26 |
 
 `tsc --noEmit` dan `vue-tsc --noEmit` bersih.

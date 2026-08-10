@@ -6,7 +6,7 @@ import { dbAll, dbGet, dbRun, withTransaction } from '../config/database';
 import { authMiddleware } from '../middleware/auth';
 import { requirePermission } from '../middleware/permission';
 import { validateUpload, storeValidatedFile, removeStoredFile } from '../utils/file-validation';
-import { validateAssetInput, validateMaintenanceInput, validatePurchaseHistoryInput, serverError }
+import { validateAssetInput, validateMaintenanceInput, validatePurchaseHistoryInput, serverError, checkStatusTransition }
   from '../utils/asset-validation';
 import { calcDepreciation } from '../utils/depreciation';
 
@@ -455,14 +455,6 @@ const updateAsset = async (req: Request, res: Response) => {
     const current: any = await dbGet('SELECT * FROM assets WHERE id = ? AND is_deleted = 0', [req.params.id]);
     if (!current) return res.status(404).json({ error: 'Aset tidak ditemukan' });
 
-    const invalid = validateAssetInput(req.body, current);
-    if (invalid) return res.status(400).json({ error: invalid });
-
-    if (has('category_id') && category_id) {
-      const category = await dbGet('SELECT id FROM asset_categories WHERE id = ?', [category_id]);
-      if (!category) return res.status(404).json({ error: 'Kategori aset tidak ditemukan' });
-    }
-
     // AST-006 — disposal tidak lagi boleh dilakukan dengan sekadar mengubah
     // status. Tanpa alur permintaan + persetujuan, tidak ada alasan, nilai
     // jual, perhitungan gain/loss, maupun jejak siapa yang menyetujui.
@@ -487,7 +479,28 @@ const updateAsset = async (req: Request, res: Response) => {
           code: 'DISPOSAL_WORKFLOW_REQUIRED',
         });
       }
+
+      // AST-012 — perpindahan status harus masuk akal, bukan sekadar string
+      // apa pun yang dikirim klien.
+      const transitionError = checkStatusTransition(current.status, status);
+      if (transitionError) {
+        return res.status(409).json({
+          error: transitionError,
+          from: current.status,
+          to: status,
+          code: 'INVALID_STATUS_TRANSITION',
+        });
+      }
     }
+
+    const invalid = validateAssetInput(req.body, current);
+    if (invalid) return res.status(400).json({ error: invalid });
+
+    if (has('category_id') && category_id) {
+      const category = await dbGet('SELECT id FROM asset_categories WHERE id = ?', [category_id]);
+      if (!category) return res.status(404).json({ error: 'Kategori aset tidak ditemukan' });
+    }
+
 
     // PARTIAL UPDATE (AST-002). Dulu handler ini melakukan replace penuh dengan
     // fallback `|| default`, sehingga field yang tidak dikirim klien ikut
@@ -537,6 +550,17 @@ const updateAsset = async (req: Request, res: Response) => {
 
     values.push(req.params.id);
     await dbRun(`UPDATE assets SET ${fields.join(', ')} WHERE id = ?`, values);
+
+    // Jejak perubahan status (AST-012) — siapa, kapan, dari status apa
+    if (has('status') && status && status !== current.status) {
+      await dbRun(
+        `INSERT INTO asset_status_history (asset_id, from_status, to_status, note, changed_by)
+         VALUES (?, ?, ?, ?, ?)`,
+        [req.params.id, current.status, status, req.body.status_note || null,
+          (req as any).user?.userId || null]
+      );
+    }
+
     res.json({ message: 'Updated' });
   } catch (error: any) {
     serverError(res, 'asset', error);
@@ -853,6 +877,23 @@ router.delete('/purchase-history/:entryId', authMiddleware, requirePermission('a
 });
 
 
+
+// GET /assets/:id/status-history — jejak perubahan status (AST-012)
+router.get('/:id/status-history', authMiddleware, requirePermission('assets.view', 'assets.manage'),
+  async (req: Request, res: Response) => {
+  try {
+    const rows = await dbAll(
+      `SELECT h.*, u.full_name AS changed_by_name
+       FROM asset_status_history h
+       LEFT JOIN users u ON h.changed_by = u.id
+       WHERE h.asset_id = ? ORDER BY h.id DESC`,
+      [req.params.id]
+    );
+    res.json({ data: rows });
+  } catch (error: any) {
+    serverError(res, 'status-history', error);
+  }
+});
 
 // ── Disposal workflow (AST-006) ─────────────────────────────────────────
 // Alur: active → disposal_requested → approved (disposed) / rejected.

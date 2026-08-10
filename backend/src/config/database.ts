@@ -977,6 +977,31 @@ const ensureSoftDeleteSchema = async (connection: any) => {
   console.log('✅ Soft delete aset ensured');
 };
 
+// ==================== RIWAYAT PERUBAHAN STATUS ASET (AST-012) ====================
+// Status aset sebelumnya berpindah tanpa jejak: tidak ada catatan siapa yang
+// mengubah, kapan, dan dari status apa.
+const ensureAssetStatusHistorySchema = async (connection: any) => {
+  const statements = [
+    `CREATE TABLE IF NOT EXISTS asset_status_history (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      asset_id INT NOT NULL,
+      from_status VARCHAR(30) NULL,
+      to_status VARCHAR(30) NOT NULL,
+      note TEXT NULL,
+      changed_by INT NULL,
+      changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE,
+      FOREIGN KEY (changed_by) REFERENCES users(id) ON DELETE SET NULL,
+      INDEX idx_asset_status_history (asset_id, changed_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  ];
+
+  for (const statement of statements) {
+    await execSchemaEnsure(connection, statement);
+  }
+  console.log('✅ Riwayat status aset ensured');
+};
+
 // ==================== DISPOSAL WORKFLOW (AST-006) ====================
 // Disposal sebelumnya hanya berupa mengubah status menjadi 'disposed' — tanpa
 // alasan, tanpa persetujuan, tanpa nilai jual, dan tanpa perhitungan gain/loss.
@@ -1282,6 +1307,7 @@ export async function initializeDatabase() {
     await ensureDepreciationLedgerSchema(connection);
     await ensureSoftDeleteSchema(connection);
     await ensureDisposalSchema(connection);
+    await ensureAssetStatusHistorySchema(connection);
     await ensurePermissionCatalog(connection);
     await ensureMasterUserRow(connection);
     // Harus paling akhir: semua permission dari ensure* di atas sudah ada

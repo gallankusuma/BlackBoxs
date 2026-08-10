@@ -9,7 +9,39 @@ import { Response } from 'express';
  * pesan errornya ditulis untuk manusia.
  */
 
-export const ASSET_STATUSES = ['active', 'idle', 'under_maintenance', 'disposal_requested', 'disposed'] as const;
+export const ASSET_STATUSES = ['draft', 'active', 'idle', 'under_maintenance', 'disposal_requested', 'disposed'] as const;
+
+/**
+ * State machine status aset (AST-012).
+ *
+ * Sebelumnya backend menerima string status apa pun tanpa memeriksa apakah
+ * perpindahannya masuk akal — aset bisa langsung dari active ke disposed,
+ * atau disposed kembali jadi active.
+ *
+ * `disposal_requested` dan `disposed` sengaja TIDAK punya jalur masuk di sini:
+ * keduanya hanya boleh dicapai lewat alur disposal (AST-006), dan itu ditolak
+ * lebih dulu di handler dengan pesan yang mengarahkan ke endpoint yang benar.
+ */
+export const STATUS_TRANSITIONS: Record<string, string[]> = {
+  draft:              ['active'],
+  active:             ['idle', 'under_maintenance'],
+  idle:               ['active', 'under_maintenance'],
+  under_maintenance:  ['active', 'idle'],
+  disposal_requested: [],
+  disposed:           [],
+};
+
+export function checkStatusTransition(from: string, to: string): string | null {
+  if (from === to) return null;
+  const allowed = STATUS_TRANSITIONS[from];
+  if (!allowed) return `Status saat ini (${from}) tidak dikenal`;
+  if (!allowed.includes(to)) {
+    return allowed.length
+      ? `Aset berstatus ${from} hanya bisa berpindah ke: ${allowed.join(', ')}`
+      : `Aset berstatus ${from} tidak bisa diubah statusnya lewat edit biasa`;
+  }
+  return null;
+}
 export const DEPRECIATION_METHODS = ['straight_line', 'declining_balance'] as const;
 export const MAINTENANCE_TYPES = ['preventive', 'corrective', 'inspection'] as const;
 // AST-004 — hanya capital_addition yang menambah basis depresiasi
@@ -97,6 +129,11 @@ export function validateAssetInput(body: any, existing?: any): string | null {
   const disposedDate = has(body, 'disposed_date') ? body.disposed_date : existing?.disposed_date;
   if (status === 'disposed' && isBlank(disposedDate)) {
     return 'Aset berstatus disposed wajib memiliki tanggal disposal';
+  }
+  // Kebalikannya juga: tanggal disposal pada aset yang masih hidup adalah
+  // kondisi tidak konsisten yang membuat perhitungan depresiasi berhenti diam-diam.
+  if (status && status !== 'disposed' && !isBlank(disposedDate)) {
+    return `Aset berstatus ${status} tidak boleh memiliki tanggal disposal`;
   }
 
   return null;

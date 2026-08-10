@@ -590,7 +590,33 @@ async function main() {
   chk('line bisa dinonaktifkan setelah kosong',
     (await call('DELETE', `/assets/production-lines/${lineC.json?.id}`, undefined, master)).status, 200);
 
-  console.log('\n16. Bersih-bersih');
+  console.log('\n16. AST-012 — state machine status');
+  const smId = (await call('POST', '/assets', { category_id: machCat.id, name: 'Mesin Status' }, master)).json?.id;
+
+  chk('active → idle', (await call('PATCH', `/assets/${smId}`, { status: 'idle' }, master)).status, 200);
+  chk('idle → under_maintenance',
+    (await call('PATCH', `/assets/${smId}`, { status: 'under_maintenance' }, master)).status, 200);
+  chk('under_maintenance → active',
+    (await call('PATCH', `/assets/${smId}`, { status: 'active' }, master)).status, 200);
+
+  const badTransition = await call('PATCH', `/assets/${smId}`, { status: 'draft' }, master);
+  chk('active → draft ditolak', badTransition.status, 409);
+  chk('kode INVALID_STATUS_TRANSITION', badTransition.json?.code, 'INVALID_STATUS_TRANSITION');
+  chk('pesan menyebut transisi yang boleh', /idle|under_maintenance/.test(badTransition.json?.error || ''), true);
+
+  chk('status yang sama tidak dianggap transisi',
+    (await call('PATCH', `/assets/${smId}`, { status: 'active' }, master)).status, 200);
+  chk('aset aktif tidak boleh punya tanggal disposal',
+    (await call('PATCH', `/assets/${smId}`, { disposed_date: '2026-01-31' }, master)).status, 400);
+
+  const smHistory = await call('GET', `/assets/${smId}/status-history`, undefined, master);
+  chk('perubahan status tercatat', (smHistory.json?.data || []).length, 3);
+  chk('mencatat status asal', (smHistory.json?.data || []).slice(-1)[0]?.from_status, 'active');
+  chk('mencatat siapa yang mengubah', !!(smHistory.json?.data || [])[0]?.changed_by_name, true);
+
+  await call('DELETE', `/assets/${smId}`, { reason: 'bersih-bersih' }, master);
+
+  console.log('\n17. Bersih-bersih');
   await call('DELETE', `/assets/${assetId}`, undefined, master);
   await call('DELETE', `/assets/pnids/${pnidId}`, undefined, master);
   await call('DELETE', `/assets/pnids/${pnid2.json?.id}`, undefined, master);
