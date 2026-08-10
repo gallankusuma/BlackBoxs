@@ -17,7 +17,8 @@
     "test:rbac": "tsx tests/rbac.ts",
     "test:asset": "tsx tests/asset.ts",
     "test:depreciation": "tsx tests/depreciation.ts",
-    "test:all": "npm test && npm run test:http && npm run test:pin && npm run test:rbac && npm run test:asset && npm run test:depreciation"
+    "test:procurement": "tsx tests/procurement.ts",
+    "test:all": "npm test && npm run test:http && npm run test:pin && npm run test:rbac && npm run test:asset && npm run test:depreciation && npm run test:procurement"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

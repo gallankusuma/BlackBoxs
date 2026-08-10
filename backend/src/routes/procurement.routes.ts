@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { dbAll, dbGet, dbRun } from '../config/database';
+import { dbAll, dbGet, dbRun, withTransaction, TxRunner } from '../config/database';
 import { authMiddleware } from '../middleware/auth';
 import multer from 'multer';
 import path from 'path';
@@ -2122,40 +2122,27 @@ router.post('/goods-receipts/:id/approve', authMiddleware, async (req: Request, 
       });
     }
 
-    // If now fully approved, create stock movements and update inventory
+    // Posting stok saat GRN akhirnya disetujui penuh.
+    // Dulu loop INSERT stock_movements ada DI SINI dan applyGrnToInventory
+    // menyisipkan lagi baris yang sama — dua sumber untuk data yang sama.
+    // Sekarang seluruhnya jadi tanggung jawab applyGrnToInventory, dalam satu
+    // transaction, sehingga kartu stok dan saldo stok tidak bisa berbeda.
     const updated = await dbGet('SELECT * FROM goods_receipts WHERE id = ?', [id]) as any;
+    let stockResult: { posted: number; skipped: boolean } | null = null;
+
     if (Number(updated.approval_status) === 2) {
-      const grnId = Number(updated.id);
-      const grnNumber = updated.grn_number || updated.gr_number || `GRN-${grnId}`;
-      const alreadyPostedStock = await dbGet(
-        'SELECT COUNT(*) as cnt FROM stock_movements WHERE reference_type = ? AND reference_id = ?',
-        ['GRN', grnId]
-      ) as any;
-
-      if ((alreadyPostedStock?.cnt || 0) === 0) {
-        for (const item of items) {
-          if ((item.received_quantity || 0) > 0 && item.product_id) {
-            await dbRun(
-              `INSERT INTO stock_movements 
-              (product_id, warehouse_id, reference_type, reference_id, quantity, movement_type, notes, created_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-              [
-                item.product_id,
-                updated.warehouse_id,
-                'GRN',
-                grnId,
-                item.received_quantity,
-                'inbound',
-                `${grnNumber} - Receipt from PO ${updated.po_id}: ${item.remarks || 'OK'}`
-              ]
-            );
-          }
-        }
-      } else {
-        console.log('[GRN Approve] Stock movements already recorded, skipping duplicate insert');
+      try {
+        stockResult = await withTransaction(tx => applyGrnToInventory(updated, items, tx));
+      } catch (err: any) {
+        // Kegagalan posting stok TIDAK lagi disembunyikan. Dulu errornya hanya
+        // dicatat di log dan API tetap membalas sukses, sehingga barang tampak
+        // sudah diterima padahal stoknya tidak pernah bertambah.
+        console.error('[GRN Approve] Posting stok gagal:', err?.message || err);
+        return res.status(500).json({
+          error: 'Persetujuan tersimpan, tetapi posting stok gagal: ' + (err?.message || 'kesalahan tidak diketahui'),
+          code: 'STOCK_POSTING_FAILED',
+        });
       }
-
-      await applyGrnToInventory(updated, items);
     }
 
     const finalData = await dbGet(
@@ -2168,7 +2155,12 @@ router.post('/goods-receipts/:id/approve', authMiddleware, async (req: Request, 
       [id]
     );
 
-    res.json({ message: 'GRN approval updated', data: finalData });
+    res.json({
+      message: 'GRN approval updated',
+      data: finalData,
+      stock_posted: stockResult ? stockResult.posted : 0,
+      stock_already_posted: stockResult ? stockResult.skipped : false,
+    });
   } catch (error: any) {
     console.error('Error approving GRN:', error);
     res.status(500).json({ error: 'Failed to approve GRN' });
@@ -2199,64 +2191,59 @@ router.post('/goods-receipts/:id/reject', authMiddleware, async (req: Request, r
 });
 
 // Sync approved GRN into inventory (quantity_on_hand / available) and log inventory transactions
-async function applyGrnToInventory(grn: any, items: any[]) {
-  try {
-    const alreadyPosted = await dbGet(
-      'SELECT COUNT(*) as cnt FROM inventory_transactions WHERE reference_type = ? AND reference_id = ?',
-      ['GRN', grn.id]
-    ) as any;
+/**
+ * Posting GRN ke stok.
+ *
+ * Versi sebelumnya TIDAK PERNAH berhasil di produksi. Query pertamanya menuju
+ * tabel `inventory_transactions` yang tidak ada di database, jadi langsung
+ * melempar error — lalu errornya ditelan `catch { console.error }` dan API
+ * tetap membalas sukses. Kolom yang ditulisnya (`quantity_on_hand`,
+ * `quantity_reserved`, `quantity_available`) juga tidak ada; `inventory_stocks`
+ * hanya punya `quantity`. Akibatnya seluruh barang yang diterima lewat GRN
+ * tercatat di kartu stok tapi saldo stoknya tetap nol.
+ *
+ * Sekarang: memakai skema yang benar-benar ada, idempoten lewat
+ * `stock_movements`, berjalan dalam transaction, dan errornya DILEMPAR
+ * sehingga pemanggil tahu kalau posting gagal.
+ */
+async function applyGrnToInventory(grn: any, items: any[], tx: TxRunner): Promise<{ posted: number; skipped: boolean }> {
+  const already: any = await tx.get(
+    'SELECT COUNT(*) AS cnt FROM stock_movements WHERE reference_type = ? AND reference_id = ?',
+    ['GRN', grn.id]
+  );
+  if (Number(already?.cnt || 0) > 0) return { posted: 0, skipped: true };
 
-    if ((alreadyPosted?.cnt || 0) > 0) {
-      console.log('[GRN Approve] Inventory already updated for this GRN, skipping duplicate apply');
-      return;
-    }
-
-    const defaultLocation = grn.warehouse_id ? `WH-${grn.warehouse_id}` : null;
-
-    for (const item of items) {
-      const qty = Number(item.received_quantity || 0);
-      if (!item.product_id || qty <= 0) continue;
-
-      const existing = await dbGet('SELECT * FROM inventory_stocks WHERE product_id = ?', [item.product_id]) as any;
-
-      let inventoryId: number;
-      if (existing) {
-        const newQoh = (existing.quantity_on_hand || 0) + qty;
-        const newAvailable = newQoh - (existing.quantity_reserved || 0);
-        await dbRun(
-          `UPDATE inventory_stocks
-          SET quantity_on_hand = ?, quantity_available = ?, location = COALESCE(location, ?), updated_at = CURRENT_TIMESTAMP
-          WHERE id = ?`,
-          [newQoh, newAvailable, defaultLocation, existing.id]
-        );
-        inventoryId = existing.id;
-      } else {
-        const insertResult = await dbRun(
-          `INSERT INTO inventory_stocks (product_id, quantity_on_hand, quantity_reserved, quantity_available, location)
-          VALUES (?, ?, 0, ?, ?)`,
-          [item.product_id, qty, qty, defaultLocation]
-        );
-        inventoryId = insertResult.insertId;
-      }
-
-      const grnLabel = grn.grn_number || grn.gr_number || `GRN-${grn.id}`;
-      await dbRun(
-        `INSERT INTO stock_movements (product_id, warehouse_id, quantity, movement_type, reference_type, reference_id, notes, created_at)
-        VALUES (?, ?, ?, 'inbound', 'GRN', ?, ?, CURRENT_TIMESTAMP)`,
-        [
-          item.product_id,
-          grn.warehouse_id,
-          qty,
-          grn.id,
-          `${grnLabel}${item.remarks ? ' - ' + item.remarks : ''}`
-        ]
-      );
-    }
-
-    console.log('[GRN Approve] Inventory updated from GRN', { grnId: grn.id, items: items.length });
-  } catch (error) {
-    console.error('[GRN Approve] Failed to apply GRN to inventory:', error);
+  if (!grn.warehouse_id) {
+    throw new Error('GRN tidak memiliki gudang tujuan, stok tidak bisa diposting');
   }
+
+  const grnLabel = grn.grn_number || grn.gr_number || `GRN-${grn.id}`;
+  let posted = 0;
+
+  for (const item of items) {
+    const qty = Number(item.received_quantity || 0);
+    if (!item.product_id || qty <= 0) continue;
+
+    // Upsert memanfaatkan UNIQUE(product_id, warehouse_id) — stok ditambahkan,
+    // bukan ditimpa, sehingga penerimaan berulang terakumulasi dengan benar.
+    await tx.run(
+      `INSERT INTO inventory_stocks (warehouse_id, product_id, quantity)
+       VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE quantity = quantity + ?, last_updated = CURRENT_TIMESTAMP`,
+      [grn.warehouse_id, item.product_id, qty, qty]
+    );
+
+    await tx.run(
+      `INSERT INTO stock_movements
+        (product_id, warehouse_id, quantity, movement_type, reference_type, reference_id, notes, created_at)
+       VALUES (?, ?, ?, 'inbound', 'GRN', ?, ?, CURRENT_TIMESTAMP)`,
+      [item.product_id, grn.warehouse_id, qty, grn.id,
+        `${grnLabel}${item.remarks ? ' - ' + item.remarks : ''}`]
+    );
+    posted++;
+  }
+
+  return { posted, skipped: false };
 }
 
 // ── Manual Price Search ─────────────────────────────────────────────────────
