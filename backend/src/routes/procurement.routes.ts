@@ -397,6 +397,33 @@ const getActivePurchaseRequest = async (
   return get(`SELECT ${columns} FROM purchase_requests WHERE id = ? AND is_deleted = 0`, [id]);
 };
 
+/**
+ * PROC-R25: satu pintu untuk membaca bid milik sebuah PR.
+ *
+ * Menjawab dua hal sekaligus yang selama ini dicek terpisah — atau tidak dicek
+ * sama sekali:
+ *
+ * 1. PR-nya masih aktif (belum dibatalkan). `getActivePurchaseRequest` sudah
+ *    dipakai di endpoint PR, tapi subresource bid masih bekerja langsung ke
+ *    tabel `pr_bids` sehingga PR yang sudah dibatalkan masih bisa diutak-atik
+ *    lewat jalur bid.
+ * 2. Bid-nya benar-benar milik PR di URL. Endpoint select sempat meng-UPDATE
+ *    dengan `WHERE id = ? AND pr_id = ?` (benar), tapi setelah itu membaca
+ *    vendornya dengan `SELECT vendor_id FROM pr_bids WHERE id = ?` saja —
+ *    tanpa `pr_id`. Akibatnya `selected_vendor_id` milik PR-A bisa terisi
+ *    vendor dari bid milik PR-B.
+ */
+const getActivePrBid = async (
+  prId: any, bidId: any, runner?: TxRunner,
+): Promise<{ pr: any; bid: any } | null> => {
+  const get = runner ? runner.get : dbGet;
+  const pr = await getActivePurchaseRequest(prId, '*', runner);
+  if (!pr) return null;
+  const bid = await get('SELECT * FROM pr_bids WHERE id = ? AND pr_id = ?', [bidId, prId]);
+  if (!bid) return null;
+  return { pr, bid };
+};
+
 const upsertPaymentSchedules = async (params: {
   poId: number;
   poData: any;
@@ -1064,6 +1091,9 @@ router.post('/purchase-requests/:id/reject', authMiddleware, async (req: Request
 router.get('/purchase-requests/:prId/bids', authMiddleware, requirePermission('procurement.purchase-requests.view'), async (req: Request, res: Response) => {
   try {
     const { prId } = req.params;
+    if (!await getActivePurchaseRequest(prId, 'id')) {
+      return res.status(404).json({ error: 'Purchase request tidak ditemukan atau sudah dibatalkan' });
+    }
     const bids = await dbAll(
       `SELECT pb.*, v.name as registered_vendor_name
        FROM pr_bids pb
@@ -1181,7 +1211,10 @@ router.post('/purchase-requests/:prId/bids', authMiddleware, requirePermission('
 // PUT /purchase-requests/:prId/bids/:bidId - update bid header + all item prices
 router.put('/purchase-requests/:prId/bids/:bidId', authMiddleware, requirePermission('procurement.purchase-requests.edit'), async (req: Request, res: Response) => {
   try {
-    const { bidId } = req.params;
+    const { prId, bidId } = req.params;
+    const scope = await getActivePrBid(prId, bidId);
+    if (!scope) return res.status(404).json({ error: 'Bid tidak ditemukan pada PR ini, atau PR-nya sudah dibatalkan', code: 'BID_NOT_IN_PR' });
+
     const { vendor_name, contact_person, phone, email, bid_date, delivery_time_days, notes, items } = req.body;
 
     // Only update bid header if header fields are explicitly provided
@@ -1223,13 +1256,18 @@ router.post('/purchase-requests/:prId/bids/:bidId/select', authMiddleware, requi
   try {
     const { prId, bidId } = req.params;
 
+    const scope = await getActivePrBid(prId, bidId);
+    if (!scope) return res.status(404).json({ error: 'Bid tidak ditemukan pada PR ini, atau PR-nya sudah dibatalkan', code: 'BID_NOT_IN_PR' });
+
     // Reset all bids for this PR to active
     await dbRun("UPDATE pr_bids SET status = 'active' WHERE pr_id = ?", [prId]);
     // Mark this one as selected
     await dbRun("UPDATE pr_bids SET status = 'selected' WHERE id = ? AND pr_id = ?", [bidId, prId]);
 
     // Update PR selected_vendor_id from the winning bid
-    const bid = await dbGet('SELECT vendor_id FROM pr_bids WHERE id = ?', [bidId]) as any;
+    // Dibaca ulang DENGAN pr_id — tanpa itu vendor dari bid milik PR lain bisa
+    // masuk ke selected_vendor_id PR ini.
+    const bid = await dbGet('SELECT vendor_id FROM pr_bids WHERE id = ? AND pr_id = ?', [bidId, prId]) as any;
     if (bid?.vendor_id) {
       await dbRun('UPDATE purchase_requests SET selected_vendor_id = ? WHERE id = ?', [bid.vendor_id, prId]);
     }
@@ -1245,6 +1283,9 @@ router.post('/purchase-requests/:prId/bids/:bidId/select', authMiddleware, requi
 router.post('/purchase-requests/:prId/bids/:bidId/select-item/:itemIndex', authMiddleware, requirePermission('procurement.purchase-requests.edit'), async (req: Request, res: Response) => {
   try {
     const { prId, bidId } = req.params;
+    const scope = await getActivePrBid(prId, bidId);
+    if (!scope) return res.status(404).json({ error: 'Bid tidak ditemukan pada PR ini, atau PR-nya sudah dibatalkan', code: 'BID_NOT_IN_PR' });
+
     const itemIndex = req.params.itemIndex as string;
     const idx = parseInt(itemIndex);
 
@@ -1309,9 +1350,36 @@ router.post('/purchase-requests/:prId/bids/:bidId/select-item/:itemIndex', authM
 // DELETE /purchase-requests/:prId/bids/:bidId - delete a bid and its items
 router.delete('/purchase-requests/:prId/bids/:bidId', authMiddleware, requirePermission('procurement.purchase-requests.delete'), async (req: Request, res: Response) => {
   try {
-    const { bidId } = req.params;
-    await dbRun('DELETE FROM pr_bid_items WHERE bid_id = ?', [bidId]);
-    await dbRun('DELETE FROM pr_bids WHERE id = ?', [bidId]);
+    const { prId, bidId } = req.params;
+
+    const scope = await getActivePrBid(prId, bidId);
+    if (!scope) return res.status(404).json({ error: 'Bid tidak ditemukan pada PR ini, atau PR-nya sudah dibatalkan', code: 'BID_NOT_IN_PR' });
+
+    // PROC-R26: bid adalah dokumen keputusan pengadaan. Begitu ia menjadi sumber
+    // sebuah PO (`purchase_orders.source_bid_id`), menghapusnya membuat PO itu
+    // menunjuk ke penawaran yang sudah tidak ada — dasar pemilihan vendornya
+    // hilang, padahal PO-nya berjalan terus.
+    const poFromBid = await dbGet(
+      'SELECT id, po_number FROM purchase_orders WHERE source_bid_id = ? AND is_deleted = 0 LIMIT 1',
+      [bidId]
+    ) as any;
+
+    if (poFromBid) {
+      return res.status(409).json({
+        error: `Penawaran ini sudah menjadi sumber PO ${poFromBid.po_number || poFromBid.id}, jadi tidak bisa dihapus. Batalkan PO tersebut lebih dulu bila memang keliru.`,
+        code: 'BID_HAS_PO',
+        po_id: poFromBid.id,
+        po_number: poFromBid.po_number,
+      });
+    }
+
+    // Dua penghapusan ini dulu berdiri sendiri-sendiri; kalau yang kedua gagal,
+    // itemnya sudah lenyap sementara bid-nya masih ada.
+    await withTransaction(async tx => {
+      await tx.run('DELETE FROM pr_bid_items WHERE bid_id = ?', [bidId]);
+      await tx.run('DELETE FROM pr_bids WHERE id = ? AND pr_id = ?', [bidId, prId]);
+    });
+
     res.json({ message: 'Bid deleted' });
   } catch (error) {
     console.error('Error deleting PR bid:', error);
@@ -1322,7 +1390,11 @@ router.delete('/purchase-requests/:prId/bids/:bidId', authMiddleware, requirePer
 // POST /purchase-requests/:prId/bids/:bidId/upload - upload multiple quotation files
 router.post('/purchase-requests/:prId/bids/:bidId/upload', authMiddleware, requirePermission('procurement.purchase-requests.edit'), bidUpload.array('file', 10), handleUploadErrors, async (req: Request, res: Response) => {
   try {
-    const { bidId } = req.params;
+    const { prId, bidId } = req.params;
+
+    const scope = await getActivePrBid(prId, bidId);
+    if (!scope) return res.status(404).json({ error: 'Bid tidak ditemukan pada PR ini, atau PR-nya sudah dibatalkan', code: 'BID_NOT_IN_PR' });
+
     const files = (req as any).files as Express.Multer.File[];
     if (!files || files.length === 0) return res.status(400).json({ error: 'No file uploaded' });
 
@@ -2090,12 +2162,43 @@ router.put('/purchase-orders/:id', authMiddleware, requirePermission('procuremen
     }
 
     const blocked: string[] = [];
+    let lockReason: 'approved' | 'grn' | 'payment' | null = null;
+
+    // PROC-R23: PO yang sudah disetujui penuh tidak boleh diubah materinya,
+    // meski belum ada GRN maupun pembayaran.
+    //
+    // Guard sebelumnya baru aktif kalau transaksi turunan sudah jalan. Padahal
+    // celahnya ada sebelum itu: PO disetujui pada 10 unit × 100.000, lalu
+    // diubah jadi 1.000 unit × 500.000 sementara approval_status tetap 2.
+    // Approval lama secara efektif ikut menyetujui angka yang tidak pernah
+    // dilihat approver.
+    //
+    // Jalur resminya: reject/reopen PO → ubah → minta approval lagi.
+    if (Number(existing.approval_status) === 2) {
+      const material: [string, any][] = [
+        ['vendor_id', existing.vendor_id],
+        ['pr_id', existing.pr_id],
+        ['project_id', existing.project_id],
+        ['currency', existing.currency],
+        ['discount_percent', existing.discount_percent],
+        ['ppn_percent', existing.ppn_percent],
+        ['advance_payment', existing.advance_payment],
+        ['payment_term', existing.payment_term],
+        ['payment_term_2', existing.payment_term_2],
+      ];
+      for (const [f, current] of material) {
+        if (scalarChanged(f, current)) blocked.push(f);
+      }
+      if (itemsChanged) blocked.push('items');
+      if (blocked.length > 0) lockReason = 'approved';
+    }
 
     if (activeGrnForPo) {
       // Barangnya sudah diterima — vendor, item, dan kuantitasnya tidak boleh
       // berubah, karena GRN merujuk ke apa yang tertulis di PO ini.
-      if (scalarChanged('vendor_id', existing.vendor_id)) blocked.push('vendor_id');
-      if (itemsChanged) blocked.push('items');
+      if (scalarChanged('vendor_id', existing.vendor_id) && !blocked.includes('vendor_id')) blocked.push('vendor_id');
+      if (itemsChanged && !blocked.includes('items')) blocked.push('items');
+      if (blocked.length > 0) lockReason = 'grn';
     }
 
     if (alreadyPaid) {
@@ -2111,14 +2214,22 @@ router.put('/purchase-orders/:id', authMiddleware, requirePermission('procuremen
         if (scalarChanged(f, current) && !blocked.includes(f)) blocked.push(f);
       }
       if (itemsChanged && !blocked.includes('items')) blocked.push('items');
+      if (blocked.length > 0) lockReason = 'payment';
     }
 
     if (blocked.length > 0) {
+      const daftar = blocked.join(', ');
+      const pesan = lockReason === 'grn'
+        ? `PO ini sudah punya penerimaan barang (${activeGrnForPo.grn_number || activeGrnForPo.id}), jadi ${daftar} tidak bisa diubah lagi.`
+        : lockReason === 'payment'
+          ? `PO ini sudah memiliki pembayaran tercatat, jadi ${daftar} tidak bisa diubah lagi.`
+          : `PO ini sudah disetujui penuh, jadi ${daftar} tidak bisa diubah tanpa persetujuan ulang. Reject PO ini dulu, ubah, lalu ajukan approval lagi.`;
+
       return res.status(409).json({
-        error: activeGrnForPo
-          ? `PO ini sudah punya penerimaan barang (${activeGrnForPo.grn_number || activeGrnForPo.id}), jadi ${blocked.join(', ')} tidak bisa diubah lagi.`
-          : `PO ini sudah memiliki pembayaran tercatat, jadi ${blocked.join(', ')} tidak bisa diubah lagi.`,
-        code: activeGrnForPo ? 'PO_LOCKED_BY_GRN' : 'PO_LOCKED_BY_PAYMENT',
+        error: pesan,
+        code: lockReason === 'grn' ? 'PO_LOCKED_BY_GRN'
+          : lockReason === 'payment' ? 'PO_LOCKED_BY_PAYMENT'
+            : 'PO_LOCKED_APPROVED',
         locked_fields: blocked,
       });
     }
@@ -2442,13 +2553,6 @@ router.delete('/purchase-orders/:id', authMiddleware, requirePermission('procure
     if (!po) return res.status(404).json({ error: 'Purchase order tidak ditemukan' });
     if (po.is_deleted) return res.status(409).json({ error: 'Purchase order sudah dihapus' });
 
-    const approvalStatus = Number(po.approval_status || 0);
-    if (po.status !== 'draft' && approvalStatus > 0) {
-      return res.status(400).json({
-        error: `Tidak bisa dihapus: status PO "${po.status}" dengan persetujuan ${approvalStatus}/2. Batalkan persetujuannya dulu.`,
-      });
-    }
-
     // PO yang sudah punya jejak penerimaan atau keuangan tidak boleh dihapus
     // sama sekali — menghapusnya membuat stok, hutang, dan pembayaran
     // kehilangan dokumen sumbernya.
@@ -2475,6 +2579,22 @@ router.delete('/purchase-orders/:id', authMiddleware, requirePermission('procure
         paid_payables: paidCount,
         hint: 'Batalkan penerimaan atau pembayarannya lebih dulu bila memang keliru',
         code: 'PO_HAS_TRAIL',
+      });
+    }
+
+    // Pemeriksaan persetujuan sengaja SETELAH pemeriksaan jejak.
+    //
+    // Sejak PROC-R24, GRN hanya bisa dibuat dari PO yang sudah disetujui penuh.
+    // Artinya setiap PO yang punya jejak penerimaan pasti juga approval_status = 2.
+    // Kalau guard persetujuan ditaruh lebih dulu, ia akan selalu menyalip dan
+    // pengguna cuma diberi tahu "batalkan persetujuannya" — padahal masalah
+    // sebenarnya adalah barangnya sudah diterima, yang tidak selesai dengan
+    // membatalkan persetujuan. Pesan yang spesifik harus menang.
+    const approvalStatus = Number(po.approval_status || 0);
+    if (po.status !== 'draft' && approvalStatus > 0) {
+      return res.status(400).json({
+        error: `Tidak bisa dihapus: status PO "${po.status}" dengan persetujuan ${approvalStatus}/2. Batalkan persetujuannya dulu.`,
+        code: 'PO_STILL_APPROVED',
       });
     }
 
@@ -2615,8 +2735,32 @@ router.post('/goods-receipts', authMiddleware, requirePermission('procurement.gr
     const created = await withNumberedDocument(
       'GRN', 'goods_receipts', 'grn_number',
       async (code, tx) => {
-        const po = await tx.get('SELECT id FROM purchase_orders WHERE id = ? FOR UPDATE', [po_id]) as any;
-        if (!po) return { conflict: 'PO tidak ditemukan' as string };
+        const po = await tx.get(
+          'SELECT id, approval_status, is_deleted, po_number FROM purchase_orders WHERE id = ? FOR UPDATE',
+          [po_id]
+        ) as any;
+        if (!po) return { conflict: 'PO tidak ditemukan' as string, code: 'PO_NOT_FOUND', status: 404 };
+
+        // PROC-R24: PO harus benar-benar disetujui sebelum barangnya bisa
+        // diterima. Sebelumnya di sini hanya dicek "PO-nya ada atau tidak",
+        // sehingga PO draft (approval_status = 0) bisa langsung dibuatkan GRN,
+        // GRN-nya disetujui, dan stok masuk — seluruh rantai approval PO
+        // terlewati begitu saja.
+        //
+        // Catatan: kolom `status` bernilai 'approved' TIDAK sama dengan sudah
+        // disetujui. `POST /purchase-orders` selalu menginisialisasi
+        // approval_status = 0 apa pun isi `status` yang dikirim klien.
+        if (Number(po.is_deleted) === 1) {
+          return { conflict: 'PO ini sudah dibatalkan, tidak bisa dibuatkan GRN.', code: 'PO_DELETED', status: 409 };
+        }
+
+        if (Number(po.approval_status) !== 2) {
+          return {
+            conflict: `PO ${po.po_number || po_id} belum disetujui penuh, jadi barangnya belum bisa diterima. Selesaikan approval PO lebih dulu.`,
+            code: 'PO_NOT_APPROVED',
+            status: 409,
+          };
+        }
 
         // GRN yang direversal ikut dihitung tidak aktif — stoknya sudah
         // dikembalikan, jadi PO-nya memang perlu bisa dibuatkan GRN pengganti.
@@ -2631,6 +2775,8 @@ router.post('/goods-receipts', authMiddleware, requirePermission('procurement.gr
         if (activeGRN) {
           return {
             conflict: `PO ini sudah terikat dengan GRN (${activeGRN.grn_number}). Anda tidak dapat membuat GRN baru untuk PO ini kecuali GRN sebelumnya di-reject atau direversal.`,
+            code: 'GRN_ALREADY_EXISTS',
+            status: 400,
           };
         }
 
@@ -2646,7 +2792,7 @@ router.post('/goods-receipts', authMiddleware, requirePermission('procurement.gr
     );
 
     if ('conflict' in created) {
-      return res.status(400).json({ error: created.conflict, code: 'GRN_ALREADY_EXISTS' });
+      return res.status(created.status).json({ error: created.conflict, code: created.code });
     }
 
     res.status(201).json({ message: 'Goods receipt created', data: { id: created.grId, grn_number: created.number } });

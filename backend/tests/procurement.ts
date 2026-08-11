@@ -70,6 +70,9 @@ async function main() {
       items: [{ product_id: product.id, quantity: qtyOrder, unit_price: 25000, uom: 'pcs' }],
     }, master);
     const poId = po.json?.data?.id ?? po.json?.id;
+    // PROC-R24: `status: 'approved'` di body TIDAK menyetujui PO — approval_status
+    // selalu mulai dari 0. GRN kini menolak PO yang belum disetujui penuh.
+    await call('POST', `/procurement/purchase-orders/${poId}/approve`, {}, master);
 
     const grn = await call('POST', '/procurement/goods-receipts', {
       po_id: poId,
@@ -247,6 +250,8 @@ async function main() {
     new Set(poOk.map(r => r.json?.data?.po_number)).size, 20);
 
   // Tiap GRN butuh PO sendiri (satu GRN aktif per PO), jadi pakai PO di atas
+  await Promise.all(poOk.map(r =>
+    call('POST', `/procurement/purchase-orders/${r.json?.data?.id}/approve`, {}, master)));
   const grnBurst = await Promise.all(poOk.map(r =>
     call('POST', '/procurement/goods-receipts', {
       po_id: r.json?.data?.id, warehouse_id: wh.id, received_date: today(),
@@ -307,6 +312,7 @@ async function main() {
     vendor_id: vendorId, po_date: today(), status: 'approved',
     items: [{ product_id: product.id, quantity: 2, unit_price: 1000, uom: 'pcs' }],
   }, master);
+  await call('POST', `/procurement/purchase-orders/${grnKeepPo.json?.data?.id ?? grnKeepPo.json?.id}/approve`, {}, master);
   const grnKeep = await call('POST', '/procurement/goods-receipts', {
     po_id: grnKeepPo.json?.data?.id ?? grnKeepPo.json?.id,
     warehouse_id: wh.id, received_date: today(), status: 'received',
@@ -427,6 +433,7 @@ async function main() {
     vendor_id: vendorId, po_date: today(), status: 'approved',
     items: [{ product_id: product.id, quantity: 1, unit_price: 1000, uom: 'pcs' }],
   }, master);
+  await call('POST', `/procurement/purchase-orders/${badPo.json?.data?.id ?? badPo.json?.id}/approve`, {}, master);
   // product_id yang tidak ada memicu pelanggaran foreign key saat posting stok
   const badGrn = await call('POST', '/procurement/goods-receipts', {
     po_id: badPo.json?.data?.id ?? badPo.json?.id,
@@ -550,6 +557,7 @@ async function main() {
     items: [{ product_id: product.id, quantity: 5, unit_price: 1000, uom: 'pcs' }],
   }, master);
   const onePoId = onePo.json?.data?.id ?? onePo.json?.id;
+  await call('POST', `/procurement/purchase-orders/${onePoId}/approve`, {}, master);
 
   const grnRace = await Promise.all(Array.from({ length: 20 }, (_, i) =>
     call('POST', '/procurement/goods-receipts', {
@@ -666,6 +674,7 @@ async function main() {
     vendor_id: vendorId, po_date: today(), status: 'approved',
     items: [{ product_id: product.id, quantity: 1, unit_price: 100, uom: 'pcs' }],
   }, master);
+  await call('POST', `/procurement/purchase-orders/${spoofPo.json?.data?.id ?? spoofPo.json?.id}/approve`, {}, master);
   const spoof = await call('POST', '/procurement/goods-receipts', {
     po_id: spoofPo.json?.data?.id ?? spoofPo.json?.id,
     warehouse_id: wh.id, received_date: today(),
@@ -686,7 +695,136 @@ async function main() {
   chk('nomor PR memakai tanggal Asia/Jakarta',
     String(numbered.json?.data?.pr_number || '').split('-')[1], jakartaToday);
 
-  console.log('\n25. RBAC — token desktop tanpa permission procurement ditolak');
+  console.log('\n25. PO approved tidak bisa diubah materinya tanpa approval ulang (PROC-R23)');
+  const poAppr = await call('POST', '/procurement/purchase-orders', {
+    vendor_id: vendorId, po_date: today(), contact_person: 'Awal',
+    items: [{ product_id: product.id, quantity: 10, unit_price: 100000, uom: 'pcs' }],
+  }, master);
+  const poApprId = poAppr.json?.data?.id ?? poAppr.json?.id;
+  await call('POST', `/procurement/purchase-orders/${poApprId}/approve`, {}, master);
+
+  const changeQty = await call('PUT', `/procurement/purchase-orders/${poApprId}`,
+    { items: [{ product_id: product.id, quantity: 1000, unit_price: 500000, uom: 'pcs' }] }, master);
+  chk('ubah qty/harga PO approved ditolak', changeQty.status, 409);
+  chk('kode PO_LOCKED_APPROVED', changeQty.json?.code, 'PO_LOCKED_APPROVED');
+
+  const vendor2 = await call('POST', '/procurement/vendors', { name: `Vendor Kedua ${stamp}`, code: `VB${stamp}` }, master);
+  chk('ganti vendor PO approved ditolak',
+    (await call('PUT', `/procurement/purchase-orders/${poApprId}`,
+      { vendor_id: vendor2.json?.data?.id ?? vendor2.json?.id }, master)).status, 409);
+  chk('ubah uang muka PO approved ditolak',
+    (await call('PUT', `/procurement/purchase-orders/${poApprId}`, { advance_payment: 90 }, master)).status, 409);
+  chk('data administratif tetap boleh',
+    (await call('PUT', `/procurement/purchase-orders/${poApprId}`, { contact_person: 'Pak Joko' }, master)).status, 200);
+
+  // Jalur resmi: reject dulu, baru boleh diubah
+  chk('reject PO tanpa GRN/pembayaran boleh',
+    (await call('POST', `/procurement/purchase-orders/${poApprId}/reject`, {}, master)).status, 200);
+  chk('setelah reject, item boleh diubah lagi',
+    (await call('PUT', `/procurement/purchase-orders/${poApprId}`,
+      { items: [{ product_id: product.id, quantity: 12, unit_price: 100000, uom: 'pcs' }] }, master)).status, 200);
+
+  console.log('\n26. GRN hanya boleh dari PO yang sudah disetujui penuh (PROC-R24)');
+  const poUnapproved = await call('POST', '/procurement/purchase-orders', {
+    vendor_id: vendorId, po_date: today(), status: 'approved',
+    items: [{ product_id: product.id, quantity: 3, unit_price: 1000, uom: 'pcs' }],
+  }, master);
+  const poUnapprovedId = poUnapproved.json?.data?.id ?? poUnapproved.json?.id;
+
+  const grnFromDraft = await call('POST', '/procurement/goods-receipts', {
+    po_id: poUnapprovedId, warehouse_id: wh.id, received_date: today(),
+    notes: JSON.stringify({ items: [{ product_id: product.id, received_quantity: 3 }] }),
+  }, master);
+  chk('GRN dari PO belum disetujui ditolak', grnFromDraft.status, 409);
+  chk('kode PO_NOT_APPROVED', grnFromDraft.json?.code, 'PO_NOT_APPROVED');
+
+  await call('POST', `/procurement/purchase-orders/${poUnapprovedId}/approve`, {}, master);
+  chk('setelah PO disetujui, GRN boleh dibuat',
+    (await call('POST', '/procurement/goods-receipts', {
+      po_id: poUnapprovedId, warehouse_id: wh.id, received_date: today(),
+      notes: JSON.stringify({ items: [{ product_id: product.id, received_quantity: 3 }] }),
+    }, master)).status, 201);
+
+  const poGone = await call('POST', '/procurement/purchase-orders', {
+    vendor_id: vendorId, po_date: today(),
+    items: [{ product_id: product.id, quantity: 1, unit_price: 1000, uom: 'pcs' }],
+  }, master);
+  const poGoneId = poGone.json?.data?.id ?? poGone.json?.id;
+  await call('DELETE', `/procurement/purchase-orders/${poGoneId}`, { reason: 'uji' }, master);
+  const grnFromDeleted = await call('POST', '/procurement/goods-receipts', {
+    po_id: poGoneId, warehouse_id: wh.id, received_date: today(),
+    notes: JSON.stringify({ items: [] }),
+  }, master);
+  chk('GRN dari PO yang dibatalkan ditolak', grnFromDeleted.status, 409);
+
+  console.log('\n27. Bid terikat pada PR-nya sendiri (PROC-R25)');
+  const mkPrWithBid = async (label: string) => {
+    const pr = await call('POST', '/procurement/purchase-requests', {
+      request_date: today(), status: 'SUBMITTED', reason: label,
+      notes: JSON.stringify({ items: [{ product_id: product.id, quantity: 1, uom: 'pcs' }] }),
+    }, master);
+    const id = pr.json?.data?.id;
+    const bid = await call('POST', `/procurement/purchase-requests/${id}/bids`,
+      { vendor_id: vendorId, total_amount: 1000 }, master);
+    return { prId: id, bidId: bid.json?.data?.id ?? bid.json?.id };
+  };
+
+  const prA = await mkPrWithBid('PR-A');
+  const prB = await mkPrWithBid('PR-B');
+  chk('dua PR dengan bid masing-masing dibuat', !!prA.bidId && !!prB.bidId, true);
+
+  // Bid milik PR-B dipakai lewat URL PR-A
+  const crossSelect = await call('POST',
+    `/procurement/purchase-requests/${prA.prId}/bids/${prB.bidId}/select`, {}, master);
+  chk('select bid milik PR lain ditolak', crossSelect.status, 404);
+  chk('kode BID_NOT_IN_PR', crossSelect.json?.code, 'BID_NOT_IN_PR');
+
+  const prAafter = (await call('GET', `/procurement/purchase-requests/${prA.prId}`, undefined, master)).json?.data;
+  chk('selected_vendor_id PR-A tidak ikut terisi', prAafter?.selected_vendor_id ?? null, null);
+
+  chk('ubah bid milik PR lain ditolak',
+    (await call('PUT', `/procurement/purchase-requests/${prA.prId}/bids/${prB.bidId}`,
+      { vendor_name: 'Disusupi' }, master)).status, 404);
+  chk('hapus bid milik PR lain ditolak',
+    (await call('DELETE', `/procurement/purchase-requests/${prA.prId}/bids/${prB.bidId}`, undefined, master)).status, 404);
+
+  // PR yang dibatalkan tidak boleh disentuh lewat jalur bid
+  await call('POST', `/procurement/purchase-requests/${prA.prId}/approve`, {}, master);
+  await call('DELETE', `/procurement/purchase-requests/${prA.prId}`, { reason: 'dibatalkan' }, master);
+  chk('lihat bid PR yang dibatalkan ditolak',
+    (await call('GET', `/procurement/purchase-requests/${prA.prId}/bids`, undefined, master)).status, 404);
+  chk('select bid pada PR yang dibatalkan ditolak',
+    (await call('POST', `/procurement/purchase-requests/${prA.prId}/bids/${prA.bidId}/select`, {}, master)).status, 404);
+  chk('ubah bid pada PR yang dibatalkan ditolak',
+    (await call('PUT', `/procurement/purchase-requests/${prA.prId}/bids/${prA.bidId}`, { vendor_name: 'X' }, master)).status, 404);
+
+  console.log('\n28. Bid yang sudah jadi sumber PO tidak bisa dihapus (PROC-R26)');
+  const prGen = await call('POST', '/procurement/purchase-requests', {
+    request_date: today(), status: 'SUBMITTED', reason: 'Uji generate',
+    notes: JSON.stringify({ items: [{ product_id: product.id, quantity: 2, uom: 'pcs' }] }),
+  }, master);
+  const prGenId = prGen.json?.data?.id;
+  const bidGen = await call('POST', `/procurement/purchase-requests/${prGenId}/bids`,
+    { vendor_id: vendorId, total_amount: 5000 }, master);
+  const bidGenId = bidGen.json?.data?.id ?? bidGen.json?.id;
+
+  await call('POST', `/procurement/purchase-requests/${prGenId}/bids/${bidGenId}/select-item/0`, {}, master);
+  await call('POST', `/procurement/purchase-requests/${prGenId}/approve`, {}, master);
+  const gen = await call('POST', `/procurement/purchase-requests/${prGenId}/generate-pos`, {}, master);
+
+  if (gen.status === 201 && (gen.json?.data || []).length > 0) {
+    const delBid = await call('DELETE',
+      `/procurement/purchase-requests/${prGenId}/bids/${bidGenId}`, undefined, master);
+    chk('hapus bid sumber PO ditolak', delBid.status, 409);
+    chk('kode BID_HAS_PO', delBid.json?.code, 'BID_HAS_PO');
+
+    const bidsStill = (await call('GET', `/procurement/purchase-requests/${prGenId}/bids`, undefined, master)).json?.data || [];
+    chk('bid tetap ada sebagai jejak', bidsStill.some((b: any) => Number(b.id) === Number(bidGenId)), true);
+  } else {
+    console.log(`  --   dilewati: generate-pos balas ${gen.status}`);
+  }
+
+  console.log('\n29. RBAC — token desktop tanpa permission procurement ditolak');
   const plainRole = await call('POST', '/roles',
     { code: `PROC${stamp}`, name: `ProcTest-${stamp}` }, master);
   const plainEmail = `proc.plain.${stamp}@test.local`;
