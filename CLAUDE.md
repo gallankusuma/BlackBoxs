@@ -125,6 +125,23 @@ Butuh 2 karyawan aktif berkode `TEST-A` dan `TEST-B` (bisa ditimpa lewat env `EM
 
 Estimator (AHSP/HSP/RAB/Proposal + MTO kalkulator konstruksi), Projects (Gantt, Kanban, milestone, cost control, timesheet, manpower), Procurement (PR/PO + approval bertingkat), Inventory & Warehouse, Sales/CRM (leads, prospects, clients), Finance (AP/AR, margin, COGS, fund request, kasbon, payment schedule), HR (employee, attendance, payslip, position rates), Production/PPIC, Quality/QC, Asset Management (asset, production line, P&ID, maintenance, depresiasi), Approval engine, Reports, Audit log, AI routes (Gemini).
 
+### Aturan bisnis procurement
+
+**Satu PO = satu GRN aktif.** Ini keputusan pemilik bisnis (Agustus 2026), bukan
+keterbatasan teknis. Partial delivery — PO qty 100 diterima 30/40/30 — **tidak**
+didukung dan memang tidak diinginkan. Tim reviewer sempat mengusulkannya
+(PROC-R13); jawabannya: tetap satu PO satu GRN.
+
+Konsekuensi yang harus dijaga:
+
+- Penegakannya ada di satu tempat: cek `activeGRN` di dalam transaction
+  `POST /goods-receipts` (`GRN_ALREADY_EXISTS`). Jangan ditambah jalur lain.
+- GRN yang **di-reject** atau **direversal** dihitung tidak aktif, jadi PO-nya
+  bisa dibuatkan GRN pengganti. Itu jalur koreksi yang sah — bukan celah.
+- Jangan menambahkan `received_qty` / `outstanding_qty` per item PO. Kolom
+  semacam itu hanya masuk akal untuk model partial delivery, dan menambahkannya
+  setengah jalan akan membuat dua sumber kebenaran untuk jumlah yang diterima.
+
 ## Kondisi repo
 
 - Remote: `github.com/gallankusuma/BlackBoxs` — **repo publik**. Jangan pernah commit kredensial; `.env`, `ecosystem.config.*`, dan dump data sudah masuk `.gitignore`.

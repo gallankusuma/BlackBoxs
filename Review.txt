@@ -829,6 +829,35 @@ per PO item.
 
 Ini bukan blocker teknis jika business memang menetapkan satu PO = satu GRN.
 
+
+### ✅ DIPUTUSKAN — pemilik bisnis
+
+**Keputusan: tetap satu PO = satu GRN.** Partial delivery tidak diadopsi.
+
+Diputuskan langsung oleh pemilik bisnis pada Agustus 2026, setelah reviewer
+mengangkatnya dua kali. Jadi ini bukan item yang tertunda — ini tertutup.
+
+Tidak ada perubahan kode. Sistem memang sudah berperilaku persis seperti
+keputusan ini, dan sejak PROC-R15 penegakannya sudah tahan konkurensi:
+pemeriksaan `activeGRN` berada di dalam transaction dengan
+`SELECT purchase_orders ... FOR UPDATE`, sehingga 20 permintaan bersamaan pada
+PO yang sama pun hanya meloloskan satu.
+
+Yang kami kerjakan hanyalah mendokumentasikannya sebagai aturan bisnis di
+`CLAUDE.md`, lengkap dengan tiga hal yang harus dijaga:
+
+1. Penegakannya tetap di satu tempat (`POST /goods-receipts`), tidak ditambah
+   jalur lain.
+2. GRN yang di-reject atau direversal dihitung tidak aktif — itu jalur koreksi
+   yang sah, bukan celah aturan.
+3. Jangan menambahkan `received_qty` / `outstanding_qty` per item PO. Kolom itu
+   hanya masuk akal untuk model partial delivery; menambahkannya setengah jalan
+   justru menciptakan dua sumber kebenaran untuk jumlah yang diterima.
+
+Verifikasi data: tidak ada satu pun PO dengan lebih dari satu GRN aktif.
+
+Dengan ini seluruh temuan review procurement (R01–R22) sudah tertutup.
+
 ---
 
 # STATUS REVIEW
