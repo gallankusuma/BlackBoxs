@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { calculateMto, toLegacyQuantities } from '../modules/estimator/mto/calculator';
 import { authMiddleware } from '../middleware/auth';
 import { dbAll, dbGet, dbRun } from '../config/database';
 
@@ -2196,65 +2197,20 @@ router.get('/proposals/:id/resume', authMiddleware, async (req: Request, res: Re
 // Mirror of /projects/:id/mto but uses proposal_id in engineering_inputs
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * EST-MTO-001: kuantitas MTO sekarang dihitung SATU tempat —
+ * `src/modules/estimator/mto/calculator.ts`.
+ *
+ * Versi lama di sini adalah salah satu dari tiga mesin hitung yang berbeda
+ * (dua lagi di frontend), dan ketiganya bisa memberi angka berbeda untuk input
+ * yang sama. Karena angka itu jadi dasar penawaran harga, perbedaannya bukan
+ * soal kosmetik.
+ *
+ * Fungsi ini dipertahankan hanya sebagai pembungkus supaya bentuk lama
+ * `Record<string, number>` tetap tersedia bagi layar yang belum dipindahkan.
+ */
 function calcMtoQty(elementType: string, params: any): Record<string, number> {
-  const q: Record<string, number> = {};
-  const STEEL_DENSITY = 7850;
-
-  if (elementType === 'foundation') {
-    const { L=0, W=0, H=0, qty=1, working_space=0.3,
-            rebar_main=16, rebar_stirrup=10, stirrup_spacing=0.15, cover=0.04 } = params;
-    q.vol_concrete   = +(L*W*H*qty).toFixed(3);
-    q.vol_excavation = +((L+2*working_space)*(W+2*working_space)*H*qty).toFixed(3);
-    q.vol_backfill   = +(Math.max(q.vol_excavation-q.vol_concrete,0)).toFixed(3);
-    q.formwork_area  = +(2*(L+W)*H*qty).toFixed(3);
-    const mDia=rebar_main/1000, sDia=rebar_stirrup/1000;
-    const mA=Math.PI*(mDia/2)**2, sA=Math.PI*(sDia/2)**2;
-    const eL=L-2*cover, eW=W-2*cover;
-    const nX=Math.floor(eW/0.15)+1, nY=Math.floor(eL/0.15)+1, nS=Math.floor(eL/stirrup_spacing)+1;
-    q.rebar_weight_kg = +( ((nX*eL+nY*eW)*mA*STEEL_DENSITY + nS*2*(eL+eW)*sA*STEEL_DENSITY)*qty ).toFixed(1);
-    q.rebar_lonjor    = +Math.ceil(q.rebar_weight_kg/(mA*STEEL_DENSITY*12));
-  } else if (elementType === 'column') {
-    const { B=0.3, H=0.3, height_per_floor=3, floors=1, qty_per_floor=1,
-            rebar_count=8, rebar_dia=16, stirrup_dia=10, stirrup_spacing=0.15, cover=0.04 } = params;
-    const tQ=qty_per_floor*floors;
-    q.vol_concrete  = +(B*H*height_per_floor*tQ).toFixed(3);
-    q.formwork_area = +(2*(B+H)*height_per_floor*tQ).toFixed(3);
-    const mD=rebar_dia/1000, sD=stirrup_dia/1000;
-    const mA=Math.PI*(mD/2)**2, sA=Math.PI*(sD/2)**2;
-    const nS=Math.floor(height_per_floor/stirrup_spacing)+1;
-    q.rebar_weight_kg = +( (rebar_count*height_per_floor*mA*STEEL_DENSITY + nS*2*((B-2*cover)+(H-2*cover))*sA*STEEL_DENSITY)*tQ ).toFixed(1);
-    q.rebar_lonjor    = +Math.ceil(q.rebar_weight_kg/(mA*STEEL_DENSITY*12));
-  } else if (elementType === 'beam') {
-    const { B=0.25, H=0.5, total_length=0, rebar_count=4,
-            rebar_dia=16, stirrup_dia=10, stirrup_spacing=0.15, cover=0.04 } = params;
-    q.vol_concrete  = +(B*H*total_length).toFixed(3);
-    q.formwork_area = +((2*H+B)*total_length).toFixed(3);
-    const mD=rebar_dia/1000, sD=stirrup_dia/1000;
-    const mA=Math.PI*(mD/2)**2, sA=Math.PI*(sD/2)**2;
-    const nS=Math.floor(total_length/stirrup_spacing)+1;
-    q.rebar_weight_kg = +(rebar_count*total_length*mA*STEEL_DENSITY + nS*2*((B-2*cover)+(H-2*cover))*sA*STEEL_DENSITY).toFixed(1);
-    q.rebar_lonjor    = +Math.ceil(q.rebar_weight_kg/(mA*STEEL_DENSITY*12));
-  } else if (elementType === 'slab') {
-    const { area=0, thickness=0.12, rebar_dia_x=10, rebar_dia_y=10,
-            spacing_x=0.15, spacing_y=0.15 } = params;
-    q.vol_concrete  = +(area*thickness).toFixed(3);
-    q.formwork_area = +area.toFixed(3);
-    const axX=Math.PI*(rebar_dia_x/1000/2)**2, axY=Math.PI*(rebar_dia_y/1000/2)**2;
-    q.rebar_weight_kg = +( ((area/spacing_x)*axX + (area/spacing_y)*axY)*STEEL_DENSITY ).toFixed(1);
-    q.rebar_lonjor    = +Math.ceil(q.rebar_weight_kg/((axX+axY)/2*STEEL_DENSITY*12));
-  } else if (elementType === 'wall') {
-    const { area=0, thickness_mm=150, has_plaster=true } = params;
-    q.wall_area   = +area.toFixed(2);
-    q.wall_volume = +(area*(thickness_mm/1000)).toFixed(3);
-    q.plaster_area = has_plaster ? +(area*2).toFixed(2) : 0;
-    q.acian_area   = q.plaster_area;
-  } else if (elementType === 'roof') {
-    const { floor_area=0, slope_deg=30, overhang=0.6 } = params;
-    const sf = 1/Math.cos(slope_deg*Math.PI/180);
-    q.roof_area     = +( (floor_area+4*overhang*Math.sqrt(floor_area))*sf ).toFixed(2);
-    q.gutters_length= +(4*Math.sqrt(floor_area)+4*overhang).toFixed(1);
-  }
-  return q;
+  return toLegacyQuantities(calculateMto(elementType, params));
 }
 
 // GET all MTO elements for a proposal — single source of truth: proposal_id only
@@ -2282,7 +2238,8 @@ router.post('/proposals/:id/mto', authMiddleware, async (req: Request, res: Resp
     const proposalId = req.params.id;
     const { element_type, element_name, parameters = {}, sort_order = 0 } = req.body;
     if (!element_type) return res.status(400).json({ error: 'element_type required' });
-    const quantities = calcMtoQty(element_type, parameters);
+    const mto = calculateMto(element_type, parameters);
+    const quantities = toLegacyQuantities(mto);
     const name = element_name || element_type;
     const paramsJson = JSON.stringify(parameters);
     const qtyJson = JSON.stringify(quantities);
@@ -2298,7 +2255,7 @@ router.post('/proposals/:id/mto', authMiddleware, async (req: Request, res: Resp
       'SELECT id FROM engineering_inputs WHERE proposal_id = ? AND element_type = ? AND element_name = ?',
       [proposalId, element_type, name]
     ) as any)?.id;
-    res.json({ id, quantities, updated: !result.insertId });
+    res.json({ id, quantities, lines: mto.lines, variant: mto.variant, notes: mto.notes, updated: !result.insertId });
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });
 
@@ -2318,12 +2275,13 @@ router.put('/proposals/:id/mto/:elementId', authMiddleware, async (req: Request,
     if (!existing) return res.status(404).json({ error: 'Element not found' });
     const type = element_type || existing.element_type;
     const params = Object.keys(parameters).length ? parameters : JSON.parse(existing.parameters || '{}');
-    const quantities = calcMtoQty(type, params);
+    const mto = calculateMto(type, params);
+    const quantities = toLegacyQuantities(mto);
     await dbRun(
       'UPDATE engineering_inputs SET element_type=?, element_name=?, parameters=?, quantities=?, sort_order=? WHERE id=?',
       [type, element_name || existing.element_name, JSON.stringify(params), JSON.stringify(quantities), sort_order ?? existing.sort_order, req.params.elementId]
     );
-    res.json({ quantities });
+    res.json({ quantities, lines: mto.lines, variant: mto.variant, notes: mto.notes });
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });
 

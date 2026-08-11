@@ -1,894 +1,1095 @@
-# PROCUREMENT MODULE — RE-REVIEW ROUND 3
+# ESTIMATOR — PROPOSAL MTO DEEP REVIEW
 
-**Repository:** `gallankusuma/BlackBoxs`
-**Branch:** `main`
-**Reviewed HEAD:** `6bf2fd0f95d0b5789e547a839988593f65b8abf0`
+## Objective: MTO sebagai Dasar Penawaran Harga
 
-## Reviewer Verdict
+**Repository:** gallankusuma/BlackBoxs
+**Reviewed branch:** main
+**Reviewed HEAD:** aa15efb5d432f6a82fe39f8b2ab24d90f5f1e97d
 
-**CHANGES REQUIRED**
+## REVIEW VERDICT
 
-Revisi terakhir berhasil menutup sebagian besar finding sebelumnya, termasuk dua race condition kritikal. Namun ditemukan gap approval-control dan audit integrity baru yang harus ditutup sebelum Procurement dinyatakan SETTLED.
+**CHANGES REQUIRED — CURRENT MTO MUST NOT YET BE USED AS FINAL QUOTATION AUTHORITY**
 
----
-
-# 1. FINDING YANG SUDAH VERIFIED
-
-| Finding                                | Status                       |
-| -------------------------------------- | ---------------------------- |
-| PROC-R14 Concurrent double reversal    | ✅ VERIFIED                   |
-| PROC-R15 Concurrent duplicate GRN      | ✅ VERIFIED                   |
-| PROC-R18 PO → Payment Schedule/AP sync | ✅ VERIFIED                   |
-| PROC-R20 Negative-stock reversal       | ✅ VERIFIED                   |
-| PROC-R21 Business timezone numbering   | ✅ VERIFIED                   |
-| PROC-R22 Upload DB/file atomicity      | ✅ VERIFIED                   |
-| PROC-R12 received_by / created_by      | ✅ VERIFIED                   |
-| PROC-R13 Partial delivery              | ✅ CLOSED — Business Decision |
+Konsep MTO → RAB → AHSP sudah benar, tetapi calculation integrity belum konsisten. Saat ini terdapat beberapa calculator berbeda yang dapat menghasilkan quantity berbeda untuk engineering input yang sama.
 
 ---
 
-# PROC-R14 — CONCURRENT REVERSAL
+# P0 — CALCULATION & COMMERCIAL INTEGRITY
 
-**Status: VERIFIED ✅**
+## EST-MTO-001 — Multiple Calculation Engines
 
-Reversal sekarang berjalan dalam transaction dan melakukan:
+Saat ini formula berada di:
 
-```sql
-SELECT *
-FROM goods_receipts
-WHERE id = ?
-FOR UPDATE
-```
+1. FoundationInputs / ColumnInputs / BeamInputs / SlabInputs / WallInputs / RoofInputs.
+2. ProjectMTO grandSummary / detailedMTO / mtoGrandTotal.
+3. Backend calcMtoQty().
 
-Dengan demikian request kedua harus menunggu request pertama selesai.
+Ketiganya memiliki formula yang berbeda.
 
-Test concurrency juga sudah tersedia:
+### Required
+
+Buat satu calculator domain di backend:
 
 ```text
-2 reversal bersamaan
-→ 1 berhasil
-→ 1 ditolak 409
+src/modules/estimator/mto/
+    calculator.ts
+    foundation.calculator.ts
+    column.calculator.ts
+    beam.calculator.ts
+    slab.calculator.ts
+    wall.calculator.ts
+    roof.calculator.ts
 ```
 
-dan stok hanya dibalik sekali.
+Frontend tidak boleh menghitung business quantity sendiri.
 
-**Closed.**
+Frontend:
+
+```text
+INPUT → API → CALCULATOR → OUTPUT
+```
+
+Semua:
+
+```text
+UI MTO
+Rekap MTO
+MTO Picker
+RAB
+Export
+```
+
+harus membaca output calculator yang sama.
 
 ---
 
-# PROC-R15 — DUPLICATE ACTIVE GRN
+## EST-MTO-002 — Foundation Excavation Formula Salah
 
-**Status: VERIFIED ✅**
+Backend menggunakan footing `H` untuk excavation depth.
 
-Create GRN sekarang melakukan lock terhadap PO:
-
-```sql
-SELECT id
-FROM purchase_orders
-WHERE id = ?
-FOR UPDATE
-```
-
-kemudian mengecek active GRN di dalam transaction yang sama.
-
-Regression test juga sudah membuat 20 GRN bersamaan terhadap satu PO:
+Required:
 
 ```text
-1 berhasil
-19 ditolak
-0 HTTP 500
-active GRN = 1
+Excavation =
+(L + 2 × working_space)
+×
+(W + 2 × working_space)
+×
+depth
+×
+qty
 ```
 
-**Closed.**
+Bukan menggunakan footing thickness.
+
+Regression test default:
+
+```text
+L=1
+W=1
+depth=1.2
+working_space=.3
+qty=12
+
+Expected excavation = 36.864 m3
+```
 
 ---
 
-# PROC-R20 — NEGATIVE STOCK REVERSAL
+## EST-MTO-003 — Foundation Output Tidak Lengkap
 
-**Status: VERIFIED ✅**
-
-Reversal sekarang tidak lagi:
+Foundation backend harus menghasilkan quantity line terpisah:
 
 ```text
-quantity = quantity - qty
+Excavation
+Backfill
+Lean Concrete
+Footing Concrete
+Footing Formwork
+Footing Main Rebar
+
+Tie Beam Concrete
+Tie Beam Formwork
+Tie Beam Main Rebar
+Tie Beam Stirrup
 ```
 
-secara buta.
-
-Jika current inventory lebih kecil daripada quantity GRN, backend menghasilkan:
-
-```text
-409
-INSUFFICIENT_STOCK_FOR_REVERSAL
-```
-
-dan seluruh transaction rollback.
-
-**Closed.**
+Jangan menggabungkan seluruh rebar sebagai satu generic field apabila diameter berbeda.
 
 ---
 
-# PROC-R18 — PAYMENT SCHEDULE / AP RECONCILIATION
+## EST-MTO-004 — Net Qty dan Waste Harus Dipisahkan
 
-**Status: VERIFIED ✅**
-
-Perubahan terhadap:
+Jangan embed:
 
 ```text
-items
-payment_term
-po_date
-expected_date
-advance_payment
-discount_percent
-ppn_percent
-notes
-vendor_id
+× 1.05
 ```
 
-sekarang dianggap mempengaruhi payment schedule.
+secara tersembunyi di formula.
 
-PO update, item update, payment schedule, dan Accounts Payable juga sudah berada dalam transaction yang sama.
-
-Test perubahan:
-
-```text
-advance_payment 20% → 40%
-```
-
-sudah memastikan payment schedule berubah mengikuti PO.
-
-**Closed.**
-
----
-
-# PROC-R21 — BUSINESS DATE DOCUMENT NUMBERING
-
-**Status: VERIFIED ✅**
-
-Document numbering sudah tidak menggunakan UTC mentah.
-
-Sekarang menggunakan:
-
-```text
-BUSINESS_TIMEZONE
-default = Asia/Jakarta
-```
-
-sehingga dokumen pada pukul 00:00–06:59 WIB tidak lagi memakai tanggal UTC hari sebelumnya.
-
-**Closed.**
-
----
-
-# PROC-R22 — UPLOAD ATOMICITY
-
-**Status: VERIFIED ✅**
-
-Multi-file bid upload sudah:
-
-```text
-validate all files
-↓
-write files
-↓
-BEGIN
-insert document rows
-update quotation_file
-COMMIT
-```
-
-Jika DB gagal:
-
-```text
-ROLLBACK
-+
-physical file cleanup
-```
-
-Multer `LIMIT_FILE_SIZE` juga sudah menjadi:
-
-```text
-413 Payload Too Large
-```
-
-bukan generic 500.
-
-**Closed.**
-
----
-
-# PROC-R12 — received_by AUDIT
-
-**Status: VERIFIED ✅**
-
-Business decision-nya masuk akal:
-
-```text
-received_by
-```
-
-boleh berbeda dari user penginput.
-
-Sekarang ditambahkan:
-
-```text
-created_by = authenticated user
-received_by = actual receiver
-```
-
-Jadi user A dapat mencatat bahwa barang diterima user B tanpa menghilangkan audit bahwa user A adalah penginput transaksi.
-
-**Closed.**
-
----
-
-# PROC-R13 — ONE PO = ONE GRN
-
-**Status: CLOSED — BUSINESS RULE ✅**
-
-Keputusan pemilik bisnis sudah didokumentasikan:
-
-```text
-1 PO = 1 active GRN
-```
-
-Partial delivery:
-
-```text
-100 → 30 + 40 + 30
-```
-
-tidak digunakan.
-
-GRN rejected/reversed dianggap tidak aktif sehingga PO dapat dibuatkan GRN koreksi/pengganti.
-
-Tidak perlu implement `received_qty/outstanding_qty`.
-
----
-
-# 2. BLOCKER BARU
-
-# PROC-R23 — FULLY APPROVED PO MASIH BISA DIUBAH TANPA RE-APPROVAL
-
-**Severity: P0 — Critical**
-**Status: NEW / OPEN**
-
-Ini blocker paling penting dari review kali ini.
-
-Current PO lifecycle lock hanya aktif apabila:
-
-```text
-PO sudah mempunyai GRN
-```
-
-atau:
-
-```text
-PO sudah mempunyai pembayaran
-```
-
-Tetapi PO yang:
-
-```text
-approval_status = 2
-GRN belum ada
-payment belum ada
-```
-
-masih dapat diedit secara material.
-
-Contoh:
-
-```text
-PO disetujui:
-
-Vendor A
-Qty      = 10
-Price    = 100.000
-Total    = 1.000.000
-
-approval_status = 2
-```
-
-Setelah approval user dengan permission edit masih berpotensi mengubah:
-
-```text
-Vendor B
-Qty      = 1.000
-Price    = 500.000
-Total    = 500.000.000
-```
-
-sementara:
-
-```text
-approval_status tetap = 2
-```
-
-Dengan kata lain approval lama secara efektif ikut "menyetujui" data baru yang tidak pernah diperiksa approver.
-
-## Required Rule
-
-### Option A — Lock
-
-Setelah:
-
-```text
-approval_status = 2
-```
-
-field material dikunci:
-
-```text
-vendor_id
-pr_id
-project_id
-items
-quantity
-unit_price
-currency
-discount
-PPN
-advance_payment
-payment_term
-```
-
-Perubahan membutuhkan:
-
-```text
-Reject / Reopen PO
-→ Edit
-→ Approval ulang
-```
-
-### Option B — Amendment Workflow
-
-Lebih ideal:
-
-```text
-Approved PO
-   ↓
-Amendment Request
-   ↓
-Revision No.
-   ↓
-Re-Approval
-   ↓
-Approved Revision
-```
-
-## Acceptance Test
-
-```text
-PO approval_status = 2
-GRN = none
-payment = none
-
-PUT quantity berbeda
-→ 409
-
-PUT vendor berbeda
-→ 409
-
-PUT unit price berbeda
-→ 409
-```
-
-Administrative field seperti:
-
-```text
-contact_person
-delivery address
-internal notes non-financial
-```
-
-boleh diputuskan tetap editable.
-
----
-
-# PROC-R24 — GRN DAPAT DIBUAT DARI PO YANG BELUM DIAPPROVE
-
-**Severity: P0 — Critical**
-**Status: NEW / OPEN**
-
-Create GRN sekarang mengunci PO dengan:
-
-```sql
-SELECT id
-FROM purchase_orders
-WHERE id = ?
-FOR UPDATE
-```
-
-Tetapi hanya memeriksa keberadaan PO.
-
-Belum memeriksa:
-
-```text
-is_deleted = 0
-approval_status = 2
-```
-
-Artinya secara backend masih memungkinkan:
-
-```text
-Draft PO
-approval_status = 0
-        ↓
-Create GRN
-        ↓
-Approve GRN
-        ↓
-Stock masuk
-```
-
-Ini membuat PO approval dapat dilewati.
-
-Bahkan test Procurement saat ini banyak membuat PO dengan:
+Output standard:
 
 ```json
 {
-  "status": "approved"
+  "net_quantity": 4.2,
+  "waste_percent": 5,
+  "gross_quantity": 4.41,
+  "unit": "m3"
 }
 ```
 
-tetapi `POST /purchase-orders` sendiri tetap menginisialisasi:
+RAB work quantity dapat menggunakan `net_quantity`.
+
+Procurement MTO dapat menggunakan `gross_quantity`.
+
+---
+
+## EST-MTO-005 — Column Floors Dihitung Dua Kali
+
+Frontend Column saat ini mengalikan floors pada:
 
 ```text
-approval_status = 0
-```
-
-Jadi `status="approved"` tidak sama dengan multi-level approval.
-
-## Required Fix
-
-Create GRN transaction:
-
-```sql
-SELECT id, approval_status, is_deleted, status
-FROM purchase_orders
-WHERE id = ?
-FOR UPDATE
-```
-
-Lalu:
-
-```text
-PO tidak ada            → 404
-PO is_deleted = 1       → 409
-approval_status != 2    → 409 PO_NOT_APPROVED
-```
-
-GRN approval juga sebaiknya melakukan defensive validation yang sama sebelum posting stok.
-
-## Acceptance Tests
-
-```text
-Draft PO → create GRN → 409
-Approval 1/2 → create GRN → 409
-Approval 2/2 → create GRN → 201
-Deleted PO → create GRN → 409
+quantity
 ```
 
 dan:
 
 ```text
-PO kehilangan approval sebelum GRN approve
-→ stock posting ditolak
+height
+```
+
+sehingga menghasilkan floors².
+
+Expected formula:
+
+```text
+B × H
+× height_per_floor
+× qty_per_floor
+× floors
+```
+
+Regression test:
+
+```text
+B=.3
+H=.3
+height=4
+qty/floor=12
+floors=2
+
+net concrete = 8.64 m3
 ```
 
 ---
 
-# PROC-R25 — CANCELLED PR MASIH BISA DIMODIFIKASI MELALUI SEBAGIAN BID ENDPOINT
+## EST-MTO-006 — Structural Type Harus Diproses Backend
 
-**Severity: P1 — High**
-**Status: PROC-R17 PARTIAL**
-
-Helper:
+Calculator wajib branch berdasarkan:
 
 ```text
-getActivePurchaseRequest()
+column.col_type
+
+concrete
+wf
+cfs
+wood
 ```
 
-sudah diterapkan di banyak endpoint dan ini merupakan improvement yang benar.
+WF tidak boleh menghasilkan concrete/rebar quantity.
 
-Tetapi belum di seluruh subresource Bid.
-
-Contoh endpoint yang masih bekerja langsung terhadap `pr_bids`:
+Contoh WF output:
 
 ```text
-GET    /purchase-requests/:prId/bids
-PUT    /purchase-requests/:prId/bids/:bidId
-POST   /purchase-requests/:prId/bids/:bidId/select
-POST   /purchase-requests/:prId/bids/:bidId/select-item/:itemIndex
-DELETE /purchase-requests/:prId/bids/:bidId
-POST   /purchase-requests/:prId/bids/:bidId/upload
+WF Profile Weight
+Base Plate
+Anchor Bolt
+Connection Plate
+Painting Area
 ```
 
-Sebagian endpoint tersebut tidak memastikan:
+sesuai scope.
+
+---
+
+## EST-MTO-007 — Beam WF / UNP / Purlin Weight Formula
+
+Current precedence menyebabkan profile weight per meter dianggap total weight.
+
+Required:
 
 ```text
-PR masih active
+steel_weight =
+weight_per_meter
+× total_length
+× waste_factor
 ```
 
-bahkan beberapa tidak memastikan:
+Regression example:
 
 ```text
-bidId benar-benar milik prId pada URL
+WF200x100
+21.3 kg/m
+300m
+5% waste
+
+gross = 6,709.5 kg
 ```
 
-## Contoh Integrity Bug
+Bukan 21.3 kg.
 
-Route:
+Perbaiki pattern yang sama pada:
 
 ```text
-/PR-A/bids/BID-B/select
-```
-
-dengan `BID-B` sebenarnya milik PR-B.
-
-Backend memang melakukan:
-
-```text
-UPDATE ... WHERE id=BID-B AND pr_id=PR-A
-```
-
-untuk selection.
-
-Tetapi sesudah itu vendor dibaca menggunakan:
-
-```sql
-SELECT vendor_id
-FROM pr_bids
-WHERE id = BID-B
-```
-
-tanpa `pr_id`.
-
-Akibatnya `selected_vendor_id` PR-A dapat diisi vendor dari bid milik PR-B.
-
-## Required
-
-Buat helper:
-
-```text
-getActivePrBid(prId, bidId)
-```
-
-yang memastikan:
-
-```text
-PR active
-bid exists
-bid.pr_id = PR id
-```
-
-Gunakan pada seluruh Bid endpoints.
-
-## Acceptance Tests
-
-```text
-Cancelled PR → update bid → 404/409
-Cancelled PR → select bid → 404/409
-Cancelled PR → upload bid document → 404/409
-
-PR-A + Bid milik PR-B
-→ select → 404
-→ tidak ada data PR-A maupun PR-B yang berubah
+WF Beam
+Purlin
+UNP
 ```
 
 ---
 
-# PROC-R26 — BID SUMBER PO MASIH BISA DIHAPUS PERMANEN
+## EST-MTO-008 — Slab Plate Weight Formula
 
-**Severity: P1 — High**
-**Status: NEW / OPEN**
-
-Generate PO sekarang menyimpan:
+Plate Bordes:
 
 ```text
-purchase_orders.source_bid_id
+plate_weight =
+kg_per_m2
+× area
+× waste_factor
 ```
 
-Ini bagus karena memberikan source trace dan idempotency.
-
-Tetapi endpoint:
+Regression:
 
 ```text
-DELETE /purchase-requests/:prId/bids/:bidId
-```
+5mm
+39.3 kg/m2
+1000 m2
+5%
 
-masih melakukan:
-
-```text
-DELETE pr_bid_items
-DELETE pr_bids
-```
-
-secara permanen.
-
-Tidak ada pengecekan apakah bid tersebut sudah menjadi sumber PO.
-
-Skenario:
-
-```text
-PR
- ↓
-Vendor quotation / bid
- ↓
-Bid selected
- ↓
-PO generated
- ↓
-source_bid_id = 123
- ↓
-DELETE Bid 123
-```
-
-Hasil:
-
-```text
-PO.source_bid_id = 123
-```
-
-tetapi dokumen keputusan procurement-nya sudah tidak ada.
-
-Selain itu delete bid saat ini merupakan dua query terpisah dan belum transaction.
-
-## Required
-
-Jika bid sudah digunakan PO:
-
-```text
-409 BID_HAS_PO
-```
-
-atau logical delete/archive.
-
-Jangan hard delete procurement decision yang sudah mempunyai downstream financial document.
-
-Minimal:
-
-```text
-SELECT PO
-WHERE source_bid_id = bidId
-AND is_deleted = 0
-```
-
-Jika ada:
-
-```text
-reject deletion
-```
-
-## Acceptance Test
-
-```text
-Generate PO dari Bid
-DELETE Bid
-→ 409 BID_HAS_PO
-
-Bid + Bid Items tetap ada
-PO source tetap dapat ditelusuri
+= 41,265 kg
 ```
 
 ---
 
-# PROC-R27 — IDEMPOTENCY GENERATED PO BERTENTANGAN DENGAN SOFT DELETE
+## EST-MTO-009 — Slab Type Harus Diproses Backend
 
-**Severity: P1 — High**
-**Status: PROC-R19 PARTIAL**
-
-Idempotency sekarang menggunakan:
+Backend wajib memahami:
 
 ```text
-UNIQUE (pr_id, source_bid_id)
+concrete
+keramik
+plate_bordes
+parquet
 ```
 
-Ini efektif mencegah duplicate generate.
+Contoh output berbeda.
 
-Tetapi soft-deleted PO masih tetap mempunyai:
+Concrete:
 
 ```text
-pr_id
-source_bid_id
+excavation
+subbase
+lean concrete
+concrete
+reinforcement
+finishing
 ```
 
-yang sama.
-
-Skenario:
+Ceramic:
 
 ```text
-PR + Bid
-  ↓
-Generate PO-001
-  ↓
-PO-001 dibatalkan / soft delete
-  ↓
-Generate ulang
+screed
+tile
+grout
+adhesive
 ```
 
-Business logic sebelumnya ingin PO cancelled tidak dianggap active downstream document.
-
-Tetapi database tetap mempunyai:
+Plate:
 
 ```text
-(PR, Bid) UNIQUE
+steel plate
+support frame
+welding
 ```
 
-dari PO-001.
-
-Generate berikutnya terkena duplicate key lalu code mencari PO lama dan memasukkannya sebagai:
+Parquet/Vinyl:
 
 ```text
-skipped
+surface
+leveling
+floor material
+adhesive
 ```
 
-Jadi sistem secara efektif tidak benar-benar dapat menerbitkan PO pengganti dari bid yang sama setelah PO lama dibatalkan.
+---
 
-## Required Business Decision
+## EST-MTO-010 — Wall Parameter Contract Tidak Konsisten
 
-Pilih salah satu:
-
-### A. Cancelled generated PO tidak boleh regenerate
-
-Maka UI/API harus mengatakan:
+Frontend:
 
 ```text
-Restore PO lama
+thickness_cm
+opening_pct
+wall_type
 ```
 
-bukan generate ulang.
+Backend:
 
-### B. Boleh generate replacement PO
+```text
+thickness_mm
+has_plaster
+```
 
-Maka idempotency key perlu mempertimbangkan active lifecycle, misalnya revision/replacement relation.
+Harus satu interface/domain model.
+
+Net wall:
+
+```text
+gross_area
+-
+opening_area
+=
+net_area
+```
+
+Jangan gunakan gross area sebagai material quantity.
+
+---
+
+## EST-MTO-011 — Wall Type Harus Diproses Backend
+
+Support minimal:
+
+```text
+brick/lightweight block
+red brick
+GRC
+zincalume cladding
+glass
+```
+
+Masing-masing harus menghasilkan MTO yang relevan.
+
+Cladding tidak boleh menghasilkan:
+
+```text
+plaster
+acian
+wall volume
+```
+
+secara otomatis.
+
+---
+
+## EST-MTO-012 — Roof Calculation Harus Satu Formula
+
+Gunakan actual perimeter yang sudah diinput.
+
+Jangan derive perimeter dari:
+
+```text
+sqrt(area)
+```
+
+kalau perimeter tersedia.
+
+Standard data:
+
+```text
+floor_area
+perimeter
+slope
+overhang
+```
+
+Output:
+
+```text
+net roof area
+waste
+gross roof cover
+purlin
+ridge
+gutter
+downspout
+cladding
+```
+
+berdasarkan roof type.
+
+
+### ✅ DITERAPKAN — tim development (Sprint 1)
+
+Seluruh temuan P0 kalkulasi diverifikasi di source lebih dulu; semuanya benar,
+tidak ada yang disanggah. Dua di antaranya lebih parah dari yang tertulis:
+
+**EST-MTO-005 — bukan sekadar dobel, tapi kuadrat.** `ColumnInputs.vue:156`
+mengalikan `floors` ke jumlah kolom DAN ke tingginya sekaligus:
+`n = qty_per_floor * floors` dan `h = height_per_floor * floors`, lalu
+`volume = B*H*h*n`. Hasilnya mengandung `floors²` — gedung 3 lantai dihitung 3×
+lipat, dan itu langsung masuk harga penawaran.
+
+**EST-MTO-007 — penyebabnya presedensi operator.** Di `BeamInputs.vue:127`:
+`WF_WEIGHT[profil] || 21.3 * total_length * 1.05`. Karena `||` berpresedensi
+lebih rendah dari `*`, ekspresi ini terbaca `WF_WEIGHT[profil] || (21.3 * ...)`,
+dan karena profilnya selalu ada di tabel, hasilnya SELALU berat per meter. Balok
+WF 300 m dilaporkan 21,3 kg — meleset ~315×, ke arah yang merugikan.
+
+Kalkulator tunggal dibuat di `backend/src/modules/estimator/mto/` sesuai struktur
+yang diminta: `calculator.ts` + enam kalkulator per elemen + `types.ts` dan
+`profiles.ts`. Tabel berat profil disalin apa adanya dari yang sudah dipakai
+frontend, supaya pemindahan perhitungan tidak diam-diam mengubah harga.
+
+`calcMtoQty()` lama kini hanya pembungkus tipis di atasnya, jadi layar yang belum
+dipindahkan tetap jalan. Endpoint POST/PUT MTO mengembalikan `lines`, `variant`,
+dan `notes` di samping bentuk lama.
+
+Diterapkan: 001 (satu kalkulator), 002 (galian pakai `depth`), 003 (baris
+terpisah termasuk tie beam), 004 (net/waste/gross eksplisit), 005, 006 (branch
+per `col_type`), 007, 008 (kg/m2 × luas), 009 (branch per `slab_type`), 010
+(`thickness_cm` & `thickness_mm` dinormalisasi, luas bersih setelah bukaan), 011
+(cladding/kaca/GRC tidak lagi menghasilkan plesteran), 012 (pakai `perimeter`
+yang diinput; `sqrt` hanya cadangan dan dicatat sebagai asumsi).
+
+Tes: `backend/tests/mto-calculator.ts`, 40 kasus, angka acuannya diambil dari
+contoh regresi reviewer — bukan dari keluaran kode ini. Ketiganya cocok persis:
+galian **36,864 m³**, balok WF **6.709,5 kg**, plat bordes **41.265 kg**.
+`npm run test:mto`; `test:all` 543 lulus.
+
+### Belum dikerjakan
+
+013–016 (link RAB, unit compatibility, rekonsiliasi, status lock) dan seluruh P1
+serta P2 masih terbuka. Frontend juga belum dipindahkan untuk membaca output
+kalkulator — komponen input dan rekap `ProjectMTO.vue` masih menghitung sendiri,
+jadi angka di layar belum tentu sama dengan angka backend sampai itu dikerjakan.
+
+---
+
+## EST-MTO-013 — MTO Link Tidak Boleh Mempercayai Quantity dari Client
+
+Client tidak boleh mengirim authoritative:
+
+```text
+value
+unit
+```
+
+Request cukup:
+
+```json
+{
+  "element_id": 123,
+  "line_code": "FND-CONC"
+}
+```
+
+Backend:
+
+1. cek proposal.
+2. cek element milik proposal.
+3. ambil current calculated line.
+4. ambil quantity server-side.
+5. validasi unit.
+6. update RAB.
+
+Client quantity tidak pernah menjadi source of truth.
+
+---
+
+## EST-MTO-014 — Unit Compatibility
+
+Sebelum MTO link:
+
+```text
+MTO unit
+vs
+AHSP / RAB unit_snapshot
+```
+
+wajib compatible.
 
 Contoh:
 
 ```text
-source_bid_id
-revision_no
-replaces_po_id
+m3 ↔ m³
+m2 ↔ m²
+m ↔ m'
+kg ↔ kg
+pcs ↔ bh
 ```
 
-Jangan hanya menghapus unique constraint karena race protection tetap diperlukan.
+Gunakan canonical unit table.
 
----
-
-# 3. CATATAN PR APPROVAL AUDIT
-
-PROC-R16 sudah menutup perubahan `notes/items/project/date` pada PR fully-approved.
-
-Namun audit sebaiknya juga mempertimbangkan field keputusan vendor:
+Jika:
 
 ```text
-vendor_comparisons
-selected_vendor_id
+MTO = kg
+AHSP = m3
 ```
 
-Begitu PO sudah dibuat, perubahan kedua field tersebut dapat membuat histori "vendor terpilih" berbeda dari PO yang benar-benar diterbitkan.
-
-Saya rekomendasikan memasukkan keduanya ke locked source field saat:
+return:
 
 ```text
-approval_status = 2
-atau
-PR memiliki PO
+409 UNIT_MISMATCH
 ```
 
 ---
 
-# 4. STATUS FINAL FINDING
+## EST-MTO-015 — Linked RAB Harus Reconcile Setelah MTO Berubah
 
-## Closed / Verified
+Jika:
 
 ```text
-R01  ✅
-R02  ✅
-R03  ✅
-R04  ✅
-R05  ✅
-R06  ✅
-R07  ✅
-R09  ✅
-R10  ✅
-R11  ✅
-R12  ✅
-R13  ✅ Business rule
-R14  ✅
-R15  ✅
-R18  ✅
-R20  ✅
-R21  ✅
-R22  ✅
+MTO 100 → 125
 ```
 
-## Partial
+RAB linked item tidak boleh tetap 100.
+
+Pilihan:
+
+### Auto Sync
+
+Saat MTO disimpan:
 
 ```text
-R08 / PR lifecycle    ⚠️
-R16                   ⚠️
-R17                   ⚠️
-R19                   ⚠️
+recalculate
+→ update linked proposal_items
+→ recalculate proposal
 ```
 
-## New Blocking Findings
+Recommended untuk Draft/Review.
+
+### Controlled Reconciliation
+
+Tampilkan:
 
 ```text
-PROC-R23 P0 — approved PO modification bypasses approval
-PROC-R24 P0 — GRN can originate from unapproved PO
-PROC-R25 P1 — cancelled PR / Bid endpoint ownership gap
-PROC-R26 P1 — source bid can be hard-deleted
-PROC-R27 P1 — generated PO soft-delete vs idempotency conflict
+MTO changed
+RAB linked quantity outdated
 ```
 
----
-
-# 5. PRIORITY DEVELOPMENT
-
-## P0 — Kerjakan terlebih dahulu
+dan button:
 
 ```text
-PROC-R23
-Approved PO material fields must require reapproval
-
-PROC-R24
-GRN requires fully-approved active PO
+Sync RAB
 ```
 
-## P1 — Setelah P0
+Untuk estimator workflow, rekomendasi:
 
 ```text
-PROC-R25
-Centralize active PR/Bid ownership validation
-
-PROC-R26
-Protect Bid once it becomes PO source
-
-PROC-R27
-Define replacement/generated-PO lifecycle
+Draft/Review → auto-sync
+Submitted/Deal → locked
 ```
 
 ---
 
-# 6. REGRESSION TEST YANG PERLU DITAMBAHKAN
+## EST-MTO-016 — Proposal Status Lock
+
+MTO hanya editable saat:
 
 ```text
-01 Approved PO → change qty → 409
-02 Approved PO → change price → 409
-03 Approved PO → change vendor → 409
-04 Reopen/reject PO → edit → approve ulang berhasil
+draft
+review
+```
 
-05 Draft PO → create GRN → 409
-06 PO 1/2 approval → create GRN → 409
-07 PO 2/2 approval → create GRN → success
-08 Deleted PO → create GRN → 409
+Frontend:
 
-09 Cancelled PR → update bid → reject
-10 Cancelled PR → select bid → reject
-11 Cancelled PR → upload quotation → reject
+```vue
+<ProjectMTO
+  ...
+  :readonly="!isEditable"
+/>
+```
 
-12 PR-A + Bid-B → selection → reject
-13 PR-A + Bid-B → update → reject
-14 PR-A + Bid-B → delete → reject
+Backend harus enforce rule yang sama.
 
-15 Bid yang sudah menghasilkan PO → delete → 409
+Submitted:
 
-16 Generated PO soft-delete → defined replacement behavior
-17 Retry generate after cancellation → tidak menghasilkan duplicate / silent skip yang salah
+```text
+POST/PUT/DELETE MTO
+→ 409 PROPOSAL_LOCKED
+```
+
+Deal:
+
+```text
+→ 409 PROPOSAL_LOCKED
+```
+
+Revisi harus melalui explicit revision workflow.
+
+---
+
+# P1 — DATA MODEL / AUDIT
+
+## EST-MTO-017 — Proposal MTO dan Project MTO Harus Terpisah
+
+Endpoint Proposal tidak boleh update engineering input milik Project melalui:
+
+```text
+proposal_id OR project_id
+```
+
+Proposal MTO:
+
+```text
+commercial baseline
+```
+
+Project MTO:
+
+```text
+execution quantity
+```
+
+Saat Proposal Deal:
+
+```text
+COPY / SNAPSHOT
+Proposal MTO
+→
+Project MTO Baseline
+```
+
+Setelah itu perubahan project tidak mengubah proposal.
+
+---
+
+## EST-MTO-018 — Scope Unique Key
+
+Jangan bergantung pada composite UNIQUE yang berisi nullable:
+
+```text
+proposal_id
+project_id
+element_type
+element_name
+```
+
+Recommended:
+
+```text
+scope_type ENUM('proposal','project')
+scope_id
+```
+
+Unique:
+
+```text
+(scope_type, scope_id, element_type, element_name)
 ```
 
 ---
 
-# FINAL VERDICT
+## EST-MTO-019 — Normalized MTO Line
 
-**PROCUREMENT = CHANGES REQUIRED**
+Tambahkan logical line layer.
 
-Modul sekarang jauh lebih kuat dibanding baseline awal dan concurrency/data-integrity utamanya sudah membaik signifikan.
+Recommended:
 
-Tetapi `PROC-R23` dan `PROC-R24` merupakan approval-control issue yang harus ditutup sebelum Procurement layak dinyatakan **SETTLED**.
+```text
+mto_elements
+-------------
+id
+scope_type
+scope_id
+element_type
+element_name
+zone_name
+parameters
+formula_version
 
-Setelah dua P0 dan tiga P1 di atas selesai, lakukan satu final re-review. Jika tidak muncul regression baru, Procurement sudah sangat dekat untuk dikunci sebagai SETTLED.
+mto_lines
+---------
+id
+element_id
+line_code
+discipline_code
+category
+description
+specification
+net_quantity
+waste_percent
+gross_quantity
+unit
+formula_code
+formula_version
+material_id nullable
+ahsp_id nullable
+created_at
+updated_at
+```
+
+Contoh:
+
+```text
+FND-EXC
+FND-LC
+FND-CONC-K300
+FND-FORM
+FND-RB-D13
+TB-CONC-K300
+TB-RB-D16
+TB-ST-D10
+```
+
+---
+
+## EST-MTO-020 — RAB Mapping
+
+Buat mapping:
+
+```text
+mto_line_code
+→
+ahsp_id
+```
+
+Estimator cukup memilih:
+
+```text
+Generate RAB From MTO
+```
+
+Backend membuat atau menyinkronkan item RAB.
+
+Hindari manual link satu-satu untuk pekerjaan standard.
+
+---
+
+## EST-MTO-021 — Costed MTO Layer
+
+Tahap berikutnya setelah quotation QTO stabil:
+
+```text
+material_id
+product_id
+vendor_id
+
+price_source
+vendor_price
+last_po
+master_price
+manual_quote
+
+currency
+unit_price
+price_date
+valid_until
+
+net_qty
+waste_pct
+order_qty
+conversion_factor
+
+total_cost
+```
+
+Price harus snapshot per Proposal Revision.
+
+---
+
+## EST-MTO-022 — Proposal Commercial Engine
+
+Pisahkan:
+
+```text
+Direct Cost
+Indirect Cost
+Contingency
+Profit / Margin
+Tax
+Selling Price
+```
+
+Jangan hardcode commercial strategy hanya sebagai AHSP:
+
+```text
+Overhead + Profit = 10%
+```
+
+Proposal harus mendukung scenario:
+
+```text
+Direct Cost       8.50 B
+Indirect           .70 B
+Contingency 3%     .28 B
+Base Cost          9.48 B
+Profit 12%         1.14 B
+Selling Price     10.62 B
+PPN                ...
+```
+
+---
+
+# P1 — SECURITY / WORKFLOW
+
+## EST-MTO-023 — Backend RBAC
+
+Estimator route saat ini tidak boleh cukup dengan authentication.
+
+Definisikan permission minimal:
+
+```text
+estimator.proposals.view
+estimator.proposals.create
+estimator.proposals.edit
+estimator.proposals.submit
+estimator.proposals.approve
+
+estimator.mto.view
+estimator.mto.edit
+
+estimator.ahsp.view
+estimator.ahsp.manage
+
+estimator.pricing.view
+estimator.pricing.manage
+```
+
+---
+
+## EST-MTO-024 — MTO Revision Snapshot
+
+Saat Proposal:
+
+```text
+submitted
+```
+
+snapshot:
+
+```text
+MTO inputs
+MTO outputs
+RAB
+AHSP prices
+Commercial assumptions
+```
+
+harus reproducible.
+
+Jika customer meminta revisi:
+
+```text
+Rev-0 submitted
+        ↓
+Create Rev-1
+        ↓
+edit MTO
+        ↓
+new price
+```
+
+Jangan mutate Rev-0.
+
+---
+
+# P2 — UX / RELIABILITY
+
+## EST-MTO-025 — MTO Picker Cache
+
+Jangan berhenti load hanya karena:
+
+```text
+mtoQuantities.length > 0
+```
+
+Setelah MTO save:
+
+```text
+invalidate MTO quantity cache
+```
+
+atau selalu fetch current server state ketika picker dibuka.
+
+---
+
+## EST-MTO-026 — Unlink MTO
+
+Simpan:
+
+```text
+manual_qty_before_link
+manual_unit_before_link
+```
+
+sehingga unlink benar-benar mengembalikan nilai manual.
+
+---
+
+## EST-MTO-027 — Export Excel
+
+Button Export Excel saat ini harus diimplementasikan.
+
+Minimum workbook:
+
+```text
+01 Proposal Summary
+02 RAB
+03 MTO Detail
+04 MTO Summary
+05 AHSP Breakdown
+06 Commercial Summary
+```
+
+MTO export wajib memakai backend calculator result yang sama dengan quotation.
+
+---
+
+# P0 TEST MATRIX
+
+Buat:
+
+```text
+backend/tests/estimator-mto.ts
+```
+
+dan:
+
+```text
+npm run test:estimator
+```
+
+masukkan ke:
+
+```text
+test:all
+```
+
+Minimum regression:
+
+1. Foundation excavation uses depth.
+2. Foundation lean concrete.
+3. Foundation tie beam.
+4. Foundation rebar by diameter.
+5. Column floors 1/2/3 scale linearly.
+6. Concrete column.
+7. WF column.
+8. CFS column.
+9. Wood column.
+10. Concrete beam.
+11. WF beam 300m = correct kg.
+12. UNP beam.
+13. Purlin.
+14. Concrete slab.
+15. Ceramic slab.
+16. Plate bordes 1000m² weight.
+17. Parquet.
+18. Brick wall opening deduction.
+19. 100mm wall remains 100mm.
+20. Zincalume wall.
+21. Glass wall.
+22. Roof actual perimeter.
+23. Zincalume roof.
+24. Concrete roof.
+25. MTO UI/API same result.
+26. Forged client MTO quantity rejected.
+27. Cross-proposal element rejected.
+28. MTO kg → AHSP m3 rejected.
+29. MTO update → linked RAB updated.
+30. Submitted proposal MTO modification rejected.
+31. Deal proposal modification rejected.
+32. Proposal MTO cannot mutate Project MTO.
+33. Duplicate zone protected.
+34. Export total = RAB total.
+35. Proposal summary = SUM RAB items.
+
+---
+
+# URGENT DELIVERY ORDER
+
+Untuk kebutuhan penawaran harga, kerjakan:
+
+### Sprint 1 — Quantity Integrity
+
+```text
+EST-MTO-001
+002
+003
+004
+005
+006
+007
+008
+009
+010
+011
+012
+```
+
+Target:
+
+**Satu input engineering selalu menghasilkan satu set quantity yang sama di seluruh sistem.**
+
+### Sprint 2 — Quotation Link
+
+```text
+013
+014
+015
+016
+020
+```
+
+Target:
+
+```text
+MTO → RAB → AHSP
+```
+
+100% server-controlled dan reconcile.
+
+### Sprint 3 — Commercial Pricing
+
+```text
+021
+022
+024
+```
+
+Target:
+
+```text
+Direct Cost
+Indirect
+Risk
+Margin
+Selling Price
+```
+
+### Sprint 4 — Procurement MTO
+
+Detailed actual material + vendor/last-PO price.
+
+---
+
+# SETTLEMENT GATE
+
+MTO Proposal baru layak menjadi basis quotation apabila:
+
+```text
+[ ] Single calculation engine
+[ ] Civil formula regression tests pass
+[ ] Element subtype supported
+[ ] Net vs waste vs gross separated
+[ ] MTO/RAB quantity reconciles
+[ ] Unit compatibility enforced
+[ ] Server controls quantity
+[ ] Submitted proposal immutable
+[ ] Proposal/project MTO separated
+[ ] AHSP mapping reliable
+[ ] Commercial total reconciles
+[ ] Estimator automated test suite passes
+```
+
+Sebelum semua critical gate tersebut lolos:
+
+**MTO CURRENT STATE = ENGINEERING DRAFT CALCULATOR**
+
+bukan:
+
+**COMMERCIAL QUOTATION SOURCE OF TRUTH**.
