@@ -55,6 +55,18 @@ dotenv.config({ path: path.resolve(__dirname, '../.env') });
 const app: Application = express();
 const PORT = process.env.PORT || 3000;
 
+// Di produksi aplikasi berjalan di belakang nginx, jadi seluruh permintaan tiba
+// dari 127.0.0.1. Tanpa ini `req.ip` selalu bernilai alamat nginx, dan
+// express-rate-limit menghitung SATU jatah untuk seluruh pengguna: 20 percobaan
+// login per 15 menit dan 300 permintaan per menit dibagi bersama. Satu orang
+// yang salah password beberapa kali cukup untuk mengunci semua orang.
+//
+// Sengaja 'loopback', bukan `true`. Dengan `true`, Express mempercayai seluruh
+// isi X-Forwarded-For — termasuk yang dikarang klien — sehingga penyerang bisa
+// memalsukan IP dan melewati rate limit sepenuhnya. 'loopback' hanya
+// mempercayai proxy di mesin yang sama, yang memang nginx kita.
+app.set('trust proxy', 'loopback');
+
 // Middleware
 app.use(helmet());
 
