@@ -136,6 +136,7 @@
 </template>
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
+import { useMtoPreview, toDisplay } from '@/composables/useMtoPreview';
 import SlabTypePicker from './SlabTypePicker.vue';
 const props = defineProps<{ modelValue: Record<string,any> }>();
 const emit = defineEmits<{ (e:'change'):void }>();
@@ -153,27 +154,11 @@ if(!p.plate_thick) p.plate_thick='5'; if(!p.bordes_type) p.bordes_type='diamond'
 if(!p.frame_profile) p.frame_profile='siku50'; if(!p.frame_length) p.frame_length=100;
 if(!p.parquet_type) p.parquet_type='vinyl_click';
 const PLATE_WEIGHT: Record<string,number> = {'4':31.4,'5':39.3,'6':47.1,'8':62.8};
-const fmt = (v:number) => v.toLocaleString('id-ID',{maximumFractionDigits:2});
-const results = computed(()=>{
-  const A=p.area||1000, type=slabType.value||'concrete';
-  if(type==='keramik'){
-    const tiles_m2=+(A*(1+(p.waste_pct||10)/100)).toFixed(1);
-    const screed=+(A*(p.screed_t||3)/100).toFixed(2);
-    return [{icon:'🏗',l:'Keramik',v:fmt(tiles_m2),u:'m²'},{icon:'🪨',l:'Screed Beton',v:fmt(screed),u:'m³'},{icon:'🪨',l:'Subbase',v:fmt(+(A*p.subbase_t).toFixed(2)),u:'m³'}];
-  }
-  if(type==='plate_bordes'){
-    const w=+(PLATE_WEIGHT[p.plate_thick]||39.3*A*1.05).toFixed(0);
-    return [{icon:'⚙',l:'Plate Bordes',v:fmt(w),u:'kg'},{icon:'🔩',l:'Las',v:fmt(p.weld_length),u:"m'"},{icon:'⚙',l:'Rangka',v:fmt(p.frame_length),u:'m'}];
-  }
-  if(type==='parquet'){
-    const mat=+(A*(1+(p.waste_pct||10)/100)).toFixed(1);
-    return [{icon:'🪵',l:'Material',v:fmt(mat),u:'m²'}];
-  }
-  // concrete default
-  const vol_sub=+(A*p.subbase_t).toFixed(2), vol_lk=+(A*p.lean_t).toFixed(2);
-  const vol_beton=+(A*p.thickness*1.05).toFixed(2);
-  return [{icon:'⛏',l:'Vol. Galian',v:fmt(+(A*p.cut_depth*1.2).toFixed(1)),u:'m³'},{icon:'🪨',l:'Subbase',v:fmt(vol_sub),u:'m³'},{icon:'🪨',l:'Lean Conc.',v:fmt(vol_lk),u:'m³'},{icon:'🏗',l:'Beton Plat',v:fmt(vol_beton),u:'m³'},{icon:'🔩',l:'Wiremesh/Besi',v:fmt(+(vol_beton*85).toFixed(0)),u:'kg'},{icon:'🎨',l:'Finishing',v:fmt(A),u:'m²'}];
-});
+// EST-MTO-001: kuantitas tidak lagi dihitung di sini. Komponen ini hanya
+// mengirim parameter; angkanya datang dari kalkulator backend yang sama
+// dengan yang dipakai RAB dan penawaran.
+const { lines, notes, loading } = useMtoPreview('slab', () => p);
+const results = computed(() => toDisplay(lines.value));
 </script>
 <style scoped>
 .inp-wrap{display:flex;flex-direction:column;gap:12px;}

@@ -64,6 +64,7 @@
 </template>
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
+import { useMtoPreview, toDisplay } from '@/composables/useMtoPreview';
 import WallTypePicker from './WallTypePicker.vue';
 const props = defineProps<{ modelValue: Record<string,any> }>();
 const emit = defineEmits<{ (e:'change'):void }>();
@@ -78,25 +79,11 @@ if(!p.window_qty) p.window_qty=8; if(!p.window_w) p.window_w=1.2; if(!p.window_h
 if(!p.zinc_thick) p.zinc_thick='0.4'; if(!p.zinc_eff_w) p.zinc_eff_w=0.85; if(!p.zinc_len) p.zinc_len=6;
 if(!p.glass_thick) p.glass_thick='8'; if(!p.glass_frame) p.glass_frame='aluminium';
 if(!p.finishing) p.finishing='plester_acian';
-const fmt = (v:number) => v.toLocaleString('id-ID',{maximumFractionDigits:2});
-const results = computed(()=>{
-  const gross=p.area||500, pct=(p.opening_pct||20)/100, net=+(gross*(1-pct)).toFixed(1);
-  const type=wallType.value||'bata_ringan';
-  const pintu=+((p.door_qty||0)*(p.door_w||0.9)*(p.door_h||2.1)).toFixed(1);
-  const jendela=+((p.window_qty||0)*(p.window_w||1.2)*(p.window_h||1.2)).toFixed(1);
-  if(type==='cladding_zincalume'){
-    const sheets=Math.ceil(net/(p.zinc_eff_w*p.zinc_len)*1.05);
-    return [{icon:'⚙',l:'Sheet Zinc.',v:String(sheets),u:'lbr'},{icon:'🧱',l:'Luas Netto',v:fmt(net),u:'m²'},{icon:'🚪',l:'Pintu+Jendela',v:fmt(pintu+jendela),u:'m²'}];
-  }
-  if(type==='kaca'){
-    return [{icon:'🪟',l:'Luas Kaca',v:fmt(net),u:'m²'},{icon:'📏',l:'Frame Alu.',v:fmt(+(net*2.5).toFixed(0)),u:"m'"},{icon:'🚪',l:'Pintu',v:fmt(pintu),u:'m²'}];
-  }
-  if(type==='partisi_grc'){
-    const board=+(net*2*1.08).toFixed(1);
-    return [{icon:'🧱',l:'GRC Board',v:fmt(board),u:'m²'},{icon:'🧱',l:'Luas Netto',v:fmt(net),u:'m²'},{icon:'🚪',l:'Pintu+Jendela',v:fmt(pintu+jendela),u:'m²'}];
-  }
-  return [{icon:'🧱',l:'Luas Netto',v:fmt(net),u:'m²'},{icon:'🖌',l:'Plesteran',v:fmt(+(net*2).toFixed(1)),u:'m²'},{icon:'🖌',l:'Acian',v:fmt(+(net*2).toFixed(1)),u:'m²'},{icon:'🎨',l:'Cat',v:fmt(+(net*2*1.1).toFixed(1)),u:'m²'},{icon:'🚪',l:'Pintu',v:fmt(pintu),u:'m²'},{icon:'🪟',l:'Jendela',v:fmt(jendela),u:'m²'}];
-});
+// EST-MTO-001: kuantitas tidak lagi dihitung di sini. Komponen ini hanya
+// mengirim parameter; angkanya datang dari kalkulator backend yang sama
+// dengan yang dipakai RAB dan penawaran.
+const { lines, notes, loading } = useMtoPreview('wall', () => p);
+const results = computed(() => toDisplay(lines.value));
 </script>
 <style scoped>
 .inp-wrap{display:flex;flex-direction:column;gap:12px;}

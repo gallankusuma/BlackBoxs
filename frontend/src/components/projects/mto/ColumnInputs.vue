@@ -133,6 +133,7 @@
 </template>
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
+import { useMtoPreview, toDisplay } from '@/composables/useMtoPreview';
 import ColumnTypePicker from './ColumnTypePicker.vue';
 const props = defineProps<{ modelValue: Record<string,any> }>();
 const emit  = defineEmits<{ (e:'change'):void }>();
@@ -150,30 +151,11 @@ if(!p.cfs_profile) p.cfs_profile='C100x50'; if(!p.cfs_weight_per_m) p.cfs_weight
 if(!p.kayu_b) p.kayu_b=12; if(!p.kayu_h) p.kayu_h=12; if(!p.kayu_kelas) p.kayu_kelas='K2';
 if(!p.sloof_length) p.sloof_length=200; if(!p.sloof_w) p.sloof_w=0.3; if(!p.sloof_h) p.sloof_h=0.5; if(!p.sloof_rebar_dia) p.sloof_rebar_dia=16;
 
-const WF_WEIGHT: Record<string,number> = {'WF150x75':14,'WF200x100':21.3,'WF250x125':29.6,'WF300x150':46.8,'WF350x175':57.4,'WF400x200':66.0};
-const fmt = (v:number) => v.toLocaleString('id-ID',{maximumFractionDigits:2});
-const results = computed(()=>{
-  const n=p.qty_per_floor*(p.floors||1), h=p.height_per_floor*(p.floors||1);
-  const type=colType.value||'beton';
-  const vol_sloof=+(p.sloof_length*p.sloof_w*p.sloof_h*1.05).toFixed(2);
-  if(type==='wf'){
-    const wpm=WF_WEIGHT[p.wf_profile]||21.3;
-    const besi_kol=+(wpm*h*n*1.05).toFixed(0);
-    const bp_kg=+(p.bp_p/1000*p.bp_l/1000*p.bp_t/1000*7850*n).toFixed(0);
-    return [{icon:'⚙',l:'Baja WF',v:fmt(besi_kol),u:'kg'},{icon:'🔩',l:'Base Plate',v:fmt(bp_kg),u:'kg'},{icon:'🔗',l:'Beton Sloof',v:fmt(vol_sloof),u:'m³'},{icon:'🔩',l:'Besi Sloof',v:fmt(+(vol_sloof*122).toFixed(0)),u:'kg'}];
-  }
-  if(type==='cfs'){
-    const besi=+(p.cfs_weight_per_m*h*n*p.cfs_layers*1.05).toFixed(0);
-    return [{icon:'⚙',l:'Baja Ringan',v:fmt(besi),u:'kg'},{icon:'🔩',l:'Baut SD',v:fmt(p.screws_per_m*h*n),u:'bh'},{icon:'🔗',l:'Beton Sloof',v:fmt(vol_sloof),u:'m³'}];
-  }
-  if(type==='kayu'){
-    const m3=+((p.kayu_b/100)*(p.kayu_h/100)*h*n*1.1).toFixed(2);
-    return [{icon:'🪵',l:'Vol. Kayu',v:fmt(m3),u:'m³'},{icon:'🔗',l:'Beton Sloof',v:fmt(vol_sloof),u:'m³'},{icon:'🔩',l:'Besi Sloof',v:fmt(+(vol_sloof*122).toFixed(0)),u:'kg'}];
-  }
-  // beton default
-  const vol_kol=+(p.B*p.H*h*n*1.05).toFixed(2);
-  return [{icon:'🏛',l:'Beton Kolom',v:fmt(vol_kol),u:'m³'},{icon:'🪵',l:'Bekisting',v:fmt(+(2*(p.B+p.H)*h*n).toFixed(1)),u:'m²'},{icon:'🔩',l:'Besi Kolom',v:fmt(+(vol_kol*160).toFixed(0)),u:'kg'},{icon:'🔗',l:'Beton Sloof',v:fmt(vol_sloof),u:'m³'},{icon:'🔩',l:'Besi Sloof',v:fmt(+(vol_sloof*122).toFixed(0)),u:'kg'}];
-});
+// EST-MTO-001: kuantitas tidak lagi dihitung di sini. Komponen ini hanya
+// mengirim parameter; angkanya datang dari kalkulator backend yang sama
+// dengan yang dipakai RAB dan penawaran.
+const { lines, notes, loading } = useMtoPreview('column', () => p);
+const results = computed(() => toDisplay(lines.value));
 </script>
 <style scoped>
 .inp-wrap{display:flex;flex-direction:column;gap:12px;}

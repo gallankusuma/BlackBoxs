@@ -2213,6 +2213,47 @@ function calcMtoQty(elementType: string, params: any): Record<string, number> {
   return toLegacyQuantities(calculateMto(elementType, params));
 }
 
+
+/**
+ * Hitung MTO tanpa menyimpan (EST-MTO-001).
+ *
+ * Dipakai komponen input di frontend supaya angka yang tampil di layar berasal
+ * dari kalkulator yang sama dengan yang dipakai RAB dan penawaran. Sebelum ini
+ * tiap komponen punya rumusnya sendiri — termasuk pendekatan kasar seperti
+ * "besi = volume beton x 160 kg/m3" — sehingga layar dan backend bisa berbeda
+ * jauh tanpa ada yang menyadarinya.
+ */
+router.post('/mto/preview', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { element_type, parameters = {} } = req.body;
+    if (!element_type) return res.status(400).json({ error: 'element_type required' });
+    const mto = calculateMto(element_type, parameters);
+    res.json({ element_type: mto.element_type, variant: mto.variant, lines: mto.lines, notes: mto.notes });
+  } catch (err: any) { res.status(500).json({ error: err.message }); }
+});
+
+
+/**
+ * Hitung banyak elemen sekaligus — dipakai layar rekap MTO.
+ *
+ * Rekap di `ProjectMTO.vue` dulu punya TIGA perhitungan sendiri
+ * (grandSummary, detailedMTO, mtoGrandTotal) dengan konstanta jempol yang
+ * berbeda-beda untuk besi: 95, 160, 117, dan 85 kg/m3 tergantung elemen.
+ * Angka itulah yang tampil sebagai total penawaran, dan tidak satu pun cocok
+ * dengan perhitungan tulangan sebenarnya di backend.
+ */
+router.post('/mto/preview-batch', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+    if (items.length > 500) return res.status(400).json({ error: 'Terlalu banyak elemen dalam satu permintaan' });
+    const results = items.map((it: any) => {
+      const mto = calculateMto(it?.element_type, it?.parameters || {});
+      return { key: it?.key ?? null, element_type: mto.element_type, variant: mto.variant, lines: mto.lines, notes: mto.notes };
+    });
+    res.json({ results });
+  } catch (err: any) { res.status(500).json({ error: err.message }); }
+});
+
 // GET all MTO elements for a proposal — single source of truth: proposal_id only
 router.get('/proposals/:id/mto', authMiddleware, async (req: Request, res: Response) => {
   try {
@@ -2222,12 +2263,22 @@ router.get('/proposals/:id/mto', authMiddleware, async (req: Request, res: Respo
       [proposalId]
     );
     res.json({
-      elements: rows.map((r: any) => ({
-        ...r,
-        parameters: typeof r.parameters === 'string' ? JSON.parse(r.parameters || '{}') : r.parameters,
-        quantities:  typeof r.quantities  === 'string' ? JSON.parse(r.quantities  || '{}') : r.quantities,
-        source: 'proposal',
-      })),
+      elements: rows.map((r: any) => {
+        const parameters = typeof r.parameters === 'string' ? JSON.parse(r.parameters || '{}') : r.parameters;
+        // Dihitung ulang dari parameter, bukan membaca kolom `quantities` yang
+        // tersimpan. Kalau formulanya diperbaiki, elemen lama ikut terkoreksi
+        // tanpa perlu migrasi data.
+        const mto = calculateMto(r.element_type, parameters || {});
+        return {
+          ...r,
+          parameters,
+          quantities: typeof r.quantities === 'string' ? JSON.parse(r.quantities || '{}') : r.quantities,
+          lines: mto.lines,
+          variant: mto.variant,
+          notes: mto.notes,
+          source: 'proposal',
+        };
+      }),
     });
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });

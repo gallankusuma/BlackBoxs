@@ -60,6 +60,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue';
+import { useMtoPreview, toDisplay } from '@/composables/useMtoPreview';
 import FoundationPicker from './FoundationPicker.vue';
 
 const props = defineProps<{ modelValue: Record<string,any> }>();
@@ -82,31 +83,12 @@ if(!p.tb_rebar_main)  p.tb_rebar_main=16;
 if(!p.tb_stirrup)     p.tb_stirrup=10;
 if(!p.stirrup_spacing) p.stirrup_spacing=0.15;
 
-const fmt = (v:number) => v.toLocaleString('id-ID',{maximumFractionDigits:2});
 
-const results = computed(()=>{
-  const n=p.qty||1, L=p.L||2, W=p.W||2, H=p.H||0.45, d=p.depth||1.5, ws=p.working_space||0.3;
-  const tbL=p.tb_length||0, tbW=p.tb_w||0.3, tbH=p.tb_h||0.5;
-  const ws2=ws*2;
-  const vol_gal = +((L+ws2)*(W+ws2)*d*n).toFixed(2);
-  const vol_lk  = +(L*W*0.05*n).toFixed(2);
-  const vol_fp  = +(L*W*H*n*1.05).toFixed(2);
-  const vol_tb  = +(tbL*tbW*tbH*1.05).toFixed(2);
-  const bek_fp  = +(2*(L+W)*H*n).toFixed(1);
-  const bek_tb  = +(2*(tbW+tbH)*tbL).toFixed(1);
-  const besi_fp = +(vol_fp*95).toFixed(0);
-  const besi_tb = +(vol_tb*122).toFixed(0);
-  return [
-    {icon:'⛏',l:'Vol. Galian',     v:fmt(vol_gal),  u:'m³'},
-    {icon:'🪨',l:'Lantai Kerja',    v:fmt(vol_lk),   u:'m³'},
-    {icon:'🏗',l:'Beton Footplat',  v:fmt(vol_fp),   u:'m³'},
-    {icon:'🔗',l:'Beton Tie Beam',  v:fmt(vol_tb),   u:'m³'},
-    {icon:'🪵',l:'Bekisting FP',    v:fmt(bek_fp),   u:'m²'},
-    {icon:'🪵',l:'Bekisting TB',    v:fmt(bek_tb),   u:'m²'},
-    {icon:'🔩',l:'Besi Footplat',   v:fmt(besi_fp),  u:'kg'},
-    {icon:'🔩',l:'Besi Tie Beam',   v:fmt(besi_tb),  u:'kg'},
-  ];
-});
+// EST-MTO-001: kuantitas tidak lagi dihitung di sini. Komponen ini hanya
+// mengirim parameter; angkanya datang dari kalkulator backend yang sama
+// dengan yang dipakai RAB dan penawaran.
+const { lines, notes, loading } = useMtoPreview('foundation', () => p);
+const results = computed(() => toDisplay(lines.value));
 </script>
 
 <style scoped>

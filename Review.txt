@@ -466,6 +466,43 @@ serta P2 masih terbuka. Frontend juga belum dipindahkan untuk membaca output
 kalkulator — komponen input dan rekap `ProjectMTO.vue` masih menghitung sendiri,
 jadi angka di layar belum tentu sama dengan angka backend sampai itu dikerjakan.
 
+
+### ✅ LANJUTAN — frontend dipindahkan (EST-MTO-001 tuntas)
+
+Kalkulator backend saja belum menyeragamkan apa pun selama layar masih
+menghitung sendiri, jadi frontend ikut dipindahkan.
+
+Dua endpoint baru: `POST /estimator/mto/preview` (satu elemen, dipakai komponen
+input) dan `POST /estimator/mto/preview-batch` (dipakai layar rekap). `GET
+/proposals/:id/mto` juga mengembalikan `lines` yang **dihitung ulang dari
+parameter**, bukan dari kolom `quantities` yang tersimpan — jadi kalau formulanya
+diperbaiki lagi, elemen lama ikut terkoreksi tanpa migrasi data.
+
+Yang dihapus dari frontend:
+
+- Enam `computed` rumus di komponen input, diganti composable
+  `useMtoPreview` (debounce 250 ms, balasan telat tidak menimpa yang baru).
+- Tiga rekap di `ProjectMTO.vue` — `grandSummary`, `detailedMTO`,
+  `mtoGrandTotal` — kini menjumlahkan `lines` dari backend berdasarkan kode
+  baris.
+- 82 baris fungsi `calcFoundation/calcColumn/calcBeam/calcSlab/...` beserta
+  `CALC_MAP`. Sudah tidak terpakai, tapi dibiarkan sebagai kode mati justru
+  berbahaya: isinya rumus lama yang salah dan tinggal menunggu dipakai lagi.
+- Salinan tabel `WF_WEIGHT` di dua komponen, karena tabelnya sekarang tunggal di
+  `backend/src/modules/estimator/mto/profiles.ts`.
+
+Diverifikasi lewat HTTP ke endpoint sungguhan: balok WF 300 m kini
+**6.709,5 kg** (layar sebelumnya menampilkan 21,3), kolom 3 lantai **15,12 m³**
+(sebelumnya 3× lipat), galian pondasi **36,864 m³**.
+
+Penyisiran akhir: nol rumus bisnis tersisa di seluruh komponen MTO frontend.
+`vue-tsc` dan `npm run build` bersih, `test:all` 543 lulus.
+
+⚠️ **Konsekuensi yang perlu diketahui pemilik pekerjaan:** angka penawaran akan
+berubah setelah ini di-deploy — kolom bertingkat turun, balok baja naik tajam.
+Itu koreksi ke arah yang benar, tapi penawaran yang sedang berjalan memakai angka
+lama perlu ditinjau ulang.
+
 ---
 
 ## EST-MTO-013 — MTO Link Tidak Boleh Mempercayai Quantity dari Client

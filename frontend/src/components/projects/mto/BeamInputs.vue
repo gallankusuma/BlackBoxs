@@ -103,6 +103,7 @@
 </template>
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
+import { useMtoPreview, toDisplay } from '@/composables/useMtoPreview';
 import BeamTypePicker from './BeamTypePicker.vue';
 const props = defineProps<{ modelValue: Record<string,any> }>();
 const emit = defineEmits<{ (e:'change'):void }>();
@@ -117,29 +118,13 @@ if(!p.wf_profile_beam) p.wf_profile_beam='WF200x100'; if(!p.purlin_length) p.pur
 if(!p.bolt_joints) p.bolt_joints=20; if(!p.bolts_per_joint) p.bolts_per_joint=4; if(!p.stiffener_qty) p.stiffener_qty=10;
 if(!p.kanal_profile) p.kanal_profile='UNP150'; if(!p.kanal_bolts) p.kanal_bolts=40;
 if(!p.kayu_b) p.kayu_b=8; if(!p.kayu_h) p.kayu_h=15; if(!p.kayu_kelas_beam) p.kayu_kelas_beam='K2';
-const WF_WEIGHT: Record<string,number> = {'WF150x75':14,'WF200x100':21.3,'WF250x125':29.6,'WF300x150':46.8,'WF350x175':57.4};
 const UNP_WEIGHT: Record<string,number> = {'UNP100':10.6,'UNP120':13.4,'UNP150':18.8,'UNP200':25.3};
 const PURLIN_WEIGHT: Record<string,number> = {'C150x65':2.24,'C200x75':3.18,'Z150x65':2.24};
-const fmt = (v:number) => v.toLocaleString('id-ID',{maximumFractionDigits:2});
-const results = computed(()=>{
-  const type=beamType.value||'beton';
-  if(type==='wf'){
-    const wBalk=+(WF_WEIGHT[p.wf_profile_beam]||21.3*p.total_length*1.05).toFixed(0);
-    const wPurlin=+(PURLIN_WEIGHT[p.purlin_profile]||2.24*p.purlin_length*1.05).toFixed(0);
-    return [{icon:'⚙',l:'Baja Balok',v:fmt(wBalk),u:'kg'},{icon:'⚙',l:'Purlin',v:fmt(wPurlin),u:'kg'},{icon:'🔩',l:'Baut',v:String(p.bolt_joints*p.bolts_per_joint),u:'bh'}];
-  }
-  if(type==='kanal'){
-    const w=+(UNP_WEIGHT[p.kanal_profile]||18.8*p.total_length*1.05).toFixed(0);
-    return [{icon:'⚙',l:'Baja Kanal',v:fmt(w),u:'kg'},{icon:'🔩',l:'Baut',v:String(p.kanal_bolts),u:'bh'}];
-  }
-  if(type==='kayu'){
-    const m3=+((p.kayu_b/100)*(p.kayu_h/100)*p.total_length*1.1).toFixed(2);
-    return [{icon:'🪵',l:'Vol. Kayu',v:fmt(m3),u:'m³'}];
-  }
-  const vB=+(p.B*p.H*p.total_length*1.05).toFixed(2);
-  const vRB=+(p.rb_B*p.rb_H*p.rb_length*1.05).toFixed(2);
-  return [{icon:'🔗',l:'Beton Balok',v:fmt(vB),u:'m³'},{icon:'🪵',l:'Bekisting Balok',v:fmt(+(2*(p.B+p.H)*p.total_length).toFixed(1)),u:'m²'},{icon:'🔩',l:'Besi Balok',v:fmt(+(vB*117).toFixed(0)),u:'kg'},{icon:'🔗',l:'Beton Ring Bal.',v:fmt(vRB),u:'m³'},{icon:'🔩',l:'Besi Ring Bal.',v:fmt(+(vRB*122).toFixed(0)),u:'kg'}];
-});
+// EST-MTO-001: kuantitas tidak lagi dihitung di sini. Komponen ini hanya
+// mengirim parameter; angkanya datang dari kalkulator backend yang sama
+// dengan yang dipakai RAB dan penawaran.
+const { lines, notes, loading } = useMtoPreview('beam', () => p);
+const results = computed(() => toDisplay(lines.value));
 </script>
 <style scoped>
 .inp-wrap{display:flex;flex-direction:column;gap:12px;}

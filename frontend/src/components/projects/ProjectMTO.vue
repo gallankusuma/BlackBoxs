@@ -364,45 +364,88 @@ async function fetchAll() {
 
 // Grand summary: aggregate all saved zones
 const fmt = (v:number) => v.toLocaleString('id-ID',{maximumFractionDigits:1});
-const grandSummary = computed(() => {
-  let vol_beton=0, besi_kg=0, galian=0, luas_atap=0, luas_dinding=0, luas_lantai=0;
-  for (const z of zones.value.foundation||[]) {
-    const p=z.params; if(!p.qty) continue;
-    const v=p.L*p.W*p.H*p.qty*1.05; vol_beton+=v; besi_kg+=v*95;
-    galian+=(p.L+0.6)*(p.W+0.6)*(p.depth||1.5)*p.qty;
+// EST-MTO-001: rekap tidak lagi menghitung sendiri.
+//
+// Sebelumnya ada TIGA perhitungan terpisah di file ini (grandSummary,
+// detailedMTO, mtoGrandTotal) dengan konstanta jempol berbeda-beda untuk besi —
+// 95, 160, 117, dan 85 kg/m3 tergantung elemen. Angka itulah yang tampil sebagai
+// total penawaran, dan tidak satu pun cocok dengan perhitungan tulangan
+// sebenarnya. Sekarang semuanya berasal dari kalkulator backend.
+const backendLines = ref<Record<string, any[]>>({});
+const zoneKey = (modId: string, idx: number) => `${modId}#${idx}`;
+
+async function refreshBackendLines() {
+  const items: any[] = [];
+  for (const mod of MODULES) {
+    (zones.value[mod.id] || []).forEach((z: any, idx: number) => {
+      items.push({ key: zoneKey(mod.id, idx), element_type: mod.id, parameters: z.params || {} });
+    });
   }
-  for (const z of zones.value.column||[]) {
-    const p=z.params; if(!p.qty_per_floor) continue;
-    const v=p.B*p.H*(p.height_per_floor||4)*(p.qty_per_floor||1)*(p.floors||1)*1.05;
-    vol_beton+=v; besi_kg+=v*160;
+  if (!items.length) { backendLines.value = {}; return; }
+  try {
+    const res = await api.post('/estimator/mto/preview-batch', { items });
+    const map: Record<string, any[]> = {};
+    for (const r of res.data?.results || []) if (r.key) map[r.key] = r.lines || [];
+    backendLines.value = map;
+  } catch { /* biarkan rekap kosong daripada menampilkan angka karangan */ }
+}
+
+let recapTimer: any = null;
+watch(zones, () => {
+  if (recapTimer) clearTimeout(recapTimer);
+  recapTimer = setTimeout(refreshBackendLines, 300);
+}, { deep: true, immediate: true });
+
+/** Jumlahkan gross_quantity dari seluruh zona untuk kode yang cocok. */
+function sumBy(match: (code: string) => boolean): number {
+  let total = 0;
+  for (const lines of Object.values(backendLines.value)) {
+    for (const l of lines) if (match(l.code)) total += Number(l.gross_quantity || 0);
   }
-  for (const z of zones.value.beam||[]) {
-    const p=z.params; if(!p.total_length) continue;
-    const v=p.B*p.H*p.total_length*1.05; vol_beton+=v; besi_kg+=v*117;
-  }
-  for (const z of zones.value.slab||[]) {
-    const p=z.params; if(!p.area) continue;
-    luas_lantai+=p.area;
-    if(p.slab_type==='concrete'||!p.slab_type){ const v=p.area*p.thickness*1.05; vol_beton+=v; besi_kg+=v*85; }
-  }
-  for (const z of zones.value.wall||[]) {
-    const p=z.params; if(!p.area) continue;
-    luas_dinding+=+(p.area*(1-(p.opening_pct||20)/100)).toFixed(0);
-  }
-  for (const z of zones.value.roof||[]) {
-    const p=z.params; if(!p.floor_area) continue;
-    const sl=(p.slope_deg||10)*Math.PI/180;
-    luas_atap+=+((p.floor_area+(p.perimeter||160)*(p.overhang||0.8))/Math.cos(sl)).toFixed(0);
-  }
-  return [
-    {icon:'🏗',l:'Total Beton',v:fmt(vol_beton),u:'m³'},
-    {icon:'🔩',l:'Total Besi',v:fmt(besi_kg),u:'kg'},
-    {icon:'⛏',l:'Total Galian',v:fmt(galian),u:'m³'},
-    {icon:'🧱',l:'Luas Lantai',v:fmt(luas_lantai),u:'m²'},
-    {icon:'🏠',l:'Luas Atap',v:fmt(luas_atap),u:'m²'},
-    {icon:'🪟',l:'Luas Dinding',v:fmt(luas_dinding),u:'m²'},
-  ];
-});
+  return total;
+}
+
+const grandSummary = computed(() => [
+  { icon: '🏗', l: 'Total Beton', v: fmt(sumBy(c => c.endsWith('-CONC'))), u: 'm³' },
+  { icon: '🔩', l: 'Total Besi', v: fmt(sumBy(c => c.includes('REBAR') || c.includes('STIRRUP'))), u: 'kg' },
+  { icon: '⛏', l: 'Total Galian', v: fmt(sumBy(c => c.includes('EXCV'))), u: 'm³' },
+  { icon: '🏠', l: 'Luas Atap', v: fmt(sumBy(c => c === 'RF-AREA')), u: 'm²' },
+  { icon: '🪟', l: 'Luas Dinding', v: fmt(sumBy(c => c === 'WAL-AREA')), u: 'm²' },
+  { icon: '🧱', l: 'Luas Lantai', v: fmt(sumBy(c => c === 'SLB-CONC' || c === 'SLB-TILE')), u: 'm²' },
+]);
+
+const detailedMTO = computed(() =>
+  MODULES.map(mod => {
+    const zoneList = zones.value[mod.id] || [];
+    const zonesData = zoneList.map((z: any, idx: number) => ({
+      name: z.name || mod.label,
+      rows: (backendLines.value[zoneKey(mod.id, idx)] || []).map((l: any) => ({
+        label: l.label, qty: f2(Number(l.gross_quantity || 0)), unit: l.unit,
+      })),
+    }));
+    const subMap = new Map<string, { qty: number; unit: string }>();
+    for (const z of zonesData) {
+      for (const r of z.rows) {
+        const n = parseFloat(String(r.qty).replace(/\./g, '').replace(',', '.')) || 0;
+        const ex = subMap.get(r.label);
+        if (ex) ex.qty += n; else subMap.set(r.label, { qty: n, unit: r.unit });
+      }
+    }
+    const subtotal = Array.from(subMap.entries()).map(([label, v]) => ({ label, qty: f2(v.qty), unit: v.unit }));
+    return { id: mod.id, icon: mod.icon, label: mod.label, zones: zonesData, subtotal, open: true };
+  }).filter(s => s.zones.length > 0)
+);
+
+const mtoGrandTotal = computed(() => [
+  { icon: '🏗', label: 'Total Beton K-250', qty: f2(sumBy(c => c.endsWith('-CONC'))), unit: 'm³', note: 'Pondasi + Kolom + Balok + Plat' },
+  { icon: '🔩', label: 'Total Besi Tulangan', qty: f0(sumBy(c => c.includes('REBAR') || c.includes('STIRRUP'))), unit: 'kg', note: 'Dihitung dari geometri tulangan, bukan rasio per m³' },
+  { icon: '🪵', label: 'Total Bekisting', qty: f2(sumBy(c => c.includes('FORM'))), unit: 'm²', note: 'Pondasi + Kolom + Balok + Plat' },
+  { icon: '⛏', label: 'Galian Tanah', qty: f2(sumBy(c => c.includes('EXCV'))), unit: 'm³', note: 'Termasuk ruang kerja' },
+  { icon: '🧱', label: 'Luas Lantai', qty: f0(sumBy(c => c === 'SLB-CONC' || c === 'SLB-TILE')), unit: 'm²', note: 'Total area plat lantai' },
+  { icon: '🏠', label: 'Luas Atap', qty: f0(sumBy(c => c === 'RF-AREA')), unit: 'm²', note: 'Sudah termasuk kemiringan' },
+  { icon: '🪟', label: 'Luas Dinding Netto', qty: f0(sumBy(c => c === 'WAL-AREA')), unit: 'm²', note: 'Setelah dikurangi bukaan' },
+]);
+
 
 onMounted(fetchAll);
 
@@ -410,155 +453,17 @@ onMounted(fetchAll);
 const f2 = (v:number) => v.toLocaleString('id-ID',{maximumFractionDigits:2});
 const f0 = (v:number) => v.toLocaleString('id-ID',{maximumFractionDigits:0});
 
-function calcFoundation(p:any) {
-  const n=p.qty||1, L=p.L||2, W=p.W||2, H=p.H||0.45, d=p.depth||1.5, ws=(p.working_space||0.3)*2;
-  const tbL=p.tb_length||0, tbW=p.tb_w||0.3, tbH=p.tb_h||0.5;
-  return [
-    {label:'Galian Tanah',         qty:f2((L+ws)*(W+ws)*d*n),       unit:'m³'},
-    {label:'Lantai Kerja',         qty:f2(L*W*0.05*n),               unit:'m³'},
-    {label:'Beton Footplat (1.05)',qty:f2(L*W*H*n*1.05),             unit:'m³'},
-    {label:'Bekisting Footplat',   qty:f2(2*(L+W)*H*n),              unit:'m²'},
-    {label:'Besi Footplat',        qty:f0(L*W*H*n*1.05*95),          unit:'kg'},
-    {label:'Beton Tie Beam',       qty:f2(tbL*tbW*tbH*1.05),         unit:'m³'},
-    {label:'Bekisting Tie Beam',   qty:f2(2*(tbW+tbH)*tbL),          unit:'m²'},
-    {label:'Besi Tie Beam',        qty:f0(tbL*tbW*tbH*1.05*122),     unit:'kg'},
-  ];
-}
-function calcColumn(p:any) {
-  const qty=p.qty_per_floor||1, fl=p.floors||1, h=p.height_per_floor||4, B=p.B||0.3, H=p.H||0.3;
-  const vol=B*H*h*qty*fl*1.05;
-  const sloofVol=(p.sloof_length||0)*(p.sloof_w||0.3)*(p.sloof_h||0.5)*1.05;
-  return [
-    {label:'Beton Kolom (1.05)',   qty:f2(vol),                unit:'m³'},
-    {label:'Bekisting Kolom',      qty:f2(2*(B+H)*h*qty*fl),   unit:'m²'},
-    {label:'Besi Utama Kolom',     qty:f0(vol*160),             unit:'kg'},
-    {label:'Beton Sloof',          qty:f2(sloofVol),            unit:'m³'},
-    {label:'Besi Sloof',           qty:f0(sloofVol*122),        unit:'kg'},
-  ];
-}
-function calcBeam(p:any) {
-  const L=p.total_length||0, B=p.B||0.25, H=p.H||0.5;
-  const vol=B*H*L*1.05;
-  const rbVol=(p.rb_length||0)*(p.rb_B||0.15)*(p.rb_H||0.25)*1.05;
-  return [
-    {label:'Beton Balok Induk',    qty:f2(vol),                 unit:'m³'},
-    {label:'Bekisting Balok',      qty:f2((B+2*H)*L),           unit:'m²'},
-    {label:'Besi Balok Induk',     qty:f0(vol*117),             unit:'kg'},
-    {label:'Beton Balok Anak',     qty:f2(rbVol),               unit:'m³'},
-    {label:'Besi Balok Anak',      qty:f0(rbVol*100),           unit:'kg'},
-  ];
-}
-function calcSlab(p:any) {
-  const area=p.area||0, t=p.thickness||0.15;
-  const volBeton=area*t*1.05;
-  const rows:any[] = [
-    {label:'Luas Plat Lantai',     qty:f0(area),                unit:'m²'},
-  ];
-  if(p.slab_type==='concrete'||!p.slab_type) {
-    rows.push({label:'Beton Plat',     qty:f2(volBeton),    unit:'m³'});
-    rows.push({label:'Besi/Wiremesh',  qty:f0(area*5.6),    unit:'kg'});
-    if(p.subbase_t) rows.push({label:'Subbase',         qty:f2(area*p.subbase_t), unit:'m³'});
-  } else {
-    rows.push({label:'Bondek/Decking', qty:f0(area*1.05),  unit:'m²'});
-  }
-  return rows;
-}
-function calcWall(p:any) {
-  const net=+(p.area*(1-(p.opening_pct||20)/100)).toFixed(1);
-  return [
-    {label:'Luas Dinding Bruto',   qty:f0(p.area||0),           unit:'m²'},
-    {label:'Luas Dinding Netto',   qty:f0(net),                 unit:'m²'},
-    {label:'Plesteran',            qty:f0(net*2),               unit:'m²'},
-    {label:'Acian',                qty:f0(net*2),               unit:'m²'},
-    {label:'Cat Dinding',          qty:f0(net*2),               unit:'m²'},
-    {label:'Kusen Pintu',          qty:String(p.door_qty||0),   unit:'bh'},
-    {label:'Kusen Jendela',        qty:String(p.window_qty||0), unit:'bh'},
-  ];
-}
-function calcRoof(p:any) {
-  const sl=(p.slope_deg||10)*Math.PI/180;
-  const luas=+((p.floor_area||0+(p.perimeter||0)*(p.overhang||0.8))/Math.cos(sl)).toFixed(1);
-  return [
-    {label:'Luas Atap (kemiringan)',qty:f0(luas),                unit:'m²'},
-    {label:'Penutup Atap (1.1)',    qty:f0(luas*1.1),            unit:'m²'},
-    {label:'Panjang Gording',       qty:f0((p.floor_area||0)/( p.purlin_spacing||1.5)), unit:'m'},
-    {label:'Nok / Ridge',          qty:f0(p.ridge_length||0),   unit:'m'},
-    {label:'Talang Horizontal',    qty:f0(p.gutter_length||0),  unit:'m'},
-    {label:'Downspout',            qty:String(p.downspout_qty||0), unit:'bh'},
-    {label:'Cladding Dinding',     qty:f0((p.cladding_h||0)*(p.perimeter||0)*1.05), unit:'m²'},
-  ];
-}
+// Rumus per elemen yang dulu ada di sini SUDAH DIHAPUS (EST-MTO-001).
+//
+// Isinya pendekatan kasar seperti `besi = volume × 160 kg/m³` dan faktor waste
+// `× 1.05` yang tertanam di dalam angka, berbeda dari kalkulator backend maupun
+// dari komponen input. Membiarkannya sebagai kode mati hanya menunggu seseorang
+// memakainya lagi. Rekap kini membaca `backendLines`.
 
-const CALC_MAP: Record<string,(p:any)=>any[]> = {
-  foundation: calcFoundation, column: calcColumn, beam: calcBeam,
-  slab: calcSlab, wall: calcWall, roof: calcRoof,
-};
 
-const detailedMTO = computed(() =>
-  MODULES.map(mod => {
-    const zoneList = zones.value[mod.id] || [];
-    const zonesData = zoneList.map(z => ({
-      name: z.name || mod.label,
-      rows: CALC_MAP[mod.id]?.(z.params) || [],
-    }));
-    // Subtotal: sum numeric rows across zones per label
-    const subMap = new Map<string, {qty:number; unit:string}>();
-    for (const z of zonesData) {
-      for (const r of z.rows) {
-        const n = parseFloat((r.qty as string).replace(/\./g,'').replace(',','.')) || 0;
-        const ex = subMap.get(r.label);
-        if (ex) ex.qty += n; else subMap.set(r.label, {qty:n, unit:r.unit});
-      }
-    }
-    const subtotal = Array.from(subMap.entries()).map(([label, v]) => ({
-      label, qty: f2(v.qty), unit: v.unit,
-    }));
-    return { id: mod.id, icon: mod.icon, label: mod.label, zones: zonesData, subtotal, open: true };
-  }).filter(s => s.zones.length > 0)
-);
 
-const mtoGrandTotal = computed(() => {
-  let vol_beton=0, besi_kg=0, galian=0, bekisting=0, luas_atap=0, luas_dinding=0, luas_lantai=0;
-  for (const z of zones.value.foundation||[]) {
-    const p=z.params; const n=p.qty||1, L=p.L||2, W=p.W||2, H=p.H||0.45, d=p.depth||1.5, ws=(p.working_space||0.3)*2;
-    galian+=(L+ws)*(W+ws)*d*n;
-    vol_beton+=L*W*H*n*1.05+(p.tb_length||0)*(p.tb_w||0.3)*(p.tb_h||0.5)*1.05;
-    besi_kg+=L*W*H*n*1.05*95+(p.tb_length||0)*(p.tb_w||0.3)*(p.tb_h||0.5)*1.05*122;
-    bekisting+=2*(L+W)*H*n+2*((p.tb_w||0.3)+(p.tb_h||0.5))*(p.tb_length||0);
-  }
-  for (const z of zones.value.column||[]) {
-    const p=z.params; const vol=p.B*p.H*(p.height_per_floor||4)*(p.qty_per_floor||1)*(p.floors||1)*1.05;
-    const sloofVol=(p.sloof_length||0)*(p.sloof_w||0.3)*(p.sloof_h||0.5)*1.05;
-    vol_beton+=vol+sloofVol; besi_kg+=vol*160+sloofVol*122;
-    bekisting+=2*(p.B+p.H)*(p.height_per_floor||4)*(p.qty_per_floor||1)*(p.floors||1);
-  }
-  for (const z of zones.value.beam||[]) {
-    const p=z.params; const vol=p.B*p.H*(p.total_length||0)*1.05;
-    const rbVol=(p.rb_length||0)*(p.rb_B||0.15)*(p.rb_H||0.25)*1.05;
-    vol_beton+=vol+rbVol; besi_kg+=vol*117+rbVol*100;
-    bekisting+=(p.B+2*p.H)*(p.total_length||0);
-  }
-  for (const z of zones.value.slab||[]) {
-    const p=z.params; luas_lantai+=p.area||0;
-    if(p.slab_type==='concrete'||!p.slab_type) { const v=(p.area||0)*p.thickness*1.05; vol_beton+=v; besi_kg+=v*85; }
-  }
-  for (const z of zones.value.wall||[]) {
-    const p=z.params; luas_dinding+=+(p.area*(1-(p.opening_pct||20)/100)).toFixed(1);
-  }
-  for (const z of zones.value.roof||[]) {
-    const p=z.params; const sl=(p.slope_deg||10)*Math.PI/180;
-    luas_atap+=+((p.floor_area||0+(p.perimeter||0)*(p.overhang||0.8))/Math.cos(sl)).toFixed(1);
-  }
-  return [
-    {icon:'🏗',label:'Total Beton K-250',    qty:f2(vol_beton),    unit:'m³', note:'Pondasi + Kolom + Balok + Plat'},
-    {icon:'🔩',label:'Total Besi Tulangan',  qty:f0(besi_kg),      unit:'kg', note:'Estimasi berdasarkan rasio besi per m³'},
-    {icon:'🪵',label:'Total Bekisting',      qty:f2(bekisting),    unit:'m²', note:'Pondasi + Kolom + Balok'},
-    {icon:'⛏',label:'Galian Tanah',          qty:f2(galian),       unit:'m³', note:'Termasuk ruang kerja'},
-    {icon:'🧱',label:'Luas Lantai',           qty:f0(luas_lantai),  unit:'m²', note:'Total area plat lantai'},
-    {icon:'🏠',label:'Luas Atap',            qty:f0(luas_atap),    unit:'m²', note:'Sudah termasuk kemiringan'},
-    {icon:'🪟',label:'Luas Dinding Netto',   qty:f0(luas_dinding), unit:'m²', note:'Setelah dikurangi bukaan'},
-  ];
-});
+
+
 
 </script>
 

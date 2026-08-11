@@ -55,6 +55,7 @@
 </template>
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
+import { useMtoPreview, toDisplay } from '@/composables/useMtoPreview';
 import RoofTypePicker from './RoofTypePicker.vue';
 const props = defineProps<{ modelValue: Record<string,any> }>();
 const emit = defineEmits<{ (e:'change'):void }>();
@@ -69,25 +70,11 @@ if(!p.dak_thick) p.dak_thick=0.12; if(!p.cladding_h) p.cladding_h=6;
 if(!p.cladding_type) p.cladding_type='zincalume'; if(!p.ridge_length) p.ridge_length=50;
 if(!p.gutter_length) p.gutter_length=100; if(!p.downspout_qty) p.downspout_qty=4; if(!p.purlin_spacing) p.purlin_spacing=1.5;
 const GENTENG_PER_M2: Record<string,number> = {morando:14,beton:10,flat:10};
-const fmt = (v:number) => v.toLocaleString('id-ID',{maximumFractionDigits:2});
-const results = computed(()=>{
-  const sl=(p.slope_deg||10)*Math.PI/180;
-  const ov=p.overhang||0.8, A=p.floor_area||1000, perim=p.perimeter||160;
-  const roof_area=+((A+perim*ov)/Math.cos(sl)*1.05).toFixed(1);
-  const cladding_area=+(p.cladding_h*perim).toFixed(1);
-  const type=roofType.value||'zincalume';
-  const purlin_kg=+(roof_area/p.purlin_spacing*2.24*1.05).toFixed(0);
-  if(type==='beton_dak'){
-    const vol=+(A*p.dak_thick*1.05).toFixed(2);
-    return [{icon:'🏗',l:'Beton Dak',v:fmt(vol),u:'m³'},{icon:'🔩',l:'Besi',v:fmt(+(vol*85).toFixed(0)),u:'kg'},{icon:'🪵',l:'Bekisting',v:fmt(A),u:'m²'},{icon:'⚙',l:'Cladding',v:fmt(cladding_area),u:'m²'}];
-  }
-  if(type==='genteng_keramik'||type==='genteng_metal'){
-    const pcs=Math.ceil(roof_area*(GENTENG_PER_M2[p.genteng_type]||14)*1.05);
-    return [{icon:'🏠',l:'Luas Atap',v:fmt(roof_area),u:'m²'},{icon:'🧱',l:'Genteng',v:fmt(pcs),u:'bh'},{icon:'⚙',l:'Cladding',v:fmt(cladding_area),u:'m²'},{icon:'🔩',l:'Purlin',v:fmt(purlin_kg),u:'kg'},{icon:'💧',l:'Talang',v:fmt(p.gutter_length),u:"m'"},{icon:'📦',l:'Downspout',v:String(p.downspout_qty),u:'bh'}];
-  }
-  // zincalume / pvc_double / sandwich
-  return [{icon:'🏠',l:'Luas Atap',v:fmt(roof_area),u:'m²'},{icon:'⚙',l:'Cladding',v:fmt(cladding_area),u:'m²'},{icon:'🔩',l:'Purlin',v:fmt(purlin_kg),u:'kg'},{icon:'📏',l:'Nok',v:fmt(p.ridge_length),u:"m'"},{icon:'💧',l:'Talang',v:fmt(p.gutter_length),u:"m'"},{icon:'📦',l:'Downspout',v:String(p.downspout_qty),u:'bh'}];
-});
+// EST-MTO-001: kuantitas tidak lagi dihitung di sini. Komponen ini hanya
+// mengirim parameter; angkanya datang dari kalkulator backend yang sama
+// dengan yang dipakai RAB dan penawaran.
+const { lines, notes, loading } = useMtoPreview('roof', () => p);
+const results = computed(() => toDisplay(lines.value));
 </script>
 <style scoped>
 .inp-wrap{display:flex;flex-direction:column;gap:12px;}
