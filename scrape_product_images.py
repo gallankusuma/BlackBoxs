@@ -17,11 +17,11 @@ DB_CONFIG = {
     'host': os.environ.get('DB_HOST', 'localhost'),
     'user': os.environ.get('DB_USER', 'erp_user'),
     'password': os.environ['DB_PASSWORD'],
-    'database': os.environ.get('DB_NAME', 'erp_genjaya'),
+    'database': os.environ.get('DB_NAME', 'blackboxs'),
     'charset': 'utf8mb4',
 }
 
-SAVE_DIR = '/var/www/erp-genjaya/backend/uploads/product-images'
+SAVE_DIR = '/var/www/blackboxs/backend/uploads/product-images'
 BASE_URL = '/uploads/product-images'
 
 HEADERS = {

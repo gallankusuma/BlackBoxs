@@ -5,7 +5,7 @@ REM  3-Tier: Local Git → GitHub → VPS Production
 REM ============================================
 
 set VPS_HOST=root@76.13.22.155
-set VPS_PATH=/var/www/erp-genjaya/frontend
+set VPS_PATH=/var/www/blackboxs/frontend
 set PROJECT_DIR=c:\xampp1\htdocs\ERP-BlackBox\frontend
 
 echo.

@@ -2,15 +2,15 @@
 # ============================================================
 # DEPLOY SCRIPT - BLACKBOX EPC
 # Domain: blackboxs.io
-# Target VPS: root@76.13.22.155 → /var/www/erp-genjaya/
+# Target VPS: root@76.13.22.155 → /var/www/blackboxs/
 # NOTE: TS compiled locally (tsc not in VPS PATH)
 # ============================================================
 
 set -e
 
 VPS="root@76.13.22.155"
-REMOTE_FRONTEND="/var/www/erp-genjaya/frontend"
-REMOTE_BACKEND="/var/www/erp-genjaya/backend"
+REMOTE_FRONTEND="/var/www/blackboxs/frontend"
+REMOTE_BACKEND="/var/www/blackboxs/backend"
 LOCAL_FRONTEND="/Users/gallankusuma/Webapps/EPC/frontend"
 LOCAL_BACKEND="/Users/gallankusuma/Webapps/EPC/backend"
 
@@ -49,7 +49,7 @@ echo "✅ Backend uploaded"
 
 # 5. Install deps & restart backend on VPS (no build needed)
 echo "🔄 Restarting backend..."
-ssh "$VPS" "cd $REMOTE_BACKEND && npm install --omit=dev 2>/dev/null; pm2 restart erp-genjaya-backend"
+ssh "$VPS" "cd $REMOTE_BACKEND && npm install --omit=dev 2>/dev/null; pm2 restart blackboxs-backend"
 echo "✅ Backend restarted"
 
 echo ""

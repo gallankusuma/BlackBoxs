@@ -1,14 +1,14 @@
 # EPC / BlackBox ERP
 
 Monolithic ERP + EPC (Engineering, Procurement, Construction) web app.
-Bahasa campur ID/EN di UI. Deployment: `blackboxs.io` (VPS `76.13.22.155`, pm2 proses `erp-genjaya-backend`).
+Bahasa campur ID/EN di UI. Deployment: `blackboxs.io` (VPS `76.13.22.155`, pm2 proses `blackboxs-backend`).
 
 ## Stack
 
 | Layer | Tech |
 |---|---|
 | Backend | Node + Express 4 + TypeScript, `tsx watch` untuk dev, `tsc` → `dist/` untuk prod |
-| DB | **MySQL 8** via `mysql2/promise` pool (`erp_genjaya`). SQLite hanya sisa artefak lama, tidak dipakai |
+| DB | **MySQL 8** via `mysql2/promise` pool (`blackboxs`). SQLite hanya sisa artefak lama, tidak dipakai |
 | Frontend | Vue 3 `<script setup>` + Vite 6 + Pinia + vue-router + Tailwind 3 + vue-toastification |
 | Auth | JWT (`authMiddleware`, `backend/src/middleware/auth.ts`) + WebAuthn (`webauthn.routes.ts`) |
 
@@ -32,13 +32,13 @@ brew install mysql@8.4 && brew services start mysql@8.4
 Lalu buat database + user sesuai `.env`:
 
 ```bash
-mysql -u root -e "CREATE DATABASE erp_genjaya CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER 'erp_user'@'localhost' IDENTIFIED BY '<password dari .env>'; GRANT ALL ON erp_genjaya.* TO 'erp_user'@'localhost';"
+mysql -u root -e "CREATE DATABASE blackboxs CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER 'erp_user'@'localhost' IDENTIFIED BY '<password dari .env>'; GRANT ALL ON blackboxs.* TO 'erp_user'@'localhost';"
 ```
 
 ⚠️ **Database kosong TIDAK cukup.** `initializeDatabase()` hanya membuat ±78 tabel, sedangkan produksi punya 141. Selisihnya adalah skema yang dulu diterapkan manual lewat file `.sql` di `backend/database/` dan tidak pernah dimasukkan ke `ensure*Schema` — termasuk kolom `employees.salary_type`, `basic_rate`, `tunjangan_rate`, `ot_rate` yang membuat login mobile gagal. Sampai drift ini dibereskan, cara paling andal menyiapkan dev lokal adalah menarik struktur dari produksi (tanpa data):
 
 ```bash
-ssh root@76.13.22.155 "cd /var/www/erp-genjaya/backend && set -a && . ./.env && set +a && mysqldump --no-data --skip-add-drop-table --skip-comments -u \"\$DB_USER\" -p\"\$DB_PASSWORD\" \"\$DB_NAME\"" | mysql -u root erp_genjaya
+ssh root@76.13.22.155 "cd /var/www/blackboxs/backend && set -a && . ./.env && set +a && mysqldump --no-data --skip-add-drop-table --skip-comments -u \"\$DB_USER\" -p\"\$DB_PASSWORD\" \"\$DB_NAME\"" | mysql -u root blackboxs
 ```
 
 Deploy: `./deploy-blackbox.sh` (build FE → rsync dist, `npx tsc` BE lokal → rsync `dist/`+`src/`, `pm2 restart`). Script punya guard yang abort kalau path mengandung `rheologi`.
@@ -91,7 +91,7 @@ Sudah ditegakkan di `user.routes.ts`, `role.routes.ts`, `permissions.routes.ts`,
 Sebelum menggembok endpoint modul yang sudah live, **cek dulu apakah role produksi memang memegang permission-nya** — kalau tidak, user aktif langsung kena 403:
 
 ```bash
-ssh root@76.13.22.155 "cd /var/www/erp-genjaya/backend && set -a && . ./.env && set +a && mysql -u \"\$DB_USER\" -p\"\$DB_PASSWORD\" \"\$DB_NAME\" -t -e \"SELECT u.username, u.user_level, r.name role, (SELECT COUNT(*) FROM role_permissions rp JOIN permissions p ON p.id=rp.permission_id WHERE rp.role_id=r.id) perms FROM users u LEFT JOIN roles r ON r.id=u.role_id WHERE u.is_active=1\""
+ssh root@76.13.22.155 "cd /var/www/blackboxs/backend && set -a && . ./.env && set +a && mysql -u \"\$DB_USER\" -p\"\$DB_PASSWORD\" \"\$DB_NAME\" -t -e \"SELECT u.username, u.user_level, r.name role, (SELECT COUNT(*) FROM role_permissions rp JOIN permissions p ON p.id=rp.permission_id WHERE rp.role_id=r.id) perms FROM users u LEFT JOIN roles r ON r.id=u.role_id WHERE u.is_active=1\""
 ```
 
 Di frontend: desktop pakai `api` dari [lib/api.ts](frontend/src/lib/api.ts), mobile pakai `mobileApi` dari [lib/mobileApi.ts](frontend/src/lib/mobileApi.ts). **Jangan** lewatkan `/webauthn/auth/verify` ke `mobileApi` — endpoint itu membalas 401 saat sidik jari tidak cocok, dan interceptor akan salah mengartikannya sebagai sesi habis lalu menendang user ke login.
@@ -152,17 +152,31 @@ Konsekuensi yang harus dijaga:
 
 ### Penamaan
 
-Branding aplikasi adalah **BlackBox EPC**. Nama lama "Genjaya" sudah dihapus dari semua teks, judul, dan dokumen.
+Branding aplikasi adalah **BlackBox EPC**, alamatnya `blackboxs.io`. Nama lama
+"Genjaya" sudah dihapus dari teks, judul, dokumen, **dan** identifier
+infrastruktur di server (11 Agustus 2026).
 
-Yang **masih** memakai nama lama adalah identifier infrastruktur yang benar-benar hidup di server, jadi jangan diganti sembarangan lewat find-and-replace — mengubahnya tanpa migrasi sisi server akan mematikan aplikasi:
-
-| Identifier | Dipakai di |
+| Identifier | Nilai sekarang |
 |---|---|
-| database `erp_genjaya` | `backend/.env`, `.env.example`, `fix_db.js`, `scrape_product_images.py` |
-| path `/var/www/erp-genjaya/` | `deploy-blackbox.sh`, `frontend/deploy.bat`, 2 blok `root` di nginx VPS |
-| proses pm2 `erp-genjaya-backend` | `deploy-blackbox.sh` (langkah restart) |
+| Database | `blackboxs` |
+| Path aplikasi | `/var/www/blackboxs/` |
+| Proses pm2 | `blackboxs-backend` |
+| Domain | `blackboxs.io` (`app.genjaya.com` → 301 ke sini) |
 
-Renaming ketiganya butuh langkah terkoordinasi di VPS (rename database, pindah direktori, update nginx, `pm2 delete` + start ulang) dan menyebabkan downtime.
+Dua hal yang **sengaja belum** diganti dan itu bukan kelalaian:
+
+- Database lama `erp_genjaya` masih ada di server sebagai jalan pulang. Boleh
+  dihapus setelah beberapa hari berjalan tanpa masalah.
+- Instance dev `erp-genjaya-dev` di `/var/www/dev-genjaya` belum disentuh —
+  keputusan user: dikerjakan belakangan, terpisah dari produksi.
+
+⚠️ **Pelajaran dari rename kemarin, kalau nanti menyentuh server lagi:**
+
+1. `/etc/nginx/sites-enabled/*` di VPS ini **bukan symlink** ke `sites-available`
+   — keduanya berkas terpisah. Mengedit `sites-available` saja tidak berefek
+   apa-apa. Edit yang di `sites-enabled`, atau edit keduanya.
+2. `mv /var/www/A /var/www/B` akan menaruh A **di dalam** B kalau B sudah ada.
+   Cek dulu tujuannya kosong atau belum ada sama sekali.
 
 ## Verifikasi sebelum commit
 

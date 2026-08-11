@@ -65,7 +65,7 @@ async function fixDatabase(dbName) {
 
 async function main() {
   await fixDatabase('erp_rheologi');
-  await fixDatabase('erp_genjaya');
+  await fixDatabase('blackboxs');
   console.log('Database fixes complete.');
 }
 
