@@ -1,5 +1,5 @@
 import { MtoResult, line, num } from './types';
-import { plateKgPerM2 } from './profiles';
+import { meters, resolveVariant } from './contract';
 
 /**
  * Dinding (EST-MTO-010, EST-MTO-011).
@@ -18,7 +18,12 @@ import { plateKgPerM2 } from './profiles';
  */
 export function calcWall(p: any): MtoResult {
   const notes: string[] = [];
-  const wallType = String(p.wall_type || 'bata').toLowerCase();
+  const resolved = resolveVariant('wall', p.wall_type, 'masonry');
+  const wallType = resolved.variant;
+  if (resolved.note) notes.push(resolved.note);
+  if (wallType === 'unknown') {
+    return { element_type: 'wall', variant: resolved.raw, lines: [], notes };
+  }
   const waste = num(p.waste_pct, 5);
 
   const grossArea = num(p.area);
@@ -36,18 +41,20 @@ export function calcWall(p: any): MtoResult {
   }
 
   // thickness_cm (frontend) maupun thickness_mm (backend lama) sama-sama diterima
-  const thicknessM = num(p.thickness_cm) ? num(p.thickness_cm) / 100
-    : num(p.thickness_mm) ? num(p.thickness_mm) / 1000
+  // `thickness_cm` (layar sekarang) maupun `thickness_mm` (kontrak lama)
+  // sama-sama diterima; keduanya terdaftar satuannya di contract.ts.
+  const thicknessM = p.thickness_cm ? meters(p, 'thickness_cm', 0.15)
+    : p.thickness_mm ? meters(p, 'thickness_mm', 0.15)
       : 0.15;
 
   const lines = [];
 
-  if (wallType === 'zincalume' || wallType === 'cladding') {
+  if (wallType === 'cladding') {
     const eff = num(p.zinc_eff_w, 1) || 1;
     lines.push(line('WAL-CLAD', 'Cladding Zincalume', netArea, 'm2', waste, 2));
     lines.push(line('WAL-CLAD-SHEET', 'Lembar Cladding', netArea / eff, 'lbr', waste, 0));
     notes.push('Cladding: tidak menghasilkan plesteran, acian, maupun volume pasangan.');
-  } else if (wallType === 'glass' || wallType === 'kaca') {
+  } else if (wallType === 'glass') {
     lines.push(line('WAL-GLASS', `Kaca ${num(p.glass_thick, 8)}mm`, netArea, 'm2', waste, 2));
     if (p.glass_frame) lines.push(line('WAL-FRAME', 'Rangka Kaca', num(p.glass_frame), 'm', waste, 1));
     notes.push('Dinding kaca: tidak menghasilkan plesteran maupun acian.');

@@ -1,5 +1,6 @@
 import { MtoResult, line, num, STEEL_DENSITY } from './types';
 import { plateKgPerM2, profileWeight } from './profiles';
+import { meters, resolveVariant } from './contract';
 
 /**
  * Lantai / pelat (EST-MTO-008, EST-MTO-009).
@@ -12,19 +13,25 @@ import { plateKgPerM2, profileWeight } from './profiles';
  */
 export function calcSlab(p: any): MtoResult {
   const notes: string[] = [];
-  const slabType = String(p.slab_type || 'concrete').toLowerCase();
+  const resolved = resolveVariant('slab', p.slab_type, 'concrete');
+  const slabType = resolved.variant;
+  if (resolved.note) notes.push(resolved.note);
+  if (slabType === 'unknown') {
+    return { element_type: 'slab', variant: resolved.raw, lines: [], notes };
+  }
   const waste = num(p.waste_pct, 5);
   const area = num(p.area);
   const lines = [];
 
-  if (slabType === 'keramik' || slabType === 'ceramic' || slabType === 'tile') {
-    const screedT = num(p.screed_t, 0.03);
+  if (slabType === 'ceramic') {
+    // Layar meminta cm: screed 3 cm pernah terbaca 3 m — 100× lipat.
+    const screedT = meters(p, 'screed_t', 0.03);
     lines.push(line('SLB-SCREED', 'Screed', area * screedT, 'm3', waste));
     lines.push(line('SLB-TILE', `Keramik ${p.tile_size || '60x60'}`, area, 'm2', num(p.waste_pct, 8)));
     lines.push(line('SLB-ADHESIVE', 'Perekat Keramik', area, 'm2', waste, 2));
     lines.push(line('SLB-GROUT', 'Nat Keramik', area, 'm2', waste, 2));
     notes.push('Lantai keramik: tidak menghasilkan beton struktural maupun pembesian.');
-  } else if (slabType === 'plate_bordes' || slabType === 'bordes' || slabType === 'plate') {
+  } else if (slabType === 'plate') {
     const thick = num(p.plate_thick, 5);
     const kgm2 = plateKgPerM2(thick);
     lines.push(line('SLB-PLATE', `Plat Bordes ${thick}mm (${kgm2} kg/m2)`, kgm2 * area, 'kg', waste, 1));
@@ -38,8 +45,9 @@ export function calcSlab(p: any): MtoResult {
     const weldLen = num(p.weld_length, 0);
     if (weldLen > 0) lines.push(line('SLB-WELD', 'Pengelasan', weldLen, 'm', 0, 1));
     notes.push('Plat bordes: tidak menghasilkan beton maupun pembesian.');
-  } else if (slabType === 'parquet' || slabType === 'parket' || slabType === 'vinyl') {
-    lines.push(line('SLB-LEVEL', 'Leveling', area, 'm2', waste, 2));
+  } else if (slabType === 'parquet') {
+    const levelT = meters(p, 'screed_t', 0.03);
+    lines.push(line('SLB-LEVEL', 'Leveling', area * levelT, 'm3', waste));
     lines.push(line('SLB-FLOOR', `Lantai ${p.parquet_type || 'Parket'}`, area, 'm2', num(p.waste_pct, 8), 2));
     lines.push(line('SLB-ADHESIVE', 'Perekat', area, 'm2', waste, 2));
     notes.push('Parket/vinyl: tidak menghasilkan beton maupun pembesian.');

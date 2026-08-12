@@ -100,5 +100,74 @@ chk('tanpa perimeter → dicatat sebagai asumsi', r2.notes.length > 0, true);
 chk('hasilnya berbeda dari yang memakai perimeter',
   lineOf(r1, 'RF-AREA').net_quantity !== lineOf(r2, 'RF-AREA').net_quantity, true);
 
+
+console.log('\n12. Nilai enum dari UI harus dikenali (EST-MTO-011/012, R01)');
+// Nilai di bawah disalin dari *TypePicker.vue — bukan dikarang ulang.
+const wallCladding = calculateMto('wall', { wall_type: 'cladding_zincalume', area: 100, zinc_eff_w: 1 });
+chk('cladding_zincalume TIDAK jatuh ke bata', !!lineOf(wallCladding, 'WAL-PLASTER'), false);
+chk('cladding_zincalume menghasilkan cladding', !!lineOf(wallCladding, 'WAL-CLAD'), true);
+
+const wallGrc = calculateMto('wall', { wall_type: 'partisi_grc', area: 100 });
+chk('partisi_grc TIDAK jatuh ke bata', !!lineOf(wallGrc, 'WAL-PLASTER'), false);
+chk('partisi_grc menghasilkan GRC', !!lineOf(wallGrc, 'WAL-GRC'), true);
+
+for (const t of ['bata_ringan', 'bata_merah']) {
+  const w = calculateMto('wall', { wall_type: t, area: 100, thickness_cm: 15 });
+  chk(`${t} tetap pasangan bata`, !!lineOf(w, 'WAL-VOL'), true);
+}
+
+const roofDak = calculateMto('roof', { roof_type: 'beton_dak', floor_area: 100, perimeter: 40, dak_thick: 0.12 });
+chk('beton_dak menghasilkan beton', !!lineOf(roofDak, 'RF-CONC'), true);
+chk('beton_dak TIDAK menghasilkan gording', !!lineOf(roofDak, 'RF-PURLIN'), false);
+
+const roofTile = calculateMto('roof', { roof_type: 'genteng_keramik', floor_area: 100, perimeter: 40 });
+chk('genteng_keramik dihitung sebagai genteng', !!lineOf(roofTile, 'RF-TILE'), true);
+
+const roofSheet = calculateMto('roof', { roof_type: 'zincalume', floor_area: 100, perimeter: 40, sheet_eff_w: 1 });
+chk('zincalume dihitung sebagai lembaran', !!lineOf(roofSheet, 'RF-SHEET'), true);
+
+console.log('\n13. Tipe tak dikenal tidak boleh diam-diam memakai default');
+const bogus = calculateMto('wall', { wall_type: 'entah_apa', area: 100 });
+chk('tidak menghasilkan baris apa pun', bogus.lines.length, 0);
+chk('memberi peringatan', bogus.notes.length > 0, true);
+
+console.log('\n14. Pondasi non-footplate tidak dihitung sebagai footplate (EST-MTO-R01)');
+const pile = calculateMto('foundation', { foundation_type: 'bored_pile', L: 1, W: 1, H: 0.3, depth: 1.2, qty: 12 });
+chk('tidak ada galian footplate', !!lineOf(pile, 'FND-EXCV'), false);
+chk('tidak ada beton footing', !!lineOf(pile, 'FND-CONC'), false);
+chk('diberi peringatan eksplisit', pile.notes.some(n => n.includes('belum didukung')), true);
+const footplate = calculateMto('foundation', { foundation_type: 'footplate', L: 1, W: 1, H: 0.3, depth: 1.2, qty: 12 });
+near('footplate tetap dihitung', lineOf(footplate, 'FND-EXCV').net_quantity, 36.864);
+
+console.log('\n15. Satuan dari layar: cm tidak boleh dibaca sebagai meter (R02/R03/R04)');
+// Default asli di layar: kolom kayu 12×12 cm, balok kayu 8×15 cm, screed 3 cm
+const woodCol = calculateMto('column', {
+  col_type: 'kayu', kayu_b: 12, kayu_h: 12,
+  height_per_floor: 4, floors: 1, qty_per_floor: 12, waste_pct: 0,
+});
+near('kolom kayu 12×12cm × 4m × 12bh = 0,6912 m³', lineOf(woodCol, 'COL-WOOD').net_quantity, 0.6912, 0.0005);
+
+const woodBeam = calculateMto('beam', {
+  beam_type: 'kayu', kayu_b: 8, kayu_h: 15, total_length: 300, waste_pct: 0,
+});
+near('balok kayu 8×15cm × 300m = 3,6 m³', lineOf(woodBeam, 'BM-WOOD').net_quantity, 3.6, 0.001);
+
+const ceramic = calculateMto('slab', { slab_type: 'keramik', area: 1000, screed_t: 3, waste_pct: 0 });
+near('screed 3cm × 1000m² = 30 m³', lineOf(ceramic, 'SLB-SCREED').net_quantity, 30, 0.01);
+
+console.log('\n16. Tipe kolom & balok dari picker dikenali semua');
+for (const t of ['beton', 'wf', 'cfs', 'kayu']) {
+  const c = calculateMto('column', { col_type: t, height_per_floor: 3, floors: 1, qty_per_floor: 4, B: 0.3, H: 0.3 });
+  chk(`kolom "${t}" menghasilkan baris`, c.lines.length > 0, true);
+}
+for (const t of ['beton', 'wf', 'kanal', 'kayu']) {
+  const b = calculateMto('beam', { beam_type: t, total_length: 100, B: 0.25, H: 0.5 });
+  chk(`balok "${t}" menghasilkan baris`, b.lines.length > 0, true);
+}
+for (const t of ['concrete', 'keramik', 'plate_bordes', 'parquet']) {
+  const sl = calculateMto('slab', { slab_type: t, area: 100, thickness: 0.12 });
+  chk(`lantai "${t}" menghasilkan baris`, sl.lines.length > 0, true);
+}
+
 console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
 process.exit(fail ? 1 : 0);

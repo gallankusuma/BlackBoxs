@@ -1,5 +1,6 @@
 import { MtoResult, line, num, STEEL_DENSITY } from './types';
 import { profileWeight } from './profiles';
+import { meters, resolveVariant } from './contract';
 
 /**
  * Balok (EST-MTO-007).
@@ -17,12 +18,17 @@ import { profileWeight } from './profiles';
  */
 export function calcBeam(p: any): MtoResult {
   const notes: string[] = [];
-  const beamType = String(p.beam_type || 'concrete').toLowerCase();
+  const resolved = resolveVariant('beam', p.beam_type, 'concrete');
+  const beamType = resolved.variant;
+  if (resolved.note) notes.push(resolved.note);
+  if (beamType === 'unknown') {
+    return { element_type: 'beam', variant: resolved.raw, lines: [], notes };
+  }
   const waste = num(p.waste_pct, 5);
   const totalLength = num(p.total_length);
   const lines = [];
 
-  if (beamType === 'wf' || beamType === 'steel') {
+  if (beamType === 'wf') {
     const profile = String(p.wf_profile_beam || 'WF200x100');
     const wpm = profileWeight(profile, 21.3);
     lines.push(line('BM-WF', `Profil ${profile} (${wpm} kg/m)`, wpm * totalLength, 'kg', waste, 1));
@@ -35,19 +41,20 @@ export function calcBeam(p: any): MtoResult {
 
     lines.push(line('BM-PAINT', 'Pengecatan Baja', totalLength * num(p.paint_perimeter, 1.1), 'm2', waste, 2));
     notes.push('Balok baja: tidak menghasilkan volume beton maupun besi tulangan.');
-  } else if (beamType === 'purlin' || beamType === 'gording') {
+  } else if (beamType === 'purlin') {
     const profile = String(p.purlin_profile || 'C150x65');
     const wpm = profileWeight(profile, 6.76);
     const len = num(p.purlin_length, totalLength);
     lines.push(line('BM-PURLIN', `Gording ${profile} (${wpm} kg/m)`, wpm * len, 'kg', waste, 1));
-  } else if (beamType === 'unp' || beamType === 'kanal') {
+  } else if (beamType === 'channel') {
     const profile = String(p.kanal_profile || 'UNP150');
     const wpm = profileWeight(profile, 18.6);
     lines.push(line('BM-UNP', `Kanal ${profile} (${wpm} kg/m)`, wpm * totalLength, 'kg', waste, 1));
     const kb = num(p.kanal_bolts, 0);
     if (kb > 0) lines.push(line('BM-KANAL-BOLT', 'Baut Kanal', kb, 'bh', 0, 0));
-  } else if (beamType === 'wood' || beamType === 'kayu') {
-    const b = num(p.kayu_b, 0.08), h = num(p.kayu_h, 0.12);
+  } else if (beamType === 'wood') {
+    // Layar meminta cm — lihat catatan yang sama di kalkulator kolom.
+    const b = meters(p, 'kayu_b', 0.08), h = meters(p, 'kayu_h', 0.12);
     lines.push(line('BM-WOOD', `Kayu ${p.kayu_kelas_beam || 'Kelas II'}`, b * h * totalLength, 'm3', waste));
   } else {
     const B = num(p.B, 0.25), H = num(p.H, 0.5);

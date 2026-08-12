@@ -1,4 +1,5 @@
 import { MtoResult, line, num, STEEL_DENSITY } from './types';
+import { resolveVariant } from './contract';
 
 /**
  * Pondasi (EST-MTO-002, EST-MTO-003).
@@ -16,6 +17,29 @@ import { MtoResult, line, num, STEEL_DENSITY } from './types';
  */
 export function calcFoundation(p: any): MtoResult {
   const notes: string[] = [];
+
+  // EST-MTO-R01: tipe pondasi selain footplate BELUM punya formula sendiri.
+  //
+  // Sebelumnya `foundation_type` diabaikan sepenuhnya, jadi bored pile dan
+  // mini pile tetap menghasilkan galian, footing, dan bekisting seperti
+  // footplate — angka yang sama sekali tidak berhubungan dengan pekerjaannya,
+  // tapi terlihat wajar sehingga bisa lolos ke penawaran.
+  //
+  // Sampai formulanya ada, lebih baik TIDAK mengeluarkan angka daripada
+  // mengeluarkan angka yang salah.
+  const resolved = resolveVariant('foundation', p.foundation_type, 'footplate');
+  if (resolved.note) notes.push(resolved.note);
+  if (resolved.variant === 'unknown') {
+    return { element_type: 'foundation', variant: resolved.raw, lines: [], notes };
+  }
+  if (resolved.variant !== 'footplate') {
+    notes.push(
+      `Pondasi tipe "${resolved.raw}" belum didukung kalkulator — formulanya berbeda `
+      + `dari footplate (kedalaman bor, volume beton per titik, casing, dan sebagainya). `
+      + `Kuantitas tidak dihitung; isikan manual di RAB sampai formulanya tersedia.`
+    );
+    return { element_type: 'foundation', variant: resolved.variant, lines: [], notes };
+  }
 
   const L = num(p.L), W = num(p.W), H = num(p.H);
   const qty = num(p.qty, 1) || 1;
@@ -78,5 +102,5 @@ export function calcFoundation(p: any): MtoResult {
       stCount * stLen * stArea * STEEL_DENSITY, 'kg', waste, 1));
   }
 
-  return { element_type: 'foundation', variant: String(p.foundation_type || 'footplat'), lines, notes };
+  return { element_type: 'foundation', variant: 'footplate', lines, notes };
 }

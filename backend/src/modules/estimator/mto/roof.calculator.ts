@@ -1,5 +1,6 @@
 import { MtoResult, line, num } from './types';
 import { profileWeight } from './profiles';
+import { resolveVariant } from './contract';
 
 /**
  * Atap (EST-MTO-012).
@@ -11,7 +12,12 @@ import { profileWeight } from './profiles';
  */
 export function calcRoof(p: any): MtoResult {
   const notes: string[] = [];
-  const roofType = String(p.roof_type || 'genteng').toLowerCase();
+  const resolved = resolveVariant('roof', p.roof_type, 'sheet');
+  const roofType = resolved.variant;
+  if (resolved.note) notes.push(resolved.note);
+  if (roofType === 'unknown') {
+    return { element_type: 'roof', variant: resolved.raw, lines: [], notes };
+  }
   const waste = num(p.waste_pct, 5);
 
   const floorArea = num(p.floor_area);
@@ -31,13 +37,13 @@ export function calcRoof(p: any): MtoResult {
   const lines = [];
   lines.push(line('RF-AREA', 'Luas Bidang Atap', netRoofArea, 'm2', waste, 2));
 
-  if (roofType === 'dak' || roofType === 'concrete') {
+  if (roofType === 'deck') {
     const t = num(p.dak_thick, 0.12);
     lines.push(line('RF-CONC', 'Beton Dak', floorArea * t, 'm3', waste));
     lines.push(line('RF-FORM', 'Bekisting Dak', floorArea, 'm2', waste, 2));
     notes.push('Atap dak: tidak menghasilkan gording maupun penutup atap lembaran.');
   } else {
-    if (roofType === 'genteng' || roofType === 'tile') {
+    if (roofType === 'tile') {
       lines.push(line('RF-TILE', `Genteng ${p.genteng_type || 'Beton'}`, netRoofArea, 'm2', num(p.waste_pct, 8), 2));
     } else {
       const eff = num(p.sheet_eff_w, 1) || 1;

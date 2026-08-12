@@ -1,5 +1,6 @@
 import { MtoResult, line, num, STEEL_DENSITY } from './types';
 import { profileWeight } from './profiles';
+import { meters, resolveVariant } from './contract';
 
 /**
  * Kolom (EST-MTO-005, EST-MTO-006).
@@ -20,7 +21,12 @@ import { profileWeight } from './profiles';
  */
 export function calcColumn(p: any): MtoResult {
   const notes: string[] = [];
-  const colType = String(p.col_type || 'concrete').toLowerCase();
+  const resolved = resolveVariant('column', p.col_type, 'concrete');
+  const colType = resolved.variant;
+  if (resolved.note) notes.push(resolved.note);
+  if (colType === 'unknown') {
+    return { element_type: 'column', variant: resolved.raw, lines: [], notes };
+  }
   const waste = num(p.waste_pct, 5);
 
   const floors = num(p.floors, 1) || 1;
@@ -56,7 +62,8 @@ export function calcColumn(p: any): MtoResult {
     lines.push(line('COL-SCREW', 'Sekrup', num(p.screws_per_m, 4) * totalLength * layers, 'bh', 0, 0));
     notes.push('Kolom baja ringan: tidak menghasilkan volume beton maupun besi tulangan.');
   } else if (colType === 'wood' || colType === 'kayu') {
-    const b = num(p.kayu_b, 0.12), h = num(p.kayu_h, 0.12);
+    // Layar meminta cm; tanpa konversi, 12×12 cm terbaca 12×12 m — 10.000× lipat.
+    const b = meters(p, 'kayu_b', 0.12), h = meters(p, 'kayu_h', 0.12);
     lines.push(line('COL-WOOD', `Kayu ${p.kayu_kelas || 'Kelas II'}`, b * h * totalLength, 'm3', waste));
     notes.push('Kolom kayu: tidak menghasilkan volume beton maupun besi tulangan.');
   } else {
