@@ -749,6 +749,18 @@ Project MTO Baseline
 
 Setelah itu perubahan project tidak mengubah proposal.
 
+
+### ✅ DITERAPKAN — tim development
+
+Query lama mencocokkan `proposal_id OR project_id`, jadi menyunting lewat layar
+proposal bisa mengubah elemen milik project yang sudah berjalan. Seluruh endpoint
+MTO proposal kini terkurung ke `scope_type = 'proposal'`.
+
+Snapshot saat deal juga sudah ada: begitu proposal menjadi `deal` dan project-nya
+terbentuk, seluruh elemen MTO disalin menjadi baris baru ber-`scope_type =
+'project'`. Setelah itu perubahan di lapangan tidak lagi menyentuh angka yang
+sudah dikontrakkan.
+
 ---
 
 ## EST-MTO-018 — Scope Unique Key
@@ -774,6 +786,31 @@ Unique:
 ```text
 (scope_type, scope_id, element_type, element_name)
 ```
+
+
+### ✅ DITERAPKAN — tim development
+
+Temuan ini bukan soal kerapian model — index lamanya **tidak pernah bekerja**.
+
+`UNIQUE (proposal_id, project_id, element_type, element_name)` memuat dua kolom
+nullable, dan MySQL tidak pernah menganggap baris ber-NULL sebagai duplikat.
+Karena elemen proposal selalu punya `project_id = NULL`, index itu tidak pernah
+menyala, sehingga `ON DUPLICATE KEY UPDATE` di endpoint MTO **selalu**
+menyisipkan baris baru.
+
+Dibuktikan lewat API sebelum diperbaiki: menyimpan elemen yang sama dua kali
+menghasilkan id 62 lalu 63, dan proposal berisi dua elemen identik — yang
+kemudian dihitung dua kali di rekap penawaran.
+
+`scope_type` + `scope_id` ditambahkan lewat `ensureMtoScopeSchema()`, di-backfill
+dari kolom lama, dengan UNIQUE `(scope_type, scope_id, element_type,
+element_name)`. `proposal_id`/`project_id` tetap diisi supaya kode lain yang
+membacanya tidak perlu ikut berubah sekarang.
+
+Upsert-nya sendiri juga diubah jadi SELECT ... FOR UPDATE + INSERT/UPDATE
+eksplisit di dalam transaction, jadi kebenarannya tidak bergantung pada index
+berhasil terpasang. Produksi diperiksa lebih dulu: 41 elemen, nol duplikat, jadi
+index unik aman dipasang di sana.
 
 ---
 

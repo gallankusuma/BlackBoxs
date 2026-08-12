@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { calculateMto, toLegacyQuantities } from '../modules/estimator/mto/calculator';
 import { checkUnitCompatibility, isProposalEditable } from '../modules/estimator/mto/units';
 import { authMiddleware } from '../middleware/auth';
-import { dbAll, dbGet, dbRun } from '../config/database';
+import { dbAll, dbGet, dbRun , withTransaction} from '../config/database';
 
 const router = Router();
 
@@ -1969,6 +1969,31 @@ router.put('/proposals/:id/status', authMiddleware, async (req: Request, res: Re
       // Link back to proposal
       await dbRun('UPDATE proposals SET project_id = ? WHERE id = ?', [projectId, proposalId]);
 
+      // EST-MTO-017: MTO proposal disalin menjadi baseline MTO project.
+      //
+      // Keduanya sengaja jadi baris terpisah: MTO proposal adalah dasar komersial
+      // yang sudah disepakati dan tidak boleh berubah lagi, sementara MTO project
+      // adalah kuantitas pelaksanaan yang wajar berubah di lapangan. Sebelum ini
+      // keduanya berbagi baris yang sama, jadi revisi di lapangan diam-diam
+      // mengubah angka yang sudah dikontrakkan.
+      const baseline: any[] = await dbAll(
+        `SELECT element_type, element_name, parameters, quantities, sort_order
+         FROM engineering_inputs WHERE scope_type = 'proposal' AND scope_id = ?`,
+        [proposalId]
+      );
+      for (const el of baseline) {
+        await dbRun(
+          `INSERT IGNORE INTO engineering_inputs
+            (scope_type, scope_id, project_id, proposal_id, element_type, element_name, parameters, quantities, sort_order)
+           VALUES ('project', ?, ?, NULL, ?, ?, ?, ?, ?)`,
+          [projectId, projectId, el.element_type, el.element_name,
+           typeof el.parameters === 'string' ? el.parameters : JSON.stringify(el.parameters || {}),
+           typeof el.quantities === 'string' ? el.quantities : JSON.stringify(el.quantities || {}),
+           el.sort_order || 0]
+        );
+      }
+      console.log(`[Proposal ${proposalId} → deal] ${baseline.length} elemen MTO disalin sebagai baseline project ${projectId}`);
+
       // === Auto-create Purchase Request from proposal materials ===
       try {
         // Get all proposal items with their AHSP ids
@@ -2299,7 +2324,7 @@ async function proposalLock(proposalId: any): Promise<{ status: number; body: an
  */
 async function syncLinkedRabItems(proposalId: any, elementId: any): Promise<number> {
   const element: any = await dbGet(
-    'SELECT id, element_type, parameters FROM engineering_inputs WHERE id = ? AND proposal_id = ?',
+    `SELECT id, element_type, parameters FROM engineering_inputs WHERE id = ? AND scope_type = 'proposal' AND scope_id = ?`,
     [elementId, proposalId]
   );
   if (!element) return 0;
@@ -2339,7 +2364,7 @@ router.get('/proposals/:id/mto', authMiddleware, async (req: Request, res: Respo
   try {
     const proposalId = req.params.id;
     const rows = await dbAll(
-      'SELECT * FROM engineering_inputs WHERE proposal_id = ? ORDER BY sort_order, id',
+      `SELECT * FROM engineering_inputs WHERE scope_type = 'proposal' AND scope_id = ? ORDER BY sort_order, id`,
       [proposalId]
     );
     res.json({
@@ -2378,19 +2403,40 @@ router.post('/proposals/:id/mto', authMiddleware, async (req: Request, res: Resp
     const paramsJson = JSON.stringify(parameters);
     const qtyJson = JSON.stringify(quantities);
 
-    // Upsert: proposal_id + element_type + element_name
-    const result: any = await dbRun(
-      `INSERT INTO engineering_inputs (proposal_id, project_id, element_type, element_name, parameters, quantities, sort_order)
-       VALUES (?, NULL, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE parameters=VALUES(parameters), quantities=VALUES(quantities), sort_order=VALUES(sort_order)`,
-      [proposalId, element_type, name, paramsJson, qtyJson, sort_order]
-    );
-    const id = result.insertId || (await dbGet(
-      'SELECT id FROM engineering_inputs WHERE proposal_id = ? AND element_type = ? AND element_name = ?',
-      [proposalId, element_type, name]
-    ) as any)?.id;
+    // EST-MTO-018: upsert dilakukan eksplisit, tidak lagi mengandalkan
+    // `ON DUPLICATE KEY UPDATE`. Index lamanya memuat kolom nullable sehingga
+    // tidak pernah menyala — menyimpan elemen yang sama dua kali menghasilkan
+    // dua baris, dan rekap penawaran menghitungnya dua kali.
+    let existedBefore = false;
+    const id = await withTransaction(async tx => {
+      const existing: any = await tx.get(
+        `SELECT id FROM engineering_inputs
+         WHERE scope_type = 'proposal' AND scope_id = ? AND element_type = ? AND element_name = ?
+         FOR UPDATE`,
+        [proposalId, element_type, name]
+      );
+
+      if (existing) {
+        existedBefore = true;
+        await tx.run(
+          `UPDATE engineering_inputs
+           SET parameters = ?, quantities = ?, sort_order = ?, updated_at = NOW()
+           WHERE id = ?`,
+          [paramsJson, qtyJson, sort_order, existing.id]
+        );
+        return existing.id;
+      }
+
+      const inserted = await tx.run(
+        `INSERT INTO engineering_inputs
+          (scope_type, scope_id, proposal_id, project_id, element_type, element_name, parameters, quantities, sort_order)
+         VALUES ('proposal', ?, ?, NULL, ?, ?, ?, ?, ?)`,
+        [proposalId, proposalId, element_type, name, paramsJson, qtyJson, sort_order]
+      );
+      return inserted.insertId;
+    });
     const synced = await syncLinkedRabItems(proposalId, id);
-    res.json({ id, quantities, lines: mto.lines, variant: mto.variant, notes: mto.notes, updated: !result.insertId, rab_items_synced: synced });
+    res.json({ id, quantities, lines: mto.lines, variant: mto.variant, notes: mto.notes, updated: existedBefore, rab_items_synced: synced });
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });
 
@@ -2401,14 +2447,16 @@ router.put('/proposals/:id/mto/:elementId', authMiddleware, async (req: Request,
     const locked = await proposalLock(proposalId);
     if (locked) return res.status(locked.status).json(locked.body);
 
-    const proposal: any = await dbGet('SELECT project_id FROM proposals WHERE id = ?', [proposalId]);
-    const projectId = proposal?.project_id || null;
     const { element_type, element_name, parameters = {}, sort_order } = req.body;
+
+    // EST-MTO-017: MTO proposal dan MTO project adalah dua hal berbeda —
+    // yang satu dasar komersial, yang satu kuantitas pelaksanaan. Query lama
+    // mencocokkan `proposal_id OR project_id`, sehingga menyunting lewat layar
+    // proposal bisa mengubah elemen milik project yang sudah berjalan.
     const existing: any = await dbGet(
-      projectId
-        ? 'SELECT * FROM engineering_inputs WHERE id = ? AND (proposal_id = ? OR project_id = ?)'
-        : 'SELECT * FROM engineering_inputs WHERE id = ? AND proposal_id = ?',
-      projectId ? [req.params.elementId, proposalId, projectId] : [req.params.elementId, proposalId]
+      `SELECT * FROM engineering_inputs
+       WHERE id = ? AND scope_type = 'proposal' AND scope_id = ?`,
+      [req.params.elementId, proposalId]
     );
     if (!existing) return res.status(404).json({ error: 'Element not found' });
     const type = element_type || existing.element_type;
@@ -2430,7 +2478,10 @@ router.delete('/proposals/:id/mto/:elementId', authMiddleware, async (req: Reque
     const locked = await proposalLock(req.params.id);
     if (locked) return res.status(locked.status).json(locked.body);
 
-    await dbRun('DELETE FROM engineering_inputs WHERE id = ? AND proposal_id = ?', [req.params.elementId, req.params.id]);
+    await dbRun(
+      `DELETE FROM engineering_inputs WHERE id = ? AND scope_type = 'proposal' AND scope_id = ?`,
+      [req.params.elementId, req.params.id]
+    );
     res.json({ message: 'Deleted' });
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });
@@ -2443,7 +2494,9 @@ router.get('/proposals/:id/mto-quantities', authMiddleware, async (req: Request,
   try {
     const rows: any[] = await dbAll(
       `SELECT id, element_type, element_name, parameters
-       FROM engineering_inputs WHERE proposal_id = ? ORDER BY element_type, sort_order`,
+       FROM engineering_inputs
+       WHERE scope_type = 'proposal' AND scope_id = ?
+       ORDER BY element_type, sort_order`,
       [req.params.id]
     );
 
@@ -2520,7 +2573,7 @@ router.put('/proposals/:id/items/:itemId/mto-link', authMiddleware, async (req: 
     // Sekarang klien hanya menyebut elemen dan kode barisnya; kuantitasnya
     // dihitung ulang di server dari parameter elemen tersebut.
     const element: any = await dbGet(
-      'SELECT id, element_type, element_name, parameters FROM engineering_inputs WHERE id = ? AND proposal_id = ?',
+      `SELECT id, element_type, element_name, parameters FROM engineering_inputs WHERE id = ? AND scope_type = 'proposal' AND scope_id = ?`,
       [element_id, proposalId]
     );
     if (!element) {

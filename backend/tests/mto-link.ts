@@ -116,6 +116,26 @@ async function main() {
   chk('hapus MTO ditolak',
     (await call('DELETE', `/estimator/proposals/${propId}/mto/${elementId}`, undefined, master)).status, 409);
 
+  console.log('\n6. Menyimpan elemen yang sama tidak membuat duplikat (EST-MTO-018)');
+  const propDup = await call('POST', '/estimator/proposals', { project_name: `Uji duplikat ${stamp}` }, master);
+  const dupId = propDup.json?.id;
+  const body = { element_type: 'column', element_name: 'K1', parameters: { B: 0.4, H: 0.4, qty_per_floor: 5 } };
+  const save1 = await call('POST', `/estimator/proposals/${dupId}/mto`, body, master);
+  const save2 = await call('POST', `/estimator/proposals/${dupId}/mto`, body, master);
+  chk('id sama pada simpan kedua', save1.json?.id, save2.json?.id);
+  chk('ditandai sebagai pembaruan', save2.json?.updated, true);
+  const listDup = await call('GET', `/estimator/proposals/${dupId}/mto`, undefined, master);
+  chk('hanya ada SATU elemen', (listDup.json?.elements || []).length, 1);
+
+  console.log('\n7. MTO proposal tidak bisa diubah lewat proposal lain (EST-MTO-017)');
+  const propOther = await call('POST', '/estimator/proposals', { project_name: `Proposal Ketiga ${stamp}` }, master);
+  const crossEdit = await call('PUT', `/estimator/proposals/${propOther.json?.id}/mto/${save1.json?.id}`,
+    { parameters: { B: 9, H: 9 } }, master);
+  chk('menyunting elemen milik proposal lain ditolak', crossEdit.status, 404);
+  const stillThere = await call('GET', `/estimator/proposals/${dupId}/mto`, undefined, master);
+  chk('parameter aslinya tidak berubah',
+    Number(stillThere.json?.elements?.[0]?.parameters?.B), 0.4);
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }

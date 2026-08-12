@@ -1056,6 +1056,37 @@ const ensureGrnReversalSchema = async (connection: any) => {
   console.log('✅ Reversal GRN ensured');
 };
 
+
+// ==================== SCOPE MTO (EST-MTO-018) ====================
+// `engineering_inputs` memakai UNIQUE (proposal_id, project_id, element_type,
+// element_name). Dua kolom pertamanya nullable, dan MySQL tidak pernah
+// menganggap baris ber-NULL sebagai duplikat — jadi index itu TIDAK PERNAH
+// menyala. Akibatnya `ON DUPLICATE KEY UPDATE` di endpoint MTO selalu menyisipkan
+// baris baru: menyimpan elemen yang sama dua kali menghasilkan dua elemen, dan
+// rekap penawaran menghitungnya dua kali.
+//
+// Diganti kunci eksplisit `(scope_type, scope_id, ...)` yang tidak pernah NULL.
+// Kolom `proposal_id`/`project_id` tetap diisi supaya kode lama yang membacanya
+// tidak perlu diubah serentak.
+const ensureMtoScopeSchema = async (connection: any) => {
+  const statements = [
+    `ALTER TABLE engineering_inputs ADD COLUMN IF NOT EXISTS scope_type VARCHAR(20) NULL`,
+    `ALTER TABLE engineering_inputs ADD COLUMN IF NOT EXISTS scope_id INT NULL`,
+    `UPDATE engineering_inputs
+       SET scope_type = CASE WHEN proposal_id IS NOT NULL THEN 'proposal' ELSE 'project' END,
+           scope_id   = COALESCE(proposal_id, project_id)
+     WHERE scope_type IS NULL OR scope_id IS NULL`,
+    `CREATE INDEX idx_mto_scope ON engineering_inputs (scope_type, scope_id)`,
+    `ALTER TABLE engineering_inputs DROP INDEX uq_mto_element`,
+    `CREATE UNIQUE INDEX uq_mto_scope ON engineering_inputs (scope_type, scope_id, element_type, element_name)`,
+  ];
+
+  for (const statement of statements) {
+    await execSchemaEnsure(connection, statement);
+  }
+  console.log('✅ Scope MTO ensured');
+};
+
 // ==================== COUNTER NOMOR DOKUMEN (PROC-R05) ====================
 // Nomor dokumen dulu ditentukan lewat MAX(...) + 1 lalu mengandalkan retry saat
 // UNIQUE bentrok. Pola itu tidak tahan permintaan serentak: 20 request membaca
@@ -1457,6 +1488,7 @@ export async function initializeDatabase() {
     await ensurePurchaseRequestSoftDelete(connection);
     await ensureGeneratedPoIdempotency(connection);
     await ensureGrnCreatedBy(connection);
+    await ensureMtoScopeSchema(connection);
     await ensureDisposalSchema(connection);
     await ensureAssetStatusHistorySchema(connection);
     await ensurePermissionCatalog(connection);
