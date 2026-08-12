@@ -534,6 +534,21 @@ Backend:
 
 Client quantity tidak pernah menjadi source of truth.
 
+
+### ✅ DITERAPKAN — tim development
+
+Terverifikasi: endpoint lama menerima `value` dan `unit` dari body lalu langsung
+menulisnya sebagai kuantitas RAB. Siapa pun yang bisa memanggil endpoint itu
+menentukan sendiri angka penawarannya, tanpa keharusan ada hubungan dengan MTO
+yang ditautkan.
+
+Kontraknya kini `{ element_id, line_code, use_net? }`. Backend memeriksa elemen
+benar milik proposal itu (404 `ELEMENT_NOT_IN_PROPOSAL` kalau bukan), menghitung
+ulang dari parameter elemen, lalu memakai angka hasil hitungannya sendiri.
+`use_net` memilih net atau gross sesuai EST-MTO-004.
+
+Tesnya menembak langsung: mengirim `value: 999999` tetap menghasilkan 36,864.
+
 ---
 
 ## EST-MTO-014 — Unit Compatibility
@@ -572,6 +587,21 @@ return:
 ```text
 409 UNIT_MISMATCH
 ```
+
+
+### ✅ DITERAPKAN — tim development
+
+Tabel padanan di `modules/estimator/mto/units.ts`: `m3`↔`m³`, `m2`↔`m²`,
+`m`↔`m'`, `bh`↔`pcs`, dan seterusnya. Tidak sepadan → 409 `UNIT_MISMATCH`.
+
+Satu keputusan yang perlu disebut: satuan yang **tidak dikenali** sengaja
+dianggap TIDAK cocok, bukan diloloskan. Meloloskan yang tidak dikenal berarti
+membiarkan kg terpasang ke item m3 — persis kesalahan yang paling mahal di
+penawaran.
+
+Efek sampingnya, satuan item RAB tidak lagi ditimpa oleh MTO: `unit_snapshot`
+adalah snapshot AHSP, dan karena kesepadanan sudah dijamin, tidak ada yang perlu
+diubah.
 
 ---
 
@@ -621,6 +651,20 @@ Draft/Review → auto-sync
 Submitted/Deal → locked
 ```
 
+
+### ✅ DITERAPKAN — tim development (auto-sync)
+
+Dipilih auto-sync sesuai rekomendasi reviewer untuk draft/review. Setiap
+POST/PUT MTO memanggil `syncLinkedRabItems()`, yang menghitung ulang elemen lalu
+memperbarui `qty` dan `total_price` seluruh item RAB yang menaut ke elemen itu.
+Jumlah yang tersinkron dilaporkan di respons sebagai `rab_items_synced`.
+
+Proposal submitted/deal tidak ikut — bukan karena terlewat, tapi karena MTO-nya
+memang sudah terkunci (EST-MTO-016), jadi tidak ada perubahan yang perlu
+disinkronkan.
+
+Tes: MTO 36,864 → 73,728 membuat qty item RAB tertaut ikut menjadi 73,728.
+
 ---
 
 ## EST-MTO-016 — Proposal Status Lock
@@ -657,6 +701,18 @@ Deal:
 ```
 
 Revisi harus melalui explicit revision workflow.
+
+
+### ✅ DITERAPKAN — tim development
+
+`proposalLock()` menutup POST, PUT, dan DELETE MTO dengan 409 `PROPOSAL_LOCKED`
+begitu status di luar `draft`/`review`. Kosakata statusnya diperiksa dulu ke
+database dan ke frontend: `draft`, `review`, `submitted`, `deal` — sama persis
+dengan yang reviewer tulis.
+
+Sisi frontend (`:readonly`) belum dikerjakan; backend sudah menegakkannya, jadi
+yang terjadi sekarang user menerima pesan penolakan alih-alih tombolnya
+tersembunyi.
 
 ---
 

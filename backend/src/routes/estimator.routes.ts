@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { calculateMto, toLegacyQuantities } from '../modules/estimator/mto/calculator';
+import { checkUnitCompatibility, isProposalEditable } from '../modules/estimator/mto/units';
 import { authMiddleware } from '../middleware/auth';
 import { dbAll, dbGet, dbRun } from '../config/database';
 
@@ -1283,7 +1284,10 @@ router.get('/proposals/:proposalId/schedule-progress/:itemId', authMiddleware, a
 router.put('/proposals/:proposalId/schedule-progress', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { proposal_item_id, unit_number, step_code, step_name, status, notes } = req.body;
-    const userId = (req as any).user?.user_id || 1;
+    // `authMiddleware` menyetel `userId` (camelCase). Membaca `user_id` selalu
+    // menghasilkan undefined, sehingga created_by SELALU jatuh ke 1 — proposal
+    // tercatat atas nama orang lain, dan gagal total kalau user id 1 tidak ada.
+    const userId = (req as any).user?.userId || (req as any).userId || null;
     await dbRun(
       `INSERT INTO schedule_progress (proposal_item_id, unit_number, step_code, step_name, status, updated_by, notes)
        VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -1302,7 +1306,10 @@ router.put('/proposals/:proposalId/schedule-progress', authMiddleware, async (re
 router.post('/proposals', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { project_name, client, client_id, lokasi, revision, proposal_type, design_params, template_sections } = req.body;
-    const userId = (req as any).user?.user_id || 1;
+    // `authMiddleware` menyetel `userId` (camelCase). Membaca `user_id` selalu
+    // menghasilkan undefined, sehingga created_by SELALU jatuh ke 1 — proposal
+    // tercatat atas nama orang lain, dan gagal total kalau user id 1 tidak ada.
+    const userId = (req as any).user?.userId || (req as any).userId || null;
     
     if (!project_name) {
       return res.status(400).json({ error: 'project_name is required' });
@@ -1553,7 +1560,10 @@ router.post('/proposals/:proposalId/items', authMiddleware, async (req: Request,
         ahsp_code_snapshot, ahsp_name_snapshot, unit_snapshot, unit_price_snapshot,
         qty, total_price, order_no)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [proposalId, discipline_id, sub_discipline_id, ahsp_id,
+      // `discipline_id` dan `sub_discipline_id` opsional. Tanpa `?? null`,
+      // menambah item tanpa memilih disiplin mengirim `undefined` ke driver dan
+      // seluruh permintaan gagal 500 — padahal kolomnya memang boleh kosong.
+      [proposalId, discipline_id ?? null, sub_discipline_id ?? null, ahsp_id,
        ahsp.kode, ahsp.name, ahsp.satuan, unitPrice,
        qtyValue, totalPrice, orderNo]
     );
@@ -2254,6 +2264,76 @@ router.post('/mto/preview-batch', authMiddleware, async (req: Request, res: Resp
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });
 
+
+/**
+ * EST-MTO-016: MTO hanya boleh diubah selagi proposal masih draft atau review.
+ *
+ * Setelah proposal dikirim ke pelanggan (submitted) atau menjadi kesepakatan
+ * (deal), mengubah kuantitas berarti mengubah dasar angka yang sudah dilihat —
+ * atau sudah disetujui — pihak lain, tanpa jejak revisi.
+ */
+async function proposalLock(proposalId: any): Promise<{ status: number; body: any } | null> {
+  const proposal: any = await dbGet('SELECT id, status FROM proposals WHERE id = ?', [proposalId]);
+  if (!proposal) return { status: 404, body: { error: 'Proposal tidak ditemukan' } };
+  if (!isProposalEditable(proposal.status)) {
+    return {
+      status: 409,
+      body: {
+        error: `Proposal berstatus "${proposal.status}" — MTO tidak bisa diubah lagi. Buat revisi kalau memang perlu.`,
+        code: 'PROPOSAL_LOCKED',
+        status_proposal: proposal.status,
+      },
+    };
+  }
+  return null;
+}
+
+/**
+ * EST-MTO-015: setelah kuantitas MTO berubah, item RAB yang menautnya ikut
+ * disesuaikan.
+ *
+ * Tanpa ini, MTO 100 → 125 meninggalkan RAB tetap di 100 dan penawarannya
+ * memakai angka yang sudah tidak berlaku — tanpa peringatan apa pun. Sinkronisasi
+ * hanya berjalan pada proposal draft/review; yang sudah submitted/deal justru
+ * TIDAK boleh berubah diam-diam.
+ */
+async function syncLinkedRabItems(proposalId: any, elementId: any): Promise<number> {
+  const element: any = await dbGet(
+    'SELECT id, element_type, parameters FROM engineering_inputs WHERE id = ? AND proposal_id = ?',
+    [elementId, proposalId]
+  );
+  if (!element) return 0;
+
+  const params = typeof element.parameters === 'string' ? JSON.parse(element.parameters || '{}') : (element.parameters || {});
+  const mto = calculateMto(element.element_type, params);
+
+  const items: any[] = await dbAll(
+    'SELECT id, mto_link, unit_snapshot FROM proposal_items WHERE proposal_id = ? AND mto_link IS NOT NULL',
+    [proposalId]
+  );
+
+  let updated = 0;
+  for (const item of items) {
+    let link: any;
+    try { link = typeof item.mto_link === 'string' ? JSON.parse(item.mto_link) : item.mto_link; } catch { continue; }
+    if (!link || Number(link.element_id) !== Number(elementId)) continue;
+
+    const lineCode = link.line_code || link.field;
+    const line = mto.lines.find(l => l.code === lineCode);
+    if (!line) continue;
+
+    const value = link.use_net ? line.net_quantity : line.gross_quantity;
+    await dbRun(
+      `UPDATE proposal_items
+       SET qty = ?, mto_link = ?, total_price = ? * unit_price_snapshot, updated_at = NOW()
+       WHERE id = ?`,
+      [value, JSON.stringify({ ...link, line_code: line.code, value, unit: line.unit }), value, item.id]
+    );
+    updated++;
+  }
+  return updated;
+}
+
 // GET all MTO elements for a proposal — single source of truth: proposal_id only
 router.get('/proposals/:id/mto', authMiddleware, async (req: Request, res: Response) => {
   try {
@@ -2289,6 +2369,9 @@ router.post('/proposals/:id/mto', authMiddleware, async (req: Request, res: Resp
     const proposalId = req.params.id;
     const { element_type, element_name, parameters = {}, sort_order = 0 } = req.body;
     if (!element_type) return res.status(400).json({ error: 'element_type required' });
+
+    const locked = await proposalLock(proposalId);
+    if (locked) return res.status(locked.status).json(locked.body);
     const mto = calculateMto(element_type, parameters);
     const quantities = toLegacyQuantities(mto);
     const name = element_name || element_type;
@@ -2306,7 +2389,8 @@ router.post('/proposals/:id/mto', authMiddleware, async (req: Request, res: Resp
       'SELECT id FROM engineering_inputs WHERE proposal_id = ? AND element_type = ? AND element_name = ?',
       [proposalId, element_type, name]
     ) as any)?.id;
-    res.json({ id, quantities, lines: mto.lines, variant: mto.variant, notes: mto.notes, updated: !result.insertId });
+    const synced = await syncLinkedRabItems(proposalId, id);
+    res.json({ id, quantities, lines: mto.lines, variant: mto.variant, notes: mto.notes, updated: !result.insertId, rab_items_synced: synced });
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });
 
@@ -2314,6 +2398,9 @@ router.post('/proposals/:id/mto', authMiddleware, async (req: Request, res: Resp
 router.put('/proposals/:id/mto/:elementId', authMiddleware, async (req: Request, res: Response) => {
   try {
     const proposalId = req.params.id;
+    const locked = await proposalLock(proposalId);
+    if (locked) return res.status(locked.status).json(locked.body);
+
     const proposal: any = await dbGet('SELECT project_id FROM proposals WHERE id = ?', [proposalId]);
     const projectId = proposal?.project_id || null;
     const { element_type, element_name, parameters = {}, sort_order } = req.body;
@@ -2332,13 +2419,17 @@ router.put('/proposals/:id/mto/:elementId', authMiddleware, async (req: Request,
       'UPDATE engineering_inputs SET element_type=?, element_name=?, parameters=?, quantities=?, sort_order=? WHERE id=?',
       [type, element_name || existing.element_name, JSON.stringify(params), JSON.stringify(quantities), sort_order ?? existing.sort_order, req.params.elementId]
     );
-    res.json({ quantities, lines: mto.lines, variant: mto.variant, notes: mto.notes });
+    const synced = await syncLinkedRabItems(proposalId, req.params.elementId);
+    res.json({ quantities, lines: mto.lines, variant: mto.variant, notes: mto.notes, rab_items_synced: synced });
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });
 
 // DELETE MTO element for proposal — only proposal_id
 router.delete('/proposals/:id/mto/:elementId', authMiddleware, async (req: Request, res: Response) => {
   try {
+    const locked = await proposalLock(req.params.id);
+    if (locked) return res.status(locked.status).json(locked.body);
+
     await dbRun('DELETE FROM engineering_inputs WHERE id = ? AND proposal_id = ?', [req.params.elementId, req.params.id]);
     res.json({ message: 'Deleted' });
   } catch (err: any) { res.status(500).json({ error: err.message }); }
@@ -2351,55 +2442,38 @@ router.delete('/proposals/:id/mto/:elementId', authMiddleware, async (req: Reque
 router.get('/proposals/:id/mto-quantities', authMiddleware, async (req: Request, res: Response) => {
   try {
     const rows: any[] = await dbAll(
-      `SELECT id, element_type, element_name, parameters, quantities
+      `SELECT id, element_type, element_name, parameters
        FROM engineering_inputs WHERE proposal_id = ? ORDER BY element_type, sort_order`,
       [req.params.id]
     );
 
-    const FIELD_META: Record<string, { label: string; unit: string }> = {
-      qty:            { label: 'Jumlah Unit',    unit: 'bh'  },
-      qty_per_floor:  { label: 'Jumlah per Lantai', unit: 'bh' },
-      vol_concrete:   { label: 'Volume Beton',   unit: 'm3'  },
-      vol_excavation: { label: 'Volume Galian',  unit: 'm3'  },
-      vol_backfill:   { label: 'Volume Timbunan',unit: 'm3'  },
-      formwork_area:  { label: 'Luas Bekisting', unit: 'm2'  },
-      rebar_weight_kg:{ label: 'Berat Besi',     unit: 'kg'  },
-      rebar_lonjor:   { label: 'Besi Lonjoran',  unit: 'btg' },
-      total_length:   { label: 'Panjang Total',  unit: 'm'   },
-      area:           { label: 'Luas Area',      unit: 'm2'  },
-      wall_area:      { label: 'Luas Dinding',   unit: 'm2'  },
-      plaster_area:   { label: 'Luas Plester',   unit: 'm2'  },
-      roof_area:      { label: 'Luas Atap',      unit: 'm2'  },
-    };
-
+    // Daftar pilihan berasal dari kalkulator, bukan dari peta nama field lama.
+    // Peta lama hanya mengenal 13 field generik (`vol_concrete`, `rebar_weight_kg`,
+    // dst) sehingga pekerjaan seperti lantai kerja, urugan kembali, atau sengkang
+    // tie beam tidak pernah bisa ditautkan ke RAB sama sekali.
     const result = rows.map((row: any) => {
       const params = typeof row.parameters === 'string' ? JSON.parse(row.parameters || '{}') : (row.parameters || {});
-      const qtys   = typeof row.quantities  === 'string' ? JSON.parse(row.quantities  || '{}') : (row.quantities  || {});
-
-      // Available quantity fields for this element
-      const available: any[] = [];
-
-      // From parameters: qty, qty_per_floor, area, total_length
-      for (const f of ['qty','qty_per_floor','area','total_length']) {
-        const v = parseFloat(params[f]);
-        if (v > 0 && FIELD_META[f]) {
-          available.push({ field: f, source: 'params', label: FIELD_META[f].label, value: +v.toFixed(4), unit: FIELD_META[f].unit });
-        }
-      }
-
-      // From computed quantities
-      for (const [f, v] of Object.entries(qtys)) {
-        const num = parseFloat(v as string);
-        if (num > 0 && FIELD_META[f]) {
-          available.push({ field: f, source: 'qty', label: FIELD_META[f].label, value: +num.toFixed(4), unit: FIELD_META[f].unit });
-        }
-      }
+      const mto = calculateMto(row.element_type, params);
 
       return {
-        element_id:   row.id,
+        element_id: row.id,
         element_type: row.element_type,
         element_name: row.element_name,
-        available
+        variant: mto.variant,
+        available: mto.lines
+          .filter(l => l.gross_quantity > 0)
+          .map(l => ({
+            line_code: l.code,
+            label: l.label,
+            unit: l.unit,
+            net_quantity: l.net_quantity,
+            gross_quantity: l.gross_quantity,
+            waste_percent: l.waste_percent,
+            // `field` & `value` dipertahankan supaya layar lama tetap terbaca,
+            // tapi bukan lagi angka yang dipakai backend saat menautkan.
+            field: l.code,
+            value: l.gross_quantity,
+          })),
       };
     });
 
@@ -2412,28 +2486,94 @@ router.get('/proposals/:id/mto-quantities', authMiddleware, async (req: Request,
 // PUT link a RAB item to an MTO quantity (saves link + updates qty/unit)
 router.put('/proposals/:id/items/:itemId/mto-link', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const { element_id, element_type, element_name, field, value, unit } = req.body;
-    const mtoLink = element_id ? { element_id, element_type, element_name, field, value, unit } : null;
+    const proposalId = req.params.id;
+    const itemId = req.params.itemId;
+    const { element_id, line_code, field, use_net = false } = req.body;
+
+    const locked = await proposalLock(proposalId);
+    if (locked) return res.status(locked.status).json(locked.body);
+
+    const item: any = await dbGet(
+      'SELECT id, unit_snapshot FROM proposal_items WHERE id = ? AND proposal_id = ?',
+      [itemId, proposalId]
+    );
+    if (!item) return res.status(404).json({ error: 'Item RAB tidak ditemukan pada proposal ini' });
+
+    // Melepas tautan: kuantitas manual kembali dipakai
+    if (!element_id) {
+      await dbRun(
+        `UPDATE proposal_items
+         SET mto_link = NULL, qty = ?, total_price = ? * unit_price_snapshot, updated_at = NOW()
+         WHERE id = ? AND proposal_id = ?`,
+        [req.body.qty_manual ?? 0, req.body.qty_manual ?? 0, itemId, proposalId]
+      );
+      return res.json({ message: 'MTO link removed', mto_link: null });
+    }
+
+    // EST-MTO-013: kuantitas TIDAK diambil dari klien.
+    //
+    // Sebelumnya `value` dan `unit` dikirim dari browser lalu langsung ditulis
+    // sebagai kuantitas RAB. Artinya siapa pun yang bisa memanggil endpoint ini
+    // menentukan sendiri angka penawarannya, dan angka itu tidak harus punya
+    // hubungan apa pun dengan MTO yang ditautkan.
+    //
+    // Sekarang klien hanya menyebut elemen dan kode barisnya; kuantitasnya
+    // dihitung ulang di server dari parameter elemen tersebut.
+    const element: any = await dbGet(
+      'SELECT id, element_type, element_name, parameters FROM engineering_inputs WHERE id = ? AND proposal_id = ?',
+      [element_id, proposalId]
+    );
+    if (!element) {
+      return res.status(404).json({ error: 'Elemen MTO tidak ditemukan pada proposal ini', code: 'ELEMENT_NOT_IN_PROPOSAL' });
+    }
+
+    const params = typeof element.parameters === 'string' ? JSON.parse(element.parameters || '{}') : (element.parameters || {});
+    const mto = calculateMto(element.element_type, params);
+
+    const wantedCode = line_code || field;
+    const line = mto.lines.find(l => l.code === wantedCode);
+    if (!line) {
+      return res.status(404).json({
+        error: `Baris MTO "${wantedCode}" tidak ada pada elemen ini`,
+        code: 'LINE_NOT_FOUND',
+        available: mto.lines.map(l => ({ code: l.code, label: l.label, unit: l.unit })),
+      });
+    }
+
+    // EST-MTO-014: satuan MTO harus sepadan dengan satuan item RAB
+    const unitCheck = checkUnitCompatibility(line.unit, item.unit_snapshot);
+    if (!unitCheck.compatible) {
+      return res.status(409).json({
+        error: unitCheck.reason,
+        code: 'UNIT_MISMATCH',
+        mto_unit: line.unit,
+        rab_unit: item.unit_snapshot,
+      });
+    }
+
+    const value = use_net ? line.net_quantity : line.gross_quantity;
+    const mtoLink = {
+      element_id: element.id,
+      element_type: element.element_type,
+      element_name: element.element_name,
+      line_code: line.code,
+      use_net: !!use_net,
+      value,
+      unit: line.unit,
+    };
 
     await dbRun(
+      // Satuan item TIDAK ditimpa: `unit_snapshot` adalah snapshot dari AHSP,
+      // dan EST-MTO-014 sudah menjamin satuan MTO sepadan dengannya. (Kode lama
+      // menulis ke kolom `unit` yang bahkan tidak ada di tabel ini, sehingga
+      // endpoint ini selalu gagal 500.)
       `UPDATE proposal_items
-       SET mto_link = ?, qty = ?, unit = ?, updated_at = NOW()
+       SET mto_link = ?, qty = ?, total_price = ? * unit_price_snapshot, updated_at = NOW()
        WHERE id = ? AND proposal_id = ?`,
-      [mtoLink ? JSON.stringify(mtoLink) : null,
-       mtoLink ? value : req.body.qty_manual,
-       mtoLink ? unit  : req.body.unit_manual,
-       req.params.itemId, req.params.id]
+      [JSON.stringify(mtoLink), value, value, itemId, proposalId]
     );
 
-    // Recalculate total_price for this item
-    await dbRun(
-      `UPDATE proposal_items
-       SET total_price = qty * unit_price_snapshot
-       WHERE id = ? AND proposal_id = ?`,
-      [req.params.itemId, req.params.id]
-    );
-
-    res.json({ message: 'MTO link saved', mto_link: mtoLink });
+    res.json({ message: 'MTO link saved', mto_link: mtoLink, line });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
