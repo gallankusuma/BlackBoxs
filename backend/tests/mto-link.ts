@@ -136,6 +136,102 @@ async function main() {
   chk('parameter aslinya tidak berubah',
     Number(stillThere.json?.elements?.[0]?.parameters?.B), 0.4);
 
+  console.log('\n8. RAB memakai NET, procurement memakai GROSS (EST-MTO-R13)');
+  // Sengaja memakai baris ber-waste 5% — tes lama memakai FND-EXCV yang waste-nya
+  // 0%, sehingga net dan gross sama dan defaultnya yang keliru tidak pernah kelihatan.
+  const propNet = await call('POST', '/estimator/proposals', { project_name: `Uji net/gross ${stamp}` }, master);
+  const pid = propNet.json?.id;
+  const elNet = await call('POST', `/estimator/proposals/${pid}/mto`, {
+    element_type: 'slab', element_name: 'S1',
+    parameters: { slab_type: 'concrete', area: 1000, thickness: 0.1, waste_pct: 5 },
+  }, master);
+  const concLine = elNet.json?.lines?.find((l: any) => l.code === 'SLB-CONC');
+  chk('net 100 m³', concLine?.net_quantity, 100);
+  chk('gross 105 m³ (waste 5%)', concLine?.gross_quantity, 105);
+
+  const ahspNet = await call('POST', '/estimator/ahsp', {
+    kode: `TSTN.${stamp}`, name: `Beton Uji ${stamp}`, satuan: 'm3', status: 'active',
+    // Harga satuan dihitung dari komponen; tanpa ini harganya 0 dan direct_cost
+    // tidak akan pernah bergerak — tes jadi tidak membuktikan apa pun.
+    items: [{ section: 'B', resource_type: 'material', resource_name: 'Beton K-250',
+              resource_satuan: 'm3', koefisien: 1, resource_harga: 1000000 }],
+  }, master);
+  const itemNet = await call('POST', `/estimator/proposals/${pid}/items`,
+    { ahsp_id: ahspNet.json?.id, qty: 1 }, master);
+  const itemNetId = itemNet.json?.id;
+
+  const linkNet = await call('PUT', `/estimator/proposals/${pid}/items/${itemNetId}/mto-link`,
+    { element_id: elNet.json?.id, line_code: 'SLB-CONC' }, master);
+  chk('tautan tersimpan', linkNet.status, 200);
+  chk('RAB memakai NET, bukan gross', linkNet.json?.mto_link?.value, 100);
+  chk('gross tetap tercatat untuk procurement', linkNet.json?.mto_link?.gross_quantity, 105);
+
+  console.log('\n9. Ringkasan proposal ikut dihitung ulang (EST-MTO-R14)');
+  const readDirectCost = async () => {
+    const r = (await call('GET', `/estimator/proposals/${pid}`, undefined, master)).json;
+    const p = r?.data ?? r?.proposal ?? r;
+    return Number(p?.direct_cost ?? 0);
+  };
+  const dc1 = await readDirectCost();
+  chk('harga satuan AHSP tidak nol', dc1 > 0, true);
+  await call('PUT', `/estimator/proposals/${pid}/mto/${elNet.json?.id}`, {
+    element_type: 'slab', element_name: 'S1',
+    parameters: { slab_type: 'concrete', area: 1500, thickness: 0.1, waste_pct: 5 },
+  }, master);
+  const rows14 = await call('GET', `/estimator/proposals/${pid}/items`, undefined, master);
+  const row14 = (Array.isArray(rows14.json) ? rows14.json : []).find((i: any) => Number(i.id) === Number(itemNetId));
+  chk('qty RAB ikut naik ke 150 (net)', Number(row14?.qty), 150);
+  const dc2 = await readDirectCost();
+  chk('direct_cost proposal ikut berubah', dc2 !== dc1, true);
+  // Invariant yang diminta reviewer: header = jumlah barisnya
+  const allRows = Array.isArray(rows14.json) ? rows14.json : [];
+  const sumRows = allRows.reduce((t: number, i: any) => t + Number(i.total_price || 0), 0);
+  chk('direct_cost = SUM(total_price)', Math.round(dc2), Math.round(sumRows));
+
+  console.log('\n10. Ganti subtype tidak boleh meninggalkan RAB basi (EST-MTO-R15)');
+  const propSub = await call('POST', '/estimator/proposals', { project_name: `Uji subtype ${stamp}` }, master);
+  const sid = propSub.json?.id;
+  const elCol = await call('POST', `/estimator/proposals/${sid}/mto`, {
+    element_type: 'column', element_name: 'K1',
+    parameters: { col_type: 'beton', B: 0.4, H: 0.4, height_per_floor: 3, floors: 1, qty_per_floor: 10 },
+  }, master);
+  const ahspCol = await call('POST', '/estimator/ahsp', {
+    kode: `TSTC.${stamp}`, name: `Beton Kolom Uji ${stamp}`, satuan: 'm3', status: 'active',
+  }, master);
+  const itemCol = await call('POST', `/estimator/proposals/${sid}/items`, { ahsp_id: ahspCol.json?.id, qty: 1 }, master);
+  await call('PUT', `/estimator/proposals/${sid}/items/${itemCol.json?.id}/mto-link`,
+    { element_id: elCol.json?.id, line_code: 'COL-CONC' }, master);
+
+  const toWf = await call('PUT', `/estimator/proposals/${sid}/mto/${elCol.json?.id}`, {
+    element_type: 'column', element_name: 'K1',
+    parameters: { col_type: 'wf', wf_profile: 'WF200x100', height_per_floor: 3, floors: 1, qty_per_floor: 10 },
+  }, master);
+  chk('ganti beton → WF ditolak selagi COL-CONC masih ditaut', toWf.status, 409);
+  chk('kode LINKED_MTO_LINE_INVALID', toWf.json?.code, 'LINKED_MTO_LINE_INVALID');
+
+  console.log('\n11. MTO yang masih ditaut tidak bisa dihapus (EST-MTO-R16)');
+  const delLinked = await call('DELETE', `/estimator/proposals/${sid}/mto/${elCol.json?.id}`, undefined, master);
+  chk('hapus ditolak', delLinked.status, 409);
+  chk('kode MTO_HAS_LINKED_RAB', delLinked.json?.code, 'MTO_HAS_LINKED_RAB');
+  chk('setelah tautan dilepas, boleh dihapus',
+    (await call('DELETE', `/estimator/proposals/${sid}/items/${itemCol.json?.id}/mto-link`, undefined, master)).status < 300
+    && (await call('DELETE', `/estimator/proposals/${sid}/mto/${elCol.json?.id}`, undefined, master)).status, 200);
+
+  console.log('\n12. Proposal terkunci mengunci RAB juga (EST-MTO-R18)');
+  await call('PUT', `/estimator/proposals/${pid}/status`, { status: 'review' }, master);
+  await call('PUT', `/estimator/proposals/${pid}/status`, { status: 'submitted' }, master);
+  chk('tambah item RAB ditolak',
+    (await call('POST', `/estimator/proposals/${pid}/items`, { ahsp_id: ahspNet.json?.id, qty: 1 }, master)).status, 409);
+  chk('ubah qty item RAB ditolak',
+    (await call('PUT', `/estimator/proposals/${pid}/items/${itemNetId}`, { qty: 99999 }, master)).status, 409);
+  chk('hapus item RAB ditolak',
+    (await call('DELETE', `/estimator/proposals/${pid}/items/${itemNetId}`, undefined, master)).status, 409);
+  chk('link MTO ditolak',
+    (await call('PUT', `/estimator/proposals/${pid}/items/${itemNetId}/mto-link`,
+      { element_id: elNet.json?.id, line_code: 'SLB-CONC' }, master)).status, 409);
+  chk('unlink MTO ditolak',
+    (await call('DELETE', `/estimator/proposals/${pid}/items/${itemNetId}/mto-link`, undefined, master)).status, 409);
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }

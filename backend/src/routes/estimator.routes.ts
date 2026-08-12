@@ -1526,6 +1526,12 @@ router.delete('/proposals/:id', authMiddleware, async (req: Request, res: Respon
 // Add item to proposal
 router.post('/proposals/:proposalId/items', authMiddleware, async (req: Request, res: Response) => {
   try {
+    // EST-MTO-R18: seluruh perubahan yang menggeser nilai komersial ikut dikunci.
+    // Mengunci MTO saja tidak cukup — qty item RAB bisa diubah langsung lewat
+    // endpoint ini dan penawaran yang sudah dikirim ikut berubah.
+    const lockedRab = await proposalLock(req.params.proposalId);
+    if (lockedRab) return res.status(lockedRab.status).json(lockedRab.body);
+
     const { ahsp_id, qty, discipline_id, sub_discipline_id } = req.body;
     const proposalId = req.params.proposalId;
     
@@ -1581,6 +1587,12 @@ router.post('/proposals/:proposalId/items', authMiddleware, async (req: Request,
 // Update proposal item (qty)
 router.put('/proposals/:proposalId/items/:itemId', authMiddleware, async (req: Request, res: Response) => {
   try {
+    // EST-MTO-R18: seluruh perubahan yang menggeser nilai komersial ikut dikunci.
+    // Mengunci MTO saja tidak cukup — qty item RAB bisa diubah langsung lewat
+    // endpoint ini dan penawaran yang sudah dikirim ikut berubah.
+    const lockedRab = await proposalLock(req.params.proposalId);
+    if (lockedRab) return res.status(lockedRab.status).json(lockedRab.body);
+
     const { qty, description, ahsp_id } = req.body;
     const { proposalId, itemId } = req.params;
     
@@ -1661,6 +1673,12 @@ router.put('/proposals/:proposalId/items/:itemId', authMiddleware, async (req: R
 // Delete proposal item
 router.delete('/proposals/:proposalId/items/:itemId', authMiddleware, async (req: Request, res: Response) => {
   try {
+    // EST-MTO-R18: seluruh perubahan yang menggeser nilai komersial ikut dikunci.
+    // Mengunci MTO saja tidak cukup — qty item RAB bisa diubah langsung lewat
+    // endpoint ini dan penawaran yang sudah dikirim ikut berubah.
+    const lockedRab = await proposalLock(req.params.proposalId);
+    if (lockedRab) return res.status(lockedRab.status).json(lockedRab.body);
+
     const { proposalId, itemId } = req.params;
     
     await dbRun('DELETE FROM proposal_items WHERE id = ?', [itemId]);
@@ -2324,7 +2342,7 @@ async function proposalLock(proposalId: any): Promise<{ status: number; body: an
  */
 async function syncLinkedRabItems(proposalId: any, elementId: any): Promise<number> {
   const element: any = await dbGet(
-    `SELECT id, element_type, parameters FROM engineering_inputs WHERE id = ? AND scope_type = 'proposal' AND scope_id = ?`,
+    `SELECT id, element_type, element_name, parameters FROM engineering_inputs WHERE id = ? AND scope_type = 'proposal' AND scope_id = ?`,
     [elementId, proposalId]
   );
   if (!element) return 0;
@@ -2338,6 +2356,8 @@ async function syncLinkedRabItems(proposalId: any, elementId: any): Promise<numb
   );
 
   let updated = 0;
+  const stale: any[] = [];
+
   for (const item of items) {
     let link: any;
     try { link = typeof item.mto_link === 'string' ? JSON.parse(item.mto_link) : item.mto_link; } catch { continue; }
@@ -2345,17 +2365,47 @@ async function syncLinkedRabItems(proposalId: any, elementId: any): Promise<numb
 
     const lineCode = link.line_code || link.field;
     const line = mto.lines.find(l => l.code === lineCode);
-    if (!line) continue;
 
-    const value = link.use_net ? line.net_quantity : line.gross_quantity;
+    // EST-MTO-R15: baris yang hilang TIDAK boleh dilewati diam-diam.
+    //
+    // Kalau engineer mengubah kolom beton menjadi baja, `COL-CONC` lenyap dari
+    // keluaran kalkulator. Versi lama `continue` begitu saja, sehingga item RAB
+    // "Beton Kolom 20 m³" tetap tinggal di penawaran padahal MTO-nya sudah baja.
+    // Sekarang perubahan itu ditolak sampai user melepas atau memetakan ulang.
+    if (!line) {
+      stale.push({ item_id: item.id, line_code: lineCode, element_id: elementId });
+      continue;
+    }
+
+    // EST-MTO-R13: RAB SELALU memakai net_quantity.
+    //
+    // Sebelumnya klien bisa memilih lewat `use_net`, dan defaultnya `false` —
+    // artinya RAB diam-diam memakai gross. Kontrak bisnisnya: RAB/BOQ memakai
+    // volume pekerjaan (net), procurement yang memakai gross termasuk susut.
+    const value = line.net_quantity;
     await dbRun(
       `UPDATE proposal_items
        SET qty = ?, mto_link = ?, total_price = ? * unit_price_snapshot, updated_at = NOW()
        WHERE id = ?`,
-      [value, JSON.stringify({ ...link, line_code: line.code, value, unit: line.unit }), value, item.id]
+      [value, JSON.stringify({
+        ...link, line_code: line.code, value, unit: line.unit,
+        basis: 'net', gross_quantity: line.gross_quantity, waste_percent: line.waste_percent,
+      }), value, item.id]
     );
     updated++;
   }
+
+  if (stale.length > 0) {
+    throw Object.assign(new Error('LINKED_MTO_LINE_INVALID'), { statusCode: 409, stale });
+  }
+
+  // EST-MTO-R14: ringkasan proposal ikut dihitung ulang.
+  //
+  // Tanpa ini, qty dan total_price per baris berubah tapi `direct_cost` dan
+  // `total_project` di header proposal tetap angka lama — nilai baris dan nilai
+  // ringkasan jadi bertentangan di dokumen yang sama.
+  if (updated > 0) await recalculateProposal(proposalId as string);
+
   return updated;
 }
 
@@ -2435,7 +2485,20 @@ router.post('/proposals/:id/mto', authMiddleware, async (req: Request, res: Resp
       );
       return inserted.insertId;
     });
-    const synced = await syncLinkedRabItems(proposalId, id);
+    let synced = 0;
+    try {
+      synced = await syncLinkedRabItems(proposalId, id);
+    } catch (syncErr: any) {
+      if (syncErr?.statusCode === 409) {
+        return res.status(409).json({
+          error: 'Perubahan ini membuat baris MTO yang sudah ditaut ke RAB tidak ada lagi. '
+            + 'Lepas atau petakan ulang tautannya dulu.',
+          code: 'LINKED_MTO_LINE_INVALID',
+          stale_links: syncErr.stale,
+        });
+      }
+      throw syncErr;
+    }
     res.json({ id, quantities, lines: mto.lines, variant: mto.variant, notes: mto.notes, updated: existedBefore, rab_items_synced: synced });
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });
@@ -2467,7 +2530,20 @@ router.put('/proposals/:id/mto/:elementId', authMiddleware, async (req: Request,
       'UPDATE engineering_inputs SET element_type=?, element_name=?, parameters=?, quantities=?, sort_order=? WHERE id=?',
       [type, element_name || existing.element_name, JSON.stringify(params), JSON.stringify(quantities), sort_order ?? existing.sort_order, req.params.elementId]
     );
-    const synced = await syncLinkedRabItems(proposalId, req.params.elementId);
+    let synced = 0;
+    try {
+      synced = await syncLinkedRabItems(proposalId, req.params.elementId);
+    } catch (syncErr: any) {
+      if (syncErr?.statusCode === 409) {
+        return res.status(409).json({
+          error: 'Perubahan ini membuat baris MTO yang sudah ditaut ke RAB tidak ada lagi. '
+            + 'Lepas atau petakan ulang tautannya dulu.',
+          code: 'LINKED_MTO_LINE_INVALID',
+          stale_links: syncErr.stale,
+        });
+      }
+      throw syncErr;
+    }
     res.json({ quantities, lines: mto.lines, variant: mto.variant, notes: mto.notes, rab_items_synced: synced });
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });
@@ -2477,6 +2553,30 @@ router.delete('/proposals/:id/mto/:elementId', authMiddleware, async (req: Reque
   try {
     const locked = await proposalLock(req.params.id);
     if (locked) return res.status(locked.status).json(locked.body);
+
+    // EST-MTO-R16: elemen yang masih dirujuk item RAB tidak boleh dihapus.
+    //
+    // Tanpa ini, menghapus MTO meninggalkan item RAB dengan kuantitas yang
+    // sumber engineering-nya sudah tidak ada — penawaran memuat angka yang tak
+    // bisa ditelusuri lagi.
+    const linkedItems: any[] = await dbAll(
+      'SELECT id, mto_link FROM proposal_items WHERE proposal_id = ? AND mto_link IS NOT NULL',
+      [req.params.id]
+    );
+    const stillLinked = linkedItems.filter((it: any) => {
+      try {
+        const l = typeof it.mto_link === 'string' ? JSON.parse(it.mto_link) : it.mto_link;
+        return l && Number(l.element_id) === Number(req.params.elementId);
+      } catch { return false; }
+    });
+
+    if (stillLinked.length > 0) {
+      return res.status(409).json({
+        error: `Elemen MTO ini masih dipakai ${stillLinked.length} item RAB. Lepas atau petakan ulang tautannya dulu sebelum menghapus.`,
+        code: 'MTO_HAS_LINKED_RAB',
+        linked_item_ids: stillLinked.map((it: any) => it.id),
+      });
+    }
 
     await dbRun(
       `DELETE FROM engineering_inputs WHERE id = ? AND scope_type = 'proposal' AND scope_id = ?`,
@@ -2541,7 +2641,7 @@ router.put('/proposals/:id/items/:itemId/mto-link', authMiddleware, async (req: 
   try {
     const proposalId = req.params.id;
     const itemId = req.params.itemId;
-    const { element_id, line_code, field, use_net = false } = req.body;
+    const { element_id, line_code, field } = req.body;
 
     const locked = await proposalLock(proposalId);
     if (locked) return res.status(locked.status).json(locked.body);
@@ -2560,6 +2660,7 @@ router.put('/proposals/:id/items/:itemId/mto-link', authMiddleware, async (req: 
          WHERE id = ? AND proposal_id = ?`,
         [req.body.qty_manual ?? 0, req.body.qty_manual ?? 0, itemId, proposalId]
       );
+      await recalculateProposal(proposalId as string);
       return res.json({ message: 'MTO link removed', mto_link: null });
     }
 
@@ -2604,13 +2705,17 @@ router.put('/proposals/:id/items/:itemId/mto-link', authMiddleware, async (req: 
       });
     }
 
-    const value = use_net ? line.net_quantity : line.gross_quantity;
+    // EST-MTO-R13: RAB selalu net; gross disimpan sebagai informasi untuk
+    // procurement, bukan sebagai kuantitas pekerjaan.
+    const value = line.net_quantity;
     const mtoLink = {
       element_id: element.id,
       element_type: element.element_type,
       element_name: element.element_name,
       line_code: line.code,
-      use_net: !!use_net,
+      basis: 'net',
+      gross_quantity: line.gross_quantity,
+      waste_percent: line.waste_percent,
       value,
       unit: line.unit,
     };
@@ -2626,6 +2731,7 @@ router.put('/proposals/:id/items/:itemId/mto-link', authMiddleware, async (req: 
       [JSON.stringify(mtoLink), value, value, itemId, proposalId]
     );
 
+    await recalculateProposal(proposalId as string);
     res.json({ message: 'MTO link saved', mto_link: mtoLink, line });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -2635,10 +2741,14 @@ router.put('/proposals/:id/items/:itemId/mto-link', authMiddleware, async (req: 
 // PUT unlink (remove MTO link from item, restore manual qty)
 router.delete('/proposals/:id/items/:itemId/mto-link', authMiddleware, async (req: Request, res: Response) => {
   try {
+    const lockedUnlink = await proposalLock(req.params.id);
+    if (lockedUnlink) return res.status(lockedUnlink.status).json(lockedUnlink.body);
+
     await dbRun(
       `UPDATE proposal_items SET mto_link = NULL WHERE id = ? AND proposal_id = ?`,
       [req.params.itemId, req.params.id]
     );
+    await recalculateProposal(req.params.id as string);
     res.json({ message: 'MTO link removed' });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
