@@ -41,7 +41,27 @@ mysql -u root -e "CREATE DATABASE blackboxs CHARACTER SET utf8mb4 COLLATE utf8mb
 ssh root@76.13.22.155 "cd /var/www/blackboxs/backend && set -a && . ./.env && set +a && mysqldump --no-data --skip-add-drop-table --skip-comments -u \"\$DB_USER\" -p\"\$DB_PASSWORD\" \"\$DB_NAME\"" | mysql -u root blackboxs
 ```
 
-Deploy: `./deploy-blackbox.sh` (build FE → rsync dist, `npx tsc` BE lokal → rsync `dist/`+`src/`, `pm2 restart`). Script punya guard yang abort kalau path mengandung `rheologi`.
+Deploy: `./deploy-blackbox.sh` (pemeriksaan pra-deploy → build FE → rsync dist, `npx tsc` BE lokal → rsync `dist/`+`src/`, `pm2 restart` → verifikasi health).
+
+**Guard di deploy script — jangan dilepas:**
+
+1. Abort kalau path mengandung `rheologi`.
+2. `scripts/preflight-check.py` dijalankan di server SEBELUM apa pun diunggah:
+   `.env` ada dan terbaca, kunci DB lengkap, **koneksi MySQL sebagai `DB_USER`
+   benar-benar berhasil**, `JWT_SECRET` terisi, proses pm2 terdaftar.
+3. Setelah restart, health endpoint diuji lewat HTTP; kalau bukan 200, deploy
+   dinyatakan gagal dan log terakhir dicetak.
+
+Pemeriksaan koneksi di nomor 2 ada karena kejadian 11–12 Agustus 2026: password
+MySQL produksi tidak lagi cocok dengan `.env`, tapi aplikasi tetap terlihat sehat
+karena masih memakai koneksi pool lama (`wait_timeout` 8 jam). Deploy me-restart
+proses, koneksi itu hilang, dan produksi mati. Memeriksa data lewat `mysql -u root`
+TIDAK cukup — root tidak berpassword, jadi mismatch-nya tidak terlihat. Yang harus
+diuji adalah kredensial yang dipakai aplikasi.
+
+⚠️ Frontend dilayani nginx langsung, jadi begitu ter-rsync ia **langsung live**.
+Itu sebabnya seluruh pemeriksaan dilakukan sebelum langkah unggah, bukan sebelum
+restart.
 
 ## Arsitektur & konvensi
 

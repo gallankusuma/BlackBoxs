@@ -13,6 +13,8 @@ REMOTE_FRONTEND="/var/www/blackboxs/frontend"
 REMOTE_BACKEND="/var/www/blackboxs/backend"
 LOCAL_FRONTEND="/Users/gallankusuma/Webapps/EPC/frontend"
 LOCAL_BACKEND="/Users/gallankusuma/Webapps/EPC/backend"
+LOCAL_ROOT="/Users/gallankusuma/Webapps/EPC"
+PM2_NAME="blackboxs-backend"
 
 echo "🚀 BLACKBOX EPC Deploy → blackboxs.io"
 echo "VPS: $VPS | Path: $REMOTE_FRONTEND"
@@ -23,6 +25,26 @@ if [[ "$REMOTE_FRONTEND" == *"rheologi"* ]]; then
   echo "❌ ABORT: Path contains 'rheologi' — this is forbidden!"
   exit 1
 fi
+
+# ── Pemeriksaan pra-deploy ───────────────────────────────────────────────────
+# Dijalankan SEBELUM apa pun diunggah.
+#
+# Pada 11 Agustus 2026 password MySQL produksi tidak lagi cocok dengan `.env`,
+# tapi aplikasi tetap terlihat sehat karena masih memakai koneksi pool lama.
+# Deploy me-restart proses, koneksi itu hilang, dan produksi mati — padahal
+# kesalahannya sudah ada berjam-jam sebelumnya dan bisa dideteksi lebih dulu.
+#
+# Urutan langkahnya juga penting: frontend dilayani nginx langsung, jadi begitu
+# ter-rsync ia LANGSUNG live. Kalau backend ternyata tidak bisa naik, penggunanya
+# sudah terlanjur memakai frontend baru terhadap backend lama.
+echo "🔎 Pemeriksaan pra-deploy..."
+scp -q "$LOCAL_ROOT/scripts/preflight-check.py" "$VPS:/tmp/preflight-check.py"
+if ! ssh "$VPS" "python3 /tmp/preflight-check.py $REMOTE_BACKEND $PM2_NAME; rc=\$?; rm -f /tmp/preflight-check.py; exit \$rc"; then
+  echo ""
+  echo "❌ ABORT: pemeriksaan pra-deploy gagal. Tidak ada yang diunggah."
+  exit 1
+fi
+echo ""
 
 # 1. Build frontend
 echo "📦 Building frontend..."
@@ -49,8 +71,22 @@ echo "✅ Backend uploaded"
 
 # 5. Install deps & restart backend on VPS (no build needed)
 echo "🔄 Restarting backend..."
-ssh "$VPS" "cd $REMOTE_BACKEND && npm install --omit=dev 2>/dev/null; pm2 restart blackboxs-backend"
+ssh "$VPS" "cd $REMOTE_BACKEND && npm install --omit=dev 2>/dev/null; pm2 restart $PM2_NAME"
 echo "✅ Backend restarted"
+
+# ── Verifikasi setelah restart ───────────────────────────────────────────────
+# Proses "online" menurut pm2 tidak berarti aplikasinya melayani. Yang diuji di
+# sini permintaan HTTP sungguhan.
+echo "🔎 Verifikasi setelah restart..."
+sleep 8
+HEALTH=$(ssh "$VPS" "curl -s -o /dev/null -w '%{http_code}' -m 15 http://localhost:3005/api/health || true")
+if [ "$HEALTH" != "200" ]; then
+  echo "❌ Backend TIDAK sehat setelah restart (health: $HEALTH)"
+  echo "   Log terakhir:"
+  ssh "$VPS" "pm2 logs $PM2_NAME --lines 15 --nostream --err 2>/dev/null | tail -15"
+  exit 1
+fi
+echo "✅ Health check 200"
 
 echo ""
 echo "✅ DONE — blackboxs.io updated"
