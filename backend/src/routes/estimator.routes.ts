@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { calculateMto, toLegacyQuantities } from '../modules/estimator/mto/calculator';
 import { checkUnitCompatibility, isProposalEditable } from '../modules/estimator/mto/units';
 import { authMiddleware } from '../middleware/auth';
-import { dbAll, dbGet, dbRun , withTransaction} from '../config/database';
+import { dbAll, dbGet, dbRun , withTransaction, TxRunner} from '../config/database';
 
 const router = Router();
 
@@ -1406,13 +1406,33 @@ router.post('/proposals', authMiddleware, async (req: Request, res: Response) =>
 // Update proposal
 router.put('/proposals/:id', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const { project_name, client, client_id, lokasi, revision, status } = req.body;
+    const { project_name, client, client_id, lokasi, revision } = req.body;
+
+    // EST-MTO-R22: endpoint ini dulu bisa dipakai untuk dua hal terlarang
+    // sekaligus.
+    //
+    // Pertama, `status` diambil langsung dari body lalu ditulis apa adanya —
+    // melewati seluruh aturan transisi di `PUT /proposals/:id/status`
+    // (draft → review → submitted → deal). Proposal bisa lompat dari draft
+    // langsung ke deal, atau mundur dari deal ke draft, tanpa pemeriksaan apa pun.
+    //
+    // Kedua, tidak ada pemeriksaan kunci, jadi proposal yang sudah submitted
+    // masih bisa diubah identitasnya.
+    if (Object.prototype.hasOwnProperty.call(req.body, 'status')) {
+      return res.status(400).json({
+        error: 'Status tidak bisa diubah lewat endpoint ini. Gunakan PUT /proposals/:id/status supaya aturan transisinya diperiksa.',
+        code: 'USE_STATUS_ENDPOINT',
+      });
+    }
+
+    const lockedProposal = await proposalLock(req.params.id);
+    if (lockedProposal) return res.status(lockedProposal.status).json(lockedProposal.body);
     
     await dbRun(
       `UPDATE proposals
-       SET project_name = ?, client = ?, client_id = ?, lokasi = ?, revision = ?, status = ?
+       SET project_name = ?, client = ?, client_id = ?, lokasi = ?, revision = ?
        WHERE id = ?`,
-      [project_name, client, client_id || null, lokasi, revision, status, req.params.id]
+      [project_name, client, client_id || null, lokasi, revision, req.params.id]
     );
     
     res.json({ message: 'Proposal updated' });
@@ -1425,6 +1445,13 @@ router.put('/proposals/:id', authMiddleware, async (req: Request, res: Response)
 // Apply template wizard to existing proposal
 router.post('/proposals/:id/apply-template', authMiddleware, async (req: Request, res: Response) => {
   try {
+    // EST-MTO-R23: menerapkan template menyisipkan item RAB baru, jadi ia
+    // mengubah nilai komersial persis seperti menambah item satu per satu.
+    // Tanpa kunci, proposal yang sudah dikirim ke pelanggan masih bisa
+    // ditambahi seluruh paket pekerjaan.
+    const lockedTpl = await proposalLock(req.params.id);
+    if (lockedTpl) return res.status(lockedTpl.status).json(lockedTpl.body);
+
     const proposalId = req.params.id;
     const { proposal_type, template_sections, mode = 'append' } = req.body;
     // mode: 'append' = add items | 'replace' = delete existing items first
@@ -1593,13 +1620,30 @@ router.put('/proposals/:proposalId/items/:itemId', authMiddleware, async (req: R
     const lockedRab = await proposalLock(req.params.proposalId);
     if (lockedRab) return res.status(lockedRab.status).json(lockedRab.body);
 
+    // EST-MTO-R21: item harus benar-benar milik proposal di URL.
+    //
+    // Kunci status diperiksa berdasarkan `:proposalId`, tapi query-nya dulu
+    // `WHERE id = ?` saja. Artinya cukup menyebut proposal draft di URL lalu
+    // menunjuk id item milik proposal yang sudah submitted — kuncinya lolos,
+    // dan penawaran yang sudah dikirim ikut berubah.
+    const ownedItem: any = await dbGet(
+      'SELECT id FROM proposal_items WHERE id = ? AND proposal_id = ?',
+      [req.params.itemId, req.params.proposalId]
+    );
+    if (!ownedItem) {
+      return res.status(404).json({
+        error: 'Item RAB tidak ditemukan pada proposal ini',
+        code: 'ITEM_NOT_IN_PROPOSAL',
+      });
+    }
+
     const { qty, description, ahsp_id } = req.body;
     const { proposalId, itemId } = req.params;
     
     // Get current item to recalculate
     const item = await dbGet(
-      `SELECT unit_price_snapshot FROM proposal_items WHERE id = ?`,
-      [itemId]
+      `SELECT unit_price_snapshot FROM proposal_items WHERE id = ? AND proposal_id = ?`,
+      [itemId, proposalId]
     );
     
     if (!item) {
@@ -1623,7 +1667,7 @@ router.put('/proposals/:proposalId/items/:itemId', authMiddleware, async (req: R
       values.push(ahsp.id, ahsp.kode, ahsp.name, ahsp.satuan, ahsp.harga_satuan);
       
       // Also recalculate total_price with new unit price
-      const currentItem: any = await dbGet(`SELECT qty FROM proposal_items WHERE id = ?`, [itemId]);
+      const currentItem: any = await dbGet(`SELECT qty FROM proposal_items WHERE id = ? AND proposal_id = ?`, [itemId, proposalId]);
       const currentQty = parseFloat(currentItem?.qty) || 0;
       updates.push('total_price = ?');
       values.push(currentQty * parseFloat(ahsp.harga_satuan));
@@ -1653,10 +1697,10 @@ router.put('/proposals/:proposalId/items/:itemId', authMiddleware, async (req: R
       return res.status(400).json({ error: 'No fields to update' });
     }
     
-    values.push(itemId);
-    
+    values.push(itemId, proposalId);
+
     await dbRun(
-      `UPDATE proposal_items SET ${updates.join(', ')} WHERE id = ?`,
+      `UPDATE proposal_items SET ${updates.join(', ')} WHERE id = ? AND proposal_id = ?`,
       values
     );
     
@@ -1679,9 +1723,26 @@ router.delete('/proposals/:proposalId/items/:itemId', authMiddleware, async (req
     const lockedRab = await proposalLock(req.params.proposalId);
     if (lockedRab) return res.status(lockedRab.status).json(lockedRab.body);
 
+    // EST-MTO-R21: item harus benar-benar milik proposal di URL.
+    //
+    // Kunci status diperiksa berdasarkan `:proposalId`, tapi query-nya dulu
+    // `WHERE id = ?` saja. Artinya cukup menyebut proposal draft di URL lalu
+    // menunjuk id item milik proposal yang sudah submitted — kuncinya lolos,
+    // dan penawaran yang sudah dikirim ikut berubah.
+    const ownedItem: any = await dbGet(
+      'SELECT id FROM proposal_items WHERE id = ? AND proposal_id = ?',
+      [req.params.itemId, req.params.proposalId]
+    );
+    if (!ownedItem) {
+      return res.status(404).json({
+        error: 'Item RAB tidak ditemukan pada proposal ini',
+        code: 'ITEM_NOT_IN_PROPOSAL',
+      });
+    }
+
     const { proposalId, itemId } = req.params;
     
-    await dbRun('DELETE FROM proposal_items WHERE id = ?', [itemId]);
+    await dbRun('DELETE FROM proposal_items WHERE id = ? AND proposal_id = ?', [itemId, proposalId]);
     
     // Recalculate proposal totals
     await recalculateProposal(proposalId as string);
@@ -1746,10 +1807,12 @@ router.get('/proposals/:id/summary', authMiddleware, async (req: Request, res: R
 // HELPER FUNCTIONS
 // ============================================
 
-async function recalculateProposal(proposalId: string | number) {
+async function recalculateProposal(proposalId: string | number, tx?: TxRunner) {
+  const get = tx ? tx.get : dbGet;
+  const run = tx ? tx.run : dbRun;
   try {
     // Calculate direct cost (sum of all items)
-    const result = await dbGet(
+    const result = await get(
       `SELECT COALESCE(SUM(total_price), 0) as direct_cost FROM proposal_items WHERE proposal_id = ?`,
       [proposalId]
     );
@@ -1759,14 +1822,21 @@ async function recalculateProposal(proposalId: string | number) {
     const riskContingency = 0; // Can be set manually or calculated
     const totalProject = directCost + overhead + riskContingency;
     
-    await dbRun(
+    await run(
       `UPDATE proposals 
        SET direct_cost = ?, overhead = ?, risk_contingency = ?, total_project = ?
        WHERE id = ?`,
       [directCost, overhead, riskContingency, totalProject, proposalId]
     );
   } catch (error) {
+    // EST-MTO-R24: kegagalan di sini TIDAK boleh didiamkan.
+    //
+    // Versi lama hanya mencatat ke log lalu selesai, sehingga qty baris bisa
+    // berubah sementara direct_cost dan total_project di header tetap angka
+    // lama — dokumen penawaran memuat dua kebenaran sekaligus, tanpa ada yang
+    // tahu. Lebih baik permintaannya gagal terang-terangan.
     console.error('Error recalculating proposal:', error);
+    throw error;
   }
 }
 
@@ -2340,8 +2410,11 @@ async function proposalLock(proposalId: any): Promise<{ status: number; body: an
  * hanya berjalan pada proposal draft/review; yang sudah submitted/deal justru
  * TIDAK boleh berubah diam-diam.
  */
-async function syncLinkedRabItems(proposalId: any, elementId: any): Promise<number> {
-  const element: any = await dbGet(
+async function syncLinkedRabItems(proposalId: any, elementId: any, tx?: TxRunner): Promise<number> {
+  const get = tx ? tx.get : dbGet;
+  const all = tx ? tx.all : dbAll;
+  const run = tx ? tx.run : dbRun;
+  const element: any = await get(
     `SELECT id, element_type, element_name, parameters FROM engineering_inputs WHERE id = ? AND scope_type = 'proposal' AND scope_id = ?`,
     [elementId, proposalId]
   );
@@ -2350,7 +2423,7 @@ async function syncLinkedRabItems(proposalId: any, elementId: any): Promise<numb
   const params = typeof element.parameters === 'string' ? JSON.parse(element.parameters || '{}') : (element.parameters || {});
   const mto = calculateMto(element.element_type, params);
 
-  const items: any[] = await dbAll(
+  const items: any[] = await all(
     'SELECT id, mto_link, unit_snapshot FROM proposal_items WHERE proposal_id = ? AND mto_link IS NOT NULL',
     [proposalId]
   );
@@ -2383,7 +2456,7 @@ async function syncLinkedRabItems(proposalId: any, elementId: any): Promise<numb
     // artinya RAB diam-diam memakai gross. Kontrak bisnisnya: RAB/BOQ memakai
     // volume pekerjaan (net), procurement yang memakai gross termasuk susut.
     const value = line.net_quantity;
-    await dbRun(
+    await run(
       `UPDATE proposal_items
        SET qty = ?, mto_link = ?, total_price = ? * unit_price_snapshot, updated_at = NOW()
        WHERE id = ?`,
@@ -2404,7 +2477,10 @@ async function syncLinkedRabItems(proposalId: any, elementId: any): Promise<numb
   // Tanpa ini, qty dan total_price per baris berubah tapi `direct_cost` dan
   // `total_project` di header proposal tetap angka lama — nilai baris dan nilai
   // ringkasan jadi bertentangan di dokumen yang sama.
-  if (updated > 0) await recalculateProposal(proposalId as string);
+  // Harus memakai `tx` yang sama: kalau tidak, SUM dihitung dari pool lain yang
+  // belum melihat perubahan qty di transaction ini, dan header proposal ditulis
+  // dengan angka lama.
+  if (updated > 0) await recalculateProposal(proposalId as string, tx);
 
   return updated;
 }
@@ -2487,7 +2563,7 @@ router.post('/proposals/:id/mto', authMiddleware, async (req: Request, res: Resp
     });
     let synced = 0;
     try {
-      synced = await syncLinkedRabItems(proposalId, id);
+      synced = await withTransaction(tx => syncLinkedRabItems(proposalId, id, tx));
     } catch (syncErr: any) {
       if (syncErr?.statusCode === 409) {
         return res.status(409).json({
@@ -2526,18 +2602,27 @@ router.put('/proposals/:id/mto/:elementId', authMiddleware, async (req: Request,
     const params = Object.keys(parameters).length ? parameters : JSON.parse(existing.parameters || '{}');
     const mto = calculateMto(type, params);
     const quantities = toLegacyQuantities(mto);
-    await dbRun(
-      'UPDATE engineering_inputs SET element_type=?, element_name=?, parameters=?, quantities=?, sort_order=? WHERE id=?',
-      [type, element_name || existing.element_name, JSON.stringify(params), JSON.stringify(quantities), sort_order ?? existing.sort_order, req.params.elementId]
-    );
+    // EST-MTO-R20: perubahan MTO dan sinkronisasi RAB harus satu transaction.
+    //
+    // Versi sebelumnya meng-UPDATE elemen lebih dulu, baru menjalankan sync, lalu
+    // membalas 409 kalau ada tautan yang jadi basi. Tapi UPDATE-nya sudah
+    // ter-commit — jadi klien menerima "gagal" padahal MTO sudah berubah, dan
+    // RAB tetap menunjuk baris yang tidak ada lagi. Persis keadaan yang ingin
+    // dicegah oleh 409 itu sendiri.
     let synced = 0;
     try {
-      synced = await syncLinkedRabItems(proposalId, req.params.elementId);
+      synced = await withTransaction(async tx => {
+        await tx.run(
+          'UPDATE engineering_inputs SET element_type=?, element_name=?, parameters=?, quantities=?, sort_order=? WHERE id=?',
+          [type, element_name || existing.element_name, JSON.stringify(params), JSON.stringify(quantities), sort_order ?? existing.sort_order, req.params.elementId]
+        );
+        return syncLinkedRabItems(proposalId, req.params.elementId, tx);
+      });
     } catch (syncErr: any) {
       if (syncErr?.statusCode === 409) {
         return res.status(409).json({
           error: 'Perubahan ini membuat baris MTO yang sudah ditaut ke RAB tidak ada lagi. '
-            + 'Lepas atau petakan ulang tautannya dulu.',
+            + 'Lepas atau petakan ulang tautannya dulu. Perubahan MTO dibatalkan.',
           code: 'LINKED_MTO_LINE_INVALID',
           stale_links: syncErr.stale,
         });

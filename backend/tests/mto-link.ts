@@ -232,6 +232,61 @@ async function main() {
   chk('unlink MTO ditolak',
     (await call('DELETE', `/estimator/proposals/${pid}/items/${itemNetId}/mto-link`, undefined, master)).status, 409);
 
+  console.log('\n13. 409 harus MEMBATALKAN perubahan MTO, bukan menyisakannya (EST-MTO-R20)');
+  const propR20 = await call('POST', '/estimator/proposals', { project_name: `Uji rollback ${stamp}` }, master);
+  const r20 = propR20.json?.id;
+  const elR20 = await call('POST', `/estimator/proposals/${r20}/mto`, {
+    element_type: 'column', element_name: 'K1',
+    parameters: { col_type: 'beton', B: 0.4, H: 0.4, height_per_floor: 3, floors: 1, qty_per_floor: 10 },
+  }, master);
+  const ahspR20 = await call('POST', '/estimator/ahsp', {
+    kode: `TSTR.${stamp}`, name: `Beton R20 ${stamp}`, satuan: 'm3', status: 'active',
+    items: [{ section: 'B', resource_type: 'material', resource_name: 'Beton', resource_satuan: 'm3', koefisien: 1, resource_harga: 1000000 }],
+  }, master);
+  const itemR20 = await call('POST', `/estimator/proposals/${r20}/items`, { ahsp_id: ahspR20.json?.id, qty: 1 }, master);
+  await call('PUT', `/estimator/proposals/${r20}/items/${itemR20.json?.id}/mto-link`,
+    { element_id: elR20.json?.id, line_code: 'COL-CONC' }, master);
+
+  const gagal = await call('PUT', `/estimator/proposals/${r20}/mto/${elR20.json?.id}`, {
+    element_type: 'column', element_name: 'K1',
+    parameters: { col_type: 'wf', wf_profile: 'WF200x100', height_per_floor: 3, floors: 1, qty_per_floor: 10 },
+  }, master);
+  chk('ditolak 409', gagal.status, 409);
+  const afterR20 = await call('GET', `/estimator/proposals/${r20}/mto`, undefined, master);
+  const elemR20 = (afterR20.json?.elements || [])[0];
+  chk('MTO TIDAK ikut berubah — masih beton', elemR20?.parameters?.col_type, 'beton');
+  chk('baris COL-CONC masih ada', (elemR20?.lines || []).some((l: any) => l.code === 'COL-CONC'), true);
+
+  console.log('\n14. Item proposal lain tidak bisa disentuh lewat proposal draft (EST-MTO-R21)');
+  // pid sudah submitted dari bagian 12; propDraft masih draft
+  const propDraft = await call('POST', '/estimator/proposals', { project_name: `Draft penyusup ${stamp}` }, master);
+  const draftId = propDraft.json?.id;
+  const bypassUpdate = await call('PUT', `/estimator/proposals/${draftId}/items/${itemNetId}`, { qty: 99999 }, master);
+  chk('ubah item milik proposal terkunci lewat URL draft ditolak', bypassUpdate.status, 404);
+  chk('kode ITEM_NOT_IN_PROPOSAL', bypassUpdate.json?.code, 'ITEM_NOT_IN_PROPOSAL');
+  const bypassDelete = await call('DELETE', `/estimator/proposals/${draftId}/items/${itemNetId}`, undefined, master);
+  chk('hapus lewat URL draft ditolak', bypassDelete.status, 404);
+  const stillRows = await call('GET', `/estimator/proposals/${pid}/items`, undefined, master);
+  const stillRow = (Array.isArray(stillRows.json) ? stillRows.json : []).find((i: any) => Number(i.id) === Number(itemNetId));
+  chk('qty aslinya tidak berubah', Number(stillRow?.qty), 150);
+
+  console.log('\n15. Status tidak bisa dilompati lewat update umum (EST-MTO-R22)');
+  const propR22 = await call('POST', '/estimator/proposals', { project_name: `Uji status ${stamp}` }, master);
+  const r22 = propR22.json?.id;
+  const jump = await call('PUT', `/estimator/proposals/${r22}`, { project_name: 'X', status: 'deal' }, master);
+  chk('menyetel status lewat PUT umum ditolak', jump.status, 400);
+  chk('kode USE_STATUS_ENDPOINT', jump.json?.code, 'USE_STATUS_ENDPOINT');
+  const cek22 = await call('GET', `/estimator/proposals/${r22}`, undefined, master);
+  const st22 = (cek22.json?.data ?? cek22.json)?.status;
+  chk('status tetap draft', st22, 'draft');
+  chk('ubah proposal terkunci ditolak',
+    (await call('PUT', `/estimator/proposals/${pid}`, { project_name: 'Diubah' }, master)).status, 409);
+
+  console.log('\n16. Apply template ikut terkunci (EST-MTO-R23)');
+  chk('apply-template pada proposal submitted ditolak',
+    (await call('POST', `/estimator/proposals/${pid}/apply-template`,
+      { template_sections: [{ code: 'A', name: 'Pekerjaan Uji' }] }, master)).status, 409);
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }
