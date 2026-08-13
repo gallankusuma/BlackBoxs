@@ -237,5 +237,38 @@ chk('waste 500% ditolak', wasteGila.lines.length, 0);
 const wajar = calculateMto('slab', { slab_type: 'concrete', area: 100, thickness: 0.12, waste_pct: 5 });
 chk('parameter wajar tetap jalan', wajar.lines.length > 0, true);
 
+
+console.log('\n23. Atap: cladding samping & satuan lembar (EST-MTO-R05/R09 reopened)');
+const roofClad = calculateMto('roof', {
+  roof_type: 'zincalume', floor_area: 200, perimeter: 60, slope_deg: 15,
+  overhang: 0.6, cladding_h: 2, sheet_eff_w: 1, waste_pct: 0,
+});
+chk('cladding samping muncul', !!lineOf(roofClad, 'RF-SIDE-CLAD'), true);
+near('luas cladding = keliling 60 × tinggi 2', lineOf(roofClad, 'RF-SIDE-CLAD').net_quantity, 120, 0.01);
+chk('penutup atap dilaporkan m2, bukan lbr', lineOf(roofClad, 'RF-SHEET').unit, 'm2');
+chk('tanpa panjang sheet: tidak ada baris lembar', !!lineOf(roofClad, 'RF-SHEET-QTY'), false);
+
+const roofSheets = calculateMto('roof', {
+  roof_type: 'zincalume', floor_area: 200, perimeter: 60, slope_deg: 0,
+  overhang: 0, sheet_eff_w: 1, sheet_len: 5, waste_pct: 0,
+});
+chk('dengan panjang sheet: baris lembar muncul', !!lineOf(roofSheets, 'RF-SHEET-QTY'), true);
+chk('satuannya lbr', lineOf(roofSheets, 'RF-SHEET-QTY').unit, 'lbr');
+near('lembar = ceil(200 / (1×5))', lineOf(roofSheets, 'RF-SHEET-QTY').net_quantity, 40, 0.01);
+
+console.log('\n24. Tipe tak dikenal ditandai invalid, bukan sekadar kosong (EST-MTO-R30)');
+const badElement = calculateMto('tiang_listrik', { area: 100 });
+chk('element_type asing → invalid', badElement.variant, 'invalid');
+chk('nol baris', badElement.lines.length, 0);
+for (const [t, key, val] of [
+  ['column', 'col_type', 'titanium'],
+  ['wall', 'wall_type', 'entah'],
+  ['roof', 'roof_type', 'jerami'],
+  ['slab', 'slab_type', 'karpet_terbang'],
+] as [string, string, string][]) {
+  const r = calculateMto(t, { [key]: val, area: 100, B: 0.3, H: 0.3, floor_area: 100 });
+  chk(`${t} subtipe "${val}" → invalid`, r.variant, 'invalid');
+}
+
 console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
 process.exit(fail ? 1 : 0);

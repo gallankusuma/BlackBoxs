@@ -25,7 +25,7 @@ export function calcColumn(p: any): MtoResult {
   const colType = resolved.variant;
   if (resolved.note) notes.push(resolved.note);
   if (colType === 'unknown') {
-    return { element_type: 'column', variant: resolved.raw, lines: [], notes };
+    return { element_type: 'column', variant: 'invalid', lines: [], notes };
   }
   const waste = num(p.waste_pct, 5);
 

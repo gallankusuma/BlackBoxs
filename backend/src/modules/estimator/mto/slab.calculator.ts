@@ -17,7 +17,7 @@ export function calcSlab(p: any): MtoResult {
   const slabType = resolved.variant;
   if (resolved.note) notes.push(resolved.note);
   if (slabType === 'unknown') {
-    return { element_type: 'slab', variant: resolved.raw, lines: [], notes };
+    return { element_type: 'slab', variant: 'invalid', lines: [], notes };
   }
   const waste = num(p.waste_pct, 5);
   const area = num(p.area);

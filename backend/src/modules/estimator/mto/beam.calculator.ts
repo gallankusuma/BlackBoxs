@@ -22,7 +22,7 @@ export function calcBeam(p: any): MtoResult {
   const beamType = resolved.variant;
   if (resolved.note) notes.push(resolved.note);
   if (beamType === 'unknown') {
-    return { element_type: 'beam', variant: resolved.raw, lines: [], notes };
+    return { element_type: 'beam', variant: 'invalid', lines: [], notes };
   }
   const waste = num(p.waste_pct, 5);
   const totalLength = num(p.total_length);

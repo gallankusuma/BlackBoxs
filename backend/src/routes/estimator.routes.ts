@@ -1528,6 +1528,10 @@ router.post('/proposals/:id/apply-template', authMiddleware, async (req: Request
       }
     }
 
+    // EST-MTO-R28: ringkasan proposal ikut dihitung ulang setelah template
+    // menyisipkan item. Tanpa ini, direct_cost tidak mencerminkan item yang baru
+    // masuk sampai ada mutasi lain yang kebetulan memicunya.
+    await recalculateProposal(proposalId as string);
     res.json({ message: 'Template applied', items_added: orderNo - (maxOrderRow?.maxOrd || 0) - 1 });
   } catch (error) {
     console.error('Error applying template:', error);
@@ -1619,6 +1623,10 @@ router.post('/proposals/:proposalId/items', authMiddleware, async (req: Request,
     // sudah ter-commit sebelumnya. Kalau recalc gagal setelah item berubah,
     // yang tersisa: baris sudah berubah, header belum, dan klien menerima 500.
     const insertedId = await withTransaction(async tx => {
+      // EST-MTO-R33: status diperiksa ulang DI DALAM transaction ini.
+      const raceLock = await proposalLockTx(proposalId, tx);
+      if (raceLock) throw Object.assign(new Error('PROPOSAL_LOCKED'), { lock: raceLock });
+
       const r = await tx.run(
         `INSERT INTO proposal_items
          (proposal_id, discipline_id, sub_discipline_id, ahsp_id,
@@ -1634,7 +1642,8 @@ router.post('/proposals/:proposalId/items', authMiddleware, async (req: Request,
     });
 
     res.status(201).json({ message: 'Item added', id: insertedId });
-  } catch (error) {
+  } catch (error: any) {
+    if (error?.lock) return res.status(error.lock.status).json(error.lock.body);
     console.error('Error adding proposal item:', error);
     res.status(500).json({ error: 'Failed to add proposal item' });
   }
@@ -1734,6 +1743,10 @@ router.put('/proposals/:proposalId/items/:itemId', authMiddleware, async (req: R
     values.push(itemId, proposalId);
 
     await withTransaction(async tx => {
+      // EST-MTO-R33: status diperiksa ulang DI DALAM transaction ini.
+      const raceLock = await proposalLockTx(proposalId, tx);
+      if (raceLock) throw Object.assign(new Error('PROPOSAL_LOCKED'), { lock: raceLock });
+
       await tx.run(
         `UPDATE proposal_items SET ${updates.join(', ')} WHERE id = ? AND proposal_id = ?`,
         values
@@ -1742,7 +1755,8 @@ router.put('/proposals/:proposalId/items/:itemId', authMiddleware, async (req: R
     });
 
     res.json({ message: 'Item updated' });
-  } catch (error) {
+  } catch (error: any) {
+    if (error?.lock) return res.status(error.lock.status).json(error.lock.body);
     console.error('Error updating proposal item:', error);
     res.status(500).json({ error: 'Failed to update proposal item' });
   }
@@ -1782,12 +1796,17 @@ router.delete('/proposals/:proposalId/items/:itemId', authMiddleware, async (req
     // sudah ter-commit sebelumnya. Kalau recalc gagal setelah item berubah,
     // yang tersisa: baris sudah berubah, header belum, dan klien menerima 500.
     await withTransaction(async tx => {
+      // EST-MTO-R33: status diperiksa ulang DI DALAM transaction ini.
+      const raceLock = await proposalLockTx(proposalId, tx);
+      if (raceLock) throw Object.assign(new Error('PROPOSAL_LOCKED'), { lock: raceLock });
+
       await tx.run('DELETE FROM proposal_items WHERE id = ? AND proposal_id = ?', [itemId, proposalId]);
       await recalculateProposal(proposalId as string, tx);
     });
 
     res.json({ message: 'Item deleted' });
-  } catch (error) {
+  } catch (error: any) {
+    if (error?.lock) return res.status(error.lock.status).json(error.lock.body);
     console.error('Error deleting proposal item:', error);
     res.status(500).json({ error: 'Failed to delete proposal item' });
   }
@@ -2448,6 +2467,32 @@ router.post('/mto/preview-batch', authMiddleware, async (req: Request, res: Resp
  * (deal), mengubah kuantitas berarti mengubah dasar angka yang sudah dilihat —
  * atau sudah disetujui — pihak lain, tanpa jejak revisi.
  */
+/**
+ * EST-MTO-R33: versi transaksional dari pemeriksaan kunci.
+ *
+ * `proposalLock()` biasa memeriksa status lewat query terpisah SEBELUM transaksi
+ * mutasinya dimulai. Di antara pemeriksaan dan penulisan, status bisa berubah —
+ * misalnya proposal disubmit oleh orang lain — dan mutasinya tetap lolos.
+ * Pemeriksaan yang benar harus berada di dalam transaction yang sama dengan
+ * penulisannya, dengan barisnya dikunci.
+ */
+async function proposalLockTx(proposalId: any, tx: TxRunner): Promise<{ status: number; body: any } | null> {
+  const proposal: any = await tx.get('SELECT id, status FROM proposals WHERE id = ? FOR UPDATE', [proposalId]);
+  if (!proposal) return { status: 404, body: { error: 'Proposal tidak ditemukan' } };
+  if (!isProposalEditable(proposal.status)) {
+    return {
+      status: 409,
+      body: {
+        error: `Proposal berstatus "${proposal.status}" — perubahan tidak diizinkan.`,
+        code: 'PROPOSAL_LOCKED',
+        status_proposal: proposal.status,
+      },
+    };
+  }
+  return null;
+}
+
+/** Pemeriksaan cepat di luar transaction — hanya untuk menolak lebih awal. */
 async function proposalLock(proposalId: any): Promise<{ status: number; body: any } | null> {
   const proposal: any = await dbGet('SELECT id, status FROM proposals WHERE id = ?', [proposalId]);
   if (!proposal) return { status: 404, body: { error: 'Proposal tidak ditemukan' } };
@@ -2897,6 +2942,10 @@ router.put('/proposals/:id/items/:itemId/mto-link', authMiddleware, async (req: 
     // tautan sebelum tautannya tersimpan, lalu tautan itu menunjuk elemen yang
     // sudah lenyap.
     const linkOutcome = await withTransaction(async tx => {
+      // EST-MTO-R33: status diperiksa ulang DI DALAM transaction ini.
+      const raceLock = await proposalLockTx(proposalId, tx);
+      if (raceLock) return { error: raceLock.status, body: raceLock.body };
+
       const element: any = await tx.get(
         `SELECT id, element_type, element_name, parameters FROM engineering_inputs
          WHERE id = ? AND scope_type = 'proposal' AND scope_id = ? FOR UPDATE`,
@@ -2978,23 +3027,40 @@ router.delete('/proposals/:id/items/:itemId/mto-link', authMiddleware, async (re
     const lockedUnlink = await proposalLock(req.params.id);
     if (lockedUnlink) return res.status(lockedUnlink.status).json(lockedUnlink.body);
 
-    // EST-MTO-R17: kembalikan kuantitas manual yang tersimpan saat penautan.
-    const curItem: any = await dbGet(
-      'SELECT mto_link, qty FROM proposal_items WHERE id = ? AND proposal_id = ?',
-      [req.params.itemId, req.params.id]
-    );
-    let restoreQty = Number(curItem?.qty ?? 0);
-    try {
-      const l = typeof curItem?.mto_link === 'string' ? JSON.parse(curItem.mto_link) : curItem?.mto_link;
-      if (l && l.previous_qty !== undefined) restoreQty = Number(l.previous_qty);
-    } catch { /* biarkan pakai qty sekarang */ }
+    // EST-MTO-R29 + R17 + R33: pembacaan qty lama, pelepasan tautan, dan
+    // penghitungan ulang ringkasan dilakukan dalam SATU transaction, dengan
+    // status proposal diperiksa di dalamnya.
+    //
+    // Versi sebelumnya membaca, meng-UPDATE, lalu memanggil recalculate sebagai
+    // tiga langkah terpisah — kalau yang terakhir gagal, item sudah terlepas
+    // sementara header masih memakai angka lama.
+    await withTransaction(async tx => {
+      const raceLock = await proposalLockTx(req.params.id, tx);
+      if (raceLock) throw Object.assign(new Error('PROPOSAL_LOCKED'), { lock: raceLock });
 
-    await dbRun(
-      `UPDATE proposal_items
-       SET mto_link = NULL, qty = ?, total_price = ? * unit_price_snapshot, updated_at = NOW()
-       WHERE id = ? AND proposal_id = ?`,
-      [restoreQty, restoreQty, req.params.itemId, req.params.id]
-    );
+      const curItem: any = await tx.get(
+        'SELECT mto_link, qty FROM proposal_items WHERE id = ? AND proposal_id = ? FOR UPDATE',
+        [req.params.itemId, req.params.id]
+      );
+      if (!curItem) throw Object.assign(new Error('ITEM_NOT_FOUND'), {
+        lock: { status: 404, body: { error: 'Item RAB tidak ditemukan pada proposal ini', code: 'ITEM_NOT_IN_PROPOSAL' } },
+      });
+
+      let restoreQty = Number(curItem.qty ?? 0);
+      try {
+        const l = typeof curItem.mto_link === 'string' ? JSON.parse(curItem.mto_link) : curItem.mto_link;
+        if (l && l.previous_qty !== undefined) restoreQty = Number(l.previous_qty);
+      } catch { /* biarkan pakai qty sekarang */ }
+
+      await tx.run(
+        `UPDATE proposal_items
+         SET mto_link = NULL, qty = ?, total_price = ? * unit_price_snapshot, updated_at = NOW()
+         WHERE id = ? AND proposal_id = ?`,
+        [restoreQty, restoreQty, req.params.itemId, req.params.id]
+      );
+      await recalculateProposal(req.params.id as string, tx);
+    });
+
     res.json({ message: 'MTO link removed' });
   } catch (err: any) {
     res.status(500).json({ error: err.message });

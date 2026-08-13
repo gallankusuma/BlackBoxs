@@ -22,7 +22,7 @@ export function calcWall(p: any): MtoResult {
   const wallType = resolved.variant;
   if (resolved.note) notes.push(resolved.note);
   if (wallType === 'unknown') {
-    return { element_type: 'wall', variant: resolved.raw, lines: [], notes };
+    return { element_type: 'wall', variant: 'invalid', lines: [], notes };
   }
   const waste = num(p.waste_pct, 5);
 

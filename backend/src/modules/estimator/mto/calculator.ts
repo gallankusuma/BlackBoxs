@@ -37,7 +37,16 @@ export function calculateMto(elementType: string, parameters: any): MtoResult {
     case 'wall':       return calcWall(p);
     case 'roof':       return calcRoof(p);
     default:
-      return { element_type: type, variant: 'unknown', lines: [], notes: [`Tipe elemen "${elementType}" belum dikenali kalkulator.`] };
+      // EST-MTO-R30: tipe elemen tak dikenal ditandai `invalid`, bukan `unknown`.
+      // Keduanya sama-sama menghasilkan nol baris, tapi `invalid` yang ditolak
+      // 422 oleh route sehingga tidak tersimpan sebagai engineering input yang
+      // sah dengan kuantitas nol.
+      return {
+        element_type: type,
+        variant: 'invalid',
+        lines: [],
+        notes: [`Tipe elemen "${elementType}" tidak dikenali kalkulator. Yang didukung: foundation, column, beam, slab, wall, roof.`],
+      };
   }
 }
 

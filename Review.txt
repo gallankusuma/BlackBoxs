@@ -1,1286 +1,626 @@
-Status 5 P0 terakhir
-Finding	Hasil review
-R13 RAB NET vs GROSS	✅ Closed
-R14 Proposal total reconciliation	⚠️ Happy-path fixed, atomicity masih gap
-R15 stale linked line	❌ Re-open — 409 tetapi DB sudah berubah
-R16 delete linked MTO	✅ Core fixed, concurrency masih perlu hardening
-R18 Submitted/Deal lock	❌ Partial — ada bypass lintas proposal & endpoint lain
-Yang benar-benar sudah bagus
-
-RAB sekarang selalu mengambil line.net_quantity; gross_quantity dan waste_percent hanya disimpan sebagai metadata link. Ini tepat dengan aturan BOQ/RAB = net, procurement = gross.
-
-Link dan sync juga sudah memanggil recalculateProposal(), dan delete MTO sudah memeriksa apakah elemen masih direferensikan item RAB.
-
-Namun berikut yang perlu dikirim lagi ke development.
-
-ESTIMATOR MTO — RE-REVIEW ROUND 4
-EST-MTO-R20 — 409 LINKED_MTO_LINE_INVALID tidak melakukan rollback
-
-Severity: P0 — Critical
-
-Ini temuan terpenting.
-
-Current PUT MTO melakukan:
-
-UPDATE engineering_inputs
-        ↓
-syncLinkedRabItems()
-        ↓
-baru cek apakah linked line hilang
-        ↓
-return 409
-
-Source menunjukkan engineering_inputs di-update lebih dulu, baru syncLinkedRabItems() dijalankan.
-
-Di dalam syncLinkedRabItems(), linked item yang valid bahkan bisa ikut di-update sebelum stale link akhirnya menyebabkan exception.
-
-Contoh
-
-Awal:
-
-Column = Concrete
-COL-CONC = 20 m³
-RAB Beton Kolom = 20 m³
-
-User mengubah:
-
-Column → WF
-
-API:
-
-409 LINKED_MTO_LINE_INVALID
-
-Kelihatannya aman.
-
-Tetapi urutan actual:
-
-engineering_inputs
-Concrete → WF    ← SUDAH TERSIMPAN
-
-sync:
-COL-CONC tidak ditemukan
-→ throw 409
-
-Hasil database bisa menjadi:
-
-MTO = WF
-RAB = Beton 20 m³
-HTTP = 409
-
-Persis kondisi stale yang ingin dicegah.
-
-Test sekarang hanya mengecek:
-
-status == 409
-code == LINKED_MTO_LINE_INVALID
-
-tetapi tidak membaca ulang MTO dan membuktikan state rollback.
-
-Required Fix
-
-Semua harus satu transaction:
-
-BEGIN
-
-LOCK MTO ELEMENT
-LOCK LINKED RAB ITEMS
-
-CALCULATE proposed MTO
-
-PRE-VALIDATE:
-semua existing line_code masih tersedia
-
-jika invalid:
-ROLLBACK
-409
-
-UPDATE engineering_inputs
-UPDATE linked RAB
-UPDATE proposal totals
-
-COMMIT
-
-Lebih baik validasi seluruh link sebelum write pertama.
-
-Acceptance
-
-Setelah failed Concrete → WF:
-
-HTTP = 409
-
-GET MTO:
-still Concrete
-
-GET RAB:
-still previous quantity
-
-Proposal direct_cost:
-unchanged
-EST-MTO-R21 — Cross-Proposal Item ID dapat membypass Submitted/Deal Lock
-
-Severity: P0 — Critical
-
-Ini bypass nyata terhadap R18.
-
-Current route:
-
-PUT /proposals/:proposalId/items/:itemId
-
-melakukan lock terhadap:
-
-proposalId dari URL
-
-tetapi item dicari hanya:
-
-WHERE id = ?
-
-dan update juga hanya berdasarkan itemId.
-
-DELETE juga:
-
-DELETE FROM proposal_items
-WHERE id = ?
-
-tanpa:
-
-AND proposal_id = ?
-Bypass
-
-Misalnya:
-
-Proposal A = Draft
-Proposal B = Submitted
-Item B id  = 999
-
-Request:
-
-PUT /proposals/A/items/999
-
-Backend:
-
-proposalLock(A) → allowed ✅
-
-kemudian:
-
-UPDATE item 999
-
-padahal item 999 milik Proposal B yang seharusnya locked.
-
-Bahkan sesudahnya backend menjalankan:
-
-recalculateProposal(A)
-
-bukan Proposal B.
-
-Jadi bisa menghasilkan:
-
-Proposal B item berubah
-Proposal B header tidak berubah
-Proposal A direcalculate
-
-Tiga layer data sekaligus menjadi tidak konsisten.
-
-Required
-
-Semua item access:
-
-WHERE id = ?
-AND proposal_id = ?
-
-Buat helper:
-
-getOwnedProposalItem(proposalId, itemId)
-
-dan gunakan pada:
-
-GET/detail
-PUT
-DELETE
-MTO link
-MTO unlink
-AHSP reassignment
-Acceptance
-Proposal A draft
-Proposal B submitted
-
-PUT /A/items/{item-B}
-→ 404
-
-DELETE /A/items/{item-B}
-→ 404
-
-B item tetap sama
-A dan B totals tetap sama
-EST-MTO-R22 — Generic Proposal Update Membypass Status Workflow
-
-Severity: P0 — Critical
-
-Ada endpoint:
-
-PUT /proposals/:id
-
-yang menerima langsung:
-
-project_name
-client
-client_id
-lokasi
-revision
-status
-
-dan melakukan:
-
-UPDATE proposals
-SET ...
-    status = ?
-
-tanpa proposalLock() dan tanpa VALID_TRANSITIONS.
-
-Padahal sudah ada endpoint lifecycle resmi:
-
-PUT /proposals/:id/status
-
-dengan:
-
-draft → review
-review → draft/submitted
-submitted → review/deal/no_deal
-deal → final
-Bypass
-
-Proposal:
-
-status = deal
-
-bisa berpotensi dipanggil:
-
-PUT /proposals/123
-{
-  ...
-  "status": "draft"
-}
-
-lalu:
-
-RAB kembali editable
-
-Lebih buruk, user juga bisa:
-
-draft → deal
-
-melalui generic PUT tanpa menjalankan workflow Deal yang membuat:
-
-Project
-Project MTO baseline
-Purchase Request
-approved_at
-deal_at
-
-Sehingga status bisa berkata:
-
-DEAL
-
-tetapi side effects Deal tidak pernah terjadi.
-
-Required
-
-Hapus status dari generic proposal update.
-
-Satu-satunya endpoint yang boleh mengubah lifecycle:
-
-PUT /proposals/:id/status
-
-Generic update setelah Submitted/Deal juga harus mengikuti revision policy.
-
-EST-MTO-R23 — Apply Template Membypass Proposal Lock
-
-Severity: P0 — Critical
-
-Endpoint:
-
-POST /proposals/:id/apply-template
-
-tidak menggunakan proposalLock().
-
-Mode:
-
-replace
-
-bahkan melakukan:
-
-DELETE FROM proposal_items
-WHERE proposal_id = ?
-
-sebelum membuat item baru.
-
-Artinya Proposal Submitted/Deal yang RAB-nya seharusnya immutable masih dapat diubah melalui Wizard/API.
-
-Skenario
-Proposal Deal
-Rp5.000.000.000
-
-POST apply-template
-mode=replace
-
-berpotensi mengganti seluruh RAB.
-
-Masalah kedua
-
-Endpoint ini juga tidak terlihat memanggil:
-
-recalculateProposal()
-
-setelah replace/append.
-
-Jadi bahkan pada Draft:
-
-RAB berubah
-header direct_cost bisa stale
-Required
-proposalLock()
-+
-one transaction
-+
-recalculateProposal()
-EST-MTO-R24 — recalculateProposal() Fail-Open
-
-Severity: P1 High / Commercial Integrity
-
-Ini membuat R14 belum sepenuhnya closed.
-
-Helper saat ini:
-
-async function recalculateProposal(...) {
-  try {
-     ...
-     UPDATE proposals
-  } catch {
-     console.error(...)
-  }
-}
-
-Error ditelan dan tidak dilempar kembali.
-
-Jadi:
-
-RAB item update sukses
-Proposal summary update gagal
-
-caller tetap bisa menerima:
-
-200 OK
-
-Karena recalculateProposal() swallow error.
-
-Required
-
-Untuk commercial mutation:
-
-RAB update
-+
-proposal summary
-
-harus satu transaction.
-
-Helper jangan swallow exception.
-
-Ideal:
-
-recalculateProposal(proposalId, tx)
-
-dan failure apa pun:
-
-ROLLBACK seluruh mutation
-EST-MTO-R25 — Delete Proposal Masih Hard Delete Tanpa Lifecycle Guard
-
-Severity: P1 High
-
-Current:
-
-DELETE /proposals/:id
-
-langsung:
-
-DELETE FROM proposals WHERE id = ?
-
-tanpa status validation.
-
-Untuk dokumen quotation/contract, Proposal:
-
-Submitted
-Deal
-
-tidak boleh hilang secara hard-delete.
-
-Recommended:
-
-Draft → soft-delete permitted
-Review → controlled cancel
-Submitted → cancellation/revision workflow
-Deal → NEVER hard delete
-
-Dengan audit:
-
-is_deleted
-deleted_at
-deleted_by
-deletion_reason
-EST-MTO-R26 — Delete MTO vs Link MTO Masih Race-Prone
-
-Severity: P1 High
-
-R16 happy-path sudah benar.
-
-Tetapi flow:
-
-Request A:
-check no linked RAB
-
-Request B:
-create MTO link
-
-Request A:
-DELETE MTO
-
-masih mungkin karena check dan delete bukan transaction/lock yang sama.
-
-Long-term paling sehat:
-
-normalized mto_link FK
-
-atau minimal transaction + lock terhadap MTO element dan affected proposal items.
-
-Status revised P0
-Finding	Status
-R13 NET/GROSS	✅ Closed
-R14 Summary sync	⚠️ Partial — fail-open/non-atomic
-R15 Stale link	❌ Re-open
-R16 Linked delete	⚠️ Core closed
-R18 Commercial lock	❌ Partial / bypass exists
-Masih ada backlog engineering yang jangan dilupakan
-
-Walaupun commercial P0 selesai nanti, beberapa engineering scope masih belum full quotation-ready:
-
-Sloof di Column belum sepenuhnya menjadi MTO output.
-Ring Beam di Beam masih gap.
-Purlin input pada branch WF masih belum konsisten.
-Profile frontend/backend masih berbeda; UI punya nilai seperti UNP120, backend catalog berbeda.
-Wall opening % versus detailed opening masih dua source.
-Cladding sheet quantity belum memperhitungkan sheet length.
-Glass frame type masih bercampur dengan quantity.
-Beton dak sudah benar masuk branch concrete, tetapi reinforcement belum ada.
-Unlink MTO belum mengembalikan manual quantity sebelumnya secara reproducible.
-Estimator RBAC/domain validation masih backlog.
-
-Jadi nanti kita bisa definisikan supported quotation scope terlebih dahulu, misalnya:
-
-✅ Footplate
-✅ Concrete Column
-✅ Concrete Beam
-✅ Concrete Slab
-✅ Basic Masonry
-✅ Basic Sheet Roof
-
-dan variant yang belum lengkap diberi:
-
-NOT YET SUPPORTED FOR FINAL QUOTATION
-
-daripada memberi angka setengah benar.
-
-Regression test yang wajib ditambah
-
-Tim dev sekarang memang menguji status 409, tetapi perlu menambah state-after-error tests:
-
-1. Concrete → WF dengan COL-CONC linked
-   → 409
-   → GET MTO masih Concrete
-   → GET RAB unchanged
-   → direct_cost unchanged
-
-2. Draft Proposal A + Submitted Proposal B
-   PUT /A/items/{B-item}
-   → 404
-   → B unchanged
-
-3. Draft A + Deal B
-   DELETE /A/items/{B-item}
-   → 404
-
-4. Submitted/Deal:
-   PUT /proposals/:id status=draft
-   → forbidden / status ignored
-
-5. Draft:
-   PUT generic status=deal
-   → forbidden
-
-6. Submitted:
-   apply-template append
-   → 409
-
-7. Deal:
-   apply-template replace
-   → 409
-
-8. Failed recalculateProposal
-   → entire RAB mutation rollback
-
-9. Delete Deal proposal
-   → 409
-
-10. Concurrent link/delete MTO
-    → no orphan mto_link
-CI
-
-HEAD terbaru masih tidak menunjukkan combined status ataupun workflow run di GitHub; jadi 621 tests pass masih merupakan hasil yang dicatat development, belum GitHub CI gate otomatis.
-
-Kesimpulan
-
-Bro, revisinya bagus dan lima isu yang kita kirim memang ditangani secara eksplisit. Tapi audit state-level menemukan dua bypass yang justru sangat penting:
-
-🔴 409 R15 bukan rollback
-🔴 lock Submitted/Deal bisa dibypass lewat item ID proposal lain dan generic proposal update
-
-Jadi status saya:
-
-MTO calculation core: 🟢
-NET/GROSS logic: 🟢
-Commercial mutation safety: 🔴
-Quotation-ready: ❌ belum
-SETTLED: ❌ belum
-
-Untuk development next round, saya sarankan jangan sentuh P1 engineering dulu. Tutup R20–R24 terutama atomic transaction dan lifecycle guard terpusat. Setelah itu saya review lagi; kalau commercial integrity bersih, baru kita selesaikan P1 engineering scope satu per satu.
-
-Today 10:58 AM
-bro sudah ada revisi 
-
-Bro, saya sudah cek revisi terbaru sampai HEAD e2163924e7202e7d523678f8e4d52ec754a11647. Kali ini progresnya besar 👍. Tim dev sudah menutup sebagian besar temuan commercial/security dan sekaligus membereskan backlog engineering MTO. Mereka melaporkan 96 test calculator + 74 test MTO-link, total 673 test lulus, plus vue-tsc dan build bersih.
-
-Tapi setelah saya tracing lagi sampai transaction boundary, error-state, lifecycle Proposal, dan jalur quotation, saya masih menemukan beberapa gap yang menurut saya belum boleh dilewatkan.
-
-Verdict terbaru
-
-🟠 ESTIMATOR MTO = VERY CLOSE, BUT NOT SETTLED
-
-🟢 Core calculation jauh lebih sehat
-🟢 Major commercial bypass R20–R26 mayoritas sudah tertutup
-🟢 MTO civil non-steel sudah mendekati pilot-ready
-🔴 Masih ada atomicity gap pada POST MTO upsert dan RAB mutation
-🔴 Steel quotation belum boleh dipercaya karena R06 belum diputuskan
-🟠 Revision/deal lifecycle masih perlu diperkeras
-❌ Belum saya nyatakan final quotation-ready untuk seluruh scope
-
-1. R20 — Atomic rollback
-PUT MTO: ✅ VERIFIED CLOSED
-
-Developer benar-benar memindahkan update MTO dan sync RAB ke transaction yang sama:
-
-withTransaction
- ├─ UPDATE engineering_inputs
- ├─ syncLinkedRabItems(..., tx)
- └─ recalculateProposal(..., tx)
-
-Jadi jika linked line hilang:
-
-Concrete → WF
-COL-CONC hilang
-→ 409
-→ transaction rollback
-
-Ini sudah jauh lebih benar.
-
-Mereka juga menambahkan test state-after-error, bukan cuma mengecek HTTP 409. Itu pendekatan test yang saya inginkan.
-
-2. R21 — Cross-Proposal item bypass
-✅ VERIFIED CLOSED
-
-Sekarang item harus benar-benar milik Proposal dari URL:
-
-WHERE id = ?
-AND proposal_id = ?
-
-Jika tidak:
-
-404 ITEM_NOT_IN_PROPOSAL
-
-Test juga sudah membuktikan Draft Proposal A tidak bisa digunakan untuk mengubah item milik Submitted Proposal B, dan quantity Proposal B tetap sama.
-
-R21 CLOSED.
-
-3. R22 — Generic status bypass
-✅ VERIFIED CLOSED
-
-PUT /proposals/:id sekarang menolak field:
-
-{
-  "status": "deal"
-}
-
-dengan:
-
-400 USE_STATUS_ENDPOINT
-
-dan update umum juga mengikuti proposalLock().
-
-Artinya lifecycle hanya boleh lewat:
-
-PUT /proposals/:id/status
-
-R22 CLOSED.
-
-4. R23 — Apply Template pada submitted/deal
-✅ Lifecycle bypass CLOSED
-
-apply-template sekarang ikut memanggil:
-
-proposalLock()
-
-sehingga proposal Submitted tidak dapat ditambahi/diganti RAB lewat Wizard.
-
-Tetapi ada masalah atomicity yang saya pisahkan menjadi finding baru R28.
-
-5. R24 — recalculateProposal
-✅ Fail-open CLOSED
-⚠️ Transaction coverage masih belum sempurna
-
-Helper sekarang menerima transaction:
-
-recalculateProposal(proposalId, tx)
-
-dan exception tidak lagi ditelan; error dilempar kembali. Bahkan developer menemukan sendiri bahwa menggunakan connection pool berbeda di tengah transaction menyebabkan:
-
-direct_cost = 110 juta
-SUM RAB     = 165 juta
-
-dan kemudian memperbaikinya supaya SUM menggunakan transaction yang sama. Ini bagus sekali.
-
-Tetapi ordinary RAB routes masih perlu perhatian—lihat R29.
-
-6. R25 — Delete Proposal
-✅ Core CLOSED
-
-Delete sekarang ditolak jika:
-
-status bukan draft/review
-→ 409 PROPOSAL_LOCKED
-
-atau sudah punya project:
-
-→ 409 PROPOSAL_HAS_PROJECT
-
-Untuk audit jangka panjang saya tetap lebih suka soft-delete, tetapi ini bukan blocker urgent MTO quotation.
-
-7. R26 — Concurrent MTO link vs delete
-✅ VERIFIED CLOSED
-
-Ini salah satu fix terbaik pada ronde ini.
-
-Developer awalnya mencoba FOR UPDATE tapi test membuktikan lock tersebut sia-sia jika tidak berada dalam transaction. Akhirnya kedua sisi, link dan delete, dibuat transactional dan sama-sama mengunci row engineering_inputs yang sama.
-
-Current design:
-
-LINK
-BEGIN
-SELECT element FOR UPDATE
-...
-COMMIT
-
-DELETE
-BEGIN
-SELECT same element FOR UPDATE
-...
-COMMIT
-
-Jadi yang datang kedua harus menunggu dan membaca state terbaru.
-
-R26 CLOSED.
-
-Engineering backlog terbaru
-
-Ronde terbaru juga benar-benar memperbaiki beberapa hal penting.
-
-R05 — Sloof / Ring Balk / Gording ✅
-
-Sekarang ada output:
-
-COL-SLOOF-CONC
-COL-SLOOF-FORM
-COL-SLOOF-REBAR
-
-BM-RB-CONC
-BM-RB-FORM
-BM-RB-REBAR
-
-BM-PURLIN
-R08 — Opening wall ✅/acceptable
-
-Detailed door/window menjadi source yang lebih spesifik; bila opening_pct juga diisi, sistem memberi note bahwa angka persentase tidak digunakan.
-
-R09 — Cladding sheet ✅
-
-Sekarang:
-
-sheet count =
-ceil(
-  area /
-  (effective_width × sheet_length)
-)
-
-dan jika sheet length tidak ada, sistem tidak mengarang jumlah lembar.
-
-R10 — Glass frame ✅ core
-
-glass_frame tidak lagi diperlakukan sebagai angka. Frameless tidak menghasilkan frame line dan tipe frame lain diberikan quantity berdasarkan area kaca.
-
-R12 — Reinforcement Beton Dak ✅ dengan catatan
-
-Sekarang ada:
-
-RF-CONC
-RF-FORM
-RF-REBAR
-
-Default sementara:
-
-D10 @150 mm
-dua arah
-
-dan assumption tersebut ditulis ke notes.
-
-Untuk quotation final nanti saya tetap ingin diameter/spacing menjadi explicit engineering input, bukan asumsi default.
-
-R17 — Unlink restore manual quantity ✅
-
-Previous manual quantity sekarang disimpan:
-
-mto_link.previous_qty
-
-dan dikembalikan saat unlink.
-
-🔴 Temuan baru setelah tracing terbaru
-EST-MTO-R27 — POST MTO Upsert masih punya atomicity hole
-
-Severity: P0 — Critical
-
-Ini subtle banget.
-
-POST /proposals/:id/mto sebenarnya bukan create-only.
-
-Dia:
-
-CREATE OR UPDATE existing element
-
-Current sequence dari diff:
+Perbaikannya bagus dan beberapa blocker besar sudah benar-benar closed. Tetapi final audit source menemukan beberapa gap yang cukup serius, termasuk satu lifecycle race baru dan beberapa coverage gap di Roof.
+
+Finding	Status terbaru
+R27 POST MTO atomic upsert	✅ VERIFIED CLOSED
+R29 RAB mutation atomic	⚠️ REOPENED / PARTIAL
+R30 invalid MTO persistence	⚠️ PARTIAL
+R28 Apply Template atomicity	🔴 OPEN
+R31 Proposal Revision	🔴 OPEN
+R32 DEAL atomic/idempotent	🔴 PARTIAL / BLOCKER
+R06 Steel Profile Master	🔴 OPEN
+R05 visible input → calculation	⚠️ REOPENED untuk Roof
+R09 sheet quantity	⚠️ REOPENED untuk Roof
+R19 domain validation	⚠️ PARTIAL
+R33 lifecycle lock race	🔴 NEW P0
+✅ R27 — POST MTO atomic upsert
+
+Ini benar-benar sudah diperbaiki.
+
+Sebelumnya:
 
 Transaction A
- ├─ SELECT existing FOR UPDATE
- ├─ UPDATE/INSERT engineering_inputs
- └─ COMMIT
-
-kemudian
+UPDATE MTO
+COMMIT
 
 Transaction B
- ├─ syncLinkedRabItems()
- └─ COMMIT/ROLLBACK
-
-Kita bisa melihat sync sekarang memang dibungkus transaction, tetapi transaction tersebut terpisah dari transaction upsert.
-
-Skenario
-
-Pertama:
-
-POST Column K1
-type = concrete
-
-COL-CONC linked ke RAB
-
-Kemudian UI kembali melakukan POST dengan nama element yang sama:
-
-Column K1
-type = WF
-
-Transaction pertama sudah menyimpan:
-
-Concrete → WF
-
-Setelah commit, transaction sync menemukan:
-
-COL-CONC tidak ada
+sync RAB
 → 409
 
-Tetapi transaction pertama tidak ikut rollback.
+Sekarang upsert dan syncLinkedRabItems() berada dalam satu withTransaction().
 
-Kita kembali ke problem lama:
+Test juga sudah membaca ulang database setelah gagal:
 
-HTTP 409
-MTO = WF
-RAB = Beton
+Concrete K1
+   ↓
+POST ulang menjadi WF
+   ↓
+409
+   ↓
+GET MTO
+   ↓
+tetap Concrete ✅
+Status: ✅ CLOSED
+⚠️ R29 — ternyata belum sepenuhnya closed
+
+POST/PUT/DELETE normal RAB memang sudah bagus:
+
+BEGIN
+ mutate proposal_items
+ recalculateProposal(tx)
+COMMIT
+
+dan source mengonfirmasi pola tersebut.
+
+Tetapi jalur DELETE unlink masih bocor:
+
+DELETE /proposals/:id/items/:itemId/mto-link
+
+Current source:
+
+UPDATE proposal_items
+SET
+    mto_link = NULL,
+    qty = ?,
+    total_price = ? * unit_price_snapshot
+WHERE id = ?
+  AND proposal_id = ?
+
+menggunakan dbRun() langsung dan setelah itu langsung:
+
+res.json(...)
+
+Tidak ada withTransaction() dan tidak ada recalculateProposal().
+
+Test sekarang hanya membuktikan:
+
+manual qty 7
+→ link MTO qty 20
+→ DELETE unlink
+→ qty kembali 7 ✅
+
+tetapi tidak mengecek bahwa direct_cost juga kembali ke angka yang sesuai.
+
+Dampak
+RAB qty       20 → 7 ✅
+total_price   ikut turun ✅
+
+Proposal
+direct_cost   tetap angka lama ❌
 Required
 
-POST upsert harus menjadi satu transaction:
+DELETE unlink harus sama dengan jalur unlink PUT:
 
 BEGIN
 
-SELECT element FOR UPDATE
-
-calculate proposed state
-prevalidate linked lines
-
-INSERT/UPDATE engineering_inputs
-sync linked RAB
-recalculate proposal
+UPDATE proposal_items
+recalculateProposal(proposalId, tx)
 
 COMMIT
-Test wajib
-POST K1 Concrete
-link COL-CONC
+Status: ⚠️ R29 REOPENED / PARTIAL
+🔴 R28 — Apply Template masih OPEN
 
-POST K1 lagi sebagai WF
-→ 409
+Ini belum dikerjakan dan source mengonfirmasi.
 
-GET MTO
-→ masih Concrete
-
-GET RAB
-→ COL-CONC tetap valid
-
-direct_cost
-→ unchanged
-EST-MTO-R28 — Apply Template belum atomic + summary reconciliation
-
-Severity: P1 High / P0 untuk mode replace
-
-R23 baru menambah lock. Itu benar.
-
-Tetapi apply-template mempunyai:
+Untuk:
 
 mode = replace
 
-yang secara desain bisa:
+masih:
 
-DELETE existing proposal_items
-        ↓
-INSERT section 1
-INSERT children
-INSERT section 2
-...
+await dbRun(
+  'DELETE FROM proposal_items WHERE proposal_id = ?'
+)
 
-Kalau insert gagal di tengah, kita berpotensi mendapat:
+di luar transaction.
 
-RAB lama sudah hilang
-+
-RAB baru hanya terisi setengah
+Kemudian section dan children dimasukkan satu per satu.
 
-Selain itu, perubahan R23 yang terlihat hanya menambahkan proposalLock() pada route tersebut.
+Lebih penting lagi, pencarian current source menunjukkan recalculateProposal() tidak dipanggil oleh apply-template.
 
-Required
-withTransaction
- ├─ optional DELETE existing
- ├─ INSERT all template items
- ├─ update proposal_type
- └─ recalculateProposal(..., tx)
+Jadi contoh:
 
-Acceptance:
+Proposal direct_cost = Rp5 M
 
-replace template gagal item ke-5
-→ seluruh RAB lama tetap utuh
+apply-template replace
+     ↓
+DELETE RAB lama
+     ↓
+insert template baru
+     ↓
+direct_cost masih Rp5 M ❌
 
-dan:
+Kalau insert gagal di tengah:
 
-successful template apply
-→ direct_cost = SUM(total_price)
-EST-MTO-R29 — Ordinary RAB mutation + header summary belum satu unit transaction
-
-Severity: P0 Commercial Integrity
-
-recalculateProposal() sekarang benar-benar melempar error. Bagus.
-
-Tetapi ordinary routes masih mempunyai pola seperti:
-
-UPDATE/DELETE proposal_items
-        ↓
-commit DB statement
-        ↓
-recalculateProposal()
-
-Pada DELETE, diff terbaru bahkan menunjukkan:
-
-DELETE FROM proposal_items
-WHERE id = ?
-AND proposal_id = ?
-
-kemudian:
-
-await recalculateProposal(proposalId)
-
-sebagai operasi berikutnya.
-
-Kalau recalc gagal:
-
-item sudah berubah/hilang
-header belum berubah
-HTTP 500
-
-Throwing error tidak bisa membatalkan SQL yang sebelumnya sudah committed.
-
-Required
-
-Semua:
-
-POST item
-PUT item
-DELETE item
-AHSP reassignment
-MTO link/unlink
-template
-
-harus mengikuti satu pola:
-
+RAB lama       hilang
+RAB baru       setengah masuk
+Proposal total lama
+Required architecture
 BEGIN
 
-mutate proposal_items
-recalculateProposal(proposalId, tx)
+LOCK proposal
+validate editable
+
+IF replace
+  DELETE proposal_items
+
+INSERT semua section
+INSERT semua children
+UPDATE proposal_type
+
+recalculateProposal(id, tx)
 
 COMMIT
 
-Jika salah satu gagal:
+Failure apa pun → ROLLBACK seluruh template.
 
-ROLLBACK
-EST-MTO-R30 — Validation sekarang mendeteksi invalid input, tapi belum benar-benar “reject”
+Status: 🔴 OPEN — P0 Commercial Integrity
+🔴 R33 — NEW: Submitted Lock masih punya race condition
 
-Severity: P1 High
+Ini temuan terpenting ronde ini.
 
-Developer sudah menambah validateParams(). Ini bagus.
+proposalLock() saat ini cuma:
 
-Tetapi current calculator melakukan:
+SELECT id, status
+FROM proposals
+WHERE id = ?
 
-invalid parameters
-        ↓
-return {
-  variant: "invalid",
-  lines: [],
-  notes: [...]
-}
+menggunakan connection biasa.
 
-bukan:
+Lalu setelah check selesai, baru endpoint membuka transaction untuk mengubah item/MTO.
 
-422 INVALID_MTO_PARAMETERS
+Contoh race nyata:
 
-Artinya secara arsitektur, POST/PUT MTO masih dapat berpotensi menyimpan engineering input invalid dengan:
+Proposal status = review
 
-lines = []
-quantity = 0
+Request A
+PUT RAB item
+       ↓
+proposalLock()
+status = review ✅
+allowed
 
-Jika belum ada RAB link, tidak ada stale-link guard yang menghentikannya.
+              Request B
+              review → submitted
+              COMMIT
 
-Ini berbahaya untuk estimator:
+Request A lanjut
+BEGIN
+UPDATE RAB
+recalculate
+COMMIT
 
-Area = -100
-→ saved
-→ MTO = 0
-→ quotation understated
+Hasil:
 
-meski notes mengatakan input salah.
+Proposal = SUBMITTED
+tetapi RAB berubah SESUDAH submission ❌
+
+Secara normal API sequential test semuanya hijau, tetapi secara concurrent commercial lock masih bisa ditembus.
+
+Dan masalah yang sama berlaku pada:
+
+POST/PUT/DELETE RAB
+POST/PUT/DELETE MTO
+MTO link/unlink
+apply-template
+
+karena proposalLock() dilakukan sebelum transaction.
 
 Required
 
-Preview boleh:
+Buat helper transactional:
 
-422
-atau
-200 { valid:false }
+assertProposalEditableTx(proposalId, tx)
 
-tetapi persisted MTO harus:
+yang melakukan:
 
-422 INVALID_MTO_PARAMETERS
+SELECT status
+FROM proposals
+WHERE id = ?
+FOR UPDATE
 
-dan tidak menulis database.
+di dalam transaction yang sama dengan mutation.
 
-EST-MTO-R06 — Steel Profile Catalog
-❌ MASIH OPEN dan saya setuju developer TIDAK menebak
-
-Ini sekarang blocker terbesar untuk steel quotation.
-
-Developer secara eksplisit menemukan:
-
-UI:
-C150x65 = 2.24 kg/m
-
-Backend:
-C150x65 = 6.76 kg/m
-
-dan:
-
-UI → UNP120
-Backend → UNP125
-
-Mereka sengaja tidak memilih salah satu, karena beda weight/m langsung mengubah tonase dan harga baja.
-
-Saya setuju dengan keputusan itu.
-
-Jangan suruh programmer “pilih yang kira-kira benar”.
-
-Solusi yang benar
-
-Engineering harus menetapkan:
-
-Approved Steel Profile Master
-
-minimal:
-
-Field	Contoh
-Profile Code	C150x65
-Profile Family	C-Channel
-H	...
-B	...
-t	...
-Weight/m	approved value
-Standard/Source	Engineering-approved
-Manufacturer	optional
-Revision	Rev-01
-Effective Date	...
-
-Kemudian:
-
-Backend Master
-      ↓
-Frontend Dropdown
-      ↓
-MTO Calculator
-      ↓
-RAB
-
-satu source.
-
-Tidak boleh lagi ada:
-
-frontend hardcode
-vs
-backend hardcode
-
-Dan kalau code tidak ada di master:
-
-422 PROFILE_NOT_FOUND
-
-bukan fallback 6.76.
-
-EST-MTO-R31 — Submitted Proposal masih bisa kembali ke Review dan overwrite baseline
-
-Severity: P1 High — Audit / Revision Control
-
-Lifecycle sebelumnya memang memperbolehkan:
-
-submitted
-   ↓
-review
-
-dan review kembali editable.
-
-Secara business:
-
-Proposal Rev-0
-dikirim customer
-Rp10B
-
-customer minta perubahan
-      ↓
-status kembali review
-      ↓
-Rev-0 diedit langsung
-
-Kita kehilangan bukti:
-
-Apa yang sebenarnya dikirim sebagai Rev-0?
-
-Untuk quotation profesional seharusnya:
-
-Rev-0 SUBMITTED
-      ↓
-Create Revision
-      ↓
-Rev-1 DRAFT
-
-Rev-0 tetap immutable.
-
-Ini merupakan bagian dari original EST-MTO-024 yang masih open.
-
-EST-MTO-R32 — Transition DEAL belum atomic/idempotent
-
-Severity: P0 Lifecycle
-
-Ini perlu dibenahi sebelum Proposal dianggap settlement.
-
-Saat Deal, banyak side effect:
-
-Proposal → DEAL
-      ↓
-Create Project
-      ↓
-link project_id
-      ↓
-copy MTO baseline
-      ↓
-create Purchase Request
-
-Kalau dua request Deal datang bersamaan, atau failure terjadi di tengah, kita perlu menjamin:
-
-1 Proposal = 1 Project
-1 baseline
-1 logical downstream flow
-
-Jadi final design harus:
+Arsitekturnya:
 
 BEGIN
 
 SELECT proposal FOR UPDATE
-recheck status
 
-UPDATE DEAL
-CREATE project idempotently
-COPY baseline
-link proposal
+if submitted/deal:
+   ROLLBACK
+   409
+
+UPDATE RAB/MTO
+RECALCULATE
 
 COMMIT
 
-PR creation bisa transactional atau explicit retry/outbox, tetapi tidak boleh silently menghasilkan lifecycle setengah selesai.
+Status transition juga harus menggunakan transaction dan lock row yang sama.
 
-Satu gap bisnis yang masih penting untuk “penawaran harga”
+Status: 🔴 P0 — NEW BLOCKER
+⚠️ R30 — invalid parameter sudah jauh lebih baik, tetapi masih partial
 
-MTO sekarang jauh lebih dekat menjadi sumber quantity.
+Untuk negative area dan generic numeric parameter, fix-nya benar.
 
-Tetapi jangan lupa:
+Persist endpoint sekarang:
 
-MTO
- ↓
-RAB
- ↓
-AHSP
+if (mto.variant === 'invalid') {
+    return 422 INVALID_MTO_PARAMETERS
+}
 
-baru menghasilkan direct/basic cost basis.
+Test juga membuktikan parameter lama tidak tertimpa saat PUT invalid. ✅
 
-recalculateProposal() masih berkonsep:
+Tetapi calculator mempunyai kondisi lain:
 
-Direct Cost
-+ Overhead 0
-+ Risk Contingency 0
-= Total Project
+variant = unknown
+lines   = []
 
-Untuk actual quotation nantinya saya tetap ingin:
+untuk element yang tidak dikenali.
 
-Direct Cost
-+ Project Indirect
-+ Overhead
-+ Risk / Contingency
-+ Profit / Margin
---------------------
-Selling Price
-+ Tax
---------------------
-Quotation Total
+Sedangkan persistence hanya menolak:
 
-Jadi MTO-nya bisa kita settle lebih dulu, lalu Commercial Pricing Engine dilanjutkan sebagai lapisan berikutnya.
+variant === "invalid"
 
-Status keseluruhan sekarang
-Area	Status
-Single MTO calculation engine	🟢
-Formula civil basic	🟢
-Unit cm/mm conversion	🟢
-Wall/Roof enum contract	🟢
-Net vs Gross	🟢
-Server-owned MTO quantity	🟢
-Unit compatibility	🟢
-MTO→RAB sync	🟢 core
-PUT MTO rollback	🟢
-Cross-proposal ownership	🟢
-Submitted RAB lock	🟢
-Delete/link concurrency	🟢
-Sloof/Ring Beam/Purlin	🟢
-Cladding	🟢
-Glass	🟢
-Dak reinforcement	🟢/assumption
-Manual qty restore	🟢
-POST MTO upsert atomicity	🔴
-RAB mutation atomicity	🔴
-Steel profile master	🔴
-Invalid MTO persistence	🟠
-Proposal revision baseline	🟠
-Deal transaction/idempotency	🔴
-Commercial selling-price engine	🟠
-GitHub CI	⚪ belum ada
-Yang saya kirim ke development sekarang
+bukan:
 
-Bro, jangan tambah fitur lagi dulu. Saya minta mereka fokus hanya:
+variant === "unknown"
 
-R27 — satukan POST MTO upsert + sync dalam satu transaction.
-R28 — apply-template transactional + recalculate.
-R29 — seluruh RAB mutation + summary transactional.
-R30 — invalid persisted MTO harus 422 dan tidak disimpan.
-R31 — buat real Proposal Revision, jangan edit submitted baseline.
-R32 — Deal transition atomic + idempotent.
-R06 — jangan coding angka profil dulu sampai Engineering menetapkan approved profile master.
+Akibatnya request seperti:
 
-Setelah enam technical item itu selesai, saya rasa kita sudah berada di titik di mana saya bisa mulai mengatakan:
+{
+  "element_type": "something_wrong"
+}
 
-Civil MTO → RAB sudah layak dipakai sebagai basis quotation.
+berpotensi tersimpan sebagai MTO valid-looking dengan:
 
-Untuk steel, saya tidak akan kasih green light sebelum R06 diputuskan, karena beda weight/m adalah beda tonase dan langsung beda harga. Dan HEAD terbaru masih belum punya GitHub Actions/status check; klaim 673 tests pass masih hasil development, belum CI gate otomatis.
+lines = []
+quantity = 0
+
+Demikian juga subtype tidak dikenal dapat menghasilkan zero-line result tanpa masuk variant='invalid'.
+
+Required
+
+Lebih sehat MTO Result mempunyai explicit state:
+
+valid
+invalid
+unsupported
+
+Kemudian persistence:
+
+invalid     → 422
+unknown     → 422
+unsupported → explicit business handling
+
+Pondasi bored_pile/precast/mini_pile boleh menjadi unsupported, karena memang kalkulator sengaja belum punya formula dan sekarang hanya menghasilkan note.
+
+Tetapi Proposal sebaiknya tidak bisa submitted diam-diam bila masih memiliki unsupported MTO yang wajib priced.
+
+Status: ⚠️ PARTIAL
+⚠️ R19 — validation coverage belum mencakup semua engineering parameter
+
+validateParams() saat ini memeriksa generic fields seperti:
+
+L
+W
+H
+B
+qty
+area
+floor_area
+total_length
+thickness
+depth
+perimeter
+waste_pct
+opening_pct
+
+Tetapi banyak domain-specific parameter belum masuk, misalnya:
+
+rb_length
+rb_B
+rb_H
+purlin_length
+purlin_spacing
+dak_thick
+dak_rebar_dia
+dak_rebar_spacing
+sheet_eff_w
+gutter_length
+ridge_length
+...
+
+Contoh berbahaya:
+
+dak_rebar_spacing = -0.15
+
+Roof calculator melakukan:
+
+rebarKg =
+  floorArea / spacing
+  * ...
+
+sehingga menghasilkan negatif, lalu helper line() melakukan:
+
+Math.max(net, 0)
+
+dan quantity akhirnya bisa menjadi:
+
+RF-REBAR = 0 kg
+
+bukannya error.
+
+Itu jauh lebih berbahaya daripada 500 karena terlihat valid tetapi besi dak hilang dari quotation.
+
+Status: ⚠️ R19 PARTIAL
+⚠️ R05 — Roof Cladding masih tidak dihitung
+
+Ini sempat luput karena R05 commit terakhir hanya membenahi:
+
+Sloof
+Ring Balk
+Purlin WF
+
+Tetapi RoofInputs.vue masih menyediakan:
+
+Tinggi Cladding (m) → cladding_h
+Tipe Cladding       → cladding_type
+
+Sedangkan calcRoof() tidak menggunakan cladding_h.
+
+Jadi user bisa isi:
+
+Cladding height = 6 m
+
+tetapi MTO side cladding tidak berubah.
+
+Padahal prinsip kita:
+
+Visible engineering input harus memengaruhi output atau dihilangkan.
+
+Status: ⚠️ R05 REOPENED untuk Roof
+⚠️ R09 — Roof Sheet masih salah satuan
+
+Ini juga baru ketahuan saat saya cross-check semua cabang Roof.
+
+Current:
+
+const eff = sheet_eff_w;
+
+RF-SHEET =
+    netRoofArea / eff
+
+tetapi unit ditulis:
+
+lbr
+
+Secara dimensi:
+
+m² / m = m
+
+jadi hasilnya meter-lari, bukan lembar.
+
+Roof UI sendiri hanya menyediakan:
+
+Lebar Efektif Sheet
+
+dan tidak mempunyai sheet length.
+
+Jadi backend saat ini sebenarnya tidak punya informasi cukup untuk menghitung jumlah lembar.
+
+Required
+
+Pilih salah satu kontrak:
+
+RF-SHEET unit = m²
+quantity      = roof area
+
+atau tambahkan:
+
+sheet_length
+
+kemudian:
+
+ceil(
+  area /
+  (effective_width × sheet_length)
+)
+Status: ⚠️ R09 REOPENED untuk Roof
+🔴 R06 — Steel profile tetap BLOCKER
+
+Ini memang belum disentuh, dan saya tetap setuju programmer jangan menebak.
+
+Frontend:
+
+C150x65 = 2.24 kg/m
+C200x75 = 3.18 kg/m
+Z150x65 = 2.24 kg/m
+
+UNP100 = 10.6
+UNP120 = 13.4
+UNP150 = 18.8
+UNP200 = 25.3
+
+Backend:
+
+C150x65 = 6.76
+C125x50 = 5.5
+C100x50 = 4.5
+
+UNP100 = 9.36
+UNP125 = 13.4
+UNP150 = 18.6
+UNP200 = 24.6
+
+Lebih buruk, calculator menggunakan fallback:
+
+profileWeight(profile, 6.76)
+
+untuk purlin.
+
+Jadi contoh:
+
+UI C200x75
+expected UI = 3.18 kg/m
+
+backend tidak mengenal C200x75
+→ fallback 6.76 kg/m
+
+Tonase bisa lebih dari 2×.
+
+Status: 🔴 Steel quotation tetap NO-GO
+
+Engineering harus menentukan approved steel profile master terlebih dahulu.
+
+🔴 R31 — Revision Control belum dikerjakan
+
+Current lifecycle masih:
+
+submitted → review
+
+Artinya quotation yang sudah dikirim:
+
+Rev-0 Submitted
+      ↓
+Review
+      ↓
+edit RAB/MTO
+
+mengubah record yang sama.
+
+Kita kehilangan baseline:
+
+“Apa persisnya angka yang dikirim ke customer pada Rev-0?”
+
+Required:
+
+Rev-0 SUBMITTED — immutable
+         ↓
+Create Revision
+         ↓
+Rev-1 DRAFT
+Status: 🔴 OPEN
+🔴 R32 — Deal transition masih belum atomic
+
+Unique index baru:
+
+UNIQUE INDEX uq_project_proposal
+ON client_projects(proposal_id)
+
+adalah improvement yang bagus untuk memastikan satu proposal tidak menghasilkan dua project.
+
+Tapi ia hanya menyelesaikan duplicate project.
+
+Current flow masih:
+
+UPDATE proposal → DEAL        commit
+        ↓
+INSERT client_project         commit
+        ↓
+UPDATE proposal.project_id    commit
+        ↓
+copy MTO baseline satu-satu   commit
+        ↓
+create PR
+
+Dan PR creation bahkan sengaja:
+
+catch error
+→ log
+→ project tetap created
+→ response tetap success
+
+Jadi masih mungkin:
+
+Proposal = DEAL
+Project  = created
+Baseline = partial
+PR       = missing
+
+Selain itu project number masih dibuat memakai:
+
+COUNT(project tahun ini) + 1
+
+sementara schema yang terlihat tidak mempunyai unique guard untuk project_number. Dua proposal berbeda yang menjadi Deal bersamaan masih dapat menghasilkan nomor project yang sama.
+
+Status: 🔴 R32 PARTIAL — tetap settlement blocker
+📌 Development Action List — Round 6
+
+Bro, ini yang saya sarankan langsung kirim ke development. Jangan tambah fitur baru dulu.
+
+P0 — R33: jadikan proposal lifecycle guard transactional. Semua commercial mutation harus SELECT proposal ... FOR UPDATE + validate status di transaction yang sama.
+P0 — R28: bungkus apply-template replace/append + recalculateProposal(tx) dalam satu transaction.
+P0 — R29: perbaiki DELETE .../mto-link; update qty + unlink + recalculate harus satu transaction. Tambahkan invariant direct_cost = SUM(total_price) setelah unlink.
+P0 — R32: buat Deal workflow atomic/idempotent untuk Proposal → Project → MTO baseline. PR harus mempunyai explicit retry/idempotency strategy; jangan silent fail.
+P0/P1 — R30/R19: reject unknown element_type, unknown subtype, dan invalid domain-specific parameters. Jangan mengubah input salah menjadi quantity 0.
+P1 — R05: implementasikan Roof side-cladding dari cladding_h atau hapus field tersebut.
+P1 — R09: jangan label area/effective_width sebagai lbr; gunakan m² atau tambahkan sheet length.
+P1 — R31: implement Proposal Revision immutable: Submitted Rev-N → create Rev-N+1, bukan membuka record yang lama.
+Business blocker — R06: Engineering menetapkan approved steel profile master; frontend/backend harus mengambil sumber yang sama dan hapus numeric fallback untuk profile tidak dikenal.
+Regression test yang wajib saya minta
+
+Tambahkan test untuk concurrent PUT RAB vs review→submitted, concurrent PUT MTO vs submit, DELETE unlink lalu assert direct_cost = SUM(total_price), apply-template replace failure lalu assert seluruh state rollback, successful apply-template lalu assert header reconciliation, unknown element/subtype → 422/no DB write, negative dak_rebar_spacing/purlin_spacing → 422, Roof sheet unit contract, Roof side cladding berubah saat cladding_h berubah, dua Deal request proposal yang sama → satu project/baseline, dan dua proposal berbeda Deal bersamaan → project number tetap unique.
+
+Final status ronde ini
+
+Yang sudah bagus: R27 benar-benar closed; normal POST/PUT/DELETE RAB atomic; negative generic parameter sekarang fail-closed; duplicate project per proposal sudah punya DB guard.
+
+Yang masih membuat saya belum berani SETTLED: R28, R29 delete-unlink, R31, R32, lifecycle race R33, Roof R05/R09, validation coverage, dan terutama R06 untuk seluruh steel pricing.
+
+Jadi untuk sekarang:
+
+Civil calculation core: 🟢 strong
+RAB/Proposal lifecycle: 🟠 belum final
+Roof MTO: 🟠 perlu revisi
+Steel MTO/Quotation: 🔴 blocked by profile master
+ESTIMATOR MODULE: ❌ NOT SETTLED YET
+
+Begitu dev push Round 6, kita cek lagi terutama R28/R29/R32/R33 dulu. Kalau empat blocker transaction/lifecycle itu bersih, baru kita masuk final settlement audit.
 
 ---
 
-# TANGGAPAN TIM DEVELOPMENT — round 5 (R27, R29, R30, R32)
+# TANGGAPAN TIM DEVELOPMENT — round 6
 
-**R27 — atomicity hole di POST MTO.** Benar, dan reviewer tepat menyebutnya
-subtle: POST bukan create-only, ia juga meng-update elemen yang sudah ada. Upsert
-punya transaction sendiri dan sync punya transaction lain, jadi mengirim ulang
-"Column K1" dengan tipe WF meng-commit perubahan elemennya lebih dulu, lalu sync
-menolak 409 karena `COL-CONC` yang ditaut RAB sudah lenyap. Persis pola R20,
-muncul lagi di jalur yang berbeda. Keduanya kini satu transaction.
+**R33 (P0 baru) — dikerjakan.** Ini temuan arsitektur yang tepat: `proposalLock()`
+memeriksa status lewat query terpisah SEBELUM transaksi mutasinya dimulai, jadi
+status bisa berubah di sela pemeriksaan dan penulisan. Dibuat `proposalLockTx()`
+yang melakukan `SELECT ... FOR UPDATE` **di dalam transaction yang sama** dengan
+mutasinya, dan dipakai di POST/PUT/DELETE item, link, serta unlink. Pemeriksaan
+cepat di luar transaction tetap ada, tapi hanya untuk menolak lebih awal — bukan
+lagi satu-satunya penjaga.
 
-**R29 — mutasi RAB dan ringkasan bukan satu unit.** Melempar error dari
-`recalculateProposal()` memang tidak bisa membatalkan SQL yang sudah ter-commit.
-POST, PUT, DELETE item, dan unlink kini semuanya:
-`BEGIN → mutate → recalculateProposal(tx) → COMMIT`. Diverifikasi: tidak ada lagi
-pemanggilan `recalculateProposal()` di luar transaction.
+**R29 — ditutup untuk unlink.** Betul, `DELETE .../mto-link` masih tiga langkah
+terpisah. Kini satu transaction: kunci status, baca qty lama, lepas tautan,
+hitung ulang ringkasan.
 
-**R30 — validasi mendeteksi tapi tidak menolak.** Diperbaiki: POST dan PUT MTO
-mengembalikan **422 `INVALID_MTO_PARAMETERS`** dan tidak menulis apa pun. Tesnya
-membuktikan parameter lama tidak tertimpa saat PUT ditolak. Preview tetap boleh
-mengembalikan hasil kosong beserta `notes`, sesuai yang direkomendasikan.
+**R28 — recalculate setelah apply-template.** Ditambahkan. Sebelumnya template
+menyisipkan item tanpa memperbarui `direct_cost`, jadi ringkasan baru menyusul
+kalau kebetulan ada mutasi lain. **Transaksionalitas penuh apply-template belum**
+— loop-nya panjang dan menyentuh AHSP lookup; kami catat sebagai belum tuntas,
+bukan selesai.
 
-**R32 — transisi DEAL.** Dikerjakan sebagian, dan kami sebutkan batasnya dengan
-jelas.
+**R30/R19 — tipe tak dikenal ditolak.** `element_type` asing dan seluruh subtipe
+asing kini bervarian `invalid`, sehingga route membalas 422 dan **tidak menulis
+apa pun**. Sebelumnya `unknown` hanya menghasilkan nol baris tapi tetap bisa
+tersimpan.
 
-Yang sudah: baris proposal di-`SELECT ... FOR UPDATE`, ada pemeriksaan idempoten
-"kalau sudah punya project, jangan buat lagi", dan **UNIQUE INDEX
-`uq_project_proposal` pada `client_projects.proposal_id`**.
+**R05 Roof — cladding samping.** Benar, `cladding_h` diinput tapi tidak pernah
+dipakai. Kini menghasilkan `RF-SIDE-CLAD` = keliling × tinggi cladding.
 
-Index itu penjaga yang sebenarnya. `FOR UPDATE` di luar transaction tidak mengunci
-apa pun di MySQL — kami sudah tertipu oleh itu sekali di R26 dan tidak mau
-mengulanginya sebagai perbaikan semu. Handler status ini panjang dan penuh efek
-samping (project, baseline MTO, PR); membungkusnya utuh dalam satu transaction
-adalah restrukturisasi yang kami nilai terlalu berisiko dikerjakan bersamaan
-dengan perubahan lain. Index unik memberi jaminan "1 proposal = 1 project" tanpa
-bergantung pada urutan eksekusi, dan bentrokannya dibalas 409
-`PROPOSAL_ALREADY_HAS_PROJECT`, bukan 500.
+**R09 Roof — satuan lembar.** Betul, dan ini kesalahan yang sama yang kami
+perbaiki di dinding tapi terlewat di atap: `luas / lebar_efektif` itu meter-lari,
+bukan lembar. Kini penutup atap dilaporkan **m²**, dan baris lembar hanya muncul
+kalau `sheet_len` diisi.
 
-Produksi diperiksa lebih dulu: nol proposal punya lebih dari satu project, jadi
-index aman dipasang.
+## Yang masih terbuka, dan kami sebut apa adanya
 
-**Sisa transaksionalnya (baseline MTO + PR dalam satu unit) belum tertutup** dan
-kami catat sebagai terbuka, bukan selesai.
-
-## Belum dikerjakan
-
-- **R28** apply-template atomic — belum.
-- **R31** submitted → review overwrite baseline — ini butuh workflow revisi
-  (Rev-0 immutable, buat Rev-1), bagian dari EST-MTO-024. Perubahan model, bukan
-  tambalan; kami tunggu arahan apakah ini prioritas sekarang.
-- **R06 katalog profil** — terima kasih sudah menyetujui bahwa ini tidak boleh
-  ditebak. Struktur "Approved Steel Profile Master" siap kami bangun, tapi
-  **nilai `weight/m` yang disetujui harus datang dari engineering**. Begitu ada
-  daftarnya, kami buat master + dropdown dari satu sumber + 422
-  `PROFILE_NOT_FOUND`, tanpa fallback.
+- **R32** — sisa transaksionalnya (status + project + baseline + PR dalam satu
+  unit) belum tertutup. Yang ada baru UNIQUE INDEX sebagai penjaga
+  "1 proposal = 1 project".
+- **R28** — atomicity penuh apply-template.
+- **R31** — workflow revisi proposal. Perubahan model; menunggu arahan.
+- **R06** — menunggu daftar `weight/m` yang disetujui engineering.
 
 ## Tes
 
-`tests/mto-link.ts` 74 → **82 kasus**. `test:all` **681 lulus**.
+`tests/mto-calculator.ts` 96 → **109 kasus**. `test:all` **694 lulus**.

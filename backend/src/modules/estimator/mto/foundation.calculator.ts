@@ -30,7 +30,7 @@ export function calcFoundation(p: any): MtoResult {
   const resolved = resolveVariant('foundation', p.foundation_type, 'footplate');
   if (resolved.note) notes.push(resolved.note);
   if (resolved.variant === 'unknown') {
-    return { element_type: 'foundation', variant: resolved.raw, lines: [], notes };
+    return { element_type: 'foundation', variant: 'invalid', lines: [], notes };
   }
   if (resolved.variant !== 'footplate') {
     notes.push(

@@ -16,7 +16,7 @@ export function calcRoof(p: any): MtoResult {
   const roofType = resolved.variant;
   if (resolved.note) notes.push(resolved.note);
   if (roofType === 'unknown') {
-    return { element_type: 'roof', variant: resolved.raw, lines: [], notes };
+    return { element_type: 'roof', variant: 'invalid', lines: [], notes };
   }
   const waste = num(p.waste_pct, 5);
 
@@ -59,8 +59,18 @@ export function calcRoof(p: any): MtoResult {
     if (roofType === 'tile') {
       lines.push(line('RF-TILE', `Genteng ${p.genteng_type || 'Beton'}`, netRoofArea, 'm2', num(p.waste_pct, 8), 2));
     } else {
+      // EST-MTO-R09: `luas / lebar_efektif` menghasilkan METER-LARI, bukan
+      // lembar. Menyebutnya "lbr" membuat angka itu terlihat siap dipesan
+      // padahal bukan. Jumlah lembar hanya dihitung kalau panjang sheet diketahui.
       const eff = num(p.sheet_eff_w, 1) || 1;
-      lines.push(line('RF-SHEET', `Penutup ${p.cladding_type || 'Metal'}`, netRoofArea / eff, 'lbr', waste, 0));
+      const sheetLen = num(p.sheet_len, 0);
+      lines.push(line('RF-SHEET', `Penutup ${p.cladding_type || 'Metal'}`, netRoofArea, 'm2', waste, 2));
+      if (sheetLen > 0) {
+        lines.push(line('RF-SHEET-QTY', `Lembar Penutup (${eff}m × ${sheetLen}m)`,
+          Math.ceil(netRoofArea / (eff * sheetLen)), 'lbr', waste, 0));
+      } else {
+        notes.push('Panjang sheet penutup belum diisi, jadi jumlah lembar tidak dihitung — pakai luas m² untuk sementara.');
+      }
     }
 
     const spacing = num(p.purlin_spacing, 1.2) || 1.2;
@@ -69,6 +79,15 @@ export function calcRoof(p: any): MtoResult {
     const wpm = profileWeight(purlinProfile, 6.76);
     lines.push(line('RF-PURLIN', `Gording ${purlinProfile} (${wpm} kg/m)`,
       wpm * purlinLength, 'kg', waste, 1));
+  }
+
+  // EST-MTO-R05: `cladding_h` diinput di layar atap tapi tidak pernah dipakai,
+  // jadi cladding samping (gable/dinding sopi-sopi) hilang dari MTO. Luasnya
+  // diturunkan dari keliling bangunan × tinggi cladding.
+  const claddingH = num(p.cladding_h, 0);
+  if (claddingH > 0) {
+    lines.push(line('RF-SIDE-CLAD', `Cladding Samping ${p.cladding_type || ''}`.trim(),
+      perimeter * claddingH, 'm2', waste, 2));
   }
 
   const ridge = num(p.ridge_length, 0);
