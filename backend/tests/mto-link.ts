@@ -386,6 +386,56 @@ async function main() {
     (await call('DELETE', `/estimator/proposals/${unId}/items/${itemUnId}/mto-link`, undefined, master)).status, 200);
   chk('qty manual 7 DIKEMBALIKAN, bukan tertinggal 20', await readQty(), 7);
 
+  console.log('\n22. Parameter invalid DITOLAK, tidak tersimpan (EST-MTO-R30)');
+  const propInv = await call('POST', '/estimator/proposals', { project_name: `Uji invalid ${stamp}` }, master);
+  const invId = propInv.json?.id;
+  const simpanInvalid = await call('POST', `/estimator/proposals/${invId}/mto`, {
+    element_type: 'slab', element_name: 'S-invalid',
+    parameters: { slab_type: 'concrete', area: -100, thickness: 0.12 },
+  }, master);
+  chk('POST dengan luas negatif ditolak 422', simpanInvalid.status, 422);
+  chk('kode INVALID_MTO_PARAMETERS', simpanInvalid.json?.code, 'INVALID_MTO_PARAMETERS');
+  const isiInv = await call('GET', `/estimator/proposals/${invId}/mto`, undefined, master);
+  chk('tidak ada elemen tersimpan', (isiInv.json?.elements || []).length, 0);
+
+  const valid = await call('POST', `/estimator/proposals/${invId}/mto`, {
+    element_type: 'slab', element_name: 'S-valid',
+    parameters: { slab_type: 'concrete', area: 100, thickness: 0.12 },
+  }, master);
+  chk('parameter wajar tetap tersimpan', valid.status, 200);
+  const ubahJadiInvalid = await call('PUT', `/estimator/proposals/${invId}/mto/${valid.json?.id}`, {
+    element_type: 'slab', element_name: 'S-valid',
+    parameters: { slab_type: 'concrete', area: -50, thickness: 0.12 },
+  }, master);
+  chk('PUT jadi invalid ditolak 422', ubahJadiInvalid.status, 422);
+  const setelah = await call('GET', `/estimator/proposals/${invId}/mto`, undefined, master);
+  chk('parameter lama tidak tertimpa', Number(setelah.json?.elements?.[0]?.parameters?.area), 100);
+
+  console.log('\n23. Upsert MTO + sync satu unit (EST-MTO-R27)');
+  const propUp = await call('POST', '/estimator/proposals', { project_name: `Uji upsert ${stamp}` }, master);
+  const upId = propUp.json?.id;
+  const elUp = await call('POST', `/estimator/proposals/${upId}/mto`, {
+    element_type: 'column', element_name: 'K1',
+    parameters: { col_type: 'beton', B: 0.4, H: 0.4, height_per_floor: 3, floors: 1, qty_per_floor: 10 },
+  }, master);
+  const ahspUp = await call('POST', '/estimator/ahsp', {
+    kode: `TSTP.${stamp}`, name: `Beton Upsert ${stamp}`, satuan: 'm3', status: 'active',
+    items: [{ section: 'B', resource_type: 'material', resource_name: 'Beton', resource_satuan: 'm3', koefisien: 1, resource_harga: 300000 }],
+  }, master);
+  const itemUp = await call('POST', `/estimator/proposals/${upId}/items`, { ahsp_id: ahspUp.json?.id, qty: 1 }, master);
+  await call('PUT', `/estimator/proposals/${upId}/items/${itemUp.json?.id}/mto-link`,
+    { element_id: elUp.json?.id, line_code: 'COL-CONC' }, master);
+
+  // POST ulang dengan NAMA SAMA tapi tipe WF → COL-CONC lenyap
+  const upsertWf = await call('POST', `/estimator/proposals/${upId}/mto`, {
+    element_type: 'column', element_name: 'K1',
+    parameters: { col_type: 'wf', wf_profile: 'WF200x100', height_per_floor: 3, floors: 1, qty_per_floor: 10 },
+  }, master);
+  chk('upsert yang menghapus baris tertaut ditolak 409', upsertWf.status, 409);
+  const cekUp = await call('GET', `/estimator/proposals/${upId}/mto`, undefined, master);
+  chk('elemen TIDAK ikut berubah — masih beton',
+    cekUp.json?.elements?.[0]?.parameters?.col_type, 'beton');
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }

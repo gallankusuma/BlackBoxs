@@ -1613,24 +1613,27 @@ router.post('/proposals/:proposalId/items', authMiddleware, async (req: Request,
     const unitPrice = parseFloat(ahsp.harga_satuan as any) || 0;
     const totalPrice = qtyValue * unitPrice;
     
-    const result = await dbRun(
-      `INSERT INTO proposal_items 
-       (proposal_id, discipline_id, sub_discipline_id, ahsp_id, 
-        ahsp_code_snapshot, ahsp_name_snapshot, unit_snapshot, unit_price_snapshot,
-        qty, total_price, order_no)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      // `discipline_id` dan `sub_discipline_id` opsional. Tanpa `?? null`,
-      // menambah item tanpa memilih disiplin mengirim `undefined` ke driver dan
-      // seluruh permintaan gagal 500 — padahal kolomnya memang boleh kosong.
-      [proposalId, discipline_id ?? null, sub_discipline_id ?? null, ahsp_id,
-       ahsp.kode, ahsp.name, ahsp.satuan, unitPrice,
-       qtyValue, totalPrice, orderNo]
-    );
-    
-    // Recalculate proposal totals
-    await recalculateProposal(proposalId as string);
+    // EST-MTO-R29: mutasi item dan penghitungan ulang ringkasan adalah SATU unit.
+    //
+    // Melempar error dari recalculateProposal() tidak bisa membatalkan SQL yang
+    // sudah ter-commit sebelumnya. Kalau recalc gagal setelah item berubah,
+    // yang tersisa: baris sudah berubah, header belum, dan klien menerima 500.
+    const insertedId = await withTransaction(async tx => {
+      const r = await tx.run(
+        `INSERT INTO proposal_items
+         (proposal_id, discipline_id, sub_discipline_id, ahsp_id,
+          ahsp_code_snapshot, ahsp_name_snapshot, unit_snapshot, unit_price_snapshot,
+          qty, total_price, order_no)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [proposalId, discipline_id ?? null, sub_discipline_id ?? null, ahsp_id,
+         ahsp.kode, ahsp.name, ahsp.satuan, unitPrice,
+         qtyValue, totalPrice, orderNo]
+      );
+      await recalculateProposal(proposalId as string, tx);
+      return r.insertId;
+    });
 
-    res.status(201).json({ message: 'Item added', id: result.insertId });
+    res.status(201).json({ message: 'Item added', id: insertedId });
   } catch (error) {
     console.error('Error adding proposal item:', error);
     res.status(500).json({ error: 'Failed to add proposal item' });
@@ -1723,15 +1726,20 @@ router.put('/proposals/:proposalId/items/:itemId', authMiddleware, async (req: R
       return res.status(400).json({ error: 'No fields to update' });
     }
     
+    // EST-MTO-R29: mutasi item dan penghitungan ulang ringkasan adalah SATU unit.
+    //
+    // Melempar error dari recalculateProposal() tidak bisa membatalkan SQL yang
+    // sudah ter-commit sebelumnya. Kalau recalc gagal setelah item berubah,
+    // yang tersisa: baris sudah berubah, header belum, dan klien menerima 500.
     values.push(itemId, proposalId);
 
-    await dbRun(
-      `UPDATE proposal_items SET ${updates.join(', ')} WHERE id = ? AND proposal_id = ?`,
-      values
-    );
-    
-    // Recalculate proposal totals
-    await recalculateProposal(proposalId as string);
+    await withTransaction(async tx => {
+      await tx.run(
+        `UPDATE proposal_items SET ${updates.join(', ')} WHERE id = ? AND proposal_id = ?`,
+        values
+      );
+      await recalculateProposal(proposalId as string, tx);
+    });
 
     res.json({ message: 'Item updated' });
   } catch (error) {
@@ -1768,10 +1776,15 @@ router.delete('/proposals/:proposalId/items/:itemId', authMiddleware, async (req
 
     const { proposalId, itemId } = req.params;
     
-    await dbRun('DELETE FROM proposal_items WHERE id = ? AND proposal_id = ?', [itemId, proposalId]);
-    
-    // Recalculate proposal totals
-    await recalculateProposal(proposalId as string);
+    // EST-MTO-R29: mutasi item dan penghitungan ulang ringkasan adalah SATU unit.
+    //
+    // Melempar error dari recalculateProposal() tidak bisa membatalkan SQL yang
+    // sudah ter-commit sebelumnya. Kalau recalc gagal setelah item berubah,
+    // yang tersisa: baris sudah berubah, header belum, dan klien menerima 500.
+    await withTransaction(async tx => {
+      await tx.run('DELETE FROM proposal_items WHERE id = ? AND proposal_id = ?', [itemId, proposalId]);
+      await recalculateProposal(proposalId as string, tx);
+    });
 
     res.json({ message: 'Item deleted' });
   } catch (error) {
@@ -2008,9 +2021,16 @@ router.put('/proposals/:id/status', authMiddleware, async (req: Request, res: Re
     const userId = (req as any).userId || 1;
     const proposalId = req.params.id;
 
-    // Get current proposal
+    // EST-MTO-R32: baris proposal dikunci selama transisi.
+    //
+    // Transisi ke `deal` memicu rangkaian efek samping — buat project, tautkan
+    // project_id, salin baseline MTO, buat PR. Dua permintaan deal yang datang
+    // bersamaan bisa sama-sama lolos pemeriksaan status lalu masing-masing
+    // membuat project sendiri: satu proposal berakhir dengan dua project dan dua
+    // baseline. Lock membuat yang kedua menunggu, lalu melihat status yang sudah
+    // berubah dan berhenti.
     const proposal = await dbGet(
-      `SELECT p.*, c.id as resolved_client_id FROM proposals p LEFT JOIN clients c ON c.name COLLATE utf8mb4_unicode_ci = p.client COLLATE utf8mb4_unicode_ci WHERE p.id = ?`,
+      `SELECT p.*, c.id as resolved_client_id FROM proposals p LEFT JOIN clients c ON c.name COLLATE utf8mb4_unicode_ci = p.client COLLATE utf8mb4_unicode_ci WHERE p.id = ? FOR UPDATE`,
       [proposalId]
     ) as any;
 
@@ -2050,7 +2070,10 @@ router.put('/proposals/:id/status', authMiddleware, async (req: Request, res: Re
     let prNumber_out = null;
 
     // If deal → auto-create project
-    if (newStatus === 'deal') {
+    if (newStatus === 'deal' && proposal.project_id) {
+      // Sudah pernah jadi deal dan project-nya ada — jangan buat lagi.
+      console.log(`[Proposal ${proposalId}] sudah punya project ${proposal.project_id}, pembuatan project dilewati`);
+    } else if (newStatus === 'deal') {
       const clientId = proposal.client_id || proposal.resolved_client_id;
 
       // Generate project number: PRJ-YYYY-XXXX
@@ -2208,7 +2231,21 @@ router.put('/proposals/:id/status', authMiddleware, async (req: Request, res: Re
       pr_id: prId || null,
       pr_number: prNumber_out || null
     });
-  } catch (error) {
+  } catch (error: any) {
+    // EST-MTO-R32: kalau dua permintaan deal berlomba, yang kalah menabrak
+    // index unik. Itu bukan kesalahan sistem — proposalnya memang sudah punya
+    // project.
+    if (error?.code === 'ER_DUP_ENTRY' && String(error.message).includes('uq_project_proposal')) {
+      const existing: any = await dbGet(
+        'SELECT id, project_number FROM client_projects WHERE proposal_id = ?', [req.params.id]
+      );
+      return res.status(409).json({
+        error: 'Proposal ini sudah memiliki project. Transisi deal tidak diulang.',
+        code: 'PROPOSAL_ALREADY_HAS_PROJECT',
+        project_id: existing?.id,
+        project_number: existing?.project_number,
+      });
+    }
     console.error('Error updating proposal status:', error);
     res.status(500).json({ error: 'Failed to update status' });
   }
@@ -2550,6 +2587,16 @@ router.post('/proposals/:id/mto', authMiddleware, async (req: Request, res: Resp
     const locked = await proposalLock(proposalId);
     if (locked) return res.status(locked.status).json(locked.body);
     const mto = calculateMto(element_type, parameters);
+    // EST-MTO-R30: parameter tidak valid ditolak dan TIDAK ditulis ke database.
+    // Menyimpannya berarti engineering input keliru tersimpan sebagai sah dengan
+    // kuantitas 0 — penawaran understated, dan `notes` tidak menahan apa pun.
+    if (mto.variant === 'invalid') {
+      return res.status(422).json({
+        error: 'Parameter engineering tidak valid, MTO tidak disimpan.',
+        code: 'INVALID_MTO_PARAMETERS',
+        problems: mto.notes,
+      });
+    }
     const quantities = toLegacyQuantities(mto);
     const name = element_name || element_type;
     const paramsJson = JSON.stringify(parameters);
@@ -2559,48 +2606,63 @@ router.post('/proposals/:id/mto', authMiddleware, async (req: Request, res: Resp
     // `ON DUPLICATE KEY UPDATE`. Index lamanya memuat kolom nullable sehingga
     // tidak pernah menyala — menyimpan elemen yang sama dua kali menghasilkan
     // dua baris, dan rekap penawaran menghitungnya dua kali.
+    // EST-MTO-R27: upsert dan sinkronisasi RAB berada dalam SATU transaction.
+    //
+    // Sebelumnya upsert punya transaction sendiri dan sync transaction lain.
+    // POST bukan create-only — ia juga meng-update elemen yang sudah ada. Jadi
+    // mengirim ulang "Column K1" dengan tipe WF akan meng-commit perubahan
+    // elemennya lebih dulu, lalu sync menolak 409 karena COL-CONC yang ditaut
+    // RAB sudah lenyap. Hasilnya sama seperti R20: klien menerima gagal, tapi
+    // datanya sudah berubah.
     let existedBefore = false;
-    const id = await withTransaction(async tx => {
-      const existing: any = await tx.get(
-        `SELECT id FROM engineering_inputs
-         WHERE scope_type = 'proposal' AND scope_id = ? AND element_type = ? AND element_name = ?
-         FOR UPDATE`,
-        [proposalId, element_type, name]
-      );
-
-      if (existing) {
-        existedBefore = true;
-        await tx.run(
-          `UPDATE engineering_inputs
-           SET parameters = ?, quantities = ?, sort_order = ?, updated_at = NOW()
-           WHERE id = ?`,
-          [paramsJson, qtyJson, sort_order, existing.id]
-        );
-        return existing.id;
-      }
-
-      const inserted = await tx.run(
-        `INSERT INTO engineering_inputs
-          (scope_type, scope_id, proposal_id, project_id, element_type, element_name, parameters, quantities, sort_order)
-         VALUES ('proposal', ?, ?, NULL, ?, ?, ?, ?, ?)`,
-        [proposalId, proposalId, element_type, name, paramsJson, qtyJson, sort_order]
-      );
-      return inserted.insertId;
-    });
+    let id: number;
     let synced = 0;
     try {
-      synced = await withTransaction(tx => syncLinkedRabItems(proposalId, id, tx));
+      const result = await withTransaction(async tx => {
+        const existing: any = await tx.get(
+          `SELECT id FROM engineering_inputs
+           WHERE scope_type = 'proposal' AND scope_id = ? AND element_type = ? AND element_name = ?
+           FOR UPDATE`,
+          [proposalId, element_type, name]
+        );
+
+        let elementId: number;
+        if (existing) {
+          existedBefore = true;
+          await tx.run(
+            `UPDATE engineering_inputs
+             SET parameters = ?, quantities = ?, sort_order = ?, updated_at = NOW()
+             WHERE id = ?`,
+            [paramsJson, qtyJson, sort_order, existing.id]
+          );
+          elementId = existing.id;
+        } else {
+          const inserted = await tx.run(
+            `INSERT INTO engineering_inputs
+              (scope_type, scope_id, proposal_id, project_id, element_type, element_name, parameters, quantities, sort_order)
+             VALUES ('proposal', ?, ?, NULL, ?, ?, ?, ?, ?)`,
+            [proposalId, proposalId, element_type, name, paramsJson, qtyJson, sort_order]
+          );
+          elementId = inserted.insertId;
+        }
+
+        const n = await syncLinkedRabItems(proposalId, elementId, tx);
+        return { elementId, n };
+      });
+      id = result.elementId;
+      synced = result.n;
     } catch (syncErr: any) {
       if (syncErr?.statusCode === 409) {
         return res.status(409).json({
           error: 'Perubahan ini membuat baris MTO yang sudah ditaut ke RAB tidak ada lagi. '
-            + 'Lepas atau petakan ulang tautannya dulu.',
+            + 'Lepas atau petakan ulang tautannya dulu. Perubahan MTO dibatalkan.',
           code: 'LINKED_MTO_LINE_INVALID',
           stale_links: syncErr.stale,
         });
       }
       throw syncErr;
     }
+
     res.json({ id, quantities, lines: mto.lines, variant: mto.variant, notes: mto.notes, updated: existedBefore, rab_items_synced: synced });
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });
@@ -2627,6 +2689,13 @@ router.put('/proposals/:id/mto/:elementId', authMiddleware, async (req: Request,
     const type = element_type || existing.element_type;
     const params = Object.keys(parameters).length ? parameters : JSON.parse(existing.parameters || '{}');
     const mto = calculateMto(type, params);
+    if (mto.variant === 'invalid') {
+      return res.status(422).json({
+        error: 'Parameter engineering tidak valid, MTO tidak diubah.',
+        code: 'INVALID_MTO_PARAMETERS',
+        problems: mto.notes,
+      });
+    }
     const quantities = toLegacyQuantities(mto);
     // EST-MTO-R20: perubahan MTO dan sinkronisasi RAB harus satu transaction.
     //
@@ -2798,13 +2867,15 @@ router.put('/proposals/:id/items/:itemId/mto-link', authMiddleware, async (req: 
           restore = l?.previous_qty ?? cur?.qty ?? 0;
         } catch { restore = cur?.qty ?? 0; }
       }
-      await dbRun(
-        `UPDATE proposal_items
-         SET mto_link = NULL, qty = ?, total_price = ? * unit_price_snapshot, updated_at = NOW()
-         WHERE id = ? AND proposal_id = ?`,
-        [restore, restore, itemId, proposalId]
-      );
-      await recalculateProposal(proposalId as string);
+      await withTransaction(async tx => {
+        await tx.run(
+          `UPDATE proposal_items
+           SET mto_link = NULL, qty = ?, total_price = ? * unit_price_snapshot, updated_at = NOW()
+           WHERE id = ? AND proposal_id = ?`,
+          [restore, restore, itemId, proposalId]
+        );
+        await recalculateProposal(proposalId as string, tx);
+      });
       return res.json({ message: 'MTO link removed', mto_link: null });
     }
 
@@ -2924,7 +2995,6 @@ router.delete('/proposals/:id/items/:itemId/mto-link', authMiddleware, async (re
        WHERE id = ? AND proposal_id = ?`,
       [restoreQty, restoreQty, req.params.itemId, req.params.id]
     );
-    await recalculateProposal(req.params.id as string);
     res.json({ message: 'MTO link removed' });
   } catch (err: any) {
     res.status(500).json({ error: err.message });

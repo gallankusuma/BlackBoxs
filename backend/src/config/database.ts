@@ -1057,6 +1057,30 @@ const ensureGrnReversalSchema = async (connection: any) => {
 };
 
 
+
+// ==================== SATU PROPOSAL = SATU PROJECT (EST-MTO-R32) ====================
+// Transisi proposal ke `deal` memicu rangkaian efek samping: buat project,
+// tautkan project_id, salin baseline MTO, buat PR. Pemeriksaan status dan
+// pembuatan project berada di luar satu transaction, jadi dua permintaan deal
+// yang datang bersamaan bisa sama-sama lolos lalu masing-masing membuat project
+// — satu proposal berakhir dengan dua project dan dua baseline.
+//
+// Index unik ini adalah penjaga terakhirnya: seberapa pun rapatnya balapan,
+// database menolak project kedua untuk proposal yang sama. Lebih dapat
+// diandalkan daripada pemeriksaan di kode, karena tidak bergantung pada urutan.
+//
+// Aman dipasang: produksi diperiksa lebih dulu, nol proposal punya lebih dari
+// satu project.
+const ensureOneProjectPerProposal = async (connection: any) => {
+  const statements = [
+    `CREATE UNIQUE INDEX uq_project_proposal ON client_projects (proposal_id)`,
+  ];
+  for (const statement of statements) {
+    await execSchemaEnsure(connection, statement);
+  }
+  console.log('✅ Satu proposal satu project ensured');
+};
+
 // ==================== SCOPE MTO (EST-MTO-018) ====================
 // `engineering_inputs` memakai UNIQUE (proposal_id, project_id, element_type,
 // element_name). Dua kolom pertamanya nullable, dan MySQL tidak pernah
@@ -1489,6 +1513,7 @@ export async function initializeDatabase() {
     await ensureGeneratedPoIdempotency(connection);
     await ensureGrnCreatedBy(connection);
     await ensureMtoScopeSchema(connection);
+    await ensureOneProjectPerProposal(connection);
     await ensureDisposalSchema(connection);
     await ensureAssetStatusHistorySchema(connection);
     await ensurePermissionCatalog(connection);
