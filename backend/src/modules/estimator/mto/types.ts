@@ -55,3 +55,47 @@ export const line = (
 };
 
 export const STEEL_DENSITY = 7850; // kg/m3
+
+/**
+ * Validasi parameter teknik (EST-MTO-R19).
+ *
+ * Kalkulator sebelumnya menerima apa saja: dimensi negatif, jumlah nol, atau
+ * teks yang tidak bisa diangkakan. Semuanya menghasilkan kuantitas — kadang nol,
+ * kadang negatif — tanpa satu pun tanda bahwa masukannya keliru.
+ *
+ * Kuantitas negatif tidak pernah punya arti fisik, jadi lebih baik ditolak di
+ * sini daripada menjalar ke RAB lalu ke harga penawaran.
+ */
+export const validateParams = (elementType: string, p: any): string[] => {
+  const errors: string[] = [];
+  const check = (field: string, label: string) => {
+    const raw = p?.[field];
+    if (raw === undefined || raw === null || raw === '') return;
+    const v = num(raw, NaN);
+    if (!isFinite(v)) { errors.push(`${label} bukan angka yang valid`); return; }
+    if (v < 0) errors.push(`${label} tidak boleh negatif (${v})`);
+  };
+
+  for (const [f, label] of [
+    ['L', 'Panjang'], ['W', 'Lebar'], ['H', 'Tinggi'], ['B', 'Lebar'],
+    ['qty', 'Jumlah'], ['qty_per_floor', 'Jumlah per lantai'], ['floors', 'Jumlah lantai'],
+    ['area', 'Luas'], ['floor_area', 'Luas lantai'], ['total_length', 'Panjang total'],
+    ['thickness', 'Tebal'], ['depth', 'Kedalaman'], ['perimeter', 'Keliling'],
+    ['waste_pct', 'Persentase waste'], ['opening_pct', 'Persentase bukaan'],
+  ] as [string, string][]) check(f, label);
+
+  const slope = num(p?.slope_deg, NaN);
+  if (isFinite(slope) && (slope < 0 || slope >= 90)) {
+    errors.push(`Kemiringan atap harus di antara 0 dan 90 derajat (${slope})`);
+  }
+  const waste = num(p?.waste_pct, NaN);
+  if (isFinite(waste) && waste > 100) {
+    errors.push(`Persentase waste ${waste}% tidak masuk akal`);
+  }
+  const opening = num(p?.opening_pct, NaN);
+  if (isFinite(opening) && opening > 100) {
+    errors.push(`Persentase bukaan ${opening}% melebihi 100%`);
+  }
+
+  return errors;
+};

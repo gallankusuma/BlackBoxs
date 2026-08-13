@@ -2788,11 +2788,21 @@ router.put('/proposals/:id/items/:itemId/mto-link', authMiddleware, async (req: 
 
     // Melepas tautan: kuantitas manual kembali dipakai
     if (!element_id) {
+      // EST-MTO-R17: kalau klien tidak menyebut qty manual, pakai nilai yang
+      // tersimpan saat penautan dulu — bukan 0, yang akan menghapus kuantitas.
+      let restore = req.body.qty_manual;
+      if (restore === undefined || restore === null) {
+        const cur: any = await dbGet('SELECT mto_link, qty FROM proposal_items WHERE id = ? AND proposal_id = ?', [itemId, proposalId]);
+        try {
+          const l = typeof cur?.mto_link === 'string' ? JSON.parse(cur.mto_link) : cur?.mto_link;
+          restore = l?.previous_qty ?? cur?.qty ?? 0;
+        } catch { restore = cur?.qty ?? 0; }
+      }
       await dbRun(
         `UPDATE proposal_items
          SET mto_link = NULL, qty = ?, total_price = ? * unit_price_snapshot, updated_at = NOW()
          WHERE id = ? AND proposal_id = ?`,
-        [req.body.qty_manual ?? 0, req.body.qty_manual ?? 0, itemId, proposalId]
+        [restore, restore, itemId, proposalId]
       );
       await recalculateProposal(proposalId as string);
       return res.json({ message: 'MTO link removed', mto_link: null });
@@ -2851,8 +2861,15 @@ router.put('/proposals/:id/items/:itemId/mto-link', authMiddleware, async (req: 
 
       // EST-MTO-R13: RAB selalu net; gross disimpan sebagai informasi procurement.
       const value = line.net_quantity;
+      // EST-MTO-R17: kuantitas manual sebelum penautan disimpan, supaya melepas
+      // tautan bisa mengembalikannya. Tanpa ini, unlink meninggalkan angka hasil
+      // MTO seolah-olah itu isian manual user.
+      const priorRow: any = await tx.get(
+        'SELECT qty FROM proposal_items WHERE id = ? AND proposal_id = ?', [itemId, proposalId]
+      );
       const mtoLink = {
         element_id: element.id,
+        previous_qty: Number(priorRow?.qty ?? 0),
         element_type: element.element_type,
         element_name: element.element_name,
         line_code: line.code,
@@ -2890,9 +2907,22 @@ router.delete('/proposals/:id/items/:itemId/mto-link', authMiddleware, async (re
     const lockedUnlink = await proposalLock(req.params.id);
     if (lockedUnlink) return res.status(lockedUnlink.status).json(lockedUnlink.body);
 
-    await dbRun(
-      `UPDATE proposal_items SET mto_link = NULL WHERE id = ? AND proposal_id = ?`,
+    // EST-MTO-R17: kembalikan kuantitas manual yang tersimpan saat penautan.
+    const curItem: any = await dbGet(
+      'SELECT mto_link, qty FROM proposal_items WHERE id = ? AND proposal_id = ?',
       [req.params.itemId, req.params.id]
+    );
+    let restoreQty = Number(curItem?.qty ?? 0);
+    try {
+      const l = typeof curItem?.mto_link === 'string' ? JSON.parse(curItem.mto_link) : curItem?.mto_link;
+      if (l && l.previous_qty !== undefined) restoreQty = Number(l.previous_qty);
+    } catch { /* biarkan pakai qty sekarang */ }
+
+    await dbRun(
+      `UPDATE proposal_items
+       SET mto_link = NULL, qty = ?, total_price = ? * unit_price_snapshot, updated_at = NOW()
+       WHERE id = ? AND proposal_id = ?`,
+      [restoreQty, restoreQty, req.params.itemId, req.params.id]
     );
     await recalculateProposal(req.params.id as string);
     res.json({ message: 'MTO link removed' });

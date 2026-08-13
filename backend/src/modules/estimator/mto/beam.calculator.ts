@@ -76,5 +76,26 @@ export function calcBeam(p: any): MtoResult {
       count * stLen * stArea * STEEL_DENSITY, 'kg', waste, 1));
   }
 
+  // EST-MTO-R05: gording pada balok WF, dan ring balk — keduanya diinput di
+  // layar tapi tidak pernah keluar dari kalkulator.
+  if (beamType === 'wf') {
+    const purlinLen = num(p.purlin_length);
+    if (purlinLen > 0) {
+      const profile = String(p.purlin_profile || 'C150x65');
+      const wpm = profileWeight(profile, 6.76);
+      lines.push(line('BM-PURLIN', `Gording ${profile} (${wpm} kg/m)`, wpm * purlinLen, 'kg', waste, 1));
+    }
+  }
+
+  const rbLen = num(p.rb_length), rbB = num(p.rb_B), rbH = num(p.rb_H);
+  if (rbLen > 0 && rbB > 0 && rbH > 0) {
+    lines.push(line('BM-RB-CONC', 'Beton Ring Balk', rbB * rbH * rbLen, 'm3', waste));
+    lines.push(line('BM-RB-FORM', 'Bekisting Ring Balk', (2 * rbH + rbB) * rbLen, 'm2', waste));
+    const rbDia = meters(p, 'rb_rebar_dia', 0.013);
+    const rbArea = Math.PI * (rbDia / 2) ** 2;
+    lines.push(line('BM-RB-REBAR', `Besi Ring Balk D${num(p.rb_rebar_dia, 13)}`,
+      num(p.rb_rebar_count, 4) * rbLen * rbArea * STEEL_DENSITY, 'kg', waste, 1));
+  }
+
   return { element_type: 'beam', variant: beamType, lines, notes };
 }

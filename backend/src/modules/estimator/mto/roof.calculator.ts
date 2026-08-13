@@ -1,4 +1,4 @@
-import { MtoResult, line, num } from './types';
+import { MtoResult, line, num, STEEL_DENSITY } from './types';
 import { profileWeight } from './profiles';
 import { resolveVariant } from './contract';
 
@@ -41,6 +41,19 @@ export function calcRoof(p: any): MtoResult {
     const t = num(p.dak_thick, 0.12);
     lines.push(line('RF-CONC', 'Beton Dak', floorArea * t, 'm3', waste));
     lines.push(line('RF-FORM', 'Bekisting Dak', floorArea, 'm2', waste, 2));
+
+    // EST-MTO-R12: dak beton sebelumnya hanya menghasilkan beton dan bekisting,
+    // tanpa pembesian sama sekali. Layar atap belum meminta diameter dan jarak
+    // tulangan, jadi dipakai asumsi lazim — dan asumsinya dicatat, tidak
+    // disembunyikan di dalam angka.
+    const dia = num(p.dak_rebar_dia, 10) / 1000;
+    const spacing = num(p.dak_rebar_spacing, 0.15) || 0.15;
+    const area = Math.PI * (dia / 2) ** 2;
+    const rebarKg = (floorArea / spacing) * 2 * area * STEEL_DENSITY;
+    lines.push(line('RF-REBAR', `Besi Dak D${num(p.dak_rebar_dia, 10)}`, rebarKg, 'kg', waste, 1));
+    if (!p.dak_rebar_dia) {
+      notes.push(`Pembesian dak memakai asumsi D${num(p.dak_rebar_dia, 10)} jarak ${spacing} m dua arah — sesuaikan bila berbeda.`);
+    }
     notes.push('Atap dak: tidak menghasilkan gording maupun penutup atap lembaran.');
   } else {
     if (roofType === 'tile') {

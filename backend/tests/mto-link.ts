@@ -357,6 +357,35 @@ async function main() {
   });
   chk('tidak ada tautan RAB yang yatim', orphan.length, 0);
 
+  console.log('\n21. Unlink mengembalikan kuantitas manual (EST-MTO-R17)');
+  const propUn = await call('POST', '/estimator/proposals', { project_name: `Uji unlink ${stamp}` }, master);
+  const unId = propUn.json?.id;
+  const elUn = await call('POST', `/estimator/proposals/${unId}/mto`, {
+    element_type: 'slab', element_name: 'S1',
+    parameters: { slab_type: 'concrete', area: 200, thickness: 0.1, waste_pct: 5 },
+  }, master);
+  const ahspUn = await call('POST', '/estimator/ahsp', {
+    kode: `TSTU.${stamp}`, name: `Beton Unlink ${stamp}`, satuan: 'm3', status: 'active',
+    items: [{ section: 'B', resource_type: 'material', resource_name: 'Beton', resource_satuan: 'm3', koefisien: 1, resource_harga: 200000 }],
+  }, master);
+  const itemUn = await call('POST', `/estimator/proposals/${unId}/items`, { ahsp_id: ahspUn.json?.id, qty: 7 }, master);
+  const itemUnId = itemUn.json?.id;
+
+  const readQty = async () => {
+    const r = await call('GET', `/estimator/proposals/${unId}/items`, undefined, master);
+    const rows = Array.isArray(r.json) ? r.json : [];
+    return Number(rows.find((i: any) => Number(i.id) === Number(itemUnId))?.qty);
+  };
+  chk('qty manual awal 7', await readQty(), 7);
+
+  await call('PUT', `/estimator/proposals/${unId}/items/${itemUnId}/mto-link`,
+    { element_id: elUn.json?.id, line_code: 'SLB-CONC' }, master);
+  chk('setelah ditaut, qty ikut MTO (20 net)', await readQty(), 20);
+
+  chk('lepas tautan',
+    (await call('DELETE', `/estimator/proposals/${unId}/items/${itemUnId}/mto-link`, undefined, master)).status, 200);
+  chk('qty manual 7 DIKEMBALIKAN, bukan tertinggal 20', await readQty(), 7);
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }

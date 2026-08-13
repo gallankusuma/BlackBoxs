@@ -169,5 +169,73 @@ for (const t of ['concrete', 'keramik', 'plate_bordes', 'parquet']) {
   chk(`lantai "${t}" menghasilkan baris`, sl.lines.length > 0, true);
 }
 
+
+console.log('\n17. Sloof, ring balk, dan gording jadi keluaran (EST-MTO-R05)');
+const colSloof = calculateMto('column', {
+  col_type: 'beton', B: 0.3, H: 0.3, height_per_floor: 3, floors: 1, qty_per_floor: 8,
+  sloof_length: 200, sloof_w: 0.3, sloof_h: 0.5, sloof_rebar_dia: 16, waste_pct: 0,
+});
+chk('beton sloof muncul', !!lineOf(colSloof, 'COL-SLOOF-CONC'), true);
+near('volume sloof = 0.3×0.5×200', lineOf(colSloof, 'COL-SLOOF-CONC').net_quantity, 30, 0.01);
+chk('besi sloof muncul', !!lineOf(colSloof, 'COL-SLOOF-REBAR'), true);
+chk('tanpa input sloof, tidak ada barisnya',
+  !!lineOf(calculateMto('column', { col_type: 'beton', B: 0.3, H: 0.3, qty_per_floor: 8 }), 'COL-SLOOF-CONC'), false);
+
+const beamRb = calculateMto('beam', {
+  beam_type: 'beton', B: 0.25, H: 0.5, total_length: 100,
+  rb_length: 80, rb_B: 0.15, rb_H: 0.25, rb_rebar_dia: 13, waste_pct: 0,
+});
+near('volume ring balk = 0.15×0.25×80', lineOf(beamRb, 'BM-RB-CONC').net_quantity, 3, 0.01);
+
+const beamWfPurlin = calculateMto('beam', {
+  beam_type: 'wf', wf_profile_beam: 'WF200x100', total_length: 100,
+  purlin_length: 500, purlin_profile: 'C150x65', waste_pct: 0,
+});
+chk('gording ikut keluar di cabang WF', !!lineOf(beamWfPurlin, 'BM-PURLIN'), true);
+near('gording = 6.76 × 500', lineOf(beamWfPurlin, 'BM-PURLIN').net_quantity, 3380, 1);
+
+console.log('\n18. Lembar cladding memperhitungkan panjang sheet (EST-MTO-R09)');
+const clad = calculateMto('wall', { wall_type: 'cladding_zincalume', area: 100, zinc_eff_w: 0.85, zinc_len: 6, waste_pct: 0 });
+near('lembar = ceil(100 / (0.85×6))', lineOf(clad, 'WAL-CLAD-SHEET').net_quantity, 20, 0.01);
+const cladNoLen = calculateMto('wall', { wall_type: 'cladding_zincalume', area: 100, zinc_eff_w: 0.85 });
+chk('tanpa panjang sheet: tidak menebak', !!lineOf(cladNoLen, 'WAL-CLAD-SHEET'), false);
+chk('dan diberi catatan', cladNoLen.notes.some(n => n.includes('Panjang sheet')), true);
+
+console.log('\n19. Rangka kaca adalah TIPE, bukan panjang (EST-MTO-R10)');
+const glassAlu = calculateMto('wall', { wall_type: 'kaca', area: 50, glass_thick: 8, glass_frame: 'aluminium' });
+const frame = lineOf(glassAlu, 'WAL-FRAME');
+chk('rangka aluminium muncul', !!frame, true);
+chk('kuantitasnya BUKAN nol', frame.net_quantity > 0, true);
+chk('satuannya m2, bukan m', frame.unit, 'm2');
+const glassNone = calculateMto('wall', { wall_type: 'kaca', area: 50, glass_frame: 'frameless' });
+chk('frameless tidak menghasilkan rangka', !!lineOf(glassNone, 'WAL-FRAME'), false);
+
+console.log('\n20. Dak beton punya pembesian (EST-MTO-R12)');
+const dak = calculateMto('roof', { roof_type: 'beton_dak', floor_area: 200, perimeter: 60, dak_thick: 0.12, waste_pct: 0 });
+chk('beton dak ada', !!lineOf(dak, 'RF-CONC'), true);
+chk('pembesian dak ada', !!lineOf(dak, 'RF-REBAR'), true);
+chk('asumsinya dicatat', dak.notes.some(n => n.includes('asumsi')), true);
+
+console.log('\n21. Sumber bukaan dinding dinyatakan tegas (EST-MTO-R08)');
+const bothSources = calculateMto('wall', {
+  wall_type: 'bata_merah', area: 100, thickness_cm: 15, opening_pct: 30,
+  door_qty: 2, door_w: 0.9, door_h: 2.1,
+});
+near('rincian yang dipakai (3.78), bukan 30%', lineOf(bothSources, 'WAL-AREA').net_quantity, 96.22, 0.01);
+chk('persentase yang diabaikan disebutkan', bothSources.notes.some(n => n.includes('diabaikan')), true);
+const pctOnly = calculateMto('wall', { wall_type: 'bata_merah', area: 100, thickness_cm: 15, opening_pct: 20 });
+near('tanpa rincian, persentase dipakai', lineOf(pctOnly, 'WAL-AREA').net_quantity, 80, 0.01);
+
+console.log('\n22. Parameter mustahil ditolak (EST-MTO-R19)');
+const negatif = calculateMto('slab', { slab_type: 'concrete', area: -100, thickness: 0.12 });
+chk('luas negatif tidak menghasilkan baris', negatif.lines.length, 0);
+chk('diberi alasan', negatif.notes.length > 0, true);
+const miring = calculateMto('roof', { roof_type: 'zincalume', floor_area: 100, perimeter: 40, slope_deg: 95 });
+chk('kemiringan 95° ditolak', miring.lines.length, 0);
+const wasteGila = calculateMto('slab', { slab_type: 'concrete', area: 100, thickness: 0.12, waste_pct: 500 });
+chk('waste 500% ditolak', wasteGila.lines.length, 0);
+const wajar = calculateMto('slab', { slab_type: 'concrete', area: 100, thickness: 0.12, waste_pct: 5 });
+chk('parameter wajar tetap jalan', wajar.lines.length > 0, true);
+
 console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
 process.exit(fail ? 1 : 0);

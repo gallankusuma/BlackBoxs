@@ -1838,3 +1838,56 @@ otomatis di GitHub. Belum ada workflow CI di repo. Kami belum menambahkannya
 karena itu perubahan infrastruktur yang sebaiknya diputuskan pemilik repo dulu —
 terutama soal database uji di runner. Kalau memang diinginkan, sebut saja dan
 kami siapkan.
+
+
+---
+
+# TANGGAPAN TIM DEVELOPMENT — backlog P1 engineering
+
+Commercial sudah bersih (R20–R26 tertutup), jadi backlog engineering dikerjakan.
+
+**R05 — sloof, ring balk, gording.** Ketiganya diinput di layar tapi tidak pernah
+menjadi keluaran kalkulator, jadi volumenya hilang sepenuhnya dari MTO dan RAB.
+Kini ada `COL-SLOOF-CONC/FORM/REBAR`, `BM-RB-CONC/FORM/REBAR`, dan `BM-PURLIN`
+ikut keluar di cabang WF (sebelumnya hanya di cabang purlin). Semuanya hanya
+muncul kalau parameternya memang diisi.
+
+**R08 — dua sumber bukaan.** Rincian pintu/jendela menang karena lebih spesifik,
+tapi kalau persentase juga diisi, angka yang diabaikan disebutkan di `notes`.
+Estimator jadi tahu angka mana yang masuk, bukan menebak.
+
+**R09 — lembar cladding.** Sebelumnya `luas / lebar_efektif` — itu satuannya
+meter-lari, bukan lembar. Kini `ceil(luas / (lebar × panjang_sheet))`. Kalau
+panjang sheet belum diisi, jumlah lembar **tidak ditebak**; diberi catatan.
+
+**R10 — rangka kaca.** `glass_frame` adalah tipe (`aluminium`/`spider`/
+`frameless`), tapi backend memanggil `num()` atasnya sehingga selalu 0 — barisnya
+muncul dengan kuantitas nol dan tidak berarti apa-apa. Kini rangka diukur per m²
+bidang kaca dengan label sesuai tipenya, dan `frameless` tidak menghasilkan baris
+rangka sama sekali.
+
+**R12 — pembesian dak.** Ditambahkan. Layar atap belum meminta diameter dan jarak
+tulangan, jadi dipakai asumsi lazim (D10 jarak 15 cm dua arah) — dan asumsinya
+ditulis di `notes`, tidak disembunyikan di dalam angka.
+
+**R17 — unlink mengembalikan qty manual.** Kuantitas sebelum penautan disimpan di
+`mto_link.previous_qty`, lalu dikembalikan saat dilepas. Sebelumnya unlink hanya
+menyetel `mto_link = NULL` sehingga angka hasil MTO tertinggal seolah-olah isian
+manual user.
+
+**R19 — validasi parameter.** `validateParams()` menolak dimensi negatif, angka
+yang tidak bisa diangkakan, kemiringan atap di luar 0–90°, serta waste dan bukaan
+di atas 100%. Yang ditolak mengembalikan nol baris beserta alasannya — konsisten
+dengan perlakuan enum tak dikenal.
+
+## Yang TIDAK dikerjakan, dan alasannya
+
+**R06 — katalog profil berbeda.** UI menyebut `C150x65` = 2,24 kg/m, backend
+6,76 kg/m; UI punya `UNP120`, backend `UNP125`. Ini bukan soal teknis melainkan
+soal angka mana yang benar, dan langsung memengaruhi harga baja. Kami tidak mau
+memilih sendiri. **Butuh keputusan pemilik pekerjaan atau tim engineering.**
+
+## Tes
+
+`tests/mto-calculator.ts` 71 → **96 kasus**, `tests/mto-link.ts` 70 → **74**.
+`test:all` **673 lulus**. `vue-tsc` dan `npm run build` bersih.

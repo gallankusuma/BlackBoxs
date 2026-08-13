@@ -86,5 +86,18 @@ export function calcColumn(p: any): MtoResult {
       perColumn * totalColumns * stLen * stArea * STEEL_DENSITY, 'kg', waste, 1));
   }
 
+  // EST-MTO-R05: sloof diinput di layar kolom tapi tidak pernah menjadi keluaran
+  // kalkulator, jadi volumenya hilang dari MTO maupun RAB. Hanya dihitung kalau
+  // memang diisi.
+  const sloofLen = num(p.sloof_length), sloofW = num(p.sloof_w), sloofH = num(p.sloof_h);
+  if (sloofLen > 0 && sloofW > 0 && sloofH > 0) {
+    lines.push(line('COL-SLOOF-CONC', 'Beton Sloof', sloofW * sloofH * sloofLen, 'm3', waste));
+    lines.push(line('COL-SLOOF-FORM', 'Bekisting Sloof', 2 * sloofH * sloofLen, 'm2', waste));
+    const sDia = meters(p, 'sloof_rebar_dia', 0.016);
+    const sArea = Math.PI * (sDia / 2) ** 2;
+    lines.push(line('COL-SLOOF-REBAR', `Besi Sloof D${num(p.sloof_rebar_dia, 16)}`,
+      num(p.sloof_rebar_count, 4) * sloofLen * sArea * STEEL_DENSITY, 'kg', waste, 1));
+  }
+
   return { element_type: 'column', variant: colType, lines, notes };
 }

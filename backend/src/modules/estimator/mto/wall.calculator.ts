@@ -31,13 +31,33 @@ export function calcWall(p: any): MtoResult {
   // Bukaan: pakai hitungan pintu/jendela kalau ada, kalau tidak pakai persentase
   const doorArea = num(p.door_qty) * num(p.door_w) * num(p.door_h);
   const windowArea = num(p.window_qty) * num(p.window_w) * num(p.window_h);
-  let openingArea = doorArea + windowArea;
-  if (openingArea === 0 && num(p.opening_pct) > 0) {
-    openingArea = grossArea * num(p.opening_pct) / 100;
+  // EST-MTO-R08: bukaan punya DUA sumber — rincian pintu/jendela dan persentase.
+  // Yang dipakai harus jelas, bukan diam-diam salah satunya. Rincian menang
+  // karena lebih spesifik, dan kalau keduanya diisi perbedaannya disebutkan
+  // supaya estimator tahu angka mana yang masuk.
+  const detailArea = doorArea + windowArea;
+  const pctArea = num(p.opening_pct) > 0 ? grossArea * num(p.opening_pct) / 100 : 0;
+
+  let openingArea = 0;
+  if (detailArea > 0) {
+    openingArea = detailArea;
+    if (pctArea > 0) {
+      notes.push(
+        `Bukaan dihitung dari rincian pintu/jendela (${detailArea.toFixed(2)} m2). `
+        + `Persentase bukaan ${num(p.opening_pct)}% (${pctArea.toFixed(2)} m2) diabaikan.`
+      );
+    }
+  } else if (pctArea > 0) {
+    openingArea = pctArea;
+    notes.push(`Bukaan dihitung dari persentase ${num(p.opening_pct)}% karena rincian pintu/jendela belum diisi.`);
   }
+
   const netArea = Math.max(grossArea - openingArea, 0);
   if (openingArea > 0) {
-    notes.push(`Luas bukaan ${openingArea.toFixed(2)} m2 dikurangkan dari ${grossArea.toFixed(2)} m2.`);
+    notes.push(`Luas bersih ${netArea.toFixed(2)} m2 = bruto ${grossArea.toFixed(2)} m2 − bukaan ${openingArea.toFixed(2)} m2.`);
+  }
+  if (openingArea > grossArea) {
+    notes.push('Luas bukaan melebihi luas bruto — periksa kembali datanya.');
   }
 
   // thickness_cm (frontend) maupun thickness_mm (backend lama) sama-sama diterima
@@ -50,13 +70,31 @@ export function calcWall(p: any): MtoResult {
   const lines = [];
 
   if (wallType === 'cladding') {
-    const eff = num(p.zinc_eff_w, 1) || 1;
+    // EST-MTO-R09: jumlah lembar dulu hanya luas dibagi lebar efektif, sehingga
+    // satuannya sebenarnya meter-lari, bukan lembar. Panjang sheet ikut
+    // diperhitungkan supaya angkanya benar-benar jumlah lembar yang dipesan.
+    const eff = num(p.zinc_eff_w, 0.85) || 0.85;
+    const sheetLen = num(p.zinc_len, 0);
     lines.push(line('WAL-CLAD', 'Cladding Zincalume', netArea, 'm2', waste, 2));
-    lines.push(line('WAL-CLAD-SHEET', 'Lembar Cladding', netArea / eff, 'lbr', waste, 0));
+    if (sheetLen > 0) {
+      lines.push(line('WAL-CLAD-SHEET', `Lembar Cladding (${eff}m × ${sheetLen}m)`,
+        Math.ceil(netArea / (eff * sheetLen)), 'lbr', waste, 0));
+    } else {
+      notes.push('Panjang sheet cladding belum diisi, jadi jumlah lembar tidak dihitung.');
+    }
     notes.push('Cladding: tidak menghasilkan plesteran, acian, maupun volume pasangan.');
   } else if (wallType === 'glass') {
     lines.push(line('WAL-GLASS', `Kaca ${num(p.glass_thick, 8)}mm`, netArea, 'm2', waste, 2));
-    if (p.glass_frame) lines.push(line('WAL-FRAME', 'Rangka Kaca', num(p.glass_frame), 'm', waste, 1));
+    // EST-MTO-R10: `glass_frame` adalah TIPE rangka (aluminium/spider/frameless),
+    // bukan panjang. Versi lama memanggil num() atasnya sehingga selalu 0 —
+    // barisnya muncul dengan kuantitas nol dan tidak berarti apa-apa.
+    const frameType = String(p.glass_frame || '').toLowerCase();
+    if (frameType && frameType !== 'frameless') {
+      const label = frameType === 'spider' ? 'Spider System' : 'Rangka Aluminium';
+      lines.push(line('WAL-FRAME', label, netArea, 'm2', waste, 2));
+    } else if (frameType === 'frameless') {
+      notes.push('Kaca frameless: tidak ada kuantitas rangka.');
+    }
     notes.push('Dinding kaca: tidak menghasilkan plesteran maupun acian.');
   } else if (wallType === 'grc') {
     lines.push(line('WAL-GRC', 'Papan GRC', netArea, 'm2', waste, 2));
