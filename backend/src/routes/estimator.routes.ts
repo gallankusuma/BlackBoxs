@@ -1538,6 +1538,32 @@ router.post('/proposals/:id/apply-template', authMiddleware, async (req: Request
 // Delete proposal
 router.delete('/proposals/:id', authMiddleware, async (req: Request, res: Response) => {
   try {
+    // EST-MTO-R25: penghapusan proposal sebelumnya tanpa pemeriksaan apa pun.
+    //
+    // Proposal berstatus `deal` adalah kesepakatan yang sudah melahirkan project,
+    // PO, dan pekerjaan di lapangan. Menghapusnya membuat dokumen turunan itu
+    // kehilangan sumbernya. Yang submitted pun sudah dikirim ke pelanggan.
+    const proposal: any = await dbGet(
+      'SELECT id, status, project_id FROM proposals WHERE id = ?', [req.params.id]
+    );
+    if (!proposal) return res.status(404).json({ error: 'Proposal tidak ditemukan' });
+
+    if (!isProposalEditable(proposal.status)) {
+      return res.status(409).json({
+        error: `Proposal berstatus "${proposal.status}" tidak bisa dihapus. Hanya draft dan review yang boleh.`,
+        code: 'PROPOSAL_LOCKED',
+        status_proposal: proposal.status,
+      });
+    }
+
+    if (proposal.project_id) {
+      return res.status(409).json({
+        error: 'Proposal ini sudah terhubung ke project, jadi tidak bisa dihapus.',
+        code: 'PROPOSAL_HAS_PROJECT',
+        project_id: proposal.project_id,
+      });
+    }
+
     await dbRun('DELETE FROM proposals WHERE id = ?', [req.params.id]);
     res.json({ message: 'Proposal deleted' });
   } catch (error) {
@@ -2639,34 +2665,57 @@ router.delete('/proposals/:id/mto/:elementId', authMiddleware, async (req: Reque
     const locked = await proposalLock(req.params.id);
     if (locked) return res.status(locked.status).json(locked.body);
 
-    // EST-MTO-R16: elemen yang masih dirujuk item RAB tidak boleh dihapus.
+    // EST-MTO-R16 + R26: pemeriksaan tautan dan penghapusan dilakukan dalam SATU
+    // transaction, dengan baris elemen dikunci lebih dulu.
     //
-    // Tanpa ini, menghapus MTO meninggalkan item RAB dengan kuantitas yang
-    // sumber engineering-nya sudah tidak ada — penawaran memuat angka yang tak
-    // bisa ditelusuri lagi.
-    const linkedItems: any[] = await dbAll(
-      'SELECT id, mto_link FROM proposal_items WHERE proposal_id = ? AND mto_link IS NOT NULL',
-      [req.params.id]
-    );
-    const stillLinked = linkedItems.filter((it: any) => {
-      try {
-        const l = typeof it.mto_link === 'string' ? JSON.parse(it.mto_link) : it.mto_link;
-        return l && Number(l.element_id) === Number(req.params.elementId);
-      } catch { return false; }
+    // Memeriksa lalu menghapus di luar transaction masih menyisakan celah:
+    // penautan yang berjalan bersamaan bisa menyimpan tautannya tepat setelah
+    // pemeriksaan lewat, sehingga item RAB menunjuk elemen yang sudah terhapus.
+    // Kunci di kedua sisi membuat yang datang belakangan menunggu dan melihat
+    // keadaan terbaru.
+    const delOutcome = await withTransaction(async tx => {
+      const element: any = await tx.get(
+        `SELECT id FROM engineering_inputs
+         WHERE id = ? AND scope_type = 'proposal' AND scope_id = ? FOR UPDATE`,
+        [req.params.elementId, req.params.id]
+      );
+      if (!element) {
+        return { error: 404, body: { error: 'Elemen MTO tidak ditemukan pada proposal ini' } };
+      }
+
+      const linkedItems: any[] = await tx.all(
+        'SELECT id, mto_link FROM proposal_items WHERE proposal_id = ? AND mto_link IS NOT NULL',
+        [req.params.id]
+      );
+      const stillLinked = linkedItems.filter((it: any) => {
+        try {
+          const l = typeof it.mto_link === 'string' ? JSON.parse(it.mto_link) : it.mto_link;
+          return l && Number(l.element_id) === Number(req.params.elementId);
+        } catch { return false; }
+      });
+
+      if (stillLinked.length > 0) {
+        return {
+          error: 409,
+          body: {
+            error: `Elemen MTO ini masih dipakai ${stillLinked.length} item RAB. Lepas atau petakan ulang tautannya dulu sebelum menghapus.`,
+            code: 'MTO_HAS_LINKED_RAB',
+            linked_item_ids: stillLinked.map((it: any) => it.id),
+          },
+        };
+      }
+
+      await tx.run(
+        `DELETE FROM engineering_inputs WHERE id = ? AND scope_type = 'proposal' AND scope_id = ?`,
+        [req.params.elementId, req.params.id]
+      );
+      return { ok: true as const };
     });
 
-    if (stillLinked.length > 0) {
-      return res.status(409).json({
-        error: `Elemen MTO ini masih dipakai ${stillLinked.length} item RAB. Lepas atau petakan ulang tautannya dulu sebelum menghapus.`,
-        code: 'MTO_HAS_LINKED_RAB',
-        linked_item_ids: stillLinked.map((it: any) => it.id),
-      });
+    if ('error' in delOutcome) {
+      return res.status(delOutcome.error).json(delOutcome.body);
     }
 
-    await dbRun(
-      `DELETE FROM engineering_inputs WHERE id = ? AND scope_type = 'proposal' AND scope_id = ?`,
-      [req.params.elementId, req.params.id]
-    );
     res.json({ message: 'Deleted' });
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });
@@ -2758,66 +2807,78 @@ router.put('/proposals/:id/items/:itemId/mto-link', authMiddleware, async (req: 
     //
     // Sekarang klien hanya menyebut elemen dan kode barisnya; kuantitasnya
     // dihitung ulang di server dari parameter elemen tersebut.
-    const element: any = await dbGet(
-      `SELECT id, element_type, element_name, parameters FROM engineering_inputs WHERE id = ? AND scope_type = 'proposal' AND scope_id = ?`,
-      [element_id, proposalId]
-    );
-    if (!element) {
-      return res.status(404).json({ error: 'Elemen MTO tidak ditemukan pada proposal ini', code: 'ELEMENT_NOT_IN_PROPOSAL' });
+    // EST-MTO-R26: pembacaan elemen dan penulisan tautan dilakukan dalam SATU
+    // transaction, dengan barisnya dikunci `FOR UPDATE`.
+    //
+    // `FOR UPDATE` di luar transaction tidak mengunci apa pun di MySQL, jadi
+    // membungkusnya bukan formalitas: tanpa ini, menautkan dan menghapus elemen
+    // yang sama secara bersamaan bisa saling mendahului — penghapusan memeriksa
+    // tautan sebelum tautannya tersimpan, lalu tautan itu menunjuk elemen yang
+    // sudah lenyap.
+    const linkOutcome = await withTransaction(async tx => {
+      const element: any = await tx.get(
+        `SELECT id, element_type, element_name, parameters FROM engineering_inputs
+         WHERE id = ? AND scope_type = 'proposal' AND scope_id = ? FOR UPDATE`,
+        [element_id, proposalId]
+      );
+      if (!element) {
+        return { error: 404, body: { error: 'Elemen MTO tidak ditemukan pada proposal ini', code: 'ELEMENT_NOT_IN_PROPOSAL' } };
+      }
+
+      const params = typeof element.parameters === 'string' ? JSON.parse(element.parameters || '{}') : (element.parameters || {});
+      const mto = calculateMto(element.element_type, params);
+
+      const wantedCode = line_code || field;
+      const line = mto.lines.find(l => l.code === wantedCode);
+      if (!line) {
+        return {
+          error: 404,
+          body: {
+            error: `Baris MTO "${wantedCode}" tidak ada pada elemen ini`,
+            code: 'LINE_NOT_FOUND',
+            available: mto.lines.map(l => ({ code: l.code, label: l.label, unit: l.unit })),
+          },
+        };
+      }
+
+      const unitCheck = checkUnitCompatibility(line.unit, item.unit_snapshot);
+      if (!unitCheck.compatible) {
+        return {
+          error: 409,
+          body: { error: unitCheck.reason, code: 'UNIT_MISMATCH', mto_unit: line.unit, rab_unit: item.unit_snapshot },
+        };
+      }
+
+      // EST-MTO-R13: RAB selalu net; gross disimpan sebagai informasi procurement.
+      const value = line.net_quantity;
+      const mtoLink = {
+        element_id: element.id,
+        element_type: element.element_type,
+        element_name: element.element_name,
+        line_code: line.code,
+        basis: 'net',
+        gross_quantity: line.gross_quantity,
+        waste_percent: line.waste_percent,
+        value,
+        unit: line.unit,
+      };
+
+      await tx.run(
+        `UPDATE proposal_items
+         SET mto_link = ?, qty = ?, total_price = ? * unit_price_snapshot, updated_at = NOW()
+         WHERE id = ? AND proposal_id = ?`,
+        [JSON.stringify(mtoLink), value, value, itemId, proposalId]
+      );
+
+      await recalculateProposal(proposalId as string, tx);
+      return { ok: true as const, mtoLink, line };
+    });
+
+    if ('error' in linkOutcome) {
+      return res.status(linkOutcome.error).json(linkOutcome.body);
     }
 
-    const params = typeof element.parameters === 'string' ? JSON.parse(element.parameters || '{}') : (element.parameters || {});
-    const mto = calculateMto(element.element_type, params);
-
-    const wantedCode = line_code || field;
-    const line = mto.lines.find(l => l.code === wantedCode);
-    if (!line) {
-      return res.status(404).json({
-        error: `Baris MTO "${wantedCode}" tidak ada pada elemen ini`,
-        code: 'LINE_NOT_FOUND',
-        available: mto.lines.map(l => ({ code: l.code, label: l.label, unit: l.unit })),
-      });
-    }
-
-    // EST-MTO-014: satuan MTO harus sepadan dengan satuan item RAB
-    const unitCheck = checkUnitCompatibility(line.unit, item.unit_snapshot);
-    if (!unitCheck.compatible) {
-      return res.status(409).json({
-        error: unitCheck.reason,
-        code: 'UNIT_MISMATCH',
-        mto_unit: line.unit,
-        rab_unit: item.unit_snapshot,
-      });
-    }
-
-    // EST-MTO-R13: RAB selalu net; gross disimpan sebagai informasi untuk
-    // procurement, bukan sebagai kuantitas pekerjaan.
-    const value = line.net_quantity;
-    const mtoLink = {
-      element_id: element.id,
-      element_type: element.element_type,
-      element_name: element.element_name,
-      line_code: line.code,
-      basis: 'net',
-      gross_quantity: line.gross_quantity,
-      waste_percent: line.waste_percent,
-      value,
-      unit: line.unit,
-    };
-
-    await dbRun(
-      // Satuan item TIDAK ditimpa: `unit_snapshot` adalah snapshot dari AHSP,
-      // dan EST-MTO-014 sudah menjamin satuan MTO sepadan dengannya. (Kode lama
-      // menulis ke kolom `unit` yang bahkan tidak ada di tabel ini, sehingga
-      // endpoint ini selalu gagal 500.)
-      `UPDATE proposal_items
-       SET mto_link = ?, qty = ?, total_price = ? * unit_price_snapshot, updated_at = NOW()
-       WHERE id = ? AND proposal_id = ?`,
-      [JSON.stringify(mtoLink), value, value, itemId, proposalId]
-    );
-
-    await recalculateProposal(proposalId as string);
-    res.json({ message: 'MTO link saved', mto_link: mtoLink, line });
+    res.json({ message: 'MTO link saved', mto_link: linkOutcome.mtoLink, line: linkOutcome.line });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

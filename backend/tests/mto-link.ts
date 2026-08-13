@@ -287,6 +287,76 @@ async function main() {
     (await call('POST', `/estimator/proposals/${pid}/apply-template`,
       { template_sections: [{ code: 'A', name: 'Pekerjaan Uji' }] }, master)).status, 409);
 
+  console.log('\n17. State proposal DEAL ikut terkunci (matriks reviewer #3, #7, #9)');
+  const propDeal = await call('POST', '/estimator/proposals', { project_name: `Uji deal ${stamp}` }, master);
+  const dealId = propDeal.json?.id;
+  const ahspDeal = await call('POST', '/estimator/ahsp', {
+    kode: `TSTD.${stamp}`, name: `Beton Deal ${stamp}`, satuan: 'm3', status: 'active',
+    items: [{ section: 'B', resource_type: 'material', resource_name: 'Beton', resource_satuan: 'm3', koefisien: 1, resource_harga: 500000 }],
+  }, master);
+  const itemDeal = await call('POST', `/estimator/proposals/${dealId}/items`, { ahsp_id: ahspDeal.json?.id, qty: 2 }, master);
+  for (const st of ['review', 'submitted', 'deal']) {
+    await call('PUT', `/estimator/proposals/${dealId}/status`, { status: st }, master);
+  }
+  const cekDeal = await call('GET', `/estimator/proposals/${dealId}`, undefined, master);
+  const stDeal = (cekDeal.json?.data ?? cekDeal.json)?.status;
+  chk('proposal mencapai status deal', stDeal, 'deal');
+
+  chk('#3 hapus item deal lewat URL draft ditolak',
+    (await call('DELETE', `/estimator/proposals/${draftId}/items/${itemDeal.json?.id}`, undefined, master)).status, 404);
+  chk('#7 apply-template pada deal ditolak',
+    (await call('POST', `/estimator/proposals/${dealId}/apply-template`,
+      { template_sections: [{ code: 'A', name: 'Tambahan' }] }, master)).status, 409);
+  const delDeal = await call('DELETE', `/estimator/proposals/${dealId}`, undefined, master);
+  chk('#9 hapus proposal deal ditolak', delDeal.status, 409);
+  chk('kode PROPOSAL_LOCKED', delDeal.json?.code, 'PROPOSAL_LOCKED');
+  chk('proposal deal masih ada',
+    (await call('GET', `/estimator/proposals/${dealId}`, undefined, master)).status, 200);
+
+  console.log('\n18. Status mundur lewat endpoint status ditolak (matriks #4)');
+  const mundur = await call('PUT', `/estimator/proposals/${dealId}/status`, { status: 'draft' }, master);
+  chk('deal → draft ditolak', mundur.status >= 400, true);
+  const stillDeal = await call('GET', `/estimator/proposals/${dealId}`, undefined, master);
+  chk('status tetap deal', (stillDeal.json?.data ?? stillDeal.json)?.status, 'deal');
+
+  console.log('\n19. Proposal draft biasa tetap boleh dihapus (kontrol negatif)');
+  const propHapus = await call('POST', '/estimator/proposals', { project_name: `Uji hapus ${stamp}` }, master);
+  chk('draft boleh dihapus',
+    (await call('DELETE', `/estimator/proposals/${propHapus.json?.id}`, undefined, master)).status, 200);
+
+  console.log('\n20. Link dan hapus MTO bersamaan tidak menyisakan tautan yatim (matriks #10)');
+  const propRace = await call('POST', '/estimator/proposals', { project_name: `Uji race ${stamp}` }, master);
+  const raceId = propRace.json?.id;
+  const elRace = await call('POST', `/estimator/proposals/${raceId}/mto`, {
+    element_type: 'slab', element_name: 'S1',
+    parameters: { slab_type: 'concrete', area: 100, thickness: 0.12, waste_pct: 5 },
+  }, master);
+  const ahspRace = await call('POST', '/estimator/ahsp', {
+    kode: `TSTX.${stamp}`, name: `Beton Race ${stamp}`, satuan: 'm3', status: 'active',
+    items: [{ section: 'B', resource_type: 'material', resource_name: 'Beton', resource_satuan: 'm3', koefisien: 1, resource_harga: 100000 }],
+  }, master);
+  const itemRace = await call('POST', `/estimator/proposals/${raceId}/items`, { ahsp_id: ahspRace.json?.id, qty: 1 }, master);
+
+  const [linkRes, delRes] = await Promise.all([
+    call('PUT', `/estimator/proposals/${raceId}/items/${itemRace.json?.id}/mto-link`,
+      { element_id: elRace.json?.id, line_code: 'SLB-CONC' }, master),
+    call('DELETE', `/estimator/proposals/${raceId}/mto/${elRace.json?.id}`, undefined, master),
+  ]);
+  const linkOk = linkRes.status === 200;
+  const delOk = delRes.status === 200;
+  chk('tidak mungkin dua-duanya berhasil', linkOk && delOk, false);
+
+  // Apa pun yang menang, tidak boleh ada item RAB menunjuk elemen yang sudah hilang
+  const elemsLeft = (await call('GET', `/estimator/proposals/${raceId}/mto`, undefined, master)).json?.elements || [];
+  const idsLeft = new Set(elemsLeft.map((e: any) => Number(e.id)));
+  const rowsRace = await call('GET', `/estimator/proposals/${raceId}/items`, undefined, master);
+  const orphan = (Array.isArray(rowsRace.json) ? rowsRace.json : []).filter((i: any) => {
+    if (!i.mto_link) return false;
+    const l = typeof i.mto_link === 'string' ? JSON.parse(i.mto_link) : i.mto_link;
+    return l?.element_id && !idsLeft.has(Number(l.element_id));
+  });
+  chk('tidak ada tautan RAB yang yatim', orphan.length, 0);
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }
