@@ -63,6 +63,18 @@ diuji adalah kredensial yang dipakai aplikasi.
 Itu sebabnya seluruh pemeriksaan dilakukan sebelum langkah unggah, bukan sebelum
 restart.
 
+### Skrip sekali-pakai di `scripts/`
+
+`backfill-mto-lines.js` — mengisi `mto_lines` untuk elemen MTO lama yang belum
+punya baris tersimpan (EST-MTO-019). Dipakai sekali di produksi 14 Agustus 2026:
+38 elemen → 278 baris, 3 dilewati (satu bertipe `manpower`, dua pondasi
+`precast_pile` yang formulanya memang belum ada).
+
+Jalankan tanpa argumen untuk simulasi, `--apply` untuk menulis. Idempoten.
+**Batasnya:** baris yang dihasilkan memakai formula saat skrip dijalankan, bukan
+formula saat elemen itu dulu dibuat — jadi ini titik awal, bukan rekonstruksi
+historis.
+
 ## Arsitektur & konvensi
 
 - **Backend**: satu file per domain di `backend/src/routes/*.ts`, semua di-mount di `src/index.ts` dengan prefix `/api/<domain>`. Tidak ada layer service/controller — query SQL langsung di handler via helper `dbAll` / `dbGet` / `dbRun` dari `config/database.ts`.
