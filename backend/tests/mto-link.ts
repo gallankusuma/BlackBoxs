@@ -483,6 +483,55 @@ async function main() {
   const kosong = await call('GET', `/estimator/proposals/${swId}/mto`, undefined, master);
   chk('elemen hilang', (kosong.json?.elements || []).length, 0);
 
+  console.log('\n27. MTO ikut terkunci dari dalam transaksinya (EST-MTO-R33)');
+  const propL = await call('POST', '/estimator/proposals', { project_name: `Uji lock MTO ${stamp}` }, master);
+  const lId = propL.json?.id;
+  const elL = await call('POST', `/estimator/proposals/${lId}/mto`, {
+    element_type: 'slab', element_name: 'S1',
+    parameters: { slab_type: 'concrete', area: 100, thickness: 0.12 },
+  }, master);
+  await call('PUT', `/estimator/proposals/${lId}/status`, { status: 'review' }, master);
+  await call('PUT', `/estimator/proposals/${lId}/status`, { status: 'submitted' }, master);
+
+  chk('POST MTO pada proposal submitted ditolak',
+    (await call('POST', `/estimator/proposals/${lId}/mto`, {
+      element_type: 'wall', element_name: 'W1', parameters: { wall_type: 'bata_merah', area: 50 },
+    }, master)).status, 409);
+  chk('PUT MTO ditolak',
+    (await call('PUT', `/estimator/proposals/${lId}/mto/${elL.json?.id}`, {
+      element_type: 'slab', element_name: 'S1',
+      parameters: { slab_type: 'concrete', area: 999, thickness: 0.12 },
+    }, master)).status, 409);
+  chk('DELETE MTO ditolak',
+    (await call('DELETE', `/estimator/proposals/${lId}/mto/${elL.json?.id}`, undefined, master)).status, 409);
+  const tetap = await call('GET', `/estimator/proposals/${lId}/mto`, undefined, master);
+  chk('parameter aslinya tidak berubah', Number(tetap.json?.elements?.[0]?.parameters?.area), 100);
+
+  console.log('\n28. Transisi status menolak perubahan bersamaan (EST-MTO-R32)');
+  const propC = await call('POST', '/estimator/proposals', { project_name: `Uji transisi ${stamp}` }, master);
+  const cId = propC.json?.id;
+  const [a, b] = await Promise.all([
+    call('PUT', `/estimator/proposals/${cId}/status`, { status: 'review' }, master),
+    call('PUT', `/estimator/proposals/${cId}/status`, { status: 'review' }, master),
+  ]);
+  chk('hanya satu transisi yang berhasil', [a.status, b.status].filter(x => x === 200).length, 1);
+  const st = await call('GET', `/estimator/proposals/${cId}`, undefined, master);
+  chk('statusnya tetap review', (st.json?.data ?? st.json)?.status, 'review');
+
+  console.log('\n29. Drift membandingkan seluruh atribut, bukan net saja (EST-MTO-R36)');
+  const propD = await call('POST', '/estimator/proposals', { project_name: `Uji drift ${stamp}` }, master);
+  const dId = propD.json?.id;
+  await call('POST', `/estimator/proposals/${dId}/mto`, {
+    element_type: 'slab', element_name: 'S1',
+    parameters: { slab_type: 'concrete', area: 100, thickness: 0.1, waste_pct: 5 },
+  }, master);
+  const baca = await call('GET', `/estimator/proposals/${dId}/mto`, undefined, master);
+  const e0 = baca.json?.elements?.[0];
+  chk('tidak ada drift setelah baru disimpan', e0?.formula_drift, false);
+  const sl = (e0?.stored_lines || []).find((l: any) => l.line_code === 'SLB-CONC');
+  chk('waste tersimpan', Number(sl?.waste_percent), 5);
+  chk('gross tersimpan', Number(sl?.gross_quantity), 10.5);
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }

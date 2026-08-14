@@ -2082,7 +2082,37 @@ router.put('/proposals/:id/status', authMiddleware, async (req: Request, res: Re
     }
 
     params.push(proposalId);
-    await dbRun(`UPDATE proposals SET ${updates.join(', ')} WHERE id = ?`, params);
+
+    // EST-MTO-R32: perubahan status dikunci dan diperiksa ulang di dalam
+    // transaction yang sama dengan penulisannya.
+    //
+    // `SELECT ... FOR UPDATE` di atas tidak mengunci apa pun selama ia berjalan
+    // di luar transaction — pelajaran yang sudah kena dua kali di R26 dan R33.
+    // Di sini baris proposal benar-benar dikunci, statusnya diperiksa ulang
+    // setelah lock didapat, lalu ditulis. Dua permintaan deal yang berlomba:
+    // yang kedua menunggu, melihat status sudah berubah, dan berhenti.
+    const transitioned = await withTransaction(async tx => {
+      const fresh: any = await tx.get('SELECT id, status, project_id FROM proposals WHERE id = ? FOR UPDATE', [proposalId]);
+      if (!fresh) return { error: 404, body: { error: 'Proposal tidak ditemukan' } };
+
+      if (fresh.status !== proposal.status) {
+        return {
+          error: 409,
+          body: {
+            error: `Status proposal sudah berubah menjadi "${fresh.status}" oleh permintaan lain. Muat ulang dan coba lagi.`,
+            code: 'STATUS_CHANGED_CONCURRENTLY',
+            status_sekarang: fresh.status,
+          },
+        };
+      }
+
+      await tx.run(`UPDATE proposals SET ${updates.join(', ')} WHERE id = ?`, params);
+      return { ok: true as const, alreadyHasProject: !!fresh.project_id };
+    });
+
+    if ('error' in transitioned) {
+      return res.status(transitioned.error).json(transitioned.body);
+    }
 
     let projectId = null;
     let prId = null;
@@ -2654,9 +2684,16 @@ router.get('/proposals/:id/mto', authMiddleware, async (req: Request, res: Respo
         const stored = (storedLines.get(Number(r.id)) || []);
         const drifted = stored.length > 0 && (
           stored.length !== mto.lines.length
+          // EST-MTO-R36: bukan hanya net. Waste, gross, dan satuan sama-sama
+          // menentukan angka yang ditawarkan — perubahan waste 5% → 8% tidak
+          // menggeser net sama sekali tapi mengubah jumlah yang dibeli.
           || stored.some((sl: any) => {
             const cur = mto.lines.find(l => l.code === sl.line_code);
-            return !cur || Math.abs(Number(sl.net_quantity) - cur.net_quantity) > 0.0001;
+            if (!cur) return true;
+            return Math.abs(Number(sl.net_quantity) - cur.net_quantity) > 0.0001
+              || Math.abs(Number(sl.waste_percent) - cur.waste_percent) > 0.0001
+              || Math.abs(Number(sl.gross_quantity) - cur.gross_quantity) > 0.0001
+              || String(sl.unit) !== String(cur.unit);
           })
         );
         return {
@@ -2721,6 +2758,13 @@ router.post('/proposals/:id/mto', authMiddleware, async (req: Request, res: Resp
     let synced = 0;
     try {
       const result = await withTransaction(async tx => {
+        // EST-MTO-R33: status diperiksa ULANG di dalam transaction ini.
+        // Pemeriksaan cepat sebelum transaction tidak cukup — proposal bisa
+        // disubmit orang lain di sela pemeriksaan dan penulisan, dan MTO tetap
+        // berubah sesudah penawaran dikirim.
+        const raceLock = await proposalLockTx(proposalId, tx);
+        if (raceLock) throw Object.assign(new Error('PROPOSAL_LOCKED'), { lock: raceLock });
+
         const existing: any = await tx.get(
           `SELECT id FROM engineering_inputs
            WHERE scope_type = 'proposal' AND scope_id = ? AND element_type = ? AND element_name = ?
@@ -2758,6 +2802,7 @@ router.post('/proposals/:id/mto', authMiddleware, async (req: Request, res: Resp
       id = result.elementId;
       synced = result.n;
     } catch (syncErr: any) {
+      if (syncErr?.lock) return res.status(syncErr.lock.status).json(syncErr.lock.body);
       if (syncErr?.statusCode === 409) {
         return res.status(409).json({
           error: 'Perubahan ini membuat baris MTO yang sudah ditaut ke RAB tidak ada lagi. '
@@ -2813,6 +2858,13 @@ router.put('/proposals/:id/mto/:elementId', authMiddleware, async (req: Request,
     let synced = 0;
     try {
       synced = await withTransaction(async tx => {
+        // EST-MTO-R33: status diperiksa ULANG di dalam transaction ini.
+        // Pemeriksaan cepat sebelum transaction tidak cukup — proposal bisa
+        // disubmit orang lain di sela pemeriksaan dan penulisan, dan MTO tetap
+        // berubah sesudah penawaran dikirim.
+        const raceLock = await proposalLockTx(proposalId, tx);
+        if (raceLock) throw Object.assign(new Error('PROPOSAL_LOCKED'), { lock: raceLock });
+
         await tx.run(
           'UPDATE engineering_inputs SET element_type=?, element_name=?, parameters=?, quantities=?, sort_order=?, formula_version=? WHERE id=?',
           [type, element_name || existing.element_name, JSON.stringify(params), JSON.stringify(quantities), sort_order ?? existing.sort_order, FORMULA_VERSION, req.params.elementId]
@@ -2821,6 +2873,7 @@ router.put('/proposals/:id/mto/:elementId', authMiddleware, async (req: Request,
         return syncLinkedRabItems(proposalId, req.params.elementId, tx);
       });
     } catch (syncErr: any) {
+      if (syncErr?.lock) return res.status(syncErr.lock.status).json(syncErr.lock.body);
       if (syncErr?.statusCode === 409) {
         return res.status(409).json({
           error: 'Perubahan ini membuat baris MTO yang sudah ditaut ke RAB tidak ada lagi. '
@@ -2850,6 +2903,9 @@ router.delete('/proposals/:id/mto/:elementId', authMiddleware, async (req: Reque
     // Kunci di kedua sisi membuat yang datang belakangan menunggu dan melihat
     // keadaan terbaru.
     const delOutcome = await withTransaction(async tx => {
+      const raceLock = await proposalLockTx(req.params.id, tx);
+      if (raceLock) return { error: raceLock.status, body: raceLock.body };
+
       const element: any = await tx.get(
         `SELECT id FROM engineering_inputs
          WHERE id = ? AND scope_type = 'proposal' AND scope_id = ? FOR UPDATE`,
