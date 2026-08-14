@@ -7,7 +7,9 @@
         <p class="text-gray-500 text-sm mt-1">Manage roles and configure module access permissions</p>
       </div>
       <div class="flex gap-2">
-        <button @click="handleExport" class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 font-medium transition-colors flex items-center gap-2">
+        <!-- Disembunyikan atas permintaan pemilik pekerjaan (13 Agustus 2026).
+             Bukan dihapus — fungsinya utuh, hapus `v-if="false"` untuk menyalakan. -->
+        <button v-if="false" @click="handleExport" class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 font-medium transition-colors flex items-center gap-2">
           📥 Export
         </button>
         <button @click="openCreateModal" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors flex items-center gap-2">

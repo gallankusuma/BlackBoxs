@@ -6,7 +6,10 @@
         <h1 class="text-3xl font-bold text-gray-900">🏷️ Item Types</h1>
         <p class="text-gray-600 mt-1">Define inventory vs non-inventory item classifications</p>
       </div>
+        <!-- Disembunyikan atas permintaan pemilik pekerjaan (13 Agustus 2026).
+             Bukan dihapus — fungsinya utuh, hapus `v-if="false"` untuk menyalakan. -->
       <button
+          v-if="false"
           @click="handleExport"
           class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 font-medium transition-colors flex items-center gap-2"
         >

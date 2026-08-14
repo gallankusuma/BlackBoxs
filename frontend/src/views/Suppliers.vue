@@ -4,7 +4,10 @@
       <div class="max-w-full">
         <div class="flex justify-between items-center mb-6">
           <h2 class="text-2xl font-bold text-gray-900">Suppliers</h2>
+        <!-- Disembunyikan atas permintaan pemilik pekerjaan (13 Agustus 2026).
+             Bukan dihapus — fungsinya utuh, hapus `v-if="false"` untuk menyalakan. -->
           <button
+          v-if="false"
           @click="handleExport"
           class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 font-medium transition-colors flex items-center gap-2"
         >
