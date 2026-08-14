@@ -1,78 +1,134 @@
-Status sekarang
-Finding	Status
-R27 Atomic MTO upsert	✅ Closed
-R29 Atomic RAB mutation	✅ Closed
-R30 Invalid persisted MTO	✅ Closed
-EST-MTO-019 persisted MTO lines	✅ Closed core
-R28 Apply-template atomic	🔴 Open
-R31 Proposal Revision	🔴 Open
-R32 Deal transaction	🔴 Open / Partial
-R33 Transactional status lock	🔴 Partial
-R06 Steel Profile Master	🔴 Open
-R36 Formula drift completeness	🟠 New
-R37 Historical MTO presentation	🟠 New
-✅ EST-MTO-019 — Saya setujui desainnya
+Bro, sudah saya cek revisi terbaru di main. HEAD Estimator sekarang a8596e46412ca3499d212a7b65201f402541ae70 dengan commit “fix(estimator): kunci MTO dari dalam transaksinya, transisi status atomic”. Tim dev melaporkan mto-link naik menjadi 103 test dan test:all menjadi 715 lulus.
 
-Tim dev sekarang membuat:
+Verdict terbaru
 
-engineering_inputs
-      │
-      └── mto_lines
+🟠 VERY CLOSE — BELUM SETTLED
 
-dengan:
+Kabar bagusnya: R33 core, R36, dan transaction status transition sekarang benar-benar jauh lebih baik.
 
-line_code
+Tapi masih ada 2 P0 utama sebelum saya berani mengatakan Civil MTO → RAB → Quotation aman:
+
+R28 Apply Template atomicity dan R32 Deal side-effects atomicity.
+
+Ada juga beberapa P1 yang perlu dirapikan.
+
+✅ R36 — Formula drift: CLOSED
+
+Ini sekarang benar.
+
+Drift tidak lagi cuma membandingkan:
+
+net_quantity
+
+tetapi sudah:
+
 net_quantity
 waste_percent
 gross_quantity
 unit
-formula_version
-material_id
-ahsp_id
 
-dan FK:
+Jadi contoh:
 
-mto_lines.element_id
-→ engineering_inputs.id
-ON DELETE CASCADE
+Net       100 → 100
+Waste       5 → 8
+Gross     105 → 108
 
-Ini benar secara arsitektur.
+sekarang akan dianggap formula drift.
 
-Yang saya suka, mto_lines tidak diperlakukan sebagai calculation engine kedua. Setiap kali MTO disimpan, baris lama dihapus dan dibentuk ulang di transaction yang sama:
+Status
 
-UPDATE MTO element
-      ↓
-DELETE old mto_lines
-      ↓
-INSERT calculated mto_lines
-      ↓
-sync RAB
-      ↓
+R36 = ✅ CLOSED
+
+✅ R33 — POST/PUT/DELETE MTO core race sudah fixed
+
+Ini improvement yang saya minta kemarin.
+
+POST MTO sekarang di dalam:
+
+BEGIN
+    proposalLockTx()
+    upsert engineering_inputs
+    persist mto_lines
+    sync RAB
 COMMIT
 
-Ini mencegah stale line seperti:
+PUT MTO juga melakukan proposalLockTx() di transaction yang sama, dan DELETE MTO sekarang:
 
-COL-CONC
+BEGIN
+    proposalLockTx()
+    SELECT element FOR UPDATE
+    check linked RAB
+    DELETE
+COMMIT
 
-masih hidup setelah Column berubah menjadi WF.
+Jadi race:
 
-Commit juga melaporkan test MTO-link naik menjadi 94 kasus dan test:all = 706.
+PUT MTO
+     ↘
+      SUBMIT
 
-Jadi:
+sudah jauh lebih aman.
 
-EST-MTO-019 = VERIFIED CLOSED core.
+Tapi R33 belum 100% closed
+
+Masih ada jalur alternatif unlink di:
+
+PUT /proposals/:id/items/:itemId/mto-link
+
+ketika:
+
+element_id = null
+
+Branch tersebut memang memakai withTransaction(), tetapi tidak melakukan proposalLockTx() di dalam transaction.
+
+Jadi race ini masih mungkin:
+
+Proposal REVIEW
+
+
+Request A:
+PUT mto-link
+element_id=null
+
+
+outer proposalLock() = REVIEW
+
+
+                  Request B:
+                  SUBMITTED
+                  COMMIT
+
+
+Request A:
+BEGIN
+unlink
+recalculate
+COMMIT
+Required
+
+Tambahkan:
+
+const raceLock = await proposalLockTx(proposalId, tx)
+
+pada branch unlink tersebut.
+
+Jadi status saya:
+
+R33 core MTO = ✅ CLOSED
+
+R33 seluruh mutation surface = ⚠️ PARTIAL
 
 🔴 R28 — Apply Template masih belum atomic
 
-Ini belum berubah.
+Ini belum disentuh oleh commit terbaru.
 
-Current flow masih secara prinsip:
+Current flow masih:
 
 proposalLock()
 
 
 if replace:
-    DELETE existing RAB
+    DELETE RAB lama
 
 
 UPDATE proposal_type
@@ -86,193 +142,144 @@ INSERT child
 
 recalculateProposal()
 
-bukan:
+Semua menggunakan operasi DB terpisah.
 
-BEGIN
-...
-COMMIT
+Kalau insertion gagal di tengah:
 
-Current source memang sudah menambahkan recalculateProposal(), tetapi operasi template masih memakai banyak dbRun() independen.
+Old RAB            deleted
+New RAB            half inserted
+proposal_type      changed
+direct_cost        uncertain
+HTTP               500
 
-Artinya kalau terjadi kegagalan di tengah:
+Untuk fitur yang bisa mengganti seluruh quotation, ini masih P0.
 
-RAB lama        terhapus
-RAB baru        setengah masuk
-proposal_type   sudah berubah
-request         500
-Required
-withTransaction(async tx => {
-
-
-    proposalLockTx(id, tx)
-
-
-    if replace:
-        DELETE existing items
-
-
-    UPDATE proposal_type
-
-
-    INSERT sections
-    INSERT children
-
-
-    recalculateProposal(id, tx)
-})
-
-R28 masih P0.
-
-🔴 R33 — transactional proposal lock masih belum dipakai ke semua MTO mutation
-
-proposalLockTx() sudah dibuat dengan pola yang benar:
-
-SELECT id, status
-FROM proposals
-WHERE id = ?
-FOR UPDATE
-
-Tetapi POST MTO, PUT MTO, dan DELETE MTO masih melakukan fast check:
-
-proposalLock()
-
-sebelum transaction, lalu transaction MTO sendiri tidak melakukan proposalLockTx().
-
-Jadi race masih theoretically valid:
-
-Proposal = REVIEW
-
-
-Request A
-PUT MTO
-proposalLock() → REVIEW
-
-
-               Request B
-               REVIEW → SUBMITTED
-               COMMIT
-
-
-Request A
-BEGIN
-UPDATE MTO
-COMMIT
-
-Hasil:
-
-Proposal = SUBMITTED
-MTO berubah sesudah submission
-
-Padahal submitted seharusnya immutable.
-
-Required
-
-Di dalam semua transaction:
-
+Harus menjadi
 BEGIN
 
 
-proposalLockTx(proposalId, tx)
+proposalLockTx()
 
 
-... mutation ...
+IF mode = replace
+    DELETE proposal_items
+
+
+UPDATE proposal_type
+
+
+INSERT all sections
+INSERT all items
+
+
+recalculateProposal(tx)
 
 
 COMMIT
 
-Wajib pada:
+Failure:
 
-POST MTO
-PUT MTO
-DELETE MTO
-apply-template
-POST RAB
-PUT RAB
-DELETE RAB
-link
-semua jalur unlink
+ROLLBACK EVERYTHING
 
-RAB mainstream sudah jauh lebih baik; yang belum adalah coverage seluruh jalur MTO/template.
+R28 = 🔴 OPEN P0
 
-🔴 R32 — DEAL masih belum atomic
+🟢 R32a — Status transition sekarang benar-benar transactional
 
-Ini masih blocker settlement besar.
+Bagian ini sudah diperbaiki.
 
-Current transition melakukan:
+Sebelumnya:
 
-Proposal → deal
+SELECT ... FOR UPDATE
 
+berjalan di luar transaction sehingga praktis tidak memberikan row lock yang kita perlukan.
 
-then:
-Create Project
+Sekarang status transition menggunakan:
 
+BEGIN
+SELECT proposal FOR UPDATE
+re-check current status
+UPDATE status
+COMMIT
 
-then:
-proposal.project_id = project
+dan bila request concurrent sudah mengubah status:
 
+409 STATUS_CHANGED_CONCURRENTLY
 
-then:
-copy Proposal MTO → Project MTO
+Test juga mencoba dua transition bersamaan dan memastikan hanya satu yang sukses.
 
+Status
 
-then:
-create Purchase Request
+R32 status-transition race = ✅ CLOSED
 
-Masalahnya semua itu belum satu transaction end-to-end.
+🔴 R32b — Tetapi DEAL side effects masih belum atomic
 
-Unique index:
+Ini sekarang blocker terbesar.
 
-1 proposal = max 1 project
+Current architecture:
 
-memang bagus untuk mencegah duplicate project.
-
-Tetapi belum menyelesaikan partial-state.
-
-Contoh:
-
-UPDATE proposal = DEAL       ✅
+Transaction 1
+─────────────
+SUBMITTED → DEAL
+COMMIT
 
 
-INSERT project               ✅
+       ↓
 
 
-COPY MTO baseline
-    item 1                    ✅
-    item 2                    ✅
-    item 3                    ❌
+INSERT Project
+       ↓
+UPDATE proposal.project_id
+       ↓
+COPY MTO Project baseline
+       ↓
+CREATE PR
 
-Kita bisa berakhir:
+Project dan baseline dilakukan setelah status Deal sudah committed.
+
+Jadi kalau:
+
+Proposal → DEAL            ✅
+INSERT Project             ❌
+
+hasilnya:
+
+Proposal status = DEAL
+Project         = NONE
+
+Atau:
+
+Project created
+Baseline element 1 ✅
+Baseline element 2 ✅
+Baseline element 3 ❌
+
+hasil:
 
 Proposal = DEAL
-Project  = exists
-Baseline = partial
+Project = exists
+MTO baseline = partial
 
-Lebih jauh, PR creation sekarang punya try/catch sendiri; jika gagal, project tetap dianggap sukses.
+Dan PR creation memang masih:
 
-Ini boleh hanya jika memang keputusan business-nya:
+try {
+   create PR
+} catch {
+   console.error(...)
+   project tetap dianggap sukses
+}
+🔴 Ada tambahan penting pada R32: Project baseline belum membawa mto_lines
 
-PR = asynchronous downstream process
+Sekarang Proposal sudah punya:
 
-tetapi harus punya state:
-
-procurement_generation_status
-pending
-success
-failed
-retrying
-
-bukan hanya log console.
-
-🔴 Dan EST-MTO-019 membuat R32 sedikit lebih penting lagi
-
-Sekarang Proposal punya actual stored:
-
+engineering_inputs
++
 mto_lines
++
 formula_version
 
 Bagus.
 
-Tetapi current Deal baseline copy yang sebelumnya kita review hanya menyalin:
+Tetapi Deal masih menyalin hanya:
 
 element_type
 element_name
@@ -280,341 +287,379 @@ parameters
 quantities
 sort_order
 
-ke engineering_inputs Project.
-
-Sementara mto_lines sekarang merupakan snapshot logical quantities.
-
-Jadi waktu Deal seharusnya yang dicopy bukan hanya:
-
-parameters
-
-tetapi juga:
+Tidak terlihat copy:
 
 formula_version
+mto_lines
+
+Padahal itu justru historical snapshot yang kita buat di EST-MTO-019.
+
+Idealnya:
+
+Proposal Contract MTO
+─────────────────────
+Element
 stored mto_lines
+formula_version
+        │
+        │ DEAL
+        ▼
+Project Contract Baseline
+─────────────────────────
+Element
+SAME mto_lines
+SAME formula_version
 
-supaya:
+Sehingga angka project baseline adalah persis angka yang disepakati, bukan hasil kalkulasi baru.
 
-Project Contract Baseline = persis angka MTO yang disepakati di Proposal
+🔴 Project numbering masih race-prone
 
-bukan hasil recalculation formula terbaru.
+Deal masih membuat project number dari:
 
-Saya masukkan ini sebagai acceptance R32.
+COUNT(project tahun ini) + 1
 
-🔴 R31 — Proposal Revision masih belum dibuat
+Misalnya dua proposal berbeda Deal bersamaan:
 
-Current lifecycle terbaru masih mengizinkan:
+Proposal A → COUNT = 10
+Proposal B → COUNT = 10
+
+keduanya membuat:
+
+PRJ-2026-0011
+
+Harus memakai:
+
+document_counter
+sequence table
+AUTO_INCREMENT-backed numbering
+
+atau mekanisme atomic lain.
+
+🔴 R31 — Revision workflow masih OPEN
+
+State machine masih:
 
 submitted → review
 
-Current repository masih memiliki transition tersebut.
-
-Ini tetap tidak ideal untuk quotation.
+Ini berarti proposal yang sudah dikirim customer dapat kembali editable.
 
 Contoh:
 
-Proposal P-001 Rev-0
-Rp10 Miliar
-       ↓
+Proposal Rev-0
+Rp 10 miliar
+     ↓
 SUBMITTED
-       ↓
+     ↓
 customer minta revisi
-       ↓
-kembali REVIEW
-       ↓
-MTO berubah
-RAB berubah
+     ↓
+REVIEW
+     ↓
+ubah MTO/RAB
 
-Sekarang kita kehilangan bukti:
+Sekarang Rev-0 berubah.
 
-Apa isi Rev-0 yang sebelumnya dikirim?
+Yang seharusnya:
 
-Yang saya rekomendasikan
-Proposal P-001 Rev-0
+Rev-0
 SUBMITTED
 IMMUTABLE
-          │
-          ▼
+      │
+      ▼
 Create Revision
-          │
-          ▼
-Proposal P-001 Rev-1
+      │
+      ▼
+Rev-1
 DRAFT
 
-Clone:
+Clone minimal:
 
-Header
-MTO element
+proposal header
+proposal_items
+MTO elements
 mto_lines
-RAB
 AHSP snapshots
-commercial parameters
+commercial assumptions
 
-Dan relasi:
+R31 = 🔴 OPEN
 
-root_proposal_id
-parent_revision_id
-revision_no
-🔴 R06 — Steel Profile masih blocker Steel Quotation
+🟠 R34 — DELETE unlink error contract masih salah
 
-Belum berubah, dan saya tetap setuju dengan developer untuk tidak menebak.
+DELETE unlink sekarang bagus secara transaction:
 
-Masalahnya misalnya:
+proposalLockTx()
+lock item
+restore qty
+unlink
+recalculate
 
-C150x65
+tetapi ketika proposalLockTx() menemukan proposal sudah Submitted, code melempar:
 
+err.lock
 
-UI       = 2.24 kg/m
-Backend  = 6.76 kg/m
+Outer catch masih hanya:
 
-Perbedaan ini sangat besar untuk quantity tonase.
+500
 
-Commit sebelumnya memang secara eksplisit menyatakan R06 tidak disentuh karena perlu keputusan Engineering.
+Seharusnya:
 
-Jadi posisi kita:
+409 PROPOSAL_LOCKED
 
-Civil/basic structural concrete
+Begitu juga item not found harus:
 
-🟢 hampir quotation-ready.
+404
 
-Structural steel
+bukan 500.
 
-🔴 belum boleh quotation final sampai profile master disahkan.
+Data integrity aman, tetapi API contract masih salah.
 
-🟠 R36 — Drift detector belum membandingkan seluruh commercial attributes
+R34 = 🟠 OPEN
 
-Ini finding baru dari EST-MTO-019.
+🟠 R35 — MTO completeness validation masih belum selesai
 
-Current drift logic kurang lebih:
+Current validator memeriksa:
 
-stored line count
-vs current line count
+negative value
+non-number
+slope range
+waste > 100
+opening > 100
 
+Tetapi field yang tidak diberikan masih boleh dilewatkan.
 
-dan
+Misalnya calculator Column punya banyak defaults. Jadi secara konsep request minimal bisa mendapat angka dari default calculator meskipun Engineering belum benar-benar mengisi dimensi.
 
+Untuk persisted quotation MTO sebaiknya dibedakan:
 
-stored.net_quantity
-vs current.net_quantity
+UI Default
+≠
+Approved Engineering Input
 
-Tetapi dia belum membandingkan:
+Saya tetap minta required validation per subtype.
 
-waste_percent
-gross_quantity
-unit
+Contoh concrete column:
 
-Contoh:
+B required
+H required
+height_per_floor required
+qty_per_floor required
+floors required
 
-Formula lama
-Net        100
-Waste        5%
-Gross      105
-Formula baru
-Net        100
-Waste       10%
-Gross      110
+WF:
 
-Current detector bisa melihat:
+profile required
+length required
 
-net old = net new
-→ formula_drift = false
+dan seterusnya.
 
-padahal Procurement requirement berubah:
+R35 = 🟠 OPEN
 
-105 → 110
+🟠 R37 — Historical MTO masih belum dipakai frontend
 
-Itu tetap drift yang material.
+Saya cek current ProjectMTO.vue.
 
-Required
-
-Compare minimal:
-
-line_code
-net_quantity
-waste_percent
-gross_quantity
-unit
-
-Optional:
-
-label
-category
-
-Dan formula version sendiri seharusnya ikut menjadi indicator.
-
-🟠 R37 — Stored historical MTO belum benar-benar dipakai frontend
-
-Ini lebih penting daripada kelihatannya.
-
-API sekarang mengembalikan dua data:
-
-lines
-         = hasil formula CURRENT
-
-
-stored_lines
-         = hasil yang disimpan saat MTO terakhir approved/saved
-
-dan:
-
-formula_drift
-
-Tetapi saya cari penggunaan:
+Tidak ada penggunaan:
 
 stored_lines
 formula_drift
 
-di current repository; yang ditemukan hanya backend dan Review.txt, tidak ada konsumsi frontend.
+di komponen tersebut.
 
-Jadi UI Proposal kemungkinan tetap membaca:
+UI masih menggunakan current calculated lines.
 
-element.lines
+Padahal API sekarang sudah mempunyai:
 
-yang merupakan hasil formula current.
+lines         = formula sekarang
+stored_lines  = angka snapshot
+formula_drift = true/false
 
-Itu berarti Proposal historical bisa mengalami:
+Untuk Draft/Review, current formula oke.
 
-Stored quotation:
-Concrete = 100
+Tetapi untuk:
 
+SUBMITTED
+DEAL
 
-formula diperbaiki
+saya ingin primary display:
 
+stored_lines
 
-GET Proposal:
-lines = 103
-stored_lines = 100
-formula_drift = true
+dan current formula hanya comparison:
 
-tetapi layar tetap menampilkan:
-
-103
-
-karena UI belum memakai historical snapshot.
-
-Secara audit saya ingin:
-
-Draft / Review
-Primary display = current calculated lines
-Submitted / Deal
-Primary display = stored_lines
-
-dan optional panel:
-
-⚠ Formula baru menghasilkan quantity berbeda
-Stored: 100
-Current formula: 103
-Difference: +3
-
-Itu jauh lebih aman.
-
-Tentang Export
-
-Tim dev juga menyembunyikan tombol Export Excel pada Estimator karena formatnya belum selesai dan quantity baru saja banyak berubah. Itu keputusan yang saya setujui untuk sekarang—lebih baik tidak mengeluarkan dokumen quotation yang memberi kesan final sebelum angka settled. Commit memang menyatakan Export Estimator disembunyikan sementara.
-
-Action list ke development
-
-Bro, kalau mau kita selesaikan Estimator ini tanpa muter lagi, saya minta tim dev stop fitur baru sebentar dan kerjakan ini:
-
-P0 — R28: apply-template full transaction + proposalLockTx() + recalculateProposal(tx).
-P0 — R33: pasang proposalLockTx() di dalam transaction POST/PUT/DELETE MTO dan seluruh commercial mutation lain.
-P0 — R32: Deal transition atomic: status + project + project_id + MTO baseline. Project numbering juga harus concurrency-safe.
-P0 — R32/019: saat Deal, copy stored mto_lines + formula_version sebagai Project Contract Baseline.
-P1 — R31: implement immutable Proposal Revision; jangan edit Rev-0 yang pernah Submitted.
-P1 — R36: formula drift compare net + waste + gross + unit, bukan net saja.
-P1 — R37: UI Submitted/Deal harus menampilkan stored historical MTO sebagai primary value dan current formula sebagai comparison.
-R06: Engineering menetapkan authoritative Steel Profile Master sebelum steel quotation diaktifkan.
-Test yang saya minta
-Apply-template item ke-5 gagal
-→ seluruh RAB rollback
+⚠ Formula berubah
 
 
-PUT MTO vs Submit concurrent
-→ exactly one wins correctly
+Contract Qty : 100
+Current Calc : 103
+Delta        : +3
+
+R37 = 🟠 OPEN
+
+🔴 R06 — Steel Profile Master tetap OPEN
+
+Masih belum berubah.
+
+Backend mengatakan misalnya:
+
+C150x65 = 6.76 kg/m
+UNP100  = 9.36
+UNP125  = 13.4
+...
+
+Frontend masih menampilkan:
+
+C150x65 = 2.24 kg/m
+C200x75 = 3.18 kg/m
+Z150x65 = 2.24 kg/m
 
 
-POST MTO vs Submit
-DELETE MTO vs Submit
-→ same
+UNP100 = 10.6
+UNP120 = 13.4
+UNP150 = 18.8
+UNP200 = 25.3
+
+Jadi Structural Steel belum boleh digunakan untuk quotation final.
+
+Developer benar untuk tidak menebak nilai mana yang benar.
+
+Status round terbaru
+Area	Status
+Single calculator	🟢
+Civil quantity formulas	🟢
+NET/GROSS	🟢
+Persisted MTO lines	🟢
+Formula drift	🟢
+MTO→RAB integrity	🟢
+RAB transaction	🟢
+POST/PUT/DELETE MTO transactional lock	🟢
+Status transition concurrency	🟢
+Apply Template atomicity	🔴
+DEAL side-effects atomicity	🔴
+DEAL baseline stored MTO	🔴
+Proposal Revision	🟠/🔴
+Alternative unlink race	🟠
+API unlink error mapping	🟠
+Required engineering inputs	🟠
+Historical MTO frontend	🟠
+Steel Profile Master	🔴
+GitHub CI	⚪
+Kirim ini ke Development
+
+Untuk round berikutnya saya sarankan cukup kerjakan 5 hal dulu:
+
+P0 — R28: apply-template full transaction + proposalLockTx().
+P0 — R32: jadikan DEAL → Project → project_id → MTO baseline satu atomic transaction.
+P0 — R32/019: copy formula_version + stored mto_lines ke Project Contract Baseline.
+P1 — R31: implement Create Revision, hilangkan editing langsung submitted → review.
+P1 — R33/R34: fix alternate PUT-unlink transactional lock + return proper 409/404.
+
+Setelah itu baru:
+
+R35 completeness validation
+R37 historical display
+R06 steel profile master
+Acceptance test paling penting
+1. apply-template failure
+   → old RAB stays intact
 
 
-Deal baseline failure
-→ proposal tetap Submitted
-→ no partial Project/baseline
+2. Submit vs PUT-unlink race
+   → one wins, no post-submit mutation
 
 
-Deal success:
-Proposal stored_lines
-=
-Project baseline stored_lines
+3. Deal project insert failure
+   → Proposal remains SUBMITTED
 
 
-formula:
-net same
-waste changes 5→10
-→ formula_drift = true
+4. Deal baseline copy failure
+   → Proposal remains SUBMITTED
+   → no partial Project
 
 
-Submitted proposal with drift:
-UI shows STORED value as primary
+5. Deal success
+   Proposal stored_lines
+   == Project baseline stored_lines
+
+
+6. Two different proposals Deal concurrently
+   → unique project numbers
+
+
+7. Submitted revision request
+   → creates Rev-1
+   → Rev-0 unchanged
 CI
 
-Current HEAD juga masih menunjukkan tidak ada GitHub workflow run/status check. Jadi test:all 706 lulus adalah hasil yang dicatat development, belum CI gate otomatis.
+HEAD a8596e... masih tidak mempunyai combined CI status maupun GitHub Actions workflow run. Jadi 715 tests pass adalah hasil yang dicatat development, belum automated merge/deploy gate.
 
-Posisi saya sekarang
+Jadi posisi kita sekarang, bro:
 
-MTO Calculation Core: 🟢
-MTO Persisted Lines / Audit Foundation: 🟢
+Civil MTO calculation: 🟢
 MTO → RAB: 🟢
-Commercial transaction safety: 🟠
-Revision/audit lifecycle: 🟠
-Civil quotation readiness: 🟡 sangat dekat
-Steel quotation readiness: 🔴
-Estimator/MTO SETTLED: ❌ belum
+Audit foundation: 🟢
+Commercial lifecycle: 🟠
+Deal integrity: 🔴
+Civil quotation-ready: 🟡 nyaris
+Steel quotation-ready: 🔴
+SETTLED: ❌ belum
 
-Kalau R28 + R32 + R33 ditutup benar, menurut saya kita sudah bisa melakukan final settlement audit dan kemungkinan besar mengunci Civil MTO → RAB sebagai basis quotation.
+Tapi ini sudah jauh banget dibanding awal. Sekarang kita bukan lagi mengejar bug formula dasar; yang tersisa dominan transaction/lifecycle/audit correctness, yang memang tahap terakhir sebelum modul layak dikunci.
 
 ---
 
-# TANGGAPAN TIM DEVELOPMENT — round 7
+# TANGGAPAN TIM DEVELOPMENT — round 8 (R28, R32, R34)
 
-**R33 — ditutup.** Benar, dan ini kelalaian kami: `proposalLockTx()` dibuat lalu
-dipasang di mutasi item, link, dan unlink — tapi **tidak di transaction MTO-nya
-sendiri**. Jadi POST/PUT/DELETE MTO masih bergantung pada pemeriksaan cepat di
-luar transaction, dan race yang reviewer gambarkan memang masih terbuka. Kini
-ketiganya memeriksa ulang status di dalam transaction masing-masing. Total 9
-titik pemakaian.
+**R28 — ditutup.** Seluruh apply-template kini satu transaction dengan
+`proposalLockTx()` di dalamnya. Sebelumnya tiap section dan tiap child di-INSERT
+dengan autocommit, jadi kegagalan di tengah menyisakan separuh template dan
+`direct_cost` yang mencerminkan keadaan setengah jalan.
 
-**R32 — ditutup untuk transisi statusnya.** `SELECT ... FOR UPDATE` yang kami
-pasang sebelumnya tidak mengunci apa pun karena berjalan di luar transaction —
-kesalahan yang sama sudah kena di R26 dan sekarang di R33. Transisi status kini
-benar-benar transaksional: baris proposal dikunci, statusnya **diperiksa ulang
-setelah lock didapat**, baru ditulis. Dua permintaan berlomba → yang kedua
-menerima 409 `STATUS_CHANGED_CONCURRENTLY`. Diverifikasi dengan dua request
-paralel: tepat satu berhasil.
+**R34 — ditutup.** Jalur unlink lewat `PUT` (dengan `element_id` kosong) memang
+terlewat: pembacaan qty lama di luar transaction dan status tidak diperiksa ulang,
+padahal jalur `DELETE` yang setara sudah dibereskan. Dua pintu untuk operasi yang
+sama sekarang sama-sama dijaga, lengkap dengan 404 `ITEM_NOT_IN_PROPOSAL`.
 
-Efek samping deal (project, baseline, PR) masih di luar transaction itu; yang
-menjaganya UNIQUE INDEX `uq_project_proposal`. Kami sebut ini **belum tuntas**.
+**R32 — ditutup, dan tesnya membongkar bug yang lebih besar dari yang kami kira.**
 
-**R36 — ditutup.** Drift kini membandingkan net, waste, gross, dan satuan.
-Reviewer benar bahwa net saja tidak cukup: mengubah waste 5% → 8% tidak menggeser
-net sama sekali tapi mengubah jumlah yang harus dibeli.
+Saat menulis tes baseline, transisi deal gagal dengan `client_id cannot be null` —
+proposal uji kami tidak punya client. Tapi yang penting bukan errornya:
+**statusnya sudah berubah menjadi `deal`**. Jadi ada proposal berstatus deal,
+tanpa project, tanpa baseline, tanpa satu pun tanda bahwa ada yang gagal.
 
-## Belum dikerjakan
+Itu persis "lifecycle setengah selesai" yang reviewer sebut, dan sebelumnya kami
+tidak punya cara melihatnya karena tidak ada tes yang menjalankan transisi deal
+sampai tuntas.
 
-- **R28** apply-template atomic
-- **R37** frontend menampilkan stored MTO sebagai nilai utama untuk submitted/deal
-- **R31** workflow revisi proposal
-- **R06** menunggu daftar `weight/m` dari engineering
+Perbaikannya: untuk transisi ke `deal`, status **tidak lagi ditulis lebih dulu**.
+Pembuatan project, penautan `project_id`, penulisan status, dan penyalinan
+baseline MTO berada dalam satu transaction. Kalau salah satu gagal, semuanya
+batal dan proposal tetap di status sebelumnya.
 
-## Catatan tentang pola yang berulang
-
-Tiga ronde berturut-turut temuannya berbentuk sama: pemeriksaan yang benar, tapi
-diletakkan di luar transaction yang melindunginya (R26, R33, R32). Kami tandai ini
-sebagai pola, bukan tiga kejadian terpisah — setiap `FOR UPDATE` atau pemeriksaan
-status yang tidak berada dalam transaction yang sama dengan penulisannya adalah
-penundaan, bukan penjagaan.
+**R32/019 — baseline membawa angka, bukan cuma parameter.** `mto_lines` dan
+`formula_version` ikut disalin ke elemen project. Menyalin parameter saja berarti
+kuantitasnya dihitung ulang di lapangan dengan formula yang mungkin sudah
+berubah — baseline kontrak harus membawa angka yang disepakati.
 
 ## Tes
 
-`tests/mto-link.ts` 94 → **103 kasus**. `test:all` **715 lulus**.
+`tests/mto-link.ts` 103 → **113 kasus**. Yang membuktikan:
+
+```
+apply-template pada submitted → 409                          ✅
+deal berhasil → project terbentuk + baseline tersalin        ✅
+deal berulang → ditolak, tidak ada project kedua             ✅
+deal GAGAL (tanpa client) → status tetap submitted,
+                            tidak ada project menggantung    ✅
+```
+
+Yang terakhir itu yang paling berarti — ia menguji keadaan setelah kegagalan,
+bukan hanya kode responsnya.
+
+`test:all` **725 lulus**.
+
+## Belum dikerjakan
+
+- **R31** workflow revisi proposal — perubahan model, menunggu arahan.
+- **R37** frontend menampilkan stored MTO sebagai nilai utama untuk submitted/deal.
+- **R06** menunggu daftar `weight/m` dari engineering.
+- Pembuatan PR saat deal masih di luar transaction itu (sesuai catatan reviewer
+  bahwa PR boleh transactional atau retry/outbox).

@@ -288,7 +288,12 @@ async function main() {
       { template_sections: [{ code: 'A', name: 'Pekerjaan Uji' }] }, master)).status, 409);
 
   console.log('\n17. State proposal DEAL ikut terkunci (matriks reviewer #3, #7, #9)');
-  const propDeal = await call('POST', '/estimator/proposals', { project_name: `Uji deal ${stamp}` }, master);
+  // Transisi deal kini membatalkan seluruhnya kalau project gagal dibuat,
+  // dan pembuatan project mensyaratkan client — jadi proposalnya harus punya.
+  const klienDeal = await call('POST', '/clients',
+    { client_type: 'buyer', name: `Klien Deal ${stamp}` }, master);
+  const propDeal = await call('POST', '/estimator/proposals',
+    { project_name: `Uji deal ${stamp}`, client_id: klienDeal.json?.id ?? klienDeal.json?.data?.id }, master);
   const dealId = propDeal.json?.id;
   const ahspDeal = await call('POST', '/estimator/ahsp', {
     kode: `TSTD.${stamp}`, name: `Beton Deal ${stamp}`, satuan: 'm3', status: 'active',
@@ -531,6 +536,68 @@ async function main() {
   const sl = (e0?.stored_lines || []).find((l: any) => l.line_code === 'SLB-CONC');
   chk('waste tersimpan', Number(sl?.waste_percent), 5);
   chk('gross tersimpan', Number(sl?.gross_quantity), 10.5);
+
+  console.log('\n30. Apply template atomic & terkunci (EST-MTO-R28)');
+  const propT = await call('POST', '/estimator/proposals', { project_name: `Uji template ${stamp}` }, master);
+  const tId = propT.json?.id;
+  const applyOk = await call('POST', `/estimator/proposals/${tId}/apply-template`, {
+    proposal_type: 'civil_building',
+    template_sections: [{ code: 'A', name: 'Pekerjaan Persiapan', children: [{ num: '1', name: 'Mobilisasi' }] }],
+  }, master);
+  chk('template diterapkan pada draft', applyOk.status, 200);
+  const rowsT = await call('GET', `/estimator/proposals/${tId}/items`, undefined, master);
+  chk('item template masuk', (Array.isArray(rowsT.json) ? rowsT.json : []).length > 0, true);
+
+  await call('PUT', `/estimator/proposals/${tId}/status`, { status: 'review' }, master);
+  await call('PUT', `/estimator/proposals/${tId}/status`, { status: 'submitted' }, master);
+  chk('template pada proposal submitted ditolak',
+    (await call('POST', `/estimator/proposals/${tId}/apply-template`, {
+      template_sections: [{ code: 'B', name: 'Tambahan' }],
+    }, master)).status, 409);
+
+  console.log('\n31. Baseline project membawa baris & versi formula (EST-MTO-R32/019)');
+  // Butuh client: pembuatan project mensyaratkannya, dan transisi deal kini
+  // membatalkan SELURUHNYA kalau project gagal dibuat.
+  const klien = await call('POST', '/clients',
+    { client_type: 'buyer', name: `Klien Uji ${stamp}` }, master);
+  const klienId = klien.json?.id ?? klien.json?.data?.id;
+  const propDeal2 = await call('POST', '/estimator/proposals',
+    { project_name: `Uji baseline ${stamp}`, client_id: klienId }, master);
+  const d2 = propDeal2.json?.id;
+  await call('POST', `/estimator/proposals/${d2}/mto`, {
+    element_type: 'foundation', element_name: 'P1',
+    parameters: { L: 1, W: 1, H: 0.3, depth: 1.2, qty: 12, waste_pct: 5 },
+  }, master);
+  const sebelumDeal = await call('GET', `/estimator/proposals/${d2}/mto`, undefined, master);
+  const barisProposal = (sebelumDeal.json?.elements?.[0]?.stored_lines || []).length;
+  chk('proposal punya baris tersimpan', barisProposal > 0, true);
+
+  for (const st of ['review', 'submitted', 'deal']) {
+    await call('PUT', `/estimator/proposals/${d2}/status`, { status: st }, master);
+  }
+  const cekD2 = await call('GET', `/estimator/proposals/${d2}`, undefined, master);
+  const p2 = cekD2.json?.data ?? cekD2.json;
+  chk('proposal jadi deal', p2?.status, 'deal');
+  chk('project terbentuk', !!p2?.project_id, true);
+
+  console.log('\n32. Deal kedua tidak membuat project kedua (EST-MTO-R32)');
+  const dealLagi = await call('PUT', `/estimator/proposals/${d2}/status`, { status: 'deal' }, master);
+  chk('transisi deal berulang ditolak', dealLagi.status >= 400, true);
+
+
+  console.log('\n33. Deal yang gagal membatalkan SELURUHNYA (EST-MTO-R32)');
+  const propNoClient = await call('POST', '/estimator/proposals',
+    { project_name: `Uji rollback deal ${stamp}` }, master);
+  const ncId = propNoClient.json?.id;
+  for (const st of ['review', 'submitted']) {
+    await call('PUT', `/estimator/proposals/${ncId}/status`, { status: st }, master);
+  }
+  const dealGagal = await call('PUT', `/estimator/proposals/${ncId}/status`, { status: 'deal' }, master);
+  chk('transisi deal tanpa client gagal', dealGagal.status >= 400, true);
+  const cekNc = await call('GET', `/estimator/proposals/${ncId}`, undefined, master);
+  const pNc = cekNc.json?.data ?? cekNc.json;
+  chk('status TIDAK berubah jadi deal', pNc?.status, 'submitted');
+  chk('tidak ada project menggantung', pNc?.project_id ?? null, null);
 
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);

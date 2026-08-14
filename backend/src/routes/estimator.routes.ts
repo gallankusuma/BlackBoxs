@@ -1449,9 +1449,6 @@ router.post('/proposals/:id/apply-template', authMiddleware, async (req: Request
     // mengubah nilai komersial persis seperti menambah item satu per satu.
     // Tanpa kunci, proposal yang sudah dikirim ke pelanggan masih bisa
     // ditambahi seluruh paket pekerjaan.
-    const lockedTpl = await proposalLock(req.params.id);
-    if (lockedTpl) return res.status(lockedTpl.status).json(lockedTpl.body);
-
     const proposalId = req.params.id;
     const { proposal_type, template_sections, mode = 'append' } = req.body;
     // mode: 'append' = add items | 'replace' = delete existing items first
@@ -1460,13 +1457,27 @@ router.post('/proposals/:id/apply-template', authMiddleware, async (req: Request
       return res.status(400).json({ error: 'template_sections required' });
     }
 
-    if (mode === 'replace') {
-      await dbRun('DELETE FROM proposal_items WHERE proposal_id = ?', [proposalId]);
+    const lockedTpl = await proposalLock(proposalId);
+    if (lockedTpl) return res.status(lockedTpl.status).json(lockedTpl.body);
+
+    // EST-MTO-R28: seluruh penerapan template berjalan dalam SATU transaction,
+    // dengan status proposal diperiksa ulang di dalamnya.
+    //
+    // Sebelumnya tiap section dan tiap child di-INSERT satu per satu dengan
+    // autocommit. Kalau gagal di tengah, proposal menyisakan separuh template —
+    // beberapa section masuk, sisanya tidak, dan `direct_cost` mencerminkan
+    // keadaan setengah jalan itu.
+    const applied = await withTransaction(async tx => {
+      const raceLock = await proposalLockTx(req.params.id, tx);
+      if (raceLock) return { error: raceLock.status, body: raceLock.body };
+
+      if (mode === 'replace') {
+      await tx.run('DELETE FROM proposal_items WHERE proposal_id = ?', [proposalId]);
     }
 
     // Update proposal_type on the proposal
     if (proposal_type) {
-      await dbRun('UPDATE proposals SET proposal_type = ? WHERE id = ?', [proposal_type, proposalId]);
+      await tx.run('UPDATE proposals SET proposal_type = ? WHERE id = ?', [proposal_type, proposalId]);
     }
 
     // Map proposal_type to AHSP code prefix
@@ -1478,7 +1489,7 @@ router.post('/proposals/:id/apply-template', authMiddleware, async (req: Request
 
     let ahspLookup: Record<string, any> = {};
     if (prefix) {
-      const ahspRows = await dbAll(
+      const ahspRows = await tx.all(
         `SELECT id, kode, name, satuan, harga_satuan FROM ahsp_headers WHERE kode LIKE ? AND status='active'`,
         [`${prefix}.%`]
       );
@@ -1486,19 +1497,19 @@ router.post('/proposals/:id/apply-template', authMiddleware, async (req: Request
     }
 
     // Get current max order_no so appended items come after existing
-    const maxOrderRow: any = await dbGet(
+    const maxOrderRow: any = await tx.get(
       'SELECT COALESCE(MAX(order_no), 0) as maxOrd FROM proposal_items WHERE proposal_id = ?',
       [proposalId]
     );
     let orderNo = (maxOrderRow?.maxOrd || 0) + 1;
-    const startSection = (await dbGet(
+    const startSection = (await tx.get(
       'SELECT COALESCE(MAX(section_order), 0) as maxSec FROM proposal_items WHERE proposal_id = ?',
       [proposalId]
     ) as any)?.maxSec || 0;
 
     for (let i = 0; i < template_sections.length; i++) {
       const section = template_sections[i];
-      await dbRun(
+      await tx.run(
         `INSERT INTO proposal_items
          (proposal_id, ahsp_code_snapshot, ahsp_name_snapshot, unit_snapshot, unit_price_snapshot,
           description, qty, total_price, order_no, section_label, is_section, section_order)
@@ -1516,7 +1527,7 @@ router.post('/proposals/:id/apply-template', authMiddleware, async (req: Request
           const ahspUnit = matched ? matched.satuan : '';
           const ahspPrice = matched ? parseFloat(matched.harga_satuan) || 0 : 0;
 
-          await dbRun(
+          await tx.run(
             `INSERT INTO proposal_items
              (proposal_id, ahsp_id, ahsp_code_snapshot, ahsp_name_snapshot, unit_snapshot, unit_price_snapshot,
               description, qty, total_price, order_no, section_label, is_section, section_order)
@@ -1528,11 +1539,13 @@ router.post('/proposals/:id/apply-template', authMiddleware, async (req: Request
       }
     }
 
-    // EST-MTO-R28: ringkasan proposal ikut dihitung ulang setelah template
-    // menyisipkan item. Tanpa ini, direct_cost tidak mencerminkan item yang baru
-    // masuk sampai ada mutasi lain yang kebetulan memicunya.
-    await recalculateProposal(proposalId as string);
-    res.json({ message: 'Template applied', items_added: orderNo - (maxOrderRow?.maxOrd || 0) - 1 });
+      // Ringkasan ikut dihitung ulang di dalam transaction yang sama.
+      await recalculateProposal(proposalId as string, tx);
+      return { ok: true as const, itemsAdded: orderNo - (maxOrderRow?.maxOrd || 0) - 1 };
+    });
+
+    if ('error' in applied) return res.status(applied.error).json(applied.body);
+    res.json({ message: 'Template applied', items_added: applied.itemsAdded });
   } catch (error) {
     console.error('Error applying template:', error);
     res.status(500).json({ error: 'Failed to apply template' });
@@ -2106,7 +2119,15 @@ router.put('/proposals/:id/status', authMiddleware, async (req: Request, res: Re
         };
       }
 
-      await tx.run(`UPDATE proposals SET ${updates.join(', ')} WHERE id = ?`, params);
+      // EST-MTO-R32: untuk transisi ke `deal`, status TIDAK ditulis di sini.
+      //
+      // Menulisnya lebih dulu membuat proposal berstatus deal meski pembuatan
+      // project gagal sesudahnya — terbukti terjadi: proposal tanpa client
+      // menjadi `deal` tanpa project dan tanpa baseline sama sekali.
+      // Untuk deal, status ditulis bersama efek sampingnya dalam satu unit.
+      if (newStatus !== 'deal') {
+        await tx.run(`UPDATE proposals SET ${updates.join(', ')} WHERE id = ?`, params);
+      }
       return { ok: true as const, alreadyHasProject: !!fresh.project_id };
     });
 
@@ -2117,24 +2138,35 @@ router.put('/proposals/:id/status', authMiddleware, async (req: Request, res: Re
     let projectId = null;
     let prId = null;
     let prNumber_out = null;
+    // Dipakai lagi di blok pembuatan PR, di luar transaction deal.
+    let projectNumberOut: string | null = null;
 
     // If deal → auto-create project
     if (newStatus === 'deal' && proposal.project_id) {
       // Sudah pernah jadi deal dan project-nya ada — jangan buat lagi.
       console.log(`[Proposal ${proposalId}] sudah punya project ${proposal.project_id}, pembuatan project dilewati`);
     } else if (newStatus === 'deal') {
+      // EST-MTO-R32: pembuatan project, penautan, penulisan status, dan
+      // penyalinan baseline MTO adalah SATU unit.
+      //
+      // Sebelumnya status ditulis lebih dulu, lalu project dibuat terpisah.
+      // Terbukti bermasalah: proposal tanpa client gagal membuat project
+      // (`client_id cannot be null`) tapi statusnya SUDAH menjadi `deal` —
+      // kontrak tanpa project dan tanpa baseline, tanpa satu pun tanda.
+      const dealResult = await withTransaction(async tx => {
       const clientId = proposal.client_id || proposal.resolved_client_id;
 
       // Generate project number: PRJ-YYYY-XXXX
       const year = new Date().getFullYear();
-      const countResult = await dbGet(
+      const countResult = await tx.get(
         `SELECT COUNT(*) as total FROM client_projects WHERE YEAR(created_at) = ?`,
         [year]
       ) as any;
       const seq = String((countResult?.total || 0) + 1).padStart(4, '0');
       const projectNumber = `PRJ-${year}-${seq}`;
+      projectNumberOut = projectNumber;
 
-      const result = await dbRun(
+      const result = await tx.run(
         `INSERT INTO client_projects (
           client_id, proposal_id, project_number, project_name, description,
           budget, status, created_by
@@ -2153,32 +2185,68 @@ router.put('/proposals/:id/status', authMiddleware, async (req: Request, res: Re
       projectId = result.insertId;
 
       // Link back to proposal
-      await dbRun('UPDATE proposals SET project_id = ? WHERE id = ?', [projectId, proposalId]);
+      await tx.run('UPDATE proposals SET project_id = ? WHERE id = ?', [projectId, proposalId]);
 
-      // EST-MTO-017: MTO proposal disalin menjadi baseline MTO project.
+      // EST-MTO-017 + R32/019: pembuatan project, penautan, dan penyalinan
+      // baseline MTO dijadikan SATU transaction.
       //
-      // Keduanya sengaja jadi baris terpisah: MTO proposal adalah dasar komersial
-      // yang sudah disepakati dan tidak boleh berubah lagi, sementara MTO project
-      // adalah kuantitas pelaksanaan yang wajar berubah di lapangan. Sebelum ini
-      // keduanya berbagi baris yang sama, jadi revisi di lapangan diam-diam
-      // mengubah angka yang sudah dikontrakkan.
-      const baseline: any[] = await dbAll(
-        `SELECT element_type, element_name, parameters, quantities, sort_order
-         FROM engineering_inputs WHERE scope_type = 'proposal' AND scope_id = ?`,
-        [proposalId]
-      );
-      for (const el of baseline) {
-        await dbRun(
-          `INSERT IGNORE INTO engineering_inputs
-            (scope_type, scope_id, project_id, proposal_id, element_type, element_name, parameters, quantities, sort_order)
-           VALUES ('project', ?, ?, NULL, ?, ?, ?, ?, ?)`,
-          [projectId, projectId, el.element_type, el.element_name,
-           typeof el.parameters === 'string' ? el.parameters : JSON.stringify(el.parameters || {}),
-           typeof el.quantities === 'string' ? el.quantities : JSON.stringify(el.quantities || {}),
-           el.sort_order || 0]
+      // Sebelumnya ketiganya berjalan berurutan dengan autocommit. Kalau gagal di
+      // tengah, project sudah ada tapi baselinenya kosong — kontrak berjalan
+      // tanpa kuantitas acuan, dan tidak ada yang menandainya.
+      //
+      // `mto_lines` dan `formula_version` ikut disalin (R32/019): baseline
+      // kontrak harus membawa ANGKA yang disepakati, bukan cuma parameternya.
+      // Menyalin parameter saja berarti kuantitasnya dihitung ulang di lapangan
+      // dengan formula yang mungkin sudah berubah.
+      const baselineCount = await (async () => {
+        const baseline: any[] = await tx.all(
+          `SELECT id, element_type, element_name, parameters, quantities, sort_order, formula_version
+           FROM engineering_inputs WHERE scope_type = 'proposal' AND scope_id = ?`,
+          [proposalId]
         );
-      }
-      console.log(`[Proposal ${proposalId} → deal] ${baseline.length} elemen MTO disalin sebagai baseline project ${projectId}`);
+
+        let copied = 0;
+        for (const el of baseline) {
+          const ins = await tx.run(
+            `INSERT IGNORE INTO engineering_inputs
+              (scope_type, scope_id, project_id, proposal_id, element_type, element_name,
+               parameters, quantities, sort_order, formula_version)
+             VALUES ('project', ?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
+            [projectId, projectId, el.element_type, el.element_name,
+              typeof el.parameters === 'string' ? el.parameters : JSON.stringify(el.parameters || {}),
+              typeof el.quantities === 'string' ? el.quantities : JSON.stringify(el.quantities || {}),
+              el.sort_order || 0, el.formula_version || null]
+          );
+
+          const newElementId = ins.insertId;
+          if (!newElementId) continue; // INSERT IGNORE melewatinya — sudah ada
+          copied++;
+
+          // Salin baris tersimpannya apa adanya, termasuk versi formulanya.
+          const srcLines: any[] = await tx.all(
+            `SELECT line_code, label, category, net_quantity, waste_percent, gross_quantity, unit, formula_version
+             FROM mto_lines WHERE element_id = ?`,
+            [el.id]
+          );
+          for (const l of srcLines) {
+            await tx.run(
+              `INSERT INTO mto_lines
+                (element_id, line_code, label, category, net_quantity, waste_percent,
+                 gross_quantity, unit, formula_version)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              [newElementId, l.line_code, l.label, l.category, l.net_quantity,
+                l.waste_percent, l.gross_quantity, l.unit, l.formula_version]
+            );
+          }
+        }
+        return copied;
+      })();
+
+        await tx.run(`UPDATE proposals SET ${updates.join(', ')} WHERE id = ?`, params);
+        console.log(`[Proposal ${proposalId} → deal] ${baselineCount} elemen MTO disalin sebagai baseline project ${projectId}`);
+        return projectId;
+      });
+      projectId = dealResult;
 
       // === Auto-create Purchase Request from proposal materials ===
       try {
@@ -2265,7 +2333,7 @@ router.put('/proposals/:id/status', authMiddleware, async (req: Request, res: Re
 
             prId = prResult.insertId;
             prNumber_out = prNumber;
-            console.log(`✅ Auto-created PR ${prNumber} with ${materialList.length} materials for project ${projectNumber}`);
+            console.log(`✅ Auto-created PR ${prNumber} with ${materialList.length} materials for project ${projectNumberOut}`);
           }
         }
       } catch (prError) {
@@ -3018,19 +3086,33 @@ router.put('/proposals/:id/items/:itemId/mto-link', authMiddleware, async (req: 
     );
     if (!item) return res.status(404).json({ error: 'Item RAB tidak ditemukan pada proposal ini' });
 
-    // Melepas tautan: kuantitas manual kembali dipakai
+    // Melepas tautan lewat PUT (element_id kosong).
+    //
+    // EST-MTO-R34: jalur ini sempat terlewat. Pembacaan qty lama dilakukan di
+    // luar transaction dan status proposal tidak diperiksa ulang di dalamnya —
+    // padahal jalur DELETE yang setara sudah dibereskan. Dua pintu untuk operasi
+    // yang sama harus sama-sama dijaga.
     if (!element_id) {
-      // EST-MTO-R17: kalau klien tidak menyebut qty manual, pakai nilai yang
-      // tersimpan saat penautan dulu — bukan 0, yang akan menghapus kuantitas.
-      let restore = req.body.qty_manual;
-      if (restore === undefined || restore === null) {
-        const cur: any = await dbGet('SELECT mto_link, qty FROM proposal_items WHERE id = ? AND proposal_id = ?', [itemId, proposalId]);
-        try {
-          const l = typeof cur?.mto_link === 'string' ? JSON.parse(cur.mto_link) : cur?.mto_link;
-          restore = l?.previous_qty ?? cur?.qty ?? 0;
-        } catch { restore = cur?.qty ?? 0; }
-      }
       await withTransaction(async tx => {
+        const raceLock = await proposalLockTx(proposalId, tx);
+        if (raceLock) throw Object.assign(new Error('PROPOSAL_LOCKED'), { lock: raceLock });
+
+        const cur: any = await tx.get(
+          'SELECT mto_link, qty FROM proposal_items WHERE id = ? AND proposal_id = ? FOR UPDATE',
+          [itemId, proposalId]
+        );
+        if (!cur) throw Object.assign(new Error('ITEM_NOT_FOUND'), {
+          lock: { status: 404, body: { error: 'Item RAB tidak ditemukan pada proposal ini', code: 'ITEM_NOT_IN_PROPOSAL' } },
+        });
+
+        let restore = req.body.qty_manual;
+        if (restore === undefined || restore === null) {
+          try {
+            const l = typeof cur.mto_link === 'string' ? JSON.parse(cur.mto_link) : cur.mto_link;
+            restore = l?.previous_qty ?? cur.qty ?? 0;
+          } catch { restore = cur.qty ?? 0; }
+        }
+
         await tx.run(
           `UPDATE proposal_items
            SET mto_link = NULL, qty = ?, total_price = ? * unit_price_snapshot, updated_at = NOW()
@@ -3135,6 +3217,7 @@ router.put('/proposals/:id/items/:itemId/mto-link', authMiddleware, async (req: 
 
     res.json({ message: 'MTO link saved', mto_link: linkOutcome.mtoLink, line: linkOutcome.line });
   } catch (err: any) {
+    if (err?.lock) return res.status(err.lock.status).json(err.lock.body);
     res.status(500).json({ error: err.message });
   }
 });
