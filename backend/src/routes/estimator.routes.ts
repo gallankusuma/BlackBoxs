@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { calculateMto, toLegacyQuantities } from '../modules/estimator/mto/calculator';
+import { calculateMto, toLegacyQuantities, FORMULA_VERSION, MtoResult } from '../modules/estimator/mto/calculator';
 import { checkUnitCompatibility, isProposalEditable } from '../modules/estimator/mto/units';
 import { authMiddleware } from '../middleware/auth';
 import { dbAll, dbGet, dbRun , withTransaction, TxRunner} from '../config/database';
@@ -2593,6 +2593,31 @@ async function syncLinkedRabItems(proposalId: any, elementId: any, tx?: TxRunner
   return updated;
 }
 
+
+/**
+ * Tulis ulang baris MTO tersimpan untuk satu elemen (EST-MTO-019).
+ *
+ * Selalu dipanggil DI DALAM transaction yang sama dengan penyimpanan elemennya,
+ * supaya baris dan parameternya tidak pernah bisa berbeda versi.
+ *
+ * Ditulis ulang seluruhnya (hapus lalu sisipkan), bukan di-merge: baris yang
+ * hilang karena tipe elemen berubah harus benar-benar hilang, bukan tertinggal
+ * sebagai sisa yang masih bisa dirujuk RAB.
+ */
+async function persistMtoLines(elementId: number | string, mto: MtoResult, tx: TxRunner): Promise<number> {
+  await tx.run('DELETE FROM mto_lines WHERE element_id = ?', [elementId]);
+  for (const l of mto.lines) {
+    await tx.run(
+      `INSERT INTO mto_lines
+        (element_id, line_code, label, category, net_quantity, waste_percent, gross_quantity, unit, formula_version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [elementId, l.code, l.label, mto.element_type, l.net_quantity, l.waste_percent,
+       l.gross_quantity, l.unit, FORMULA_VERSION]
+    );
+  }
+  return mto.lines.length;
+}
+
 // GET all MTO elements for a proposal — single source of truth: proposal_id only
 router.get('/proposals/:id/mto', authMiddleware, async (req: Request, res: Response) => {
   try {
@@ -2601,6 +2626,20 @@ router.get('/proposals/:id/mto', authMiddleware, async (req: Request, res: Respo
       `SELECT * FROM engineering_inputs WHERE scope_type = 'proposal' AND scope_id = ? ORDER BY sort_order, id`,
       [proposalId]
     );
+    const lineRows: any[] = rows.length
+      ? await dbAll(
+          `SELECT element_id, line_code, label, net_quantity, waste_percent, gross_quantity, unit, formula_version
+           FROM mto_lines WHERE element_id IN (${rows.map(() => '?').join(',')})`,
+          rows.map((r: any) => r.id)
+        )
+      : [];
+    const storedLines = new Map<number, any[]>();
+    for (const l of lineRows) {
+      const arr = storedLines.get(Number(l.element_id)) || [];
+      arr.push(l);
+      storedLines.set(Number(l.element_id), arr);
+    }
+
     res.json({
       elements: rows.map((r: any) => {
         const parameters = typeof r.parameters === 'string' ? JSON.parse(r.parameters || '{}') : r.parameters;
@@ -2608,13 +2647,31 @@ router.get('/proposals/:id/mto', authMiddleware, async (req: Request, res: Respo
         // tersimpan. Kalau formulanya diperbaiki, elemen lama ikut terkoreksi
         // tanpa perlu migrasi data.
         const mto = calculateMto(r.element_type, parameters || {});
+        // EST-MTO-019: baris yang TERSIMPAN dibandingkan dengan hasil hitung
+        // sekarang. Kalau formulanya sudah berubah sejak elemen ini disimpan,
+        // perbedaannya ditandai — bukan diam-diam menampilkan angka baru seolah
+        // itu yang dulu ditawarkan.
+        const stored = (storedLines.get(Number(r.id)) || []);
+        const drifted = stored.length > 0 && (
+          stored.length !== mto.lines.length
+          || stored.some((sl: any) => {
+            const cur = mto.lines.find(l => l.code === sl.line_code);
+            return !cur || Math.abs(Number(sl.net_quantity) - cur.net_quantity) > 0.0001;
+          })
+        );
         return {
           ...r,
           parameters,
           quantities: typeof r.quantities === 'string' ? JSON.parse(r.quantities || '{}') : r.quantities,
           lines: mto.lines,
+          stored_lines: stored,
+          formula_drift: drifted,
+          formula_version_stored: r.formula_version || null,
+          formula_version_current: FORMULA_VERSION,
           variant: mto.variant,
-          notes: mto.notes,
+          notes: drifted
+            ? [...mto.notes, 'Formula kalkulator berubah sejak elemen ini disimpan — angka tersimpan dan angka sekarang berbeda. Simpan ulang untuk memperbarui.']
+            : mto.notes,
           source: 'proposal',
         };
       }),
@@ -2691,6 +2748,10 @@ router.post('/proposals/:id/mto', authMiddleware, async (req: Request, res: Resp
           elementId = inserted.insertId;
         }
 
+        await tx.run('UPDATE engineering_inputs SET formula_version = ? WHERE id = ?',
+          [FORMULA_VERSION, elementId]);
+        await persistMtoLines(elementId, mto, tx);
+
         const n = await syncLinkedRabItems(proposalId, elementId, tx);
         return { elementId, n };
       });
@@ -2753,9 +2814,10 @@ router.put('/proposals/:id/mto/:elementId', authMiddleware, async (req: Request,
     try {
       synced = await withTransaction(async tx => {
         await tx.run(
-          'UPDATE engineering_inputs SET element_type=?, element_name=?, parameters=?, quantities=?, sort_order=? WHERE id=?',
-          [type, element_name || existing.element_name, JSON.stringify(params), JSON.stringify(quantities), sort_order ?? existing.sort_order, req.params.elementId]
+          'UPDATE engineering_inputs SET element_type=?, element_name=?, parameters=?, quantities=?, sort_order=?, formula_version=? WHERE id=?',
+          [type, element_name || existing.element_name, JSON.stringify(params), JSON.stringify(quantities), sort_order ?? existing.sort_order, FORMULA_VERSION, req.params.elementId]
         );
+        await persistMtoLines(req.params.elementId as string, mto, tx);
         return syncLinkedRabItems(proposalId, req.params.elementId, tx);
       });
     } catch (syncErr: any) {

@@ -57,6 +57,17 @@ export const line = (
 export const STEEL_DENSITY = 7850; // kg/m3
 
 /**
+ * Versi formula kalkulator (EST-MTO-019).
+ *
+ * Direkam pada tiap baris yang disimpan. Kalau formulanya diperbaiki, baris lama
+ * tetap membawa versi yang menghasilkannya — sehingga bisa dibedakan mana angka
+ * yang memang ditawarkan dulu dan mana yang berubah karena koreksi kemudian.
+ *
+ * Naikkan setiap kali ada perubahan yang mengubah ANGKA keluaran.
+ */
+export const FORMULA_VERSION = '2026.08.13';
+
+/**
  * Validasi parameter teknik (EST-MTO-R19).
  *
  * Kalkulator sebelumnya menerima apa saja: dimensi negatif, jumlah nol, atau

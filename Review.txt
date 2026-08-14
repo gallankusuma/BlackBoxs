@@ -624,3 +624,51 @@ kalau `sheet_len` diisi.
 ## Tes
 
 `tests/mto-calculator.ts` 96 → **109 kasus**. `test:all` **694 lulus**.
+
+
+---
+
+# TANGGAPAN TIM DEVELOPMENT — EST-MTO-019
+
+Tabel `mto_lines` dibuat, plus `formula_version` dan `zone_name` di
+`engineering_inputs`.
+
+## Keputusan desain yang perlu disebut
+
+`engineering_inputs` dipertahankan sebagai `mto_elements` — ia sudah punya
+`scope_type`/`scope_id` dari EST-MTO-018, jadi membuat tabel elemen baru berarti
+migrasi data hidup tanpa manfaat tambahan.
+
+**`mto_lines` diperlakukan sebagai PROYEKSI, bukan sumber kebenaran kedua.**
+Isinya ditulis ulang seluruhnya (hapus lalu sisipkan) di dalam transaction yang
+sama dengan penyimpanan elemennya. Kalau di-merge, baris yang hilang karena tipe
+elemen berubah akan tertinggal sebagai sisa yang masih bisa dirujuk RAB — persis
+masalah stale link yang sudah kita tutup di R15.
+
+Ini penting karena menyimpan hasil hitung selalu berisiko menciptakan dua
+kebenaran. Jadi:
+
+- **Tulis**: baris disimpan di transaction yang sama dengan elemennya
+- **Hapus elemen**: `ON DELETE CASCADE` menghapus barisnya
+- **Baca**: `GET` mengembalikan `stored_lines` DAN hasil hitung sekarang, lalu
+  **membandingkannya**
+
+Perbandingan itu yang menjawab kekhawatiran audit: kalau formula diperbaiki
+setelah sebuah elemen disimpan, `formula_drift: true` muncul beserta catatan.
+Angka yang dulu ditawarkan tidak diam-diam berubah menjadi angka baru — selisihnya
+justru ditandai supaya bisa diputuskan sadar.
+
+`FORMULA_VERSION` (`2026.08.13`) direkam di elemen maupun di tiap baris.
+
+## Yang belum
+
+`material_id` dan `ahsp_id` sudah ada kolomnya tapi belum diisi — itu bagian
+EST-MTO-020 (mapping `line_code → ahsp_id`), belum dikerjakan.
+
+## Tes
+
+`tests/mto-link.ts` 82 → **94 kasus**: baris benar-benar tersimpan dengan net
+36,864 dan versi formulanya; baris lama benar-benar hilang saat tipe berubah
+(`COL-CONC` → `COL-WF`); menghapus elemen ikut menghapus barisnya.
+
+`test:all` **706 lulus**.

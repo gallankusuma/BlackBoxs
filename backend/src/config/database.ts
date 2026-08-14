@@ -1058,6 +1058,53 @@ const ensureGrnReversalSchema = async (connection: any) => {
 
 
 
+
+// ==================== BARIS MTO TERSIMPAN (EST-MTO-019) ====================
+// Sampai sekarang baris MTO hanya dihitung saat dibaca dan tidak pernah
+// disimpan. Konsekuensinya dua:
+//
+// 1. Tidak ada lapisan logis yang bisa dirujuk RAB. Tautan menyimpan `line_code`
+//    sebagai teks di dalam JSON, tanpa baris nyata yang menjadi sasarannya.
+// 2. Tidak ada jejak. Kalau formula diperbaiki, angka yang dulu dipakai untuk
+//    menawar ikut berubah surut, dan tidak ada cara membuktikan berapa yang
+//    sebenarnya dikirim ke pelanggan.
+//
+// Tabel ini adalah PROYEKSI, bukan sumber kebenaran kedua: isinya ditulis ulang
+// seluruhnya di dalam transaction yang sama dengan penyimpanan elemennya.
+// `formula_version` merekam versi kalkulator yang menghasilkannya, sehingga
+// pergeseran formula bisa dideteksi alih-alih diam-diam mengubah sejarah.
+const ensureMtoLinesSchema = async (connection: any) => {
+  const statements = [
+    `CREATE TABLE IF NOT EXISTS mto_lines (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      element_id INT NOT NULL,
+      line_code VARCHAR(40) NOT NULL,
+      label VARCHAR(200) NULL,
+      category VARCHAR(40) NULL,
+      net_quantity DECIMAL(18,4) NOT NULL DEFAULT 0,
+      waste_percent DECIMAL(8,3) NOT NULL DEFAULT 0,
+      gross_quantity DECIMAL(18,4) NOT NULL DEFAULT 0,
+      unit VARCHAR(20) NOT NULL,
+      formula_version VARCHAR(20) NULL,
+      material_id INT NULL,
+      ahsp_id INT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_mto_line (element_id, line_code),
+      KEY idx_mto_line_element (element_id),
+      CONSTRAINT fk_mto_line_element FOREIGN KEY (element_id)
+        REFERENCES engineering_inputs (id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `ALTER TABLE engineering_inputs ADD COLUMN IF NOT EXISTS formula_version VARCHAR(20) NULL`,
+    `ALTER TABLE engineering_inputs ADD COLUMN IF NOT EXISTS zone_name VARCHAR(100) NULL`,
+  ];
+
+  for (const statement of statements) {
+    await execSchemaEnsure(connection, statement);
+  }
+  console.log('✅ Baris MTO tersimpan ensured');
+};
+
 // ==================== SATU PROPOSAL = SATU PROJECT (EST-MTO-R32) ====================
 // Transisi proposal ke `deal` memicu rangkaian efek samping: buat project,
 // tautkan project_id, salin baseline MTO, buat PR. Pemeriksaan status dan
@@ -1514,6 +1561,7 @@ export async function initializeDatabase() {
     await ensureGrnCreatedBy(connection);
     await ensureMtoScopeSchema(connection);
     await ensureOneProjectPerProposal(connection);
+    await ensureMtoLinesSchema(connection);
     await ensureDisposalSchema(connection);
     await ensureAssetStatusHistorySchema(connection);
     await ensurePermissionCatalog(connection);

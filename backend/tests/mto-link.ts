@@ -436,6 +436,53 @@ async function main() {
   chk('elemen TIDAK ikut berubah — masih beton',
     cekUp.json?.elements?.[0]?.parameters?.col_type, 'beton');
 
+  console.log('\n24. Baris MTO benar-benar tersimpan (EST-MTO-019)');
+  const propLn = await call('POST', '/estimator/proposals', { project_name: `Uji lines ${stamp}` }, master);
+  const lnId = propLn.json?.id;
+  const elLn = await call('POST', `/estimator/proposals/${lnId}/mto`, {
+    element_type: 'foundation', element_name: 'P1',
+    parameters: { L: 1, W: 1, H: 0.3, depth: 1.2, qty: 12, waste_pct: 5 },
+  }, master);
+  chk('elemen tersimpan', elLn.status, 200);
+
+  const bacaLn = await call('GET', `/estimator/proposals/${lnId}/mto`, undefined, master);
+  const el0 = bacaLn.json?.elements?.[0];
+  chk('stored_lines terisi', (el0?.stored_lines || []).length > 0, true);
+  chk('jumlahnya sama dengan hasil hitung', (el0?.stored_lines || []).length, (el0?.lines || []).length);
+  chk('versi formula tercatat di elemen', !!el0?.formula_version_stored, true);
+  chk('tidak ada drift pada elemen yang baru disimpan', el0?.formula_drift, false);
+
+  const galian = (el0?.stored_lines || []).find((l: any) => l.line_code === 'FND-EXCV');
+  chk('baris galian tersimpan', !!galian, true);
+  chk('net tersimpan 36.864', Number(galian?.net_quantity), 36.864);
+  chk('versi formula tercatat di baris', !!galian?.formula_version, true);
+
+  console.log('\n25. Baris lama tidak tertinggal saat tipe berubah (EST-MTO-019)');
+  const propSw = await call('POST', '/estimator/proposals', { project_name: `Uji switch ${stamp}` }, master);
+  const swId = propSw.json?.id;
+  const elSw = await call('POST', `/estimator/proposals/${swId}/mto`, {
+    element_type: 'column', element_name: 'K1',
+    parameters: { col_type: 'beton', B: 0.4, H: 0.4, height_per_floor: 3, floors: 1, qty_per_floor: 10 },
+  }, master);
+  const sebelum = await call('GET', `/estimator/proposals/${swId}/mto`, undefined, master);
+  chk('COL-CONC tersimpan',
+    (sebelum.json?.elements?.[0]?.stored_lines || []).some((l: any) => l.line_code === 'COL-CONC'), true);
+
+  // Tanpa tautan RAB, ganti tipe boleh — baris beton harus benar-benar hilang
+  await call('PUT', `/estimator/proposals/${swId}/mto/${elSw.json?.id}`, {
+    element_type: 'column', element_name: 'K1',
+    parameters: { col_type: 'wf', wf_profile: 'WF200x100', height_per_floor: 3, floors: 1, qty_per_floor: 10 },
+  }, master);
+  const sesudah = await call('GET', `/estimator/proposals/${swId}/mto`, undefined, master);
+  const codes = (sesudah.json?.elements?.[0]?.stored_lines || []).map((l: any) => l.line_code);
+  chk('COL-CONC sudah TIDAK ada', codes.includes('COL-CONC'), false);
+  chk('COL-WF menggantikannya', codes.includes('COL-WF'), true);
+
+  console.log('\n26. Hapus elemen ikut menghapus barisnya');
+  await call('DELETE', `/estimator/proposals/${swId}/mto/${elSw.json?.id}`, undefined, master);
+  const kosong = await call('GET', `/estimator/proposals/${swId}/mto`, undefined, master);
+  chk('elemen hilang', (kosong.json?.elements || []).length, 0);
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }
