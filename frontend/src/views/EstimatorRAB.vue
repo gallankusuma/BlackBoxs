@@ -18,7 +18,20 @@
               </svg>
               Print
             </button>
+            <!--
+              Tombol Export Excel disembunyikan atas permintaan pemilik pekerjaan
+              (13 Agustus 2026), bukan dihapus.
+
+              Alasannya: format ekspor belum dibereskan (EST-MTO-027 masih
+              terbuka), sementara angka RAB baru saja berubah cukup besar setelah
+              perbaikan kalkulator MTO. Berkas yang terlanjur diedarkan lebih
+              sulit ditarik daripada tombol yang belum ditampilkan.
+
+              Untuk menyalakan kembali: hapus `v-if="false"` di bawah ini.
+              Fungsi `exportToExcel` sengaja dibiarkan utuh.
+            -->
             <button
+              v-if="false"
               @click="exportToExcel"
               class="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
             >

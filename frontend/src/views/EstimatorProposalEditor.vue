@@ -47,7 +47,15 @@
             <button @click="showResume = true" class="px-4 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700">
               📊 Resume
             </button>
-            <button class="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50">
+            <!--
+              Disembunyikan bersama tombol serupa di EstimatorRAB.vue
+              (13 Agustus 2026). Lihat catatan lengkapnya di sana.
+
+              Tambahan untuk yang ini: tombolnya bahkan belum punya @click sama
+              sekali — ditekan pun tidak melakukan apa-apa. Menampilkannya hanya
+              membuat orang mengira ekspor penawaran sudah tersedia.
+            -->
+            <button v-if="false" class="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50">
               📥 Export Excel
             </button>
             
