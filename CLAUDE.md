@@ -51,6 +51,11 @@ Deploy: `./deploy-blackbox.sh` (pemeriksaan pra-deploy → build FE → rsync di
    benar-benar berhasil**, `JWT_SECRET` terisi, proses pm2 terdaftar.
 3. Setelah restart, health endpoint diuji lewat HTTP; kalau bukan 200, deploy
    dinyatakan gagal dan log terakhir dicetak.
+4. `scripts/smoke-test.js` dijalankan terhadap `blackboxs.io`. Health 200 saja
+   TIDAK membuktikan aplikasi bekerja — 12 Agustus 2026 proses online dan health
+   menjawab sementara backend tidak bisa membuat koneksi database baru sama
+   sekali. Smoke test menembak permintaan yang benar-benar menyentuh database
+   dan memeriksa otorisasi.
 
 Pemeriksaan koneksi di nomor 2 ada karena kejadian 11–12 Agustus 2026: password
 MySQL produksi tidak lagi cocok dengan `.env`, tapi aplikasi tetap terlihat sehat
@@ -62,6 +67,22 @@ diuji adalah kredensial yang dipakai aplikasi.
 ⚠️ Frontend dilayani nginx langsung, jadi begitu ter-rsync ia **langsung live**.
 Itu sebabnya seluruh pemeriksaan dilakukan sebelum langkah unggah, bukan sebelum
 restart.
+
+### Smoke test
+
+```bash
+cd backend && npm run smoke
+```
+
+`scripts/smoke-test.js` — **sepenuhnya read-only**, aman ditembakkan ke produksi
+kapan saja. Memeriksa: halaman utama & health, query nyata ke tabel `users`
+(401 = database terbaca, 500 = kemungkinan kredensial DB tak cocok), otorisasi
+ditegakkan di empat modul, endpoint kunci tidak hilang dari build, dan jalur
+`/uploads` menjawab.
+
+Yang diuji adalah "jalurnya hidup dan terjaga", **bukan** "angkanya benar" —
+kebenaran angka diuji `npm run test:all` di dev, yang memang membuat data.
+Ganti target dengan `BASE_URL=http://localhost:3005`.
 
 ### Skrip sekali-pakai di `scripts/`
 

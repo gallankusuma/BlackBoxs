@@ -79,6 +79,8 @@ echo "✅ Backend restarted"
 # sini permintaan HTTP sungguhan.
 echo "🔎 Verifikasi setelah restart..."
 sleep 8
+
+# Health check dasar dulu — cepat, dan kalau ini saja gagal tidak perlu lanjut.
 HEALTH=$(ssh "$VPS" "curl -s -o /dev/null -w '%{http_code}' -m 15 http://localhost:3005/api/health || true")
 if [ "$HEALTH" != "200" ]; then
   echo "❌ Backend TIDAK sehat setelah restart (health: $HEALTH)"
@@ -87,6 +89,18 @@ if [ "$HEALTH" != "200" ]; then
   exit 1
 fi
 echo "✅ Health check 200"
+
+# Smoke test: health 200 saja TIDAK membuktikan aplikasi bekerja. Pada 12 Agustus
+# 2026 proses terlihat online dan health menjawab, sementara backend sama sekali
+# tidak bisa membuat koneksi database baru. Yang membedakan adalah permintaan
+# yang benar-benar menyentuh database dan memeriksa otorisasi.
+echo "🔎 Smoke test..."
+if ! node "$LOCAL_ROOT/scripts/smoke-test.js"; then
+  echo ""
+  echo "❌ Smoke test GAGAL setelah deploy. Log terakhir:"
+  ssh "$VPS" "pm2 logs $PM2_NAME --lines 20 --nostream --err 2>/dev/null | tail -20"
+  exit 1
+fi
 
 echo ""
 echo "✅ DONE — blackboxs.io updated"
