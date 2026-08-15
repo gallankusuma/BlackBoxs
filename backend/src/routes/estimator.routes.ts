@@ -2047,124 +2047,142 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
   deal: [],            // final state
 };
 
+const BUSINESS_TZ = process.env.BUSINESS_TIMEZONE || 'Asia/Jakarta';
+
+/**
+ * Tahun berjalan menurut zona waktu bisnis, bukan zona server. Server berjalan
+ * UTC; tanpa ini, deal yang dilakukan 1 Januari pagi WIB masih mendapat nomor
+ * bertahun sebelumnya.
+ */
+const businessYear = (): string =>
+  new Intl.DateTimeFormat('en-CA', { timeZone: BUSINESS_TZ, year: 'numeric' }).format(new Date());
+
+/**
+ * Nomor project berikutnya, atomic (EST-MTO-R39).
+ *
+ * Versi lama memakai `SELECT COUNT(*) ... WHERE YEAR(created_at) = ?` lalu
+ * menambah satu. Dua proposal yang berbeda tidak mengunci baris yang sama, jadi
+ * keduanya membaca hitungan yang sama dan keduanya BERHASIL — bukan salah satu
+ * gagal, tapi dua project dengan nomor identik. Pola yang persis sama sudah
+ * terbukti gagal di procurement (PROC-R05: dari 20 PO serentak hanya 2 berhasil).
+ *
+ * `LAST_INSERT_ID()` mengembalikan nilai yang di-set statement itu sendiri pada
+ * koneksi yang sama, jadi tiap pemanggil mendapat nomor berbeda dalam satu
+ * statement. Seed dari nomor yang sudah ada supaya penomoran tidak mundur di
+ * database yang barisnya dulu diisi COUNT()+1 atau manual.
+ *
+ * Dijalankan DI DALAM transaction deal — beda dari procurement yang sengaja
+ * memisahkannya. Alasannya: deal terjadi beberapa kali sehari, bukan puluhan
+ * bersamaan, jadi menahan baris counter sebentar tidak menimbulkan antrean, dan
+ * imbalannya deal yang gagal tidak meninggalkan nomor yang hangus.
+ */
+const nextProjectNumber = async (tx: TxRunner): Promise<string> => {
+  const year = businessYear();
+
+  const row: any = await tx.get(
+    `SELECT MAX(CAST(SUBSTRING_INDEX(project_number, '-', -1) AS UNSIGNED)) AS maxNum
+     FROM client_projects WHERE project_number LIKE ?`,
+    [`PRJ-${year}-%`]
+  );
+  const seed = Number(row?.maxNum || 0);
+
+  await tx.run(
+    `INSERT INTO document_counters (prefix, date_part, last_no)
+     VALUES ('PRJ', ?, LAST_INSERT_ID(? + 1))
+     ON DUPLICATE KEY UPDATE last_no = LAST_INSERT_ID(GREATEST(last_no, ?) + 1)`,
+    [year, seed, seed]
+  );
+
+  const got: any = await tx.get('SELECT LAST_INSERT_ID() AS n');
+  return `PRJ-${year}-${String(Number(got?.n || seed + 1)).padStart(4, '0')}`;
+};
+
+type StatusOutcome =
+  | { error: number; body: any }
+  | {
+      ok: true;
+      projectId: number | null;
+      projectNumber: string | null;
+      createdProject: boolean;
+      proposal: any;
+    };
+
 router.put('/proposals/:id/status', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const { status: newStatus, notes } = req.body;
+    const { status: newStatus } = req.body;
     const userId = (req as any).userId || 1;
     const proposalId = req.params.id;
 
-    // EST-MTO-R32: baris proposal dikunci selama transisi.
+    // EST-MTO-R38: SELURUH transisi — termasuk deal berikut efek sampingnya —
+    // berjalan dalam SATU transaction yang dimulai dari lock baris proposal.
     //
-    // Transisi ke `deal` memicu rangkaian efek samping — buat project, tautkan
-    // project_id, salin baseline MTO, buat PR. Dua permintaan deal yang datang
-    // bersamaan bisa sama-sama lolos pemeriksaan status lalu masing-masing
-    // membuat project sendiri: satu proposal berakhir dengan dua project dan dua
-    // baseline. Lock membuat yang kedua menunggu, lalu melihat status yang sudah
-    // berubah dan berhenti.
-    const proposal = await dbGet(
-      `SELECT p.*, c.id as resolved_client_id FROM proposals p LEFT JOIN clients c ON c.name COLLATE utf8mb4_unicode_ci = p.client COLLATE utf8mb4_unicode_ci WHERE p.id = ? FOR UPDATE`,
-      [proposalId]
-    ) as any;
-
-    if (!proposal) {
-      return res.status(404).json({ error: 'Proposal not found' });
-    }
-
-    // Validate transition
-    const allowed = VALID_TRANSITIONS[proposal.status] || [];
-    if (!allowed.includes(newStatus)) {
-      return res.status(400).json({ 
-        error: `Cannot change status from '${proposal.status}' to '${newStatus}'`,
-        allowed_transitions: allowed
-      });
-    }
-
-    // Build update fields
-    const updates: string[] = ['status = ?'];
-    const params: any[] = [newStatus];
-
-    if (newStatus === 'review') {
-      // no extra fields
-    } else if (newStatus === 'submitted') {
-      updates.push('submitted_at = NOW()');
-    } else if (newStatus === 'deal') {
-      updates.push('deal_at = NOW()');
-      updates.push('approved_by = ?');
-      updates.push('approved_at = NOW()');
-      params.push(userId);
-    }
-
-    params.push(proposalId);
-
-    // EST-MTO-R32: perubahan status dikunci dan diperiksa ulang di dalam
-    // transaction yang sama dengan penulisannya.
+    // Versi sebelumnya memakai dua transaction: yang pertama mengunci dan
+    // memvalidasi status tapi sengaja TIDAK menulis status untuk deal, yang
+    // kedua membuat project lalu menulis status. Di antara keduanya lock sudah
+    // dilepas, dan transaction kedua tidak memeriksa ulang status. Akibatnya:
     //
-    // `SELECT ... FOR UPDATE` di atas tidak mengunci apa pun selama ia berjalan
-    // di luar transaction — pelajaran yang sudah kena dua kali di R26 dan R33.
-    // Di sini baris proposal benar-benar dikunci, statusnya diperiksa ulang
-    // setelah lock didapat, lalu ditulis. Dua permintaan deal yang berlomba:
-    // yang kedua menunggu, melihat status sudah berubah, dan berhenti.
-    const transitioned = await withTransaction(async tx => {
-      const fresh: any = await tx.get('SELECT id, status, project_id FROM proposals WHERE id = ? FOR UPDATE', [proposalId]);
-      if (!fresh) return { error: 404, body: { error: 'Proposal tidak ditemukan' } };
+    //   A: submitted→deal  lock, status=submitted ✅, COMMIT (tanpa menulis)
+    //   B: submitted→review                              lock, tulis REVIEW, COMMIT
+    //   A: (transaction 2) buat project, tulis DEAL, COMMIT
+    //
+    // Dua-duanya sukses, dan proposal berakhir DEAL padahal saat project
+    // benar-benar dibuat statusnya sudah REVIEW. Dengan satu transaction, lock
+    // dipegang sampai selesai: yang mendapat lock lebih dulu menang, yang kedua
+    // menunggu lalu melihat status sudah berubah dan berhenti.
+    const outcome = await withTransaction(async (tx): Promise<StatusOutcome> => {
+      const proposal: any = await tx.get('SELECT * FROM proposals WHERE id = ? FOR UPDATE', [proposalId]);
+      if (!proposal) return { error: 404, body: { error: 'Proposal not found' } };
 
-      if (fresh.status !== proposal.status) {
+      // Divalidasi terhadap baris yang SUDAH dikunci, bukan terhadap pembacaan
+      // sebelum lock — jadi tidak perlu lagi membandingkan status lama vs baru.
+      const allowed = VALID_TRANSITIONS[proposal.status] || [];
+      if (!allowed.includes(newStatus)) {
         return {
-          error: 409,
+          error: 400,
           body: {
-            error: `Status proposal sudah berubah menjadi "${fresh.status}" oleh permintaan lain. Muat ulang dan coba lagi.`,
-            code: 'STATUS_CHANGED_CONCURRENTLY',
-            status_sekarang: fresh.status,
+            error: `Cannot change status from '${proposal.status}' to '${newStatus}'`,
+            allowed_transitions: allowed,
           },
         };
       }
 
-      // EST-MTO-R32: untuk transisi ke `deal`, status TIDAK ditulis di sini.
-      //
-      // Menulisnya lebih dulu membuat proposal berstatus deal meski pembuatan
-      // project gagal sesudahnya — terbukti terjadi: proposal tanpa client
-      // menjadi `deal` tanpa project dan tanpa baseline sama sekali.
-      // Untuk deal, status ditulis bersama efek sampingnya dalam satu unit.
-      if (newStatus !== 'deal') {
-        await tx.run(`UPDATE proposals SET ${updates.join(', ')} WHERE id = ?`, params);
+      const updates: string[] = ['status = ?'];
+      const params: any[] = [newStatus];
+      if (newStatus === 'submitted') {
+        updates.push('submitted_at = NOW()');
+      } else if (newStatus === 'deal') {
+        updates.push('deal_at = NOW()');
+        updates.push('approved_by = ?');
+        updates.push('approved_at = NOW()');
+        params.push(userId);
       }
-      return { ok: true as const, alreadyHasProject: !!fresh.project_id };
-    });
+      params.push(proposalId);
 
-    if ('error' in transitioned) {
-      return res.status(transitioned.error).json(transitioned.body);
-    }
+      const writeStatus = () => tx.run(`UPDATE proposals SET ${updates.join(', ')} WHERE id = ?`, params);
 
-    let projectId = null;
-    let prId = null;
-    let prNumber_out = null;
-    // Dipakai lagi di blok pembuatan PR, di luar transaction deal.
-    let projectNumberOut: string | null = null;
+      if (newStatus !== 'deal') {
+        await writeStatus();
+        return { ok: true, projectId: null, projectNumber: null, createdProject: false, proposal };
+      }
 
-    // If deal → auto-create project
-    if (newStatus === 'deal' && proposal.project_id) {
-      // Sudah pernah jadi deal dan project-nya ada — jangan buat lagi.
-      console.log(`[Proposal ${proposalId}] sudah punya project ${proposal.project_id}, pembuatan project dilewati`);
-    } else if (newStatus === 'deal') {
-      // EST-MTO-R32: pembuatan project, penautan, penulisan status, dan
-      // penyalinan baseline MTO adalah SATU unit.
-      //
-      // Sebelumnya status ditulis lebih dulu, lalu project dibuat terpisah.
-      // Terbukti bermasalah: proposal tanpa client gagal membuat project
-      // (`client_id cannot be null`) tapi statusnya SUDAH menjadi `deal` —
-      // kontrak tanpa project dan tanpa baseline, tanpa satu pun tanda.
-      const dealResult = await withTransaction(async tx => {
-      const clientId = proposal.client_id || proposal.resolved_client_id;
+      if (proposal.project_id) {
+        // Sudah punya project — jangan buat lagi, statusnya saja yang ditulis.
+        console.log(`[Proposal ${proposalId}] sudah punya project ${proposal.project_id}, pembuatan project dilewati`);
+        await writeStatus();
+        return { ok: true, projectId: proposal.project_id, projectNumber: null, createdProject: false, proposal };
+      }
 
-      // Generate project number: PRJ-YYYY-XXXX
-      const year = new Date().getFullYear();
-      const countResult = await tx.get(
-        `SELECT COUNT(*) as total FROM client_projects WHERE YEAR(created_at) = ?`,
-        [year]
-      ) as any;
-      const seq = String((countResult?.total || 0) + 1).padStart(4, '0');
-      const projectNumber = `PRJ-${year}-${seq}`;
-      projectNumberOut = projectNumber;
+      // Client dicocokkan lewat nama kalau client_id belum terisi. Ekspresi
+      // COLLATE-nya dipertahankan persis seperti sebelumnya.
+      const clientRow: any = await tx.get(
+        `SELECT c.id FROM proposals p
+         LEFT JOIN clients c ON c.name COLLATE utf8mb4_unicode_ci = p.client COLLATE utf8mb4_unicode_ci
+         WHERE p.id = ?`,
+        [proposalId]
+      );
+      const clientId = proposal.client_id || clientRow?.id || null;
+
+      const projectNumber = await nextProjectNumber(tx);
 
       const result = await tx.run(
         `INSERT INTO client_projects (
@@ -2172,7 +2190,7 @@ router.put('/proposals/:id/status', authMiddleware, async (req: Request, res: Re
           budget, status, created_by
         ) VALUES (?, ?, ?, ?, ?, ?, 'open', ?)`,
         [
-          clientId || null,
+          clientId,
           proposalId,
           projectNumber,
           proposal.project_name,
@@ -2182,7 +2200,7 @@ router.put('/proposals/:id/status', authMiddleware, async (req: Request, res: Re
         ]
       );
 
-      projectId = result.insertId;
+      const projectId = result.insertId;
 
       // Link back to proposal
       await tx.run('UPDATE proposals SET project_id = ? WHERE id = ?', [projectId, proposalId]);
@@ -2198,56 +2216,66 @@ router.put('/proposals/:id/status', authMiddleware, async (req: Request, res: Re
       // kontrak harus membawa ANGKA yang disepakati, bukan cuma parameternya.
       // Menyalin parameter saja berarti kuantitasnya dihitung ulang di lapangan
       // dengan formula yang mungkin sudah berubah.
-      const baselineCount = await (async () => {
-        const baseline: any[] = await tx.all(
-          `SELECT id, element_type, element_name, parameters, quantities, sort_order, formula_version
-           FROM engineering_inputs WHERE scope_type = 'proposal' AND scope_id = ?`,
-          [proposalId]
+      const baseline: any[] = await tx.all(
+        `SELECT id, element_type, element_name, parameters, quantities, sort_order, formula_version
+         FROM engineering_inputs WHERE scope_type = 'proposal' AND scope_id = ?`,
+        [proposalId]
+      );
+
+      let baselineCount = 0;
+      for (const el of baseline) {
+        const ins = await tx.run(
+          `INSERT IGNORE INTO engineering_inputs
+            (scope_type, scope_id, project_id, proposal_id, element_type, element_name,
+             parameters, quantities, sort_order, formula_version)
+           VALUES ('project', ?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
+          [projectId, projectId, el.element_type, el.element_name,
+            typeof el.parameters === 'string' ? el.parameters : JSON.stringify(el.parameters || {}),
+            typeof el.quantities === 'string' ? el.quantities : JSON.stringify(el.quantities || {}),
+            el.sort_order || 0, el.formula_version || null]
         );
 
-        let copied = 0;
-        for (const el of baseline) {
-          const ins = await tx.run(
-            `INSERT IGNORE INTO engineering_inputs
-              (scope_type, scope_id, project_id, proposal_id, element_type, element_name,
-               parameters, quantities, sort_order, formula_version)
-             VALUES ('project', ?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
-            [projectId, projectId, el.element_type, el.element_name,
-              typeof el.parameters === 'string' ? el.parameters : JSON.stringify(el.parameters || {}),
-              typeof el.quantities === 'string' ? el.quantities : JSON.stringify(el.quantities || {}),
-              el.sort_order || 0, el.formula_version || null]
-          );
+        const newElementId = ins.insertId;
+        if (!newElementId) continue; // INSERT IGNORE melewatinya — sudah ada
+        baselineCount++;
 
-          const newElementId = ins.insertId;
-          if (!newElementId) continue; // INSERT IGNORE melewatinya — sudah ada
-          copied++;
-
-          // Salin baris tersimpannya apa adanya, termasuk versi formulanya.
-          const srcLines: any[] = await tx.all(
-            `SELECT line_code, label, category, net_quantity, waste_percent, gross_quantity, unit, formula_version
-             FROM mto_lines WHERE element_id = ?`,
-            [el.id]
+        // Salin baris tersimpannya apa adanya, termasuk versi formulanya.
+        const srcLines: any[] = await tx.all(
+          `SELECT line_code, label, category, net_quantity, waste_percent, gross_quantity, unit, formula_version
+           FROM mto_lines WHERE element_id = ?`,
+          [el.id]
+        );
+        for (const l of srcLines) {
+          await tx.run(
+            `INSERT INTO mto_lines
+              (element_id, line_code, label, category, net_quantity, waste_percent,
+               gross_quantity, unit, formula_version)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [newElementId, l.line_code, l.label, l.category, l.net_quantity,
+              l.waste_percent, l.gross_quantity, l.unit, l.formula_version]
           );
-          for (const l of srcLines) {
-            await tx.run(
-              `INSERT INTO mto_lines
-                (element_id, line_code, label, category, net_quantity, waste_percent,
-                 gross_quantity, unit, formula_version)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-              [newElementId, l.line_code, l.label, l.category, l.net_quantity,
-                l.waste_percent, l.gross_quantity, l.unit, l.formula_version]
-            );
-          }
         }
-        return copied;
-      })();
+      }
 
-        await tx.run(`UPDATE proposals SET ${updates.join(', ')} WHERE id = ?`, params);
-        console.log(`[Proposal ${proposalId} → deal] ${baselineCount} elemen MTO disalin sebagai baseline project ${projectId}`);
-        return projectId;
-      });
-      projectId = dealResult;
+      await writeStatus();
+      console.log(`[Proposal ${proposalId} → deal] ${baselineCount} elemen MTO disalin sebagai baseline project ${projectId}`);
+      return { ok: true, projectId, projectNumber, createdProject: true, proposal };
+    });
 
+    if ('error' in outcome) {
+      return res.status(outcome.error).json(outcome.body);
+    }
+
+    const projectId = outcome.projectId;
+    const proposal = outcome.proposal;
+    const projectNumberOut = outcome.projectNumber;
+    let prId: number | null = null;
+    let prNumber_out: string | null = null;
+
+    // PR hanya dibuat saat project baru benar-benar dibuat di transaction di
+    // atas. Ini downstream process yang sengaja di LUAR transaction deal —
+    // kegagalannya tidak boleh membatalkan kontrak yang sudah sah.
+    if (outcome.createdProject) {
       // === Auto-create Purchase Request from proposal materials ===
       try {
         // Get all proposal items with their AHSP ids
@@ -2345,6 +2373,7 @@ router.put('/proposals/:id/status', authMiddleware, async (req: Request, res: Re
       message: `Status updated to ${newStatus}`,
       status: newStatus,
       project_id: projectId,
+      project_number: projectNumberOut || null,
       pr_id: prId || null,
       pr_number: prNumber_out || null
     });
@@ -3264,6 +3293,13 @@ router.delete('/proposals/:id/items/:itemId/mto-link', authMiddleware, async (re
 
     res.json({ message: 'MTO link removed' });
   } catch (err: any) {
+    // EST-MTO-R34b: transaction di atas melempar error ber-`lock` untuk kondisi
+    // yang punya arti HTTP sendiri — proposal terkunci (409) dan item tidak ada
+    // (404). Tanpa pemetaan ini keduanya keluar sebagai 500, jadi klien tidak
+    // bisa membedakan "tidak boleh" dari "sistem rusak" dan menampilkan pesan
+    // error umum untuk situasi yang sebenarnya normal.
+    if (err?.lock) return res.status(err.lock.status).json(err.lock.body);
+    console.error('Error removing MTO link:', err);
     res.status(500).json({ error: err.message });
   }
 });

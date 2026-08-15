@@ -1184,6 +1184,52 @@ const ensureDocumentCounterSchema = async (connection: any) => {
   console.log('✅ Counter nomor dokumen ensured');
 };
 
+// ==================== NOMOR PROJECT UNIK (EST-MTO-R39) ====================
+// `client_projects.project_number` dulu dibentuk dari COUNT(*)+1 tanpa UNIQUE
+// apa pun. Dua proposal yang di-deal berbarengan membaca hitungan yang sama dan
+// keduanya BERHASIL — bukan salah satu gagal, tapi dua project bernomor identik.
+// Penomorannya sudah dipindah ke `document_counters` (lihat `nextProjectNumber`
+// di estimator.routes.ts); index ini jaring terakhir di level database.
+//
+// NULL boleh berulang di UNIQUE MySQL, jadi baris lama yang nomornya kosong
+// tidak terganggu.
+const ensureProjectNumberUnique = async (connection: any) => {
+  try {
+    const [dupes]: any = await connection.execute(
+      `SELECT project_number, COUNT(*) AS n FROM client_projects
+       WHERE project_number IS NOT NULL
+       GROUP BY project_number HAVING n > 1`
+    );
+
+    if (dupes.length > 0) {
+      // Sengaja TIDAK menomori ulang. Nomor project sudah dipakai di kontrak,
+      // PR, dan dokumen di luar sistem — menimpanya diam-diam jauh lebih
+      // merusak daripada membiarkan index tidak terpasang. Tapi harus kelihatan.
+      console.error(
+        `⚠️  UNIQUE(project_number) TIDAK dipasang — ada ${dupes.length} nomor kembar: `
+        + dupes.map((d: any) => `${d.project_number}×${d.n}`).join(', ')
+        + '. Perbaiki manual lalu restart backend.'
+      );
+      return;
+    }
+
+    // MySQL 8 tidak punya CREATE UNIQUE INDEX IF NOT EXISTS.
+    const [idx]: any = await connection.execute(
+      `SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'client_projects'
+         AND INDEX_NAME = 'uq_client_projects_number' LIMIT 1`
+    );
+    if (idx.length === 0) {
+      await connection.execute(
+        'CREATE UNIQUE INDEX uq_client_projects_number ON client_projects (project_number)'
+      );
+    }
+    console.log('✅ Nomor project unik ensured');
+  } catch (err: any) {
+    console.warn('Schema ensure warning (project_number unique):', String(err.message).substring(0, 160));
+  }
+};
+
 // ==================== SOFT DELETE PURCHASE REQUEST (PROC-R08) ====================
 // PO sudah memakai logical delete, tapi PR masih dihapus permanen berikut bid,
 // bid item, dan itemnya — sebagian lewat helper yang menelan error, jadi
@@ -1561,6 +1607,7 @@ export async function initializeDatabase() {
     await ensureGrnCreatedBy(connection);
     await ensureMtoScopeSchema(connection);
     await ensureOneProjectPerProposal(connection);
+    await ensureProjectNumberUnique(connection);
     await ensureMtoLinesSchema(connection);
     await ensureDisposalSchema(connection);
     await ensureAssetStatusHistorySchema(connection);

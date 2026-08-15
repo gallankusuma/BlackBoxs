@@ -239,6 +239,36 @@ siapa yang mendapatkan lock dulu yang menang secara deterministic.
 
 R38 = P0
 
+──────────────────────────────────────────────────────────────────────────────
+[DEV] R38 — DITERAPKAN. estimator.routes.ts PUT /proposals/:id/status
+
+Betul, dan analisisnya tepat sampai ke urutan commit-nya. Transaction pertama
+memang sengaja tidak menulis status untuk deal (itu perbaikan R32 supaya deal
+tidak menjadi `deal` sebelum project-nya jadi), tapi akibatnya lock dilepas di
+sela dan transaction kedua tidak memeriksa ulang apa pun.
+
+Sekarang SATU transaction untuk semua transisi, tidak ada jalur khusus deal:
+
+  BEGIN
+    SELECT * FROM proposals WHERE id=? FOR UPDATE
+    validasi transisi TERHADAP BARIS YANG SUDAH DIKUNCI
+    (deal) resolve client → nextProjectNumber → INSERT project
+           → UPDATE proposals.project_id
+           → COPY engineering_inputs + mto_lines
+    UPDATE proposals SET status=...
+  COMMIT
+
+Perbandingan `fresh.status !== proposal.status` yang dulu ada ikut hilang —
+tidak diperlukan lagi karena validasinya sekarang memakai baris yang dikunci,
+bukan hasil pembacaan sebelum lock.
+
+Pembuatan PR tetap di luar transaction, sesuai yang Anda terima.
+
+Tes: mto-link #34, 5 putaran deal-vs-review berbarengan. Yang diperiksa bukan
+hanya "tepat satu yang menang" tapi juga status akhir HARUS cocok dengan
+pemenangnya — itu justru invariant yang dilanggar bug lama. 5/5.
+──────────────────────────────────────────────────────────────────────────────
+
 🔴 EST-MTO-R39 — Project number masih race-prone
 
 Di dalam Deal sekarang masih:
@@ -298,6 +328,38 @@ sebagai database invariant terakhir.
 
 R39 = P0
 
+──────────────────────────────────────────────────────────────────────────────
+[DEV] R39 — DITERAPKAN. estimator.routes.ts `nextProjectNumber()` +
+config/database.ts `ensureProjectNumberUnique()`
+
+Dikonfirmasi lengkap, termasuk bagian yang paling penting: tanpa UNIQUE,
+KEDUANYA berhasil dengan nomor sama — bukan salah satu gagal.
+
+1. Penomoran pindah ke `document_counters` dengan pola LAST_INSERT_ID() yang
+   sama seperti procurement, di-seed dari MAX nomor yang sudah ada supaya tidak
+   mundur di database yang barisnya dulu diisi COUNT()+1 atau manual.
+
+2. UNIQUE(project_number) dipasang lewat `ensureProjectNumberUnique`. NULL boleh
+   berulang di MySQL, jadi baris lama yang nomornya kosong tidak terganggu.
+   Diperiksa dulu di produksi sebelum dipasang: 2 project, 2 nomor, 0 kembar.
+
+   Kalau nanti ADA nomor kembar, index sengaja TIDAK dipasang dan dicetak
+   `console.error` dengan daftar nomornya. Menomori ulang otomatis bukan pilihan
+   — nomor project sudah dipakai di kontrak dan dokumen di luar sistem.
+
+3. Satu beda sadar dari procurement: alokasi nomor di sini dilakukan DI DALAM
+   transaction deal, bukan transaction terpisah. Procurement memisahkannya
+   karena 20 PO serentak mengantre di baris counter. Deal terjadi beberapa kali
+   sehari, jadi imbalannya lebih berharga: deal yang rollback tidak
+   meninggalkan nomor hangus. Dicatat di komentar fungsinya.
+
+Verifikasi bahwa tesnya memang bergigi: `nextProjectNumber` sementara
+dikembalikan ke COUNT()+1, tes langsung jatuh ke "2 dari 5 berhasil" — pola
+2-dari-20 PROC-R05 persis. Setelah dikembalikan: 5/5 berhasil, 5 nomor unik.
+
+Tes: mto-link #35.
+──────────────────────────────────────────────────────────────────────────────
+
 🟠 R34b — DELETE unlink masih salah HTTP response
 
 Alternate unlink melalui PUT sekarang sudah bagus:
@@ -327,6 +389,16 @@ ITEM_NOT_FOUND  → seharusnya 404
 Data integrity aman, jadi bukan P0 corruption.
 
 R34b = P1 API correctness
+
+──────────────────────────────────────────────────────────────────────────────
+[DEV] R34b — DITERAPKAN. estimator.routes.ts DELETE .../mto-link
+
+Benar. `err.lock` memang dilempar tapi catch-nya membuang semuanya jadi 500,
+jadi klien tidak bisa membedakan "tidak boleh" dari "sistem rusak". Sekarang
+memakai pola yang sama dengan PUT: `if (err?.lock) return res.status(...)`.
+
+Tes: mto-link #36 — item tidak ada → 404, proposal submitted → 409.
+──────────────────────────────────────────────────────────────────────────────
 
 🟠 R31 — Revision workflow masih belum selesai
 
@@ -446,6 +518,18 @@ UNP200 = 25.3
 Jadi tetap:
 
 Structural Steel quotation = HOLD sampai Engineering menetapkan approved profile master.
+
+──────────────────────────────────────────────────────────────────────────────
+[DEV] Ringkasan round ini
+
+Diterapkan : R38, R39, R34b
+Belum      : R31, R35, R37, R06 — dan R06 tetap menunggu Engineering, kami tidak
+             akan menebak berat profil.
+
+test:all 733 lulus / 0 gagal (dari 725; +8 dari R38/R39/R34b).
+Sisi PR pasca-deal: status pending/success/failed + retry belum dikerjakan,
+diakui sebagai utang, bukan disanggah.
+──────────────────────────────────────────────────────────────────────────────
 
 Development Action List — Round berikutnya
 P0 R38: gabungkan seluruh submitted → deal menjadi satu transaction, dimulai dari SELECT proposal FOR UPDATE + recheck status.

@@ -599,6 +599,94 @@ async function main() {
   chk('status TIDAK berubah jadi deal', pNc?.status, 'submitted');
   chk('tidak ada project menggantung', pNc?.project_id ?? null, null);
 
+  console.log('\n34. Deal vs perubahan status lain: satu transaction (EST-MTO-R38)');
+  // Sebelum R38, deal berjalan dalam DUA transaction: yang pertama memvalidasi
+  // status lalu COMMIT tanpa menulisnya, yang kedua membuat project dan menulis
+  // DEAL tanpa memeriksa ulang. Di sela keduanya lock sudah dilepas, jadi
+  // `submitted → review` bisa menyelip dan KEDUANYA sukses — proposal berakhir
+  // DEAL padahal saat project dibuat statusnya sudah REVIEW.
+  // Satu putaran race adalah bukti yang lemah — jendelanya bisa terlewat
+  // kebetulan. Diulang beberapa kali dengan proposal yang berbeda.
+  const PUTARAN = 5;
+  let tepatSatu = 0, konsisten = 0;
+  for (let i = 0; i < PUTARAN; i++) {
+    const propDealRace = await call('POST', '/estimator/proposals',
+      { project_name: `Uji race deal ${stamp}-${i}`, client_id: klienId }, master);
+    const rcId = propDealRace.json?.id;
+    for (const st of ['review', 'submitted']) {
+      await call('PUT', `/estimator/proposals/${rcId}/status`, { status: st }, master);
+    }
+
+    const [toDeal, toReview] = await Promise.all([
+      call('PUT', `/estimator/proposals/${rcId}/status`, { status: 'deal' }, master),
+      call('PUT', `/estimator/proposals/${rcId}/status`, { status: 'review' }, master),
+    ]);
+    if ([toDeal.status, toReview.status].filter(x => x === 200).length === 1) tepatSatu++;
+
+    // Yang paling penting: status akhir HARUS cocok dengan siapa yang menang.
+    // Bug lamanya justru di sini — deal dan review sama-sama sukses, dan
+    // proposal berakhir DEAL padahal project dibuat setelah status jadi REVIEW.
+    const cekRace = await call('GET', `/estimator/proposals/${rcId}`, undefined, master);
+    const pRace = cekRace.json?.data ?? cekRace.json;
+    const dealMenang = toDeal.status === 200;
+    const cocok = dealMenang
+      ? pRace?.status === 'deal' && !!pRace?.project_id
+      : pRace?.status === 'review' && !pRace?.project_id;
+    if (cocok) konsisten++;
+  }
+  chk(`tepat satu transisi menang di ${PUTARAN} putaran`, tepatSatu, PUTARAN);
+  chk(`status akhir konsisten dengan pemenang di ${PUTARAN} putaran`, konsisten, PUTARAN);
+
+  console.log('\n35. Nomor project tidak kembar saat deal berbarengan (EST-MTO-R39)');
+  // Versi lama memakai COUNT(*)+1. Dua proposal berbeda tidak mengunci baris
+  // yang sama, jadi keduanya membaca hitungan yang sama dan KEDUANYA berhasil
+  // dengan nomor identik — client_projects.project_number pun belum UNIQUE.
+  const N = 5;
+  const raceIds: number[] = [];
+  for (let i = 0; i < N; i++) {
+    const pr = await call('POST', '/estimator/proposals',
+      { project_name: `Uji nomor ${stamp}-${i}`, client_id: klienId }, master);
+    const id = pr.json?.id;
+    raceIds.push(id);
+    for (const st of ['review', 'submitted']) {
+      await call('PUT', `/estimator/proposals/${id}/status`, { status: st }, master);
+    }
+  }
+
+  const hasil = await Promise.all(
+    raceIds.map(id => call('PUT', `/estimator/proposals/${id}/status`, { status: 'deal' }, master))
+  );
+  chk(`${N} deal berbarengan semuanya berhasil`, hasil.filter(r => r.status === 200).length, N);
+
+  const nomor = hasil.map(r => r.json?.project_number).filter(Boolean);
+  chk('semua deal mengembalikan nomor project', nomor.length, N);
+  chk('nomornya unik semua', new Set(nomor).size, nomor.length);
+  chk('formatnya PRJ-TAHUN-NNNN', nomor.every((n: string) => /^PRJ-\d{4}-\d{4}$/.test(n)), true);
+
+  console.log('\n36. DELETE unlink membalas kode HTTP yang benar (EST-MTO-R34b)');
+  // Dulu semua kegagalan di transaction keluar sebagai 500, jadi "proposal
+  // terkunci" tidak bisa dibedakan dari "sistem rusak".
+  const propUnl = await call('POST', '/estimator/proposals',
+    { project_name: `Uji unlink ${stamp}` }, master);
+  const unlId = propUnl.json?.id;
+  chk('item tidak ada → 404',
+    (await call('DELETE', `/estimator/proposals/${unlId}/items/99999999/mto-link`, undefined, master)).status, 404);
+
+  const elUnl = await call('POST', `/estimator/proposals/${unlId}/mto`, {
+    element_type: 'foundation', element_name: 'P1',
+    parameters: { L: 1, W: 1, H: 0.3, depth: 1.2, qty: 12, waste_pct: 5 },
+  }, master);
+  const itUnl = await call('POST', `/estimator/proposals/${unlId}/items`, { ahsp_id: ahspId, qty: 1 }, master);
+  const itUnlId = itUnl.json?.id ?? itUnl.json?.data?.id;
+  await call('PUT', `/estimator/proposals/${unlId}/items/${itUnlId}/mto-link`, {
+    element_id: elUnl.json?.id, line_code: 'FND-EXCV', unit: 'm3',
+  }, master);
+  for (const st of ['review', 'submitted']) {
+    await call('PUT', `/estimator/proposals/${unlId}/status`, { status: st }, master);
+  }
+  chk('proposal terkunci → 409',
+    (await call('DELETE', `/estimator/proposals/${unlId}/items/${itUnlId}/mto-link`, undefined, master)).status, 409);
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }
