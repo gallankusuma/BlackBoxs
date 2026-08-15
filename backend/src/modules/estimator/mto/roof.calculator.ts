@@ -75,8 +75,8 @@ export function calcRoof(p: any): MtoResult {
 
     const spacing = num(p.purlin_spacing, 1.2) || 1.2;
     const purlinLength = netRoofArea / spacing;
-    const purlinProfile = String(p.purlin_profile || 'C150x65');
-    const wpm = profileWeight(purlinProfile, 6.76);
+    const purlinProfile = String(p.purlin_profile || 'CNP150x65x20x2.3');
+    const wpm = profileWeight(purlinProfile, 5.5);
     lines.push(line('RF-PURLIN', `Gording ${purlinProfile} (${wpm} kg/m)`,
       wpm * purlinLength, 'kg', waste, 1));
   }

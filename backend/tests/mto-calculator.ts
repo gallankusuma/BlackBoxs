@@ -192,7 +192,7 @@ const beamWfPurlin = calculateMto('beam', {
   purlin_length: 500, purlin_profile: 'C150x65', waste_pct: 0,
 });
 chk('gording ikut keluar di cabang WF', !!lineOf(beamWfPurlin, 'BM-PURLIN'), true);
-near('gording = 6.76 × 500', lineOf(beamWfPurlin, 'BM-PURLIN').net_quantity, 3380, 1);
+near('gording = 5.5 × 500 (CNP 150x65x20x2.3)', lineOf(beamWfPurlin, 'BM-PURLIN').net_quantity, 2750, 1);
 
 console.log('\n18. Lembar cladding memperhitungkan panjang sheet (EST-MTO-R09)');
 const clad = calculateMto('wall', { wall_type: 'cladding_zincalume', area: 100, zinc_eff_w: 0.85, zinc_len: 6, waste_pct: 0 });
@@ -320,5 +320,45 @@ chk('dinding thickness_mm lolos', dindingMm.missing_required, undefined);
 const atapDatar = calculateMto('roof', { roof_type: 'beton_dak', floor_area: 200, slope_deg: 0, dak_thick: 0.12 });
 chk('kemiringan 0 derajat diterima', atapDatar.missing_required, undefined);
 
-console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
-process.exit(fail ? 1 : 0);
+console.log('\nX3. Berat profil baja mengikuti tabel pasar (EST-MTO-R06)');
+// Angka-angka ini dulu disalin dari label dropdown, dan labelnya sendiri memuat
+// nilai yang tidak ada di tabel baja mana pun. Dikunci di sini supaya tidak
+// bergeser diam-diam lagi — tiap perubahan harus lewat tes ini.
+import('../src/modules/estimator/mto/profiles').then(({ lookupProfileWeight }) => {
+  // WF — JIS G3192. Dua yang dulu keliru:
+  chk('WF300x150 = 36.7 (dulu 46.8)', lookupProfileWeight('WF300x150'), 36.7);
+  chk('WF350x175 = 49.6 (dulu 57.4)', lookupProfileWeight('WF350x175'), 49.6);
+  chk('WF200x100 tetap 21.3', lookupProfileWeight('WF200x100'), 21.3);
+  chk('WF400x200 tetap 66.0', lookupProfileWeight('WF400x200'), 66.0);
+
+  // UNP — backend memang sudah benar, layar yang dulu memakai seri Eropa.
+  chk('UNP100 = 9.36 (bukan 10.6 seri Eropa)', lookupProfileWeight('UNP100'), 9.36);
+  chk('UNP150 = 18.6', lookupProfileWeight('UNP150'), 18.6);
+
+  // CNP — tebal WAJIB ada di kodenya, karena itu yang menentukan berat.
+  chk('CNP150x65x20x2.3 = 5.5', lookupProfileWeight('CNP150x65x20x2.3'), 5.5);
+  chk('CNP150x65x20x3.2 = 7.52', lookupProfileWeight('CNP150x65x20x3.2'), 7.52);
+
+  // 6,76 kg/m yang dulu dipakai untuk "C150x65" ternyata berat CNP 150x50x3,2 —
+  // lebar sayapnya 50, bukan 65. Label dan angkanya milik profil berbeda.
+  chk('6.76 sebenarnya CNP150x50x20x3.2', lookupProfileWeight('CNP150x50x20x3.2'), 6.76);
+
+  // Profil Z sama beratnya dengan C pada ukuran & tebal sama.
+  chk('Z150x65x20x2.3 = C150x65x20x2.3', lookupProfileWeight('Z150x65x20x2.3'), 5.5);
+
+  // Siku — dulu tidak ada di tabel sama sekali, jatuh ke fallback 9,36 (UNP100).
+  chk('L50x50x5 = 3.75', lookupProfileWeight('L50x50x5'), 3.75);
+  chk('L65x65x6 = 5.91', lookupProfileWeight('L65x65x6'), 5.91);
+
+  // Kode lama di data produksi tetap terbaca lewat alias.
+  chk('alias C150x65 → 5.5', lookupProfileWeight('C150x65'), 5.5);
+  chk('alias siku50 → 3.75', lookupProfileWeight('siku50'), 3.75);
+  chk('alias UNP120 → UNP125, sama-sama 13.4', lookupProfileWeight('UNP120'), 13.4);
+
+  // Kode betulan tak dikenal tetap dikenali sebagai tak dikenal.
+  chk('profil karangan → null', lookupProfileWeight('WF999x999'), null);
+
+  console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
+  process.exit(fail ? 1 : 0);
+});
+

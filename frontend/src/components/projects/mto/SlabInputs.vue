@@ -95,9 +95,12 @@
           <div class="fields">
             <label>Profil Rangka</label>
             <select v-model="p.frame_profile" @change="emit('change')">
-              <option value="siku50">Siku 50×50×5</option>
-              <option value="siku65">Siku 65×65×6</option>
-              <option value="kanal100">Kanal C 100</option>
+              <option value="L50x50x5">Siku 50×50×5 (3.75 kg/m)</option>
+              <option value="L60x60x6">Siku 60×60×6 (5.42 kg/m)</option>
+              <option value="L65x65x6">Siku 65×65×6 (5.91 kg/m)</option>
+              <option value="L70x70x6">Siku 70×70×6 (6.38 kg/m)</option>
+              <option value="CNP100x50x20x2.3">Kanal C 100×50×20×2.3 (4.07 kg/m)</option>
+              <option value="UNP100">UNP 100 (9.36 kg/m)</option>
             </select>
             <label>Total Panjang Rangka (m)</label><input type="number" v-model.number="p.frame_length" @change="emit('change')" step="1">
           </div>
@@ -151,7 +154,7 @@ if(!p.rebar_dia_x) p.rebar_dia_x=8; if(!p.spacing_x) p.spacing_x=0.15; if(!p.fin
 if(!p.tile_size) p.tile_size='60x60'; if(!p.screed_t) p.screed_t=3; if(!p.grout_mm) p.grout_mm=2;
 if(!p.tile_type) p.tile_type='keramik_biasa'; if(!p.waste_pct) p.waste_pct=10;
 if(!p.plate_thick) p.plate_thick='5'; if(!p.bordes_type) p.bordes_type='diamond'; if(!p.weld_length) p.weld_length=50;
-if(!p.frame_profile) p.frame_profile='siku50'; if(!p.frame_length) p.frame_length=100;
+if(!p.frame_profile) p.frame_profile='L50x50x5'; if(!p.frame_length) p.frame_length=100;
 if(!p.parquet_type) p.parquet_type='vinyl_click';
 const PLATE_WEIGHT: Record<string,number> = {'4':31.4,'5':39.3,'6':47.1,'8':62.8};
 // EST-MTO-001: kuantitas tidak lagi dihitung di sini. Komponen ini hanya

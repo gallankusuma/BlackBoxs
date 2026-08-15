@@ -42,8 +42,8 @@ export function calcBeam(p: any): MtoResult {
     lines.push(line('BM-PAINT', 'Pengecatan Baja', totalLength * num(p.paint_perimeter, 1.1), 'm2', waste, 2));
     notes.push('Balok baja: tidak menghasilkan volume beton maupun besi tulangan.');
   } else if (beamType === 'purlin') {
-    const profile = String(p.purlin_profile || 'C150x65');
-    const wpm = profileWeight(profile, 6.76);
+    const profile = String(p.purlin_profile || 'CNP150x65x20x2.3');
+    const wpm = profileWeight(profile, 5.5);
     const len = num(p.purlin_length, totalLength);
     lines.push(line('BM-PURLIN', `Gording ${profile} (${wpm} kg/m)`, wpm * len, 'kg', waste, 1));
   } else if (beamType === 'channel') {
@@ -81,8 +81,8 @@ export function calcBeam(p: any): MtoResult {
   if (beamType === 'wf') {
     const purlinLen = num(p.purlin_length);
     if (purlinLen > 0) {
-      const profile = String(p.purlin_profile || 'C150x65');
-      const wpm = profileWeight(profile, 6.76);
+      const profile = String(p.purlin_profile || 'CNP150x65x20x2.3');
+      const wpm = profileWeight(profile, 5.5);
       lines.push(line('BM-PURLIN', `Gording ${profile} (${wpm} kg/m)`, wpm * purlinLen, 'kg', waste, 1));
     }
   }

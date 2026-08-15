@@ -603,6 +603,77 @@ Jadi tetap:
 Structural Steel quotation = HOLD sampai Engineering menetapkan approved profile master.
 
 ──────────────────────────────────────────────────────────────────────────────
+[DEV] R06 — SEBAGIAN BESAR DITERAPKAN, sisanya perlu konfirmasi Engineering.
+backend/src/modules/estimator/mto/profiles.ts + ColumnInputs/BeamInputs/SlabInputs
+
+Kami cek ke tabel baja yang beredar di pasar Indonesia, dan hasilnya mengubah
+kesimpulan sebelumnya: sebagian besar selisih ini TIDAK ambigu — memang salah,
+dan angka benarnya terpublikasi.
+
+1. WF — DUA NILAI KELIRU, DAN INI TIDAK DILAPORKAN DI REVIEW
+
+   WF300x150   46,8 → 36,7   (+27%)
+   WF350x175   57,4 → 49,6   (+16%)
+
+   Empat ukuran lain cocok dalam ±1%. Tidak ada satu pun tabel yang mencantumkan
+   WF 300x150 seberat 46,8 kg/m atau WF 350x175 seberat 57,4 kg/m — termasuk
+   varian ringannya (298x149 = 32,0; 346x174 = 41,2). Nilai benarnya juga cocok
+   dengan hitungan luas penampang JIS G3192 berikut filletnya. Ini kekeliruan
+   angka, bukan beda standar. Backend dan frontend sama-sama salah karena
+   backend menyalin dari label dropdown.
+
+   Tidak ada data produksi yang terkena — semuanya memakai WF200x100 (benar).
+
+2. UNP — BACKEND YANG BENAR, LAYAR YANG SALAH
+
+   Backend 9,36 / 13,4 / 18,6 / 24,6 adalah seri JIS G3192 yang jadi acuan SNI.
+   Layar memakai UNP100 = 10,6, itu U100 seri Eropa. Layar disamakan ke backend,
+   bukan sebaliknya. UNP120 (Eropa) dipetakan ke UNP125 (JIS) — kebetulan
+   dua-duanya 13,4 kg/m, jadi tidak ada angka yang bergeser.
+
+3. C150x65 — SUMBER 6,76 AKHIRNYA KETEMU
+
+   CNP 150x50x20x3,2 = 40,56 kg per batang 6 m = tepat 6,76 kg/m. Jadi angka
+   backend itu berat profil dengan sayap 50 mm, dipasang pada label 150x65.
+   Label dan angkanya milik profil yang berbeda. Yang 2,24 di layar memang baja
+   ringan (±0,9 mm), kelas produk lain.
+
+   Akar masalahnya: kode profil tidak menyebut TEBAL, padahal itu yang
+   menentukan berat — 150x65x20 ada versi 2,3 mm (5,5 kg/m) dan 3,2 mm
+   (7,52 kg/m), beda 37%. Kode di layar sekarang menyebut tebal
+   (CNP150x65x20x2.3), jadi ambiguitas ini tidak bisa terulang.
+
+4. SIKU — TEMUAN BARU
+
+   `siku50` tidak ada di tabel mana pun, jadi jatuh ke fallback 9,36 kg/m —
+   berat UNP100. Siku 50x50x5 sebenarnya 3,75 kg/m: 2,5x lipat terlalu berat,
+   dipakai di 3 elemen produksi. Tabel siku lengkap ditambahkan.
+
+DAMPAK KE DATA PRODUKSI (diukur, bukan diperkirakan):
+
+   #5/#33/#45  gording  3.380 kg → 2.750 kg   (-19%)
+   #24/#34/#46 rangka     936 kg →   375 kg   (-60%)
+   TOTAL              12.948 kg → 9.375 kg
+   Selisih 3.573 kg ≈ Rp 64,3 juta @ Rp18.000/kg — ke arah LEBIH MURAH, jadi
+   yang selama ini terjadi adalah penawaran kemahalan.
+
+MASIH PERLU ENGINEERING (tiga pertanyaan saja):
+   a. Gording C150x65 — CNP struktural atau baja ringan? Kalau CNP, tebal 2,3
+      atau 3,2 mm? Kode lama kami asumsikan 2,3 mm (stok paling umum);
+      kalau ternyata 3,2 mm angkanya 37% lebih berat.
+   b. UNP200 — sayap 75 atau 80 mm?
+   c. `siku50` — L50x50x5?
+
+Fallback diam-diam untuk profil tak dikenal SENGAJA belum dihapus — itu
+keputusan terpisah yang masih di tangan pemilik produk. Yang dikerjakan di sini
+murni mengoreksi angkanya. `lookupProfileWeight()` sudah mengembalikan `null`
+untuk kode tak dikenal, jadi penggemboknya tinggal dipasang kalau diputuskan.
+
+Tes: mto-calculator #X3 — 16 assertion mengunci tiap nilai tabel, termasuk bukti
+bahwa 6,76 itu milik CNP150x50x20x3.2. test:all 780 lulus / 0 gagal.
+──────────────────────────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────────────
 [DEV] Ringkasan round ini
 
 Diterapkan : R38, R39, R34b, R35, R37

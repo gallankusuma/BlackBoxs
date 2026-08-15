@@ -36,15 +36,18 @@
               <option value="WF150x75">WF 150×75 (14 kg/m)</option>
               <option value="WF200x100">WF 200×100 (21.3 kg/m)</option>
               <option value="WF250x125">WF 250×125 (29.6 kg/m)</option>
-              <option value="WF300x150">WF 300×150 (46.8 kg/m)</option>
-              <option value="WF350x175">WF 350×175 (57.4 kg/m)</option>
+              <option value="WF300x150">WF 300×150 (36.7 kg/m)</option>
+              <option value="WF350x175">WF 350×175 (49.6 kg/m)</option>
             </select>
             <label>Panjang Purlin (m)</label><input type="number" v-model.number="p.purlin_length" @change="emit('change')" step="1">
             <label>Profil Purlin</label>
             <select v-model="p.purlin_profile" @change="emit('change')">
-              <option value="C150x65">C 150×65 (2.24 kg/m)</option>
-              <option value="C200x75">C 200×75 (3.18 kg/m)</option>
-              <option value="Z150x65">Z 150×65 (2.24 kg/m)</option>
+              <option value="CNP100x50x20x2.3">CNP 100×50×20×2.3 (4.07 kg/m)</option>
+              <option value="CNP125x50x20x2.3">CNP 125×50×20×2.3 (4.52 kg/m)</option>
+              <option value="CNP150x65x20x2.3">CNP 150×65×20×2.3 (5.5 kg/m)</option>
+              <option value="CNP150x65x20x3.2">CNP 150×65×20×3.2 (7.52 kg/m)</option>
+              <option value="CNP200x75x20x3.2">CNP 200×75×20×3.2 (9.27 kg/m)</option>
+              <option value="Z150x65x20x2.3">Z 150×65×20×2.3 (5.5 kg/m)</option>
             </select>
           </div>
         </div>
@@ -65,10 +68,10 @@
             <label>Total Panjang (m)</label><input type="number" v-model.number="p.total_length" @change="emit('change')" step="1">
             <label>Profil Kanal</label>
             <select v-model="p.kanal_profile" @change="emit('change')">
-              <option value="UNP100">UNP 100 (10.6 kg/m)</option>
-              <option value="UNP120">UNP 120 (13.4 kg/m)</option>
-              <option value="UNP150">UNP 150 (18.8 kg/m)</option>
-              <option value="UNP200">UNP 200 (25.3 kg/m)</option>
+              <option value="UNP100">UNP 100 (9.36 kg/m)</option>
+              <option value="UNP125">UNP 125 (13.4 kg/m)</option>
+              <option value="UNP150">UNP 150 (18.6 kg/m)</option>
+              <option value="UNP200">UNP 200 (24.6 kg/m)</option>
             </select>
             <label>Baut/sambungan (bh)</label><input type="number" v-model.number="p.kanal_bolts" @change="emit('change')">
           </div>
@@ -114,12 +117,13 @@ if(!p.beam_type) p.beam_type='beton';
 if(!p.total_length) p.total_length=300; if(!p.B) p.B=0.25; if(!p.H) p.H=0.5;
 if(!p.rebar_count) p.rebar_count=4; if(!p.rebar_dia) p.rebar_dia=16; if(!p.stirrup_dia) p.stirrup_dia=10;
 if(!p.rb_length) p.rb_length=200; if(!p.rb_B) p.rb_B=0.15; if(!p.rb_H) p.rb_H=0.25; if(!p.rb_rebar_dia) p.rb_rebar_dia=13;
-if(!p.wf_profile_beam) p.wf_profile_beam='WF200x100'; if(!p.purlin_length) p.purlin_length=500; if(!p.purlin_profile) p.purlin_profile='C150x65';
+if(!p.wf_profile_beam) p.wf_profile_beam='WF200x100'; if(!p.purlin_length) p.purlin_length=500; if(!p.purlin_profile) p.purlin_profile='CNP150x65x20x2.3';
 if(!p.bolt_joints) p.bolt_joints=20; if(!p.bolts_per_joint) p.bolts_per_joint=4; if(!p.stiffener_qty) p.stiffener_qty=10;
 if(!p.kanal_profile) p.kanal_profile='UNP150'; if(!p.kanal_bolts) p.kanal_bolts=40;
 if(!p.kayu_b) p.kayu_b=8; if(!p.kayu_h) p.kayu_h=15; if(!p.kayu_kelas_beam) p.kayu_kelas_beam='K2';
-const UNP_WEIGHT: Record<string,number> = {'UNP100':10.6,'UNP120':13.4,'UNP150':18.8,'UNP200':25.3};
-const PURLIN_WEIGHT: Record<string,number> = {'C150x65':2.24,'C200x75':3.18,'Z150x65':2.24};
+// EST-MTO-R06: tabel berat lokal DIHAPUS. Angkanya tidak cocok dengan tabel
+// baja mana pun (UNP100 10,6 = seri Eropa; C150x65 2,24 = baja ringan).
+// Sumber tunggalnya sekarang backend/src/modules/estimator/mto/profiles.ts.
 // EST-MTO-001: kuantitas tidak lagi dihitung di sini. Komponen ini hanya
 // mengirim parameter; angkanya datang dari kalkulator backend yang sama
 // dengan yang dipakai RAB dan penawaran.

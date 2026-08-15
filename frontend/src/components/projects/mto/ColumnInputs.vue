@@ -42,8 +42,8 @@
               <option value="WF150x75">WF 150×75 (14 kg/m)</option>
               <option value="WF200x100">WF 200×100 (21.3 kg/m)</option>
               <option value="WF250x125">WF 250×125 (29.6 kg/m)</option>
-              <option value="WF300x150">WF 300×150 (46.8 kg/m)</option>
-              <option value="WF350x175">WF 350×175 (57.4 kg/m)</option>
+              <option value="WF300x150">WF 300×150 (36.7 kg/m)</option>
+              <option value="WF350x175">WF 350×175 (49.6 kg/m)</option>
               <option value="WF400x200">WF 400×200 (66.0 kg/m)</option>
             </select>
           </div>
