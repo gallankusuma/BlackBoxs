@@ -270,5 +270,55 @@ for (const [t, key, val] of [
   chk(`${t} subtipe "${val}" → invalid`, r.variant, 'invalid');
 }
 
+console.log('\nX. Dimensi wajib yang kosong ditandai, bukan didiamkan (EST-MTO-R35)');
+// Sebelum ini, kolom beton tanpa B/H tetap menghasilkan volume beton, bekisting,
+// besi, dan sengkang dari asumsi 30x30 cm setinggi 3 m — angka wajar, tanpa
+// error, dan bisa lolos ke penawaran.
+const kolomKosong = calculateMto('column', { col_type: 'beton', qty_per_floor: 4, height_per_floor: 3.5 });
+chk('kolom beton tanpa B/H ditandai', (kolomKosong.missing_required || []).length, 2);
+chk('sebutkan B', (kolomKosong.missing_required || []).some(m => m.includes('(B)')), true);
+chk('sebutkan H', (kolomKosong.missing_required || []).some(m => m.includes('(H)')), true);
+
+// Yang ditandai TIDAK dibuat invalid: elemen lama harus tetap terbaca di layar
+// dan tetap bisa ditautkan ke RAB. Penolakannya ada di route POST/PUT.
+chk('tetap menghasilkan baris', kolomKosong.lines.length > 0, true);
+chk('bukan invalid', kolomKosong.variant, 'concrete');
+chk('asumsinya disebut di catatan',
+  kolomKosong.notes.some(n => n.includes('nilai asumsi')), true);
+
+const kolomLengkap = calculateMto('column',
+  { col_type: 'beton', qty_per_floor: 4, height_per_floor: 3.5, B: 0.3, H: 0.4 });
+chk('kolom lengkap tidak ditandai', kolomLengkap.missing_required, undefined);
+
+console.log('\nX2. Field wajib berbeda per varian (EST-MTO-R35)');
+// Kolom WF tidak butuh B/H tapi WAJIB punya profil — tanpa itu beratnya diambil
+// dari asumsi WF200x100 (21,3 kg/m).
+const wfTanpaProfil = calculateMto('column', { col_type: 'wf', qty_per_floor: 4, height_per_floor: 3.5 });
+chk('kolom WF wajib profil', (wfTanpaProfil.missing_required || [])[0]?.includes('wf_profile'), true);
+chk('kolom WF tidak diminta B/H',
+  (wfTanpaProfil.missing_required || []).some(m => m.includes('(B)')), false);
+
+const wfLengkap = calculateMto('column',
+  { col_type: 'wf', qty_per_floor: 4, height_per_floor: 3.5, wf_profile: 'WF250x125' });
+chk('kolom WF dengan profil lolos', wfLengkap.missing_required, undefined);
+
+// Gording boleh memakai panjangnya sendiri ATAU panjang total balok.
+const gordingA = calculateMto('beam', { beam_type: 'gording', purlin_profile: 'C150x65', purlin_length: 120 });
+chk('gording pakai purlin_length lolos', gordingA.missing_required, undefined);
+const gordingB = calculateMto('beam', { beam_type: 'gording', purlin_profile: 'C150x65', total_length: 120 });
+chk('gording pakai total_length lolos', gordingB.missing_required, undefined);
+const gordingC = calculateMto('beam', { beam_type: 'gording', purlin_profile: 'C150x65' });
+chk('gording tanpa keduanya ditandai', (gordingC.missing_required || []).length, 1);
+
+// Dinding: layar sekarang cm, kontrak lama mm — dua-duanya sah.
+const dindingCm = calculateMto('wall', { wall_type: 'bata_ringan', area: 100, thickness_cm: 15 });
+chk('dinding thickness_cm lolos', dindingCm.missing_required, undefined);
+const dindingMm = calculateMto('wall', { wall_type: 'bata_ringan', area: 100, thickness_mm: 150 });
+chk('dinding thickness_mm lolos', dindingMm.missing_required, undefined);
+
+// Atap datar 0 derajat itu sah — nol tidak boleh dianggap "belum diisi".
+const atapDatar = calculateMto('roof', { roof_type: 'beton_dak', floor_area: 200, slope_deg: 0, dak_thick: 0.12 });
+chk('kemiringan 0 derajat diterima', atapDatar.missing_required, undefined);
+
 console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
 process.exit(fail ? 1 : 0);

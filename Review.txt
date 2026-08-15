@@ -463,6 +463,50 @@ Contract Qty     100.000 m³
 Current Formula  103.000 m³
 Difference        +3.000 m³
 ⚠ Formula changed after submission
+
+──────────────────────────────────────────────────────────────────────────────
+[DEV] R37 — DITERAPKAN. ProjectMTO.vue + EstimatorProposalEditor.vue +
+ProjectDetail.vue + project.routes.ts + mto/enrich.ts
+
+Diterima sepenuhnya, termasuk pembagian draft/review vs submitted/deal.
+
+Frontend: `ProjectMTO` menerima prop `contractMode`. Saat aktif, angka utama —
+KPI, rekap per bagian, dan grand total — dibaca dari `stored_lines`, bukan dari
+preview formula sekarang. Kalau ada drift, muncul tabel pembanding persis
+seperti contoh Anda (Zona | Item | Kontrak | Formula sekarang | Selisih) dengan
+catatan bahwa rekap di atasnya tetap memakai angka kontrak.
+
+Dinyalakan di dua tempat: proposal berstatus submitted/deal, dan seluruh layar
+project — project hanya ada setelah deal, jadi yang berlaku di sana selalu
+kuantitas kontrak.
+
+DUA HAL YANG KAMI TEMUKAN SENDIRI saat mengerjakan ini, keduanya sudah diperbaiki:
+
+1. `GET /projects/:id/mto` sama sekali tidak mengembalikan baris tersimpan —
+   hanya parameter. Jadi layar project TIDAK MUNGKIN menampilkan kuantitas
+   kontrak, bukan sekadar belum dipakai. Sekarang route itu diperkaya dengan
+   `stored_lines`, `formula_drift`, dan `formula_version_stored`.
+
+   Logika drift-nya dipindah ke `mto/enrich.ts` supaya tidak ditulis dua kali di
+   dua route. Versi pertama drift (R36) sempat hanya membandingkan
+   `net_quantity`; menduplikasinya berarti mengundang kesalahan yang sama lagi.
+
+2. Tab MTO pada proposal submitted/deal masih tampak bisa diedit, padahal
+   backend menolaknya dengan 409. Sekarang ikut readonly, jadi tidak lagi
+   menawarkan aksi yang pasti gagal.
+
+Baris kontrak dikunci ke `element_id`, bukan indeks zona — indeks bergeser
+begitu ada zona ditambah/dihapus dan baris kontrak akan menempel ke zona yang
+salah tanpa kelihatan.
+
+Fallback yang disengaja: elemen yang belum punya baris tersimpan (dibuat sebelum
+EST-MTO-019 dan belum di-backfill) tetap menampilkan hasil hitung sekarang,
+bukan kosong.
+
+Tes: mto-link #38 — proposal submitted membawa baris kontrak, angkanya identik
+dengan hitung sekarang selama formula belum berubah, dan layar project menerima
+baris kontrak berikut versi formulanya.
+──────────────────────────────────────────────────────────────────────────────
 🟠 R35 — completeness validation masih sama
 
 Validator sekarang kuat untuk negative/range:
@@ -492,6 +536,45 @@ length required
 Roof:
 floor_area required
 ...
+
+──────────────────────────────────────────────────────────────────────────────
+[DEV] R35 — DITERAPKAN. mto/contract.ts `missingRequiredFields()` +
+mto/calculator.ts + route POST/PUT MTO
+
+Benar, dan `check()` memang return kalau field tidak diberikan. Daftar wajibnya
+disusun per elemen DAN per varian, karena kebutuhannya beda: kolom beton wajib
+B/H, kolom WF tidak — tapi wajib profil. Yang didaftarkan hanya field yang
+memang dikumpulkan layar (`*Inputs.vue`); mewajibkan field yang tidak ada di
+layar akan membuat elemen mustahil disimpan.
+
+SATU PENYIMPANGAN SADAR dari yang Anda minta, dan ini yang penting:
+
+Penolakannya TIDAK ditaruh di kalkulator. Kalau `calculateMto` mengembalikan
+`invalid`, elemen lama yang terlanjur tersimpan tanpa field itu ikut kehilangan
+kuantitasnya di layar dan tidak bisa lagi ditautkan ke RAB — padahal angkanya
+sudah dipakai. Kami ukur dulu di produksi sebelum memutuskan: 41 elemen, 6 di
+antaranya ada di kondisi ini (kolom WF tanpa `wf_profile`, atap tanpa
+`slope_deg`, pelat tanpa `thickness`).
+
+Jadi pembagiannya:
+  - Kalkulator  : tetap menghitung, tapi mengembalikan `missing_required`
+                  dan mencatat di notes bahwa angkanya berdiri di atas asumsi.
+  - POST/PUT MTO: 422 `MISSING_REQUIRED_PARAMETERS`. Data setengah jadi yang
+                  BARU tidak bisa masuk, dan 6 elemen tadi tidak bisa disimpan
+                  ulang sebelum dilengkapi — pesannya menyebut field persisnya.
+  - Layar       : menandai zona yang bersangkutan (lihat R37).
+
+Hasilnya di produksi: 40 dari 41 elemen tetap terbaca utuh. Satu yang invalid
+(`manpower`) memang sudah invalid sebelum perubahan ini — bukan elemen konstruksi.
+
+Nol boleh: atap datar `slope_deg = 0` sah, jadi nol tidak dianggap "belum diisi".
+Dua jalur input yang sah dipertahankan: gording boleh `purlin_length` ATAU
+`total_length`; dinding boleh `thickness_cm` ATAU `thickness_mm`.
+
+Tes: mto-calculator #X/#X2 (16 assertion), mto-link #37 (7 assertion).
+Catatan: aturan ini langsung menangkap data tes kami sendiri yang tidak lengkap
+(kolom tanpa `height_per_floor`) — tesnya yang diperbaiki, bukan aturannya.
+──────────────────────────────────────────────────────────────────────────────
 🔴 R06 — Steel masih belum boleh final quotation
 
 Ini belum berubah.
@@ -522,11 +605,12 @@ Structural Steel quotation = HOLD sampai Engineering menetapkan approved profile
 ──────────────────────────────────────────────────────────────────────────────
 [DEV] Ringkasan round ini
 
-Diterapkan : R38, R39, R34b
-Belum      : R31, R35, R37, R06 — dan R06 tetap menunggu Engineering, kami tidak
+Diterapkan : R38, R39, R34b, R35, R37
+Belum      : R31 (perubahan model, menunggu keputusan pemilik produk soal alur
+             revisinya) dan R06 — R06 tetap menunggu Engineering, kami tidak
              akan menebak berat profil.
 
-test:all 733 lulus / 0 gagal (dari 725; +8 dari R38/R39/R34b).
+test:all 764 lulus / 0 gagal (dari 725; +39).
 Sisi PR pasca-deal: status pending/success/failed + retry belum dikerjakan,
 diakui sebagai utang, bukan disanggah.
 ──────────────────────────────────────────────────────────────────────────────

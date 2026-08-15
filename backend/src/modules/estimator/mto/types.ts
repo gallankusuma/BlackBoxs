@@ -26,6 +26,16 @@ export interface MtoResult {
   lines: MtoLine[];
   /** Peringatan non-fatal: parameter kosong, asumsi yang dipakai, dsb. */
   notes: string[];
+  /**
+   * Dimensi teknis wajib yang belum diisi (EST-MTO-R35).
+   *
+   * Sengaja TIDAK membuat hasilnya `invalid`. Elemen lama yang sudah terlanjur
+   * tersimpan tanpa field ini harus tetap bisa DIBACA — kalau dibuat invalid,
+   * kuantitasnya hilang dari layar dan tidak bisa lagi ditautkan ke RAB, padahal
+   * angka itu sudah dipakai. Yang digembok adalah penulisannya: route POST/PUT
+   * membalas 422 kalau daftar ini tidak kosong.
+   */
+  missing_required?: string[];
 }
 
 const round = (v: number, d = 3): number => {

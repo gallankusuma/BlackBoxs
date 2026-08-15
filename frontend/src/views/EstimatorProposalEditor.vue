@@ -275,6 +275,8 @@
           <ProjectMTO
             :project-id="proposalId"
             api-base="/estimator/proposals"
+            :contract-mode="isContractQty"
+            :readonly="isContractQty"
           />
         </div><!-- end MTO tab -->
 
@@ -1233,6 +1235,13 @@ interface AhspDetailItem {
 }
 
 const proposal = ref<Proposal | null>(null);
+
+// EST-MTO-R37: begitu proposal dikirim, yang berlaku adalah kuantitas yang
+// disepakati. Layar MTO harus menampilkan angka TERSIMPAN sebagai angka utama,
+// bukan hasil hitung ulang formula sekarang — kalau formulanya diperbaiki
+// setelah proposal dikirim, angka di layar akan diam-diam beda dari penawaran.
+const isContractQty = computed(() =>
+  ['submitted', 'deal'].includes(String(proposal.value?.status || '')));
 const disciplines = ref<Discipline[]>([]);
 const subDisciplines = ref<SubDiscipline[]>([]);
 const items = ref<ProposalItem[]>([]);

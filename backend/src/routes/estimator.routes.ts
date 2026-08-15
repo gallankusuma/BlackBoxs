@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { calculateMto, toLegacyQuantities, FORMULA_VERSION, MtoResult } from '../modules/estimator/mto/calculator';
 import { checkUnitCompatibility, isProposalEditable } from '../modules/estimator/mto/units';
+import { enrichMtoElement, groupStoredLines } from '../modules/estimator/mto/enrich';
 import { authMiddleware } from '../middleware/auth';
 import { dbAll, dbGet, dbRun , withTransaction, TxRunner} from '../config/database';
 
@@ -2760,52 +2761,16 @@ router.get('/proposals/:id/mto', authMiddleware, async (req: Request, res: Respo
           rows.map((r: any) => r.id)
         )
       : [];
-    const storedLines = new Map<number, any[]>();
-    for (const l of lineRows) {
-      const arr = storedLines.get(Number(l.element_id)) || [];
-      arr.push(l);
-      storedLines.set(Number(l.element_id), arr);
-    }
+    const storedLines = groupStoredLines(lineRows);
 
     res.json({
       elements: rows.map((r: any) => {
         const parameters = typeof r.parameters === 'string' ? JSON.parse(r.parameters || '{}') : r.parameters;
-        // Dihitung ulang dari parameter, bukan membaca kolom `quantities` yang
-        // tersimpan. Kalau formulanya diperbaiki, elemen lama ikut terkoreksi
-        // tanpa perlu migrasi data.
-        const mto = calculateMto(r.element_type, parameters || {});
-        // EST-MTO-019: baris yang TERSIMPAN dibandingkan dengan hasil hitung
-        // sekarang. Kalau formulanya sudah berubah sejak elemen ini disimpan,
-        // perbedaannya ditandai — bukan diam-diam menampilkan angka baru seolah
-        // itu yang dulu ditawarkan.
-        const stored = (storedLines.get(Number(r.id)) || []);
-        const drifted = stored.length > 0 && (
-          stored.length !== mto.lines.length
-          // EST-MTO-R36: bukan hanya net. Waste, gross, dan satuan sama-sama
-          // menentukan angka yang ditawarkan — perubahan waste 5% → 8% tidak
-          // menggeser net sama sekali tapi mengubah jumlah yang dibeli.
-          || stored.some((sl: any) => {
-            const cur = mto.lines.find(l => l.code === sl.line_code);
-            if (!cur) return true;
-            return Math.abs(Number(sl.net_quantity) - cur.net_quantity) > 0.0001
-              || Math.abs(Number(sl.waste_percent) - cur.waste_percent) > 0.0001
-              || Math.abs(Number(sl.gross_quantity) - cur.gross_quantity) > 0.0001
-              || String(sl.unit) !== String(cur.unit);
-          })
-        );
         return {
           ...r,
           parameters,
           quantities: typeof r.quantities === 'string' ? JSON.parse(r.quantities || '{}') : r.quantities,
-          lines: mto.lines,
-          stored_lines: stored,
-          formula_drift: drifted,
-          formula_version_stored: r.formula_version || null,
-          formula_version_current: FORMULA_VERSION,
-          variant: mto.variant,
-          notes: drifted
-            ? [...mto.notes, 'Formula kalkulator berubah sejak elemen ini disimpan — angka tersimpan dan angka sekarang berbeda. Simpan ulang untuk memperbarui.']
-            : mto.notes,
+          ...enrichMtoElement(r.element_type, parameters, storedLines.get(Number(r.id)) || [], r.formula_version),
           source: 'proposal',
         };
       }),
@@ -2831,6 +2796,17 @@ router.post('/proposals/:id/mto', authMiddleware, async (req: Request, res: Resp
         error: 'Parameter engineering tidak valid, MTO tidak disimpan.',
         code: 'INVALID_MTO_PARAMETERS',
         problems: mto.notes,
+      });
+    }
+    // EST-MTO-R35: dimensi teknis wajib digembok di jalur TULIS, bukan di
+    // kalkulator. Kalkulator tetap menghitung supaya elemen lama yang terlanjur
+    // tersimpan tanpa field ini masih terbaca di layar dan masih bisa ditautkan
+    // ke RAB — yang dicegah adalah data setengah jadi yang BARU masuk.
+    if (mto.missing_required?.length) {
+      return res.status(422).json({
+        error: 'Dimensi teknis yang wajib belum diisi, MTO tidak disimpan.',
+        code: 'MISSING_REQUIRED_PARAMETERS',
+        problems: mto.missing_required,
       });
     }
     const quantities = toLegacyQuantities(mto);
@@ -2942,6 +2918,17 @@ router.put('/proposals/:id/mto/:elementId', authMiddleware, async (req: Request,
         error: 'Parameter engineering tidak valid, MTO tidak diubah.',
         code: 'INVALID_MTO_PARAMETERS',
         problems: mto.notes,
+      });
+    }
+    // EST-MTO-R35: dimensi teknis wajib digembok di jalur TULIS, bukan di
+    // kalkulator. Kalkulator tetap menghitung supaya elemen lama yang terlanjur
+    // tersimpan tanpa field ini masih terbaca di layar dan masih bisa ditautkan
+    // ke RAB — yang dicegah adalah data setengah jadi yang BARU masuk.
+    if (mto.missing_required?.length) {
+      return res.status(422).json({
+        error: 'Dimensi teknis yang wajib belum diisi, MTO tidak diubah.',
+        code: 'MISSING_REQUIRED_PARAMETERS',
+        problems: mto.missing_required,
       });
     }
     const quantities = toLegacyQuantities(mto);

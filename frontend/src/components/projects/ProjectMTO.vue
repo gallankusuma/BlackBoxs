@@ -19,6 +19,31 @@
       </button>
     </div>
 
+    <!-- EST-MTO-R37: saat proposal sudah dikirim, yang berlaku adalah angka
+         yang disepakati — bukan hasil hitung ulang formula sekarang. -->
+    <div v-if="contractMode && !loading && hasSaved" class="mto-contract-bar">
+      <span class="mcb-icon">🔒</span>
+      <div>
+        <div class="mcb-title">Kuantitas Kontrak</div>
+        <div class="mcb-sub">
+          Angka di bawah adalah kuantitas yang tersimpan saat proposal dikirim.
+          Perubahan formula setelahnya tidak menggesernya.
+        </div>
+      </div>
+    </div>
+
+    <!-- Dimensi teknis wajib yang belum diisi (EST-MTO-R35) -->
+    <div v-if="anyMissing && !loading" class="mto-warn-bar mto-warn-amber">
+      <span class="mcb-icon">⚠️</span>
+      <div>
+        <div class="mcb-title">Dimensi teknis belum lengkap</div>
+        <div class="mcb-sub">
+          Sebagian zona memakai nilai asumsi kalkulator, bukan data teknis.
+          Elemen yang ditandai tidak bisa disimpan ulang sebelum dilengkapi.
+        </div>
+      </div>
+    </div>
+
     <div class="mto-content">
       <div v-if="loading" class="mto-loading">⏳ Memuat data...</div>
       <template v-else>
@@ -58,6 +83,13 @@
                 @change="markDirty" />
               <span v-else class="zone-name-input" style="background:#f8fafc;border-color:#e2e8f0;color:#0f172a">{{ activeZone.name || activeModule.label + ' ' + (activeZoneIdx+1) }}</span>
               <span class="zone-hint">{{ activeModule.label }} — Zona {{ activeZoneIdx + 1 }}</span>
+            </div>
+
+            <!-- Dimensi wajib yang kurang pada zona ini (EST-MTO-R35) -->
+            <div v-if="activeZoneMissing.length" class="zone-missing">
+              <strong>⚠️ Wajib diisi:</strong>
+              <ul><li v-for="m in activeZoneMissing" :key="m">{{ m }}</li></ul>
+              <span class="zm-note">Kuantitas di bawah memakai nilai asumsi sampai ini dilengkapi.</span>
             </div>
 
             <div class="mod-body">
@@ -107,6 +139,34 @@
               <div class="rk-u">{{ s.u }}</div>
               <div class="rk-l">{{ s.l }}</div>
             </div>
+          </div>
+
+          <!-- EST-MTO-R37: formula berubah setelah proposal dikirim.
+               Yang tampil di atas tetap angka kontrak; ini pembandingnya. -->
+          <div v-if="anyDrift && contractComparison.length" class="drift-panel">
+            <div class="dp-head">
+              ⚠️ Formula kalkulator berubah setelah proposal dikirim
+            </div>
+            <div class="dp-sub">
+              Rekap di atas memakai <strong>kuantitas kontrak</strong>. Tabel ini hanya
+              memperlihatkan bedanya kalau dihitung dengan formula sekarang.
+            </div>
+            <table class="dp-table">
+              <thead>
+                <tr><th>Zona</th><th>Item</th><th>Kontrak</th><th>Formula sekarang</th><th>Selisih</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="(r, i) in contractComparison" :key="i">
+                  <td>{{ r.zone }}</td>
+                  <td>{{ r.label }}</td>
+                  <td class="dp-num">{{ f2(r.contract) }} {{ r.unit }}</td>
+                  <td class="dp-num">{{ f2(r.current) }} {{ r.unit }}</td>
+                  <td class="dp-num" :class="r.diff > 0 ? 'dp-up' : 'dp-down'">
+                    {{ r.diff > 0 ? '+' : '' }}{{ f2(r.diff) }} {{ r.unit }}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
           </div>
 
           <!-- Empty state -->
@@ -190,6 +250,13 @@ const props = defineProps<{
   projectId: number | string;
   apiBase?: string;           // default '/projects'
   readonly?: boolean;         // when true, hide all editing controls
+  /**
+   * EST-MTO-R37: kuantitas yang ditampilkan adalah KUANTITAS KONTRAK — baris
+   * yang tersimpan saat proposal dikirim — bukan hasil hitung ulang formula
+   * sekarang. Dipakai untuk proposal berstatus submitted/deal dan untuk layar
+   * project, yang memang hanya ada setelah deal.
+   */
+  contractMode?: boolean;
 }>();
 
 const baseUrl = computed(() => `${props.apiBase || '/projects'}/${props.projectId}`);
@@ -349,11 +416,27 @@ async function fetchAll() {
   try {
     const res = await api.get(`${baseUrl.value}/mto`);
     const elements: any[] = res.data.elements || [];
+    storedByElement.value = {};
+    driftByElement.value = {};
+    missingByElement.value = {};
     for (const el of elements) {
       const t = el.element_type;
       if (!zones.value[t]) zones.value[t] = [];
       const params = el.parameters || {};
       zones.value[t].push({ zid: uid(), name: params._zone_name || el.element_name || t, element_id: el.id, params: { ...DEFAULTS[t]?.(), ...params } });
+
+      // EST-MTO-R37: `mto_lines` memakai `line_code`, kalkulator memakai `code`.
+      // Diseragamkan di sini supaya sisa layar tidak perlu tahu asal barisnya.
+      storedByElement.value[el.id] = (el.stored_lines || []).map((l: any) => ({
+        code: l.line_code,
+        label: l.label,
+        net_quantity: Number(l.net_quantity || 0),
+        waste_percent: Number(l.waste_percent || 0),
+        gross_quantity: Number(l.gross_quantity || 0),
+        unit: l.unit,
+      }));
+      driftByElement.value[el.id] = !!el.formula_drift;
+      missingByElement.value[el.id] = el.missing_required || [];
     }
   } catch(e) { console.error('MTO fetch:', e); }
   finally {
@@ -373,6 +456,83 @@ const fmt = (v:number) => v.toLocaleString('id-ID',{maximumFractionDigits:1});
 // sebenarnya. Sekarang semuanya berasal dari kalkulator backend.
 const backendLines = ref<Record<string, any[]>>({});
 const zoneKey = (modId: string, idx: number) => `${modId}#${idx}`;
+
+// EST-MTO-R37: baris yang TERSIMPAN saat proposal dikirim, per zona.
+//
+// Sebelumnya layar ini hanya menampilkan hasil hitung ulang formula sekarang.
+// Untuk proposal yang sudah dikirim itu keliru secara komersial: yang disepakati
+// pelanggan adalah angka saat itu, dan formula bisa berubah setelahnya. Kalau
+// formulanya membaik, angka di layar diam-diam bergeser dari isi penawaran.
+//
+// Dikunci ke `element_id`, BUKAN ke indeks zona. Indeks bergeser begitu ada zona
+// ditambah atau dihapus, dan baris kontrak akan menempel ke zona yang salah —
+// diam-diam, karena angkanya tetap terlihat wajar.
+const storedByElement = ref<Record<number, any[]>>({});
+const driftByElement = ref<Record<number, boolean>>({});
+const missingByElement = ref<Record<number, string[]>>({});
+
+const zoneAt = (modId: string, idx: number): any => (zones.value[modId] || [])[idx] || null;
+
+/**
+ * Baris yang dipakai sebagai angka UTAMA untuk sebuah zona.
+ *
+ * Mode kontrak memakai baris tersimpan. Kalau elemen itu memang belum punya
+ * baris tersimpan (dibuat sebelum fitur ini ada dan belum di-backfill), jatuh ke
+ * hasil hitung sekarang — lebih baik menampilkan angka disertai penanda daripada
+ * mengosongkan layar.
+ */
+function linesFor(modId: string, idx: number): any[] {
+  const zone = zoneAt(modId, idx);
+  if (props.contractMode && zone?.element_id) {
+    const stored = storedByElement.value[zone.element_id];
+    if (stored?.length) return stored;
+  }
+  return backendLines.value[zoneKey(modId, idx)] || [];
+}
+
+/** Jalankan `fn` untuk tiap zona yang ada, apa pun modulnya. */
+function forEachZone(fn: (modId: string, idx: number, zone: any) => void) {
+  for (const mod of MODULES) {
+    (zones.value[mod.id] || []).forEach((z: any, i: number) => fn(mod.id, i, z));
+  }
+}
+
+const activeZoneMissing = computed(() => {
+  const zone = zoneAt(activeTab.value, activeZoneIdx.value);
+  return (zone?.element_id && missingByElement.value[zone.element_id]) || [];
+});
+
+const anyDrift = computed(() => {
+  if (!props.contractMode) return false;
+  let found = false;
+  forEachZone((_m, _i, z) => { if (z?.element_id && driftByElement.value[z.element_id]) found = true; });
+  return found;
+});
+
+const anyMissing = computed(() => {
+  let found = false;
+  forEachZone((_m, _i, z) => { if ((missingByElement.value[z?.element_id] || []).length) found = true; });
+  return found;
+});
+
+/** Perbandingan kontrak vs formula sekarang — hanya baris yang benar-benar berbeda. */
+const contractComparison = computed(() => {
+  if (!props.contractMode) return [];
+  const rows: any[] = [];
+  forEachZone((modId, idx, zone) => {
+    if (!zone?.element_id || !driftByElement.value[zone.element_id]) return;
+    const stored = storedByElement.value[zone.element_id] || [];
+    const current = backendLines.value[zoneKey(modId, idx)] || [];
+    for (const sl of stored) {
+      const cur = current.find((x: any) => x.code === sl.code);
+      const now = cur ? Number(cur.gross_quantity || 0) : 0;
+      const was = Number(sl.gross_quantity || 0);
+      if (Math.abs(now - was) < 0.0001) continue;
+      rows.push({ zone: zone.name, label: sl.label, unit: sl.unit, contract: was, current: now, diff: now - was });
+    }
+  });
+  return rows;
+});
 
 async function refreshBackendLines() {
   const items: any[] = [];
@@ -399,9 +559,9 @@ watch(zones, () => {
 /** Jumlahkan gross_quantity dari seluruh zona untuk kode yang cocok. */
 function sumBy(match: (code: string) => boolean): number {
   let total = 0;
-  for (const lines of Object.values(backendLines.value)) {
-    for (const l of lines) if (match(l.code)) total += Number(l.gross_quantity || 0);
-  }
+  forEachZone((modId, idx) => {
+    for (const l of linesFor(modId, idx)) if (match(l.code)) total += Number(l.gross_quantity || 0);
+  });
   return total;
 }
 
@@ -419,7 +579,7 @@ const detailedMTO = computed(() =>
     const zoneList = zones.value[mod.id] || [];
     const zonesData = zoneList.map((z: any, idx: number) => ({
       name: z.name || mod.label,
-      rows: (backendLines.value[zoneKey(mod.id, idx)] || []).map((l: any) => ({
+      rows: linesFor(mod.id, idx).map((l: any) => ({
         label: l.label, qty: f2(Number(l.gross_quantity || 0)), unit: l.unit,
       })),
     }));
@@ -469,6 +629,26 @@ const f0 = (v:number) => v.toLocaleString('id-ID',{maximumFractionDigits:0});
 
 <style scoped>
 .mto-wrap{display:flex;flex-direction:column;gap:14px;}
+
+/* EST-MTO-R37 / R35 — penanda kuantitas kontrak & kelengkapan dimensi */
+.mto-contract-bar,.mto-warn-bar{display:flex;gap:12px;align-items:flex-start;padding:11px 14px;border-radius:12px;border:1px solid #bfdbfe;background:#eff6ff;}
+.mto-warn-amber{border-color:#fcd34d;background:#fffbeb;}
+.mcb-icon{font-size:1.1rem;line-height:1.3;}
+.mcb-title{font-size:.85rem;font-weight:700;color:#1e3a8a;}
+.mto-warn-amber .mcb-title{color:#92400e;}
+.mcb-sub{font-size:.76rem;color:#475569;margin-top:2px;line-height:1.45;}
+.zone-missing{border:1px solid #fcd34d;background:#fffbeb;border-radius:10px;padding:10px 12px;font-size:.78rem;color:#92400e;}
+.zone-missing ul{margin:5px 0 0 18px;list-style:disc;}
+.zm-note{display:block;margin-top:6px;color:#78350f;font-size:.72rem;}
+.drift-panel{border:1px solid #fcd34d;background:#fffbeb;border-radius:12px;padding:13px 15px;margin-bottom:14px;}
+.dp-head{font-size:.85rem;font-weight:700;color:#92400e;}
+.dp-sub{font-size:.76rem;color:#78350f;margin:3px 0 10px;line-height:1.45;}
+.dp-table{width:100%;border-collapse:collapse;font-size:.78rem;}
+.dp-table th{text-align:left;padding:6px 8px;border-bottom:1px solid #fcd34d;color:#92400e;font-weight:600;}
+.dp-table td{padding:6px 8px;border-bottom:1px solid #fef3c7;color:#0f172a;}
+.dp-num{text-align:right;font-variant-numeric:tabular-nums;}
+.dp-up{color:#b45309;font-weight:600;}
+.dp-down{color:#0369a1;font-weight:600;}
 
 /* Module tabs */
 .mto-tabs{display:flex;flex-wrap:wrap;gap:4px;background:#f1f5f9;padding:8px;border-radius:14px;}

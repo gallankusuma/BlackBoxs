@@ -119,7 +119,7 @@ async function main() {
   console.log('\n6. Menyimpan elemen yang sama tidak membuat duplikat (EST-MTO-018)');
   const propDup = await call('POST', '/estimator/proposals', { project_name: `Uji duplikat ${stamp}` }, master);
   const dupId = propDup.json?.id;
-  const body = { element_type: 'column', element_name: 'K1', parameters: { B: 0.4, H: 0.4, qty_per_floor: 5 } };
+  const body = { element_type: 'column', element_name: 'K1', parameters: { B: 0.4, H: 0.4, qty_per_floor: 5, height_per_floor: 3.5 } };
   const save1 = await call('POST', `/estimator/proposals/${dupId}/mto`, body, master);
   const save2 = await call('POST', `/estimator/proposals/${dupId}/mto`, body, master);
   chk('id sama pada simpan kedua', save1.json?.id, save2.json?.id);
@@ -686,6 +686,79 @@ async function main() {
   }
   chk('proposal terkunci → 409',
     (await call('DELETE', `/estimator/proposals/${unlId}/items/${itUnlId}/mto-link`, undefined, master)).status, 409);
+
+  console.log('\n37. Dimensi wajib digembok di jalur tulis (EST-MTO-R35)');
+  const propReq = await call('POST', '/estimator/proposals',
+    { project_name: `Uji wajib ${stamp}` }, master);
+  const rqId = propReq.json?.id;
+
+  const kolomTanpaDimensi = await call('POST', `/estimator/proposals/${rqId}/mto`, {
+    element_type: 'column', element_name: 'K-tanpa-dimensi',
+    parameters: { col_type: 'beton', qty_per_floor: 4, height_per_floor: 3.5 },
+  }, master);
+  chk('kolom tanpa B/H ditolak 422', kolomTanpaDimensi.status, 422);
+  chk('kodenya MISSING_REQUIRED_PARAMETERS',
+    kolomTanpaDimensi.json?.code, 'MISSING_REQUIRED_PARAMETERS');
+  chk('pesannya menyebut field yang kurang',
+    (kolomTanpaDimensi.json?.problems || []).length, 2);
+
+  const kolomLengkap = await call('POST', `/estimator/proposals/${rqId}/mto`, {
+    element_type: 'column', element_name: 'K-lengkap',
+    parameters: { col_type: 'beton', qty_per_floor: 4, height_per_floor: 3.5, B: 0.3, H: 0.4 },
+  }, master);
+  chk('kolom lengkap tersimpan', kolomLengkap.status, 200);
+
+  // PUT yang MENGHILANGKAN dimensi wajib juga harus ditolak, bukan cuma POST.
+  const putKosong = await call('PUT', `/estimator/proposals/${rqId}/mto/${kolomLengkap.json?.id}`, {
+    parameters: { col_type: 'beton', qty_per_floor: 4, height_per_floor: 3.5 },
+  }, master);
+  chk('PUT yang menghapus B/H ditolak 422', putKosong.status, 422);
+
+  // Elemen yang sudah tersimpan tetap TERBACA — ini yang membedakan "gembok
+  // tulis" dari "tandai invalid". Kalau invalid, kuantitas elemen lama hilang
+  // dari layar dan tidak bisa lagi ditautkan ke RAB.
+  const bacaLagi = await call('GET', `/estimator/proposals/${rqId}/mto`, undefined, master);
+  const elLengkap = (bacaLagi.json?.elements || []).find((e: any) => e.element_name === 'K-lengkap');
+  chk('elemen tersimpan tetap terbaca', !!elLengkap, true);
+  chk('kuantitasnya tetap keluar', (elLengkap?.lines || []).length > 0, true);
+
+  console.log('\n38. Layar project menerima kuantitas kontrak (EST-MTO-R37)');
+  // Sebelumnya route MTO project hanya mengembalikan parameter — tidak ada baris
+  // tersimpan sama sekali, jadi layar project sepenuhnya bergantung pada hitung
+  // ulang formula sekarang dan kuantitas yang disepakati tidak pernah tampil.
+  const propKtr = await call('POST', '/estimator/proposals',
+    { project_name: `Uji kontrak ${stamp}`, client_id: klienId }, master);
+  const ktrId = propKtr.json?.id;
+  await call('POST', `/estimator/proposals/${ktrId}/mto`, {
+    element_type: 'foundation', element_name: 'P1',
+    parameters: { L: 1, W: 1, H: 0.3, depth: 1.2, qty: 12, waste_pct: 5 },
+  }, master);
+  for (const st of ['review', 'submitted']) {
+    await call('PUT', `/estimator/proposals/${ktrId}/status`, { status: st }, master);
+  }
+
+  const mtoSubmit = await call('GET', `/estimator/proposals/${ktrId}/mto`, undefined, master);
+  const elKtr = mtoSubmit.json?.elements?.[0];
+  chk('proposal submitted punya baris kontrak', (elKtr?.stored_lines || []).length > 0, true);
+  chk('tidak ada drift saat baru disimpan', elKtr?.formula_drift, false);
+  chk('field missing_required ikut dikirim', Array.isArray(elKtr?.missing_required), true);
+
+  // Angka kontrak harus sama persis dengan hasil hitung saat ini selama formula
+  // belum berubah — kalau tidak, berarti yang tersimpan bukan yang dihitung.
+  const galianKontrak = (elKtr?.stored_lines || []).find((l: any) => l.line_code === 'FND-EXCV');
+  const galianSekarang = (elKtr?.lines || []).find((l: any) => l.code === 'FND-EXCV');
+  chk('galian kontrak = galian hitung sekarang',
+    Number(galianKontrak?.gross_quantity), Number(galianSekarang?.gross_quantity));
+
+  const dealKtr = await call('PUT', `/estimator/proposals/${ktrId}/status`, { status: 'deal' }, master);
+  const projKtr = dealKtr.json?.project_id;
+  chk('project terbentuk', !!projKtr, true);
+
+  const mtoProject = await call('GET', `/projects/${projKtr}/mto`, undefined, master);
+  const elProj = mtoProject.json?.elements?.[0];
+  chk('layar project menerima baris kontrak', (elProj?.stored_lines || []).length > 0, true);
+  chk('layar project menerima tanda drift', typeof elProj?.formula_drift, 'boolean');
+  chk('versi formula kontrak ikut terbawa', !!elProj?.formula_version_stored, true);
 
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);

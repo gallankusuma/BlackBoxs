@@ -266,7 +266,9 @@
 
       <!-- MTO / QTO Tab -->
       <div v-if="activeTab === 'mto'">
-        <ProjectMTO :project-id="route.params.id as string" readonly />
+        <!-- EST-MTO-R37: project hanya ada setelah deal, jadi yang ditampilkan
+             selalu kuantitas kontrak, bukan hitung ulang formula sekarang. -->
+        <ProjectMTO :project-id="route.params.id as string" readonly contract-mode />
       </div>
 
       <!-- Manpower Mobilization Plan Tab -->

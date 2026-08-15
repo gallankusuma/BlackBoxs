@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { enrichMtoElement, groupStoredLines } from '../modules/estimator/mto/enrich';
 import { dbQuery, dbGet, dbAll, dbRun } from '../config/database';
 import { authMiddleware } from '../middleware/auth';
 import multer from 'multer';
@@ -1388,13 +1389,30 @@ router.get('/:id/mto', authMiddleware, async (req: Request, res: Response) => {
       [proposalId]
     );
 
+    // EST-MTO-R37: layar project ikut menerima baris TERSIMPAN dan tanda drift.
+    // Sebelumnya route ini hanya mengembalikan parameter, jadi layar project
+    // sepenuhnya bergantung pada hitung ulang formula sekarang — kuantitas
+    // kontrak yang disepakati tidak pernah ditampilkan sama sekali.
+    const lineRows: any[] = rows.length
+      ? await dbAll(
+          `SELECT element_id, line_code, label, net_quantity, waste_percent, gross_quantity, unit, formula_version
+           FROM mto_lines WHERE element_id IN (${rows.map(() => '?').join(',')})`,
+          rows.map((r: any) => r.id)
+        )
+      : [];
+    const storedLines = groupStoredLines(lineRows);
+
     res.json({
-      elements: rows.map(r => ({
-        ...r,
-        parameters: typeof r.parameters === 'string' ? JSON.parse(r.parameters || '{}') : r.parameters,
-        quantities:  typeof r.quantities  === 'string' ? JSON.parse(r.quantities  || '{}') : r.quantities,
-        source: 'proposal',
-      })),
+      elements: rows.map(r => {
+        const parameters = typeof r.parameters === 'string' ? JSON.parse(r.parameters || '{}') : r.parameters;
+        return {
+          ...r,
+          parameters,
+          quantities: typeof r.quantities === 'string' ? JSON.parse(r.quantities || '{}') : r.quantities,
+          ...enrichMtoElement(r.element_type, parameters, storedLines.get(Number(r.id)) || [], r.formula_version),
+          source: 'proposal',
+        };
+      }),
       linked_proposal_id: proposalId,
     });
   } catch (err: any) {

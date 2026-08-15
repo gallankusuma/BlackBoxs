@@ -94,6 +94,19 @@ const VARIANTS: Record<string, Record<string, string>> = {
   },
 };
 
+/**
+ * Nama field pemilih tipe di tiap layar, berikut varian defaultnya kalau kosong.
+ * Nilainya harus sama persis dengan yang dipakai masing-masing kalkulator.
+ */
+export const VARIANT_FIELD: Record<string, [field: string, fallback: string]> = {
+  foundation: ['foundation_type', 'footplate'],
+  column: ['col_type', 'concrete'],
+  beam: ['beam_type', 'concrete'],
+  slab: ['slab_type', 'concrete'],
+  wall: ['wall_type', 'masonry'],
+  roof: ['roof_type', 'sheet'],
+};
+
 export interface VariantResolution {
   variant: string;
   /** Nilai mentah dari klien, disimpan untuk audit. */
@@ -124,4 +137,117 @@ export const resolveVariant = (
       + `Yang didukung: ${Object.keys(table).join(', ')}. `
       + `Kuantitas TIDAK dihitung supaya tidak menghasilkan angka yang keliru.`,
   };
+};
+
+/**
+ * Field yang WAJIB diisi, per elemen dan per varian (EST-MTO-R35).
+ *
+ * Validator lama hanya menolak angka negatif, bukan angka. dan di luar rentang.
+ * Field yang TIDAK diisi sama sekali dilewatkan begitu saja — `check()` langsung
+ * return kalau nilainya undefined. Akibatnya kalkulator memakai default diam-diam:
+ *
+ *     const B = num(p.B, 0.3), H = num(p.H, 0.3);     // kolom beton
+ *     const heightPerFloor = num(p.height_per_floor, 3);
+ *
+ * Kolom yang lebar dan tingginya tidak pernah diisi tetap menghasilkan volume
+ * beton, bekisting, besi, dan sengkang — semuanya dari asumsi 30×30 cm setinggi
+ * 3 m. Angkanya wajar, tidak ada error, dan bisa lolos ke penawaran.
+ *
+ * Yang didaftarkan di sini HANYA field yang benar-benar dikumpulkan layar
+ * (`*Inputs.vue`). Mewajibkan field yang tidak ada di layar akan membuat elemen
+ * mustahil disimpan.
+ */
+type Req = [field: string, label: string];
+
+/** Wajib untuk semua varian dari elemen tersebut. */
+const REQUIRED_COMMON: Record<string, Req[]> = {
+  column: [['qty_per_floor', 'Jumlah kolom per lantai'], ['height_per_floor', 'Tinggi per lantai']],
+  slab: [['area', 'Luas lantai']],
+  wall: [['area', 'Luas dinding']],
+  roof: [['floor_area', 'Luas lantai'], ['slope_deg', 'Kemiringan atap']],
+};
+
+/** Wajib hanya untuk varian tertentu. */
+const REQUIRED_VARIANT: Record<string, Record<string, Req[]>> = {
+  // Varian pondasi selain footplate tidak menghasilkan baris sama sekali
+  // (EST-MTO-R01), jadi tidak ada yang perlu diwajibkan di sana.
+  foundation: {
+    footplate: [['L', 'Panjang footing'], ['W', 'Lebar footing'],
+      ['H', 'Tebal footing'], ['qty', 'Jumlah titik pondasi']],
+  },
+  column: {
+    concrete: [['B', 'Lebar kolom'], ['H', 'Tinggi penampang kolom']],
+    wf: [['wf_profile', 'Profil baja kolom']],
+    cfs: [['cfs_weight_per_m', 'Berat per meter baja ringan']],
+    wood: [['kayu_b', 'Lebar penampang kayu'], ['kayu_h', 'Tinggi penampang kayu']],
+  },
+  beam: {
+    concrete: [['total_length', 'Panjang total balok'], ['B', 'Lebar balok'], ['H', 'Tinggi balok']],
+    wf: [['total_length', 'Panjang total balok'], ['wf_profile_beam', 'Profil baja balok']],
+    channel: [['total_length', 'Panjang total balok'], ['kanal_profile', 'Profil kanal']],
+    purlin: [['purlin_profile', 'Profil gording']],
+    wood: [['total_length', 'Panjang total balok'],
+      ['kayu_b', 'Lebar penampang kayu'], ['kayu_h', 'Tinggi penampang kayu']],
+  },
+  slab: {
+    concrete: [['thickness', 'Tebal pelat']],
+    ceramic: [['screed_t', 'Tebal screed']],
+    plate: [['plate_thick', 'Tebal plat bordes']],
+    parquet: [['screed_t', 'Tebal leveling']],
+  },
+  wall: {
+    glass: [['glass_thick', 'Tebal kaca']],
+  },
+  roof: {
+    deck: [['dak_thick', 'Tebal dak beton']],
+  },
+};
+
+/**
+ * Cukup salah satu yang diisi. Dipakai kalau memang ada dua jalur input yang
+ * sah — bukan untuk melonggarkan field yang seharusnya wajib.
+ */
+const REQUIRED_EITHER: Record<string, Record<string, [fields: string[], label: string][]>> = {
+  // Gording bisa diberi panjangnya sendiri atau ikut panjang total balok.
+  beam: { purlin: [[['purlin_length', 'total_length'], 'Panjang gording']] },
+  // Layar sekarang memakai cm; kontrak lama memakai mm. Keduanya sah.
+  wall: { masonry: [[['thickness_cm', 'thickness_mm'], 'Tebal dinding']] },
+};
+
+/** Field yang boleh bernilai nol. Atap datar berkemiringan 0 derajat itu sah. */
+const ALLOW_ZERO = new Set(['slope_deg']);
+
+const isFilled = (params: any, field: string): boolean => {
+  const raw = params?.[field];
+  if (raw === undefined || raw === null || String(raw).trim() === '') return false;
+
+  // Field bernilai teks (nama profil) cukup tidak kosong.
+  const value = num(raw, NaN);
+  if (!isFinite(value)) return String(raw).trim() !== '';
+
+  return ALLOW_ZERO.has(field) ? true : value > 0;
+};
+
+/**
+ * Daftar field wajib yang belum diisi, sudah dalam bahasa manusia.
+ * Kosong berarti lengkap.
+ */
+export const missingRequiredFields = (elementType: string, params: any, variant: string): string[] => {
+  const missing: string[] = [];
+
+  for (const [field, label] of REQUIRED_COMMON[elementType] || []) {
+    if (!isFilled(params, field)) missing.push(`${label} (${field}) wajib diisi`);
+  }
+
+  for (const [field, label] of (REQUIRED_VARIANT[elementType] || {})[variant] || []) {
+    if (!isFilled(params, field)) missing.push(`${label} (${field}) wajib diisi`);
+  }
+
+  for (const [fields, label] of (REQUIRED_EITHER[elementType] || {})[variant] || []) {
+    if (!fields.some(f => isFilled(params, f))) {
+      missing.push(`${label} wajib diisi (${fields.join(' atau ')})`);
+    }
+  }
+
+  return missing;
 };

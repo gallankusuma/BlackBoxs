@@ -1,4 +1,5 @@
 import { MtoResult, validateParams } from './types';
+import { VARIANT_FIELD, resolveVariant, missingRequiredFields } from './contract';
 import { calcFoundation } from './foundation.calculator';
 import { calcColumn } from './column.calculator';
 import { calcBeam } from './beam.calculator';
@@ -29,13 +30,47 @@ export function calculateMto(elementType: string, parameters: any): MtoResult {
     return { element_type: type, variant: 'invalid', lines: [], notes: paramErrors };
   }
 
+  // EST-MTO-R35: dimensi teknis yang wajib dideteksi kalau tidak diisi.
+  //
+  // Validator di atas hanya menolak nilai yang salah; field yang tidak diisi
+  // sama sekali lolos, lalu kalkulator memakai default diam-diam — kolom tanpa
+  // B dan H tetap menghasilkan beton, bekisting, besi, dan sengkang dari asumsi
+  // 30x30 cm setinggi 3 m. Angkanya wajar dan tidak menimbulkan error, jadi bisa
+  // lolos sampai ke penawaran.
+  //
+  // Hasilnya TIDAK dijadikan `invalid`. Penolakan ada di route POST/PUT (422)
+  // supaya data baru tidak bisa masuk setengah jadi, sementara elemen lama yang
+  // terlanjur tersimpan tetap terbaca dan tetap bisa ditautkan ke RAB — hanya
+  // saja ditandai. Diukur sebelum diterapkan: 6 elemen di produksi ada di
+  // kondisi ini, dan mengosongkan layarnya akan jauh lebih merusak daripada
+  // membiarkannya tampil dengan peringatan.
+  let missingRequired: string[] = [];
+  const variantField = VARIANT_FIELD[type];
+  if (variantField) {
+    const resolved = resolveVariant(type, p[variantField[0]], variantField[1]);
+    if (resolved.variant !== 'unknown') {
+      missingRequired = missingRequiredFields(type, p, resolved.variant);
+    }
+  }
+
+  const withMissing = (result: MtoResult): MtoResult =>
+    missingRequired.length === 0 ? result : {
+      ...result,
+      missing_required: missingRequired,
+      notes: [
+        ...result.notes,
+        `Dimensi wajib belum diisi: ${missingRequired.join('; ')}. `
+        + `Kuantitas di bawah memakai nilai asumsi kalkulator, bukan data teknis.`,
+      ],
+    };
+
   switch (type) {
-    case 'foundation': return calcFoundation(p);
-    case 'column':     return calcColumn(p);
-    case 'beam':       return calcBeam(p);
-    case 'slab':       return calcSlab(p);
-    case 'wall':       return calcWall(p);
-    case 'roof':       return calcRoof(p);
+    case 'foundation': return withMissing(calcFoundation(p));
+    case 'column':     return withMissing(calcColumn(p));
+    case 'beam':       return withMissing(calcBeam(p));
+    case 'slab':       return withMissing(calcSlab(p));
+    case 'wall':       return withMissing(calcWall(p));
+    case 'roof':       return withMissing(calcRoof(p));
     default:
       // EST-MTO-R30: tipe elemen tak dikenal ditandai `invalid`, bukan `unknown`.
       // Keduanya sama-sama menghasilkan nol baris, tapi `invalid` yang ditolak
