@@ -67,6 +67,15 @@ echo "📤 Uploading backend dist + src..."
 rsync -avz --delete "$LOCAL_BACKEND/dist/" "$VPS:$REMOTE_BACKEND/dist/"
 rsync -avz "$LOCAL_BACKEND/src/" "$VPS:$REMOTE_BACKEND/src/"
 rsync -avz "$LOCAL_BACKEND/package.json" "$LOCAL_BACKEND/package-lock.json" "$VPS:$REMOTE_BACKEND/"
+
+# DR-P1-07: `database/` WAJIB ikut. `initializeDatabase()` membaca
+# `schema_mysql.sql` dan `schema-baseline.sql` dari sana saat boot; tanpa
+# keduanya, instalasi baru tidak akan pernah punya skema lengkap.
+#
+# Ini sempat terlewat: baseline dibuat tapi tidak pernah sampai ke server, dan
+# baru ketahuan saat log boot produksi diperiksa — bukan dari deploy yang
+# melaporkan sukses.
+rsync -avz "$LOCAL_BACKEND/database/" "$VPS:$REMOTE_BACKEND/database/"
 echo "✅ Backend uploaded"
 
 # 5. Install deps & restart backend on VPS (no build needed)

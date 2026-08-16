@@ -3622,3 +3622,34 @@ endpoint per modul" **belum** — yang sudah adalah boot penuh + verifikasi daft
 tabel wajib.
 
 test:all 884 lulus / 0 gagal.
+
+**Verifikasi reviewer 16 Agustus 2026 16:54 WIB — DITERAPKAN SEBAGIAN;
+klaim fresh-schema parity ditolak.** Pemuatan 148 definisi tabel dan gerbang nama
+tabel adalah kemajuan, tetapi tes yang dilaporkan hanya membuktikan **jumlah/nama
+tabel**, bukan kontrak kolom/index/FK yang diwajibkan acceptance criteria.
+
+Urutan kode terkini tetap `schema_mysql.sql` (baris 1757–1780) → baseline (1787)
+→ ensure. Jadi 48 tabel lama dibuat lebih dahulu dan `CREATE TABLE IF NOT EXISTS`
+baseline tidak mengubahnya. Perbandingan kedua DDL menemukan 17 tabel overlap
+dengan kolom berbeda. Contoh yang tidak disembuhkan ensure: `employees` fresh
+tetap tidak mempunyai `basic_rate/tunjangan_rate/ot_rate/salary_type`, dan
+`accounts_receivable` tetap tidak mempunyai tujuh kolom yang dipakai endpoint
+Finance. Mendapat **148 tabel** karena baseline membuat tabel sisanya sepenuhnya
+konsisten dengan bukti ini; angka itu tidak membuktikan 48 tabel overlap memakai
+struktur baseline.
+
+Verifier juga masih hanya membaca `INFORMATION_SCHEMA.TABLES`, dan kegagalan DDL
+baseline masih dikumpulkan lalu di-log tanpa throw. Karena itu status DR-P1-07
+tetap terbuka pada P1 Live Auto Review 16:51. Kriteria penutupan: test fresh DB
+harus meng-assert manifest kolom/type/nullability/index/FK dan menyentuh kontrak
+query tiap modul, baseline harus menang terhadap schema lama, DDL failure fatal,
+serta file baseline harus ikut artifact/deploy. `npx tsc --noEmit` lulus; reviewer
+tidak menjalankan uji database karena aturan task melarang perubahan database.
+
+**Verifikasi susulan 16 Agustus 2026 16:57 WIB — sub-kriteria artifact
+DITERAPKAN di working tree.** `deploy-blackbox.sh` sekarang menyalin direktori
+`backend/database/` sebelum restart, sehingga `schema_mysql.sql` dan
+`schema-baseline.sql` tersedia pada layout path yang dibaca build backend. Tidak
+ada regresi baru yang terverifikasi pada perubahan deploy ini. Perbaikannya masih
+belum commit dan tidak mengubah status utama DR-P1-07: urutan schema lama →
+baseline, verifier hanya nama tabel, dan DDL baseline non-fatal tetap terbuka.
