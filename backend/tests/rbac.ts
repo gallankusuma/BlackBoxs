@@ -51,6 +51,14 @@ async function hapusRuleUji(nama: string): Promise<void> {
   await dbRun('DELETE FROM approval_rules WHERE name = ?', [nama]);
 }
 
+async function countExpenseGaji(periodeLabel: string): Promise<number> {
+  const { dbGet } = await import('../src/config/database');
+  const r: any = await dbGet(
+    `SELECT COUNT(*) AS n FROM project_expenses WHERE description LIKE ?`, [`%Gaji ${periodeLabel}%`]
+  );
+  return Number(r?.n ?? -1);
+}
+
 async function permKeysDariLayout(): Promise<string[]> {
   const fs = await import('fs');
   const path = await import('path');
@@ -670,6 +678,22 @@ async function main() {
       chk('fixture payroll dibersihkan tuntas', sisa, 0);
     }
   }
+
+  console.log('\n8c. Expense payroll: digembok & tidak bisa dibebankan dua kali (P1)');
+  // Endpoint ini dulu hanya butuh login, mengambil SELURUH payslip final periode
+  // tanpa filter project, dan cek duplikatnya hanya per project — jadi periode
+  // yang sama bisa dibebankan penuh ke project A lalu project B.
+  chk('generate expense oleh user tanpa hak',
+    await status('POST', '/hr/payslip/generate-expense',
+      { period_month: 12, period_year: 2099, project_id: 1 }, plainToken), 403);
+  chk('tanpa token', await status('POST', '/hr/payslip/generate-expense',
+    { period_month: 12, period_year: 2099, project_id: 1 }), 401);
+
+  // Periode tanpa payslip final harus ditolak, bukan membuat expense nol.
+  const kosong = await call('POST', '/hr/payslip/generate-expense',
+    { period_month: 12, period_year: 2098, project_id: 1 }, master);
+  chk('periode tanpa payslip ditolak', kosong.status >= 400, true);
+  chk('tidak ada expense hantu terbuat', await countExpenseGaji('Desember 2098'), 0);
 
   console.log('\n9b. Batas hr.employees.view vs hr.payroll.view (klarifikasi reviewer)');
   // Keputusan: "Data Karyawan" adalah direktori, bukan kompensasi. Membuka angka

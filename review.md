@@ -2153,6 +2153,16 @@ kontrak yang sama. Test wajib membuktikan `fund_request + assets` ditolak 400/40
 `fund_request + canonical finance key` memilih rule yang benar, dan approver
 permission tepat dapat bertindak sementara wrong-resource tidak.
 
+**Verifikasi reviewer 16 Agustus 2026 19:30 WIB — DITERAPKAN SEBAGIAN.** Commit
+`36ed8d40` menutup bypass utama: `module` dari body tidak lagi dibaca, existence
+entitas diperiksa melalui registry, dan prefix permission diturunkan dari
+`entity_type`. Namun kriteria ownership/scope submit belum diterapkan: setiap
+token desktop masih dapat membuat request untuk fund request/PR/PO/GRN/payroll/
+kasbon milik user atau proyek lain karena query existence hanya `WHERE id = ?`
+dan endpoint tidak memeriksa permission submit, requester, project scope, status
+dokumen, maupun pending request duplikat. Selain itu pemetaan rule dan nilai
+registry memperkenalkan gap baru yang dirinci pada Live Auto Review 19:30 WIB.
+
 ### [P1 / BOOT-SCHEMA] Fresh MySQL lolos boot tetapi seluruh jalur approval baru gagal karena schema prasyarat tidak di-ensure
 
 Patch hanya menambah `approval_requests.rule_id` dan `condition_value`
@@ -4326,3 +4336,133 @@ otorisasi lama (modul lain 403, tidak ditugaskan 403, `can_reject`, delegasi, du
 approve paralel) tetap hijau.
 
 test:all 897 lulus / 0 gagal.
+
+---
+
+## Live Auto Review — 16 Agustus 2026 19:30 WIB
+
+Baseline: commit baru `36ed8d40` (`fix(approval): entitas menentukan modul,
+bukan klien`). Source aplikasi tidak diubah reviewer. Backend `npx tsc --noEmit`
+dan frontend `npx vue-tsc --noEmit` lulus; test HTTP tidak dijalankan reviewer
+karena membuat fixture/data.
+
+### [P1 / APPROVAL-INTEGRITY] Alias kompatibilitas menggabungkan rule PR, PO, dan GRN ke satu pool Procurement
+
+Registry memberi `purchase_request`, `purchase_order`, dan `grn` nilai module
+kanonik yang sama, yaitu `procurement`
+([approval.routes.ts:31](backend/src/routes/approval.routes.ts)). Lalu
+`moduleKeysFor('procurement')` menghasilkan `procurement`, `pr`, `po`, dan `grn`,
+dan `selectRuleForRequest()` mengambil seluruh rule pada empat key tersebut hanya
+berdasarkan urutan sequence/id serta rentang nilai
+([approval.routes.ts:46](backend/src/routes/approval.routes.ts),
+[approval.routes.ts:102](backend/src/routes/approval.routes.ts)). Tidak ada lagi
+predicate yang membedakan jenis dokumen.
+
+**Bukti perilaku:** bila rule legacy `pr` dan `po` sama-sama aktif, submit
+`purchase_order` dapat mengunci `rule_id` milik PR apabila sequence/ID-nya lebih
+dulu dan rentangnya cocok. Sebaliknya PR tanpa nilai dapat mengambil rule tanpa
+batas milik PO/GRN. UI baru juga hanya menawarkan `procurement`, sehingga admin
+tidak dapat membuat workflow/approver/threshold yang berbeda untuk ketiga proses
+([ApprovalRules.vue:138](frontend/src/views/ApprovalRules.vue),
+[approval.routes.ts:239](backend/src/routes/approval.routes.ts)).
+
+**Dampak:** PO bernilai tinggi bisa mengikuti jumlah step atau approver PR/GRN,
+dan dokumen sah dapat terkunci ke rule yang bukan miliknya. Ini mengganti bypass
+module dari klien dengan salah-pilih workflow di server.
+
+**Rekomendasi/acceptance:** pisahkan `ruleScope`/`workflowKey` dari
+`permissionPrefix` di registry—misalnya `pr`, `po`, dan `grn` tetap scope rule
+berbeda, sementara ketiganya boleh memakai prefix permission `procurement`.
+Pemilihan rule harus exact pada scope entitas; alias hanya memigrasikan satu key
+legacy ke satu scope, bukan menggabungkan semuanya. Buat fixture tiga rule aktif
+dengan step/threshold berbeda dan buktikan masing-masing entity mengunci
+`rule_id` yang tepat, termasuk setelah migrasi alias dan saat sequence-nya
+disengaja bertabrakan.
+
+### [P1 / API-CONTRACT] Registry salah membaca nominal Kasbon dan mengabaikan nominal Payroll
+
+`kasbon_request` diregistrasikan dengan `amountColumn: 'amount'`
+([approval.routes.ts:35](backend/src/routes/approval.routes.ts)), padahal tabel
+`kasbon_requests` hanya mempunyai `total_amount`
+([schema-baseline.sql:1475](backend/database/schema-baseline.sql)). Karena
+`resolveEntityAmount()` membentuk `SELECT amount ...`, submit Kasbon yang valid
+selalu masuk catch dan membalas 500. Di sisi lain `payroll_request` tidak diberi
+`amountColumn`, meski `payroll_requests.total_amount` tersedia
+([schema-baseline.sql:1757](backend/database/schema-baseline.sql)); nilainya selalu
+`null`, sehingga rule payroll berbatas nominal tidak pernah terpilih.
+
+**Dampak:** jalur Kasbon baru tidak dapat digunakan, sedangkan Payroll dapat
+jatuh ke rule HR tanpa batas atau `REQUEST_WITHOUT_RULE` dan tidak mengikuti
+approval threshold sesuai nilai aktual. Compile dan test baru tidak menangkap
+kontrak SQL ini karena hanya menguji entity yang tidak ada dan daftar registry.
+
+**Rekomendasi/acceptance:** petakan `total_amount` untuk kedua entity, validasi
+`condition_field` yang didukung per entity, dan jangan diam-diam mengembalikan
+`null` untuk rule nilai yang dikonfigurasi. Test dengan row Kasbon/Payroll nyata
+di boundary min/max harus membuktikan `condition_value` dan `rule_id` benar;
+kesalahan kolom/config harus gagal sebelum deployment, bukan menjadi 500 runtime.
+
+### [FEATURE-REGRESSION][High] Kontrak baru menghapus konfigurasi approval Sales Order, Work Order, dan Batch Release
+
+Sebelum commit ini, Approval Rules menawarkan `so`, `wo`, dan `batch_release`.
+Alias backend masih menyebut ketiganya
+([approval.routes.ts:46](backend/src/routes/approval.routes.ts)), tetapi
+`ENTITY_REGISTRY` tidak mempunyai entity Sales/Production/Quality dan endpoint
+kontrak hanya mengembalikan module dari enam entity yang terdaftar. Karena UI
+sekarang sepenuhnya memakai response tersebut, opsi Sales, Production, dan
+Quality hilang. `POST /approval/submit` juga menolak entity di luar registry
+dengan `UNKNOWN_ENTITY_TYPE` sebelum compatibility alias dapat dipakai.
+
+**Dampak:** kemampuan baseline untuk mengonfigurasi rule SO, WO, dan batch
+release dipersempit oleh perbaikan security. Rule legacy masih tampil di daftar,
+tetapi nilai module-nya tidak ada di select edit; workflow baru tidak dapat
+dibuat/disubmit melalui kontrak ini. Ini melanggar baseline minimum walaupun
+produksi saat ini dilaporkan belum mempunyai rule aktif.
+
+**Rekomendasi/acceptance:** lengkapi registry untuk semua entity baseline dengan
+table, state/ownership validator, rule scope, permission resource, dan resolver
+nilai yang benar sebelum daftar hardcoded lama dilepas. Sediakan migration/
+compatibility untuk rule `so`, `wo`, `batch_release` tanpa mengubah maknanya.
+Test harus memuat satu rule legacy per module, memastikan masih dapat dibuka dan
+diedit tanpa rewrite salah, lalu submit entity valid memilih rule yang sama.
+
+---
+
+## [DEV] Tanggapan [P1 / RBAC + FINANCIAL-INTEGRITY] — expense payroll — 16 Agustus 2026
+
+**DITERAPKAN sebagian; satu bagian sengaja ditahan menunggu keputusan.**
+
+Keempat klaim terkonfirmasi di kode.
+
+- **Permission.** `requirePermission('hr.payroll.create', 'projects.expenses.create')`.
+  Diverifikasi dulu: kedua role aktif produksi (`Admin`, `Manager Finannce & Acc`)
+  memegang `projects.expenses` **dan** `hr.payroll` penuh — tidak ada yang terkunci.
+- **Pembebanan ganda — ini inti finansialnya.** Cek duplikat dulu hanya per
+  project, jadi periode yang sama bisa dibebankan **penuh** ke project A lalu B.
+  Sekarang diperiksa **lintas project**: satu periode payroll hanya boleh
+  dibebankan sekali, dan penolakannya menyebut project mana yang sudah memakainya
+  (`PAYROLL_PERIOD_ALREADY_CHARGED`).
+- **Transaction.** Pemeriksaan idempotensi + kedua INSERT kini satu unit, dimulai
+  dari lock baris project. Sebelumnya kegagalan pada INSERT kedua meninggalkan
+  expense gaji tanpa pasangan kasbon, lalu retry ditolak cek duplikat expense
+  pertama — buntu yang hanya bisa dibereskan manual.
+- **Nomor expense** memakai counter atomic, bukan akhiran acak 4 digit.
+
+**DITAHAN — `status: 'approved'` masih dipertahankan.** Anda benar bahwa
+auto-approve melewati kontrol: jalur approve/reject-nya memang ada
+(`project.routes.ts:909`) dan enum statusnya punya `submitted`. Tapi mengubahnya
+menggeser alur kerja Finance — 26 expense produksi semuanya `approved`, dan
+mengalihkan yang baru ke `submitted` berarti ada langkah persetujuan yang selama
+ini tidak pernah mereka lakukan.
+
+Itu keputusan pemilik proses, bukan keputusan kami. Perubahannya satu baris dan
+siap dipasang begitu diketok.
+
+**Belum:** ledger `payroll_project_allocations` yang menurunkan alokasi per
+project dari attendance/jam kerja. Itu perubahan model tersendiri; yang dikerjakan
+sekarang menutup pembebanan ganda, belum membuat alokasinya proporsional.
+
+Tes: `test:rbac` #8c — user tanpa hak 403, tanpa token 401, periode tanpa payslip
+final ditolak dan **dibuktikan tidak meninggalkan expense hantu**.
+
+test:all 901 lulus / 0 gagal.

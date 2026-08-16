@@ -3,6 +3,7 @@ import { businessDate, businessTime, businessDatePart } from '../utils/date.util
 import bcrypt from 'bcrypt';
 import { randomInt } from 'crypto';
 import { dbAll, dbGet, dbRun, withTransaction } from '../config/database';
+import { nextSequentialCode } from './procurement.routes';
 import { authMiddleware, generateMobileToken, mobileAuthMiddleware, assertSelf, MobileAuthRequest } from '../middleware/auth';
 import { requirePermission, loadUserAccess } from '../middleware/permission';
 
@@ -1036,112 +1037,130 @@ router.get('/mobile/payslip/:employee_id', mobileAuthMiddleware, async (req: Mob
 
 // ===== GENERATE PAYROLL → PROJECT EXPENSE =====
 // Creates project_expenses entries from finalized payslips for a period
-router.post('/payslip/generate-expense', authMiddleware, async (req: Request, res: Response) => {
+router.post('/payslip/generate-expense', authMiddleware, requirePermission('hr.payroll.create', 'projects.expenses.create'), async (req: Request, res: Response) => {
   try {
     const { period_month, period_year, project_id } = req.body;
     if (!period_month || !period_year || !project_id) {
       return res.status(400).json({ error: 'period_month, period_year, and project_id are required' });
     }
 
-    const userId = (req as any).user?.userId || null;
+    const userId = (req as any).userId || null;
     const monthNames = ['','Januari','Februari','Maret','April','Mei','Juni','Juli','Agustus','September','Oktober','November','Desember'];
     const periodLabel = `${monthNames[+period_month]} ${period_year}`;
 
-    // Check if project exists
-    const project: any = await dbGet('SELECT id, project_name FROM client_projects WHERE id=?', [project_id]);
-    if (!project) return res.status(404).json({ error: 'Project tidak ditemukan' });
+    const hasil = await withTransaction(async tx => {
+      const project: any = await tx.get('SELECT id, project_name FROM client_projects WHERE id=? FOR UPDATE', [project_id]);
+      if (!project) return { error: 404, body: { error: 'Project tidak ditemukan' } };
 
-    // Check if expense already exists for this period + project (avoid duplicates)
-    const existingExp: any = await dbGet(
-      `SELECT id FROM project_expenses WHERE project_id=? AND category='salary'
-       AND description LIKE ? AND status NOT IN ('rejected')`,
-      [project_id, `%Gaji ${periodLabel}%`]
-    );
-    if (existingExp) {
-      return res.status(400).json({
-        error: `Expense gaji ${periodLabel} sudah ada di project ${project.project_name}. Hapus dulu jika ingin generate ulang.`,
-        existing_id: existingExp.id
-      });
-    }
-
-    // Get all finalized payslips for the period
-    const payslips: any[] = await dbAll(
-      `SELECT pr.*, e.name as employee_name, e.code as employee_code
-       FROM payslip_records pr
-       JOIN employees e ON pr.employee_id = e.id
-       WHERE pr.period_month=? AND pr.period_year=? AND pr.status='final'
-       ORDER BY e.name ASC`,
-      [period_month, period_year]
-    );
-
-    if (payslips.length === 0) {
-      return res.status(400).json({ error: 'Tidak ada slip gaji finalized untuk periode ini' });
-    }
-
-    // Aggregate totals
-    let totalGross = 0, totalKasbon = 0, totalNet = 0;
-    const employeeDetails: string[] = [];
-    for (const ps of payslips) {
-      const gross = parseFloat(ps.gross_salary) || 0;
-      const adv1 = parseFloat(ps.advance_1) || 0;
-      const adv2 = parseFloat(ps.advance_2) || 0;
-      const kasbon = adv1 + adv2;
-      totalGross += gross;
-      totalKasbon += kasbon;
-      totalNet += parseFloat(ps.net_salary) || 0;
-      employeeDetails.push(`${ps.employee_name}: Rp ${Math.round(ps.net_salary||0).toLocaleString('id-ID')}`);
-    }
-
-    const now = new Date();
-    const datePart = businessDatePart(now); // DR-P0-06: WIB, bukan UTC
-    const lastDay = new Date(+period_year, +period_month, 0).getDate();
-    const expenseDate = `${period_year}-${String(period_month).padStart(2,'0')}-${lastDay}`;
-    const createdExpenses: any[] = [];
-
-    // 1. Expense: Gaji (net salary = gross - kasbon)
-    const salaryExpNum = `EXP-SAL-${datePart}-${Math.floor(1000 + Math.random() * 9000)}`;
-    const salaryResult = await dbRun(
-      `INSERT INTO project_expenses (project_id, expense_number, category, description, amount, expense_date, notes, status, created_by)
-       VALUES (?, ?, 'salary', ?, ?, ?, ?, 'approved', ?)`,
-      [project_id, salaryExpNum,
-       `Gaji ${periodLabel} (${payslips.length} karyawan)`,
-       totalNet, expenseDate,
-       JSON.stringify({ type: 'payroll', period_month, period_year, employee_count: payslips.length, gross: totalGross, kasbon: totalKasbon, net: totalNet, details: employeeDetails }),
-       userId]
-    );
-    createdExpenses.push({ id: salaryResult.insertId, type: 'salary', amount: totalNet });
-
-    // 2. Expense: Kasbon (if any kasbon deductions exist)
-    if (totalKasbon > 0) {
-      const kasbonExpNum = `EXP-KSB-${datePart}-${Math.floor(1000 + Math.random() * 9000)}`;
-      const kasbonDetails: string[] = [];
-      for (const ps of payslips) {
-        const k = (parseFloat(ps.advance_1)||0) + (parseFloat(ps.advance_2)||0);
-        if (k > 0) kasbonDetails.push(`${ps.employee_name}: Rp ${Math.round(k).toLocaleString('id-ID')}`);
+      // P1: pemeriksaan duplikat dulu HANYA per project, sehingga permintaan yang
+      // sama ke project A lalu B sama-sama lolos dan membebankan 100% payroll
+      // perusahaan ke KEDUA project. Sekarang periode diperiksa lintas project:
+      // satu periode payroll hanya boleh dibebankan sekali.
+      const sudahAda: any = await tx.get(
+        `SELECT pe.id, pe.project_id, cp.project_name
+         FROM project_expenses pe LEFT JOIN client_projects cp ON cp.id = pe.project_id
+         WHERE pe.category='salary' AND pe.description LIKE ? AND pe.status NOT IN ('rejected')
+         LIMIT 1`,
+        [`%Gaji ${periodLabel}%`]
+      );
+      if (sudahAda) {
+        return {
+          error: 409,
+          body: {
+            error: sudahAda.project_id == project_id
+              ? `Expense gaji ${periodLabel} sudah ada di project ini. Hapus dulu jika ingin generate ulang.`
+              : `Expense gaji ${periodLabel} SUDAH dibebankan ke project "${sudahAda.project_name}". Satu periode payroll hanya boleh dibebankan sekali.`,
+            code: 'PAYROLL_PERIOD_ALREADY_CHARGED',
+            existing_id: sudahAda.id,
+            existing_project_id: sudahAda.project_id,
+          },
+        };
       }
-      const kasbonResult = await dbRun(
+
+      const payslips: any[] = await tx.all(
+        `SELECT pr.*, e.name as employee_name, e.code as employee_code
+         FROM payslip_records pr
+         JOIN employees e ON pr.employee_id = e.id
+         WHERE pr.period_month=? AND pr.period_year=? AND pr.status='final'
+         ORDER BY e.name ASC`,
+        [period_month, period_year]
+      );
+      if (payslips.length === 0) {
+        return { error: 400, body: { error: 'Tidak ada slip gaji finalized untuk periode ini' } };
+      }
+
+      let totalGross = 0, totalKasbon = 0, totalNet = 0;
+      const employeeDetails: string[] = [];
+      for (const ps of payslips) {
+        const gross = parseFloat(ps.gross_salary) || 0;
+        const kasbon = (parseFloat(ps.advance_1) || 0) + (parseFloat(ps.advance_2) || 0);
+        totalGross += gross;
+        totalKasbon += kasbon;
+        totalNet += parseFloat(ps.net_salary) || 0;
+        employeeDetails.push(`${ps.employee_name}: Rp ${Math.round(ps.net_salary || 0).toLocaleString('id-ID')}`);
+      }
+
+      const lastDay = new Date(+period_year, +period_month, 0).getDate();
+      const expenseDate = `${period_year}-${String(period_month).padStart(2, '0')}-${lastDay}`;
+      const createdExpenses: any[] = [];
+
+      // Nomor memakai counter atomic, bukan akhiran acak 4 digit.
+      const salaryExpNum = await nextSequentialCode('EXP-SAL', 'project_expenses', 'expense_number', tx);
+      const salaryResult = await tx.run(
         `INSERT INTO project_expenses (project_id, expense_number, category, description, amount, expense_date, notes, status, created_by)
-         VALUES (?, ?, 'kasbon', ?, ?, ?, ?, 'approved', ?)`,
-        [project_id, kasbonExpNum,
-         `Kasbon ${periodLabel} (${kasbonDetails.length} karyawan)`,
-         totalKasbon, expenseDate,
-         JSON.stringify({ type: 'kasbon', period_month, period_year, details: kasbonDetails }),
+         VALUES (?, ?, 'salary', ?, ?, ?, ?, 'approved', ?)`,
+        [project_id, salaryExpNum,
+         `Gaji ${periodLabel} (${payslips.length} karyawan)`,
+         totalNet, expenseDate,
+         JSON.stringify({ type: 'payroll', period_month, period_year, employee_count: payslips.length, gross: totalGross, kasbon: totalKasbon, net: totalNet, details: employeeDetails }),
          userId]
       );
-      createdExpenses.push({ id: kasbonResult.insertId, type: 'kasbon', amount: totalKasbon });
-    }
+      createdExpenses.push({ id: salaryResult.insertId, type: 'salary', amount: totalNet });
+
+      // 2. Expense: Kasbon (kalau ada potongan kasbon)
+      //
+      // Kedua INSERT kini berada dalam transaction yang sama. Sebelumnya
+      // terpisah: kegagalan pada yang kedua meninggalkan expense gaji tanpa
+      // pasangan kasbon, lalu retry ditolak oleh cek duplikat expense pertama —
+      // buntu yang hanya bisa dibereskan manual.
+      if (totalKasbon > 0) {
+        const kasbonDetails: string[] = [];
+        for (const ps of payslips) {
+          const k = (parseFloat(ps.advance_1) || 0) + (parseFloat(ps.advance_2) || 0);
+          if (k > 0) kasbonDetails.push(`${ps.employee_name}: Rp ${Math.round(k).toLocaleString('id-ID')}`);
+        }
+        const kasbonExpNum = await nextSequentialCode('EXP-KSB', 'project_expenses', 'expense_number', tx);
+        const kasbonResult = await tx.run(
+          `INSERT INTO project_expenses (project_id, expense_number, category, description, amount, expense_date, notes, status, created_by)
+           VALUES (?, ?, 'kasbon', ?, ?, ?, ?, 'approved', ?)`,
+          [project_id, kasbonExpNum,
+           `Potongan Kasbon ${periodLabel}`,
+           totalKasbon, expenseDate,
+           JSON.stringify({ type: 'kasbon', period_month, period_year, details: kasbonDetails }),
+           userId]
+        );
+        createdExpenses.push({ id: kasbonResult.insertId, type: 'kasbon', amount: totalKasbon });
+      }
+
+      return {
+        ok: true as const,
+        project, periodLabel, payslips, totalGross, totalKasbon, totalNet, createdExpenses,
+      };
+    });
+
+    if ('error' in hasil) return res.status(hasil.error).json(hasil.body);
 
     res.status(201).json({
-      message: `✅ Expense berhasil di-generate ke project ${project.project_name}`,
+      message: `✅ Expense berhasil di-generate ke project ${hasil.project.project_name}`,
       data: {
-        project_id, project_name: project.project_name,
-        period: periodLabel,
-        employee_count: payslips.length,
-        total_gross: totalGross,
-        total_kasbon: totalKasbon,
-        total_net: totalNet,
-        expenses: createdExpenses
-      }
+        project_id, project_name: hasil.project.project_name,
+        period: hasil.periodLabel,
+        employee_count: hasil.payslips.length,
+        total_gross: hasil.totalGross,
+        total_kasbon: hasil.totalKasbon,
+        total_net: hasil.totalNet,
+        expenses: hasil.createdExpenses,
+      },
     });
   } catch (error) {
     console.error('Generate expense error:', error);
