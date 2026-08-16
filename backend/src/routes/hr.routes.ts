@@ -87,9 +87,20 @@ router.delete('/position-rates/:id', authMiddleware, requirePermission('hr.posit
 // halaman.
 router.get('/employees', authMiddleware, async (req: Request, res: Response) => {
   try {
+    // Batas permission ditegaskan di sini (jawaban atas "perlu klarifikasi"
+    // reviewer): membuka angka gaji HANYA lewat `hr.payroll.view`.
+    //
+    // `hr.employees.view` adalah gate menu "Data Karyawan" di Layout.vue —
+    // direktori karyawan. Kalau permission itu ikut membuka kompensasi, setiap
+    // role yang boleh melihat daftar nama otomatis melihat gaji seluruh
+    // perusahaan. Direktori dan kompensasi adalah dua hal berbeda, jadi
+    // dipisahkan.
+    //
+    // Diperiksa aman untuk produksi: kedua role aktif (`Admin`,
+    // `Manager Finannce & Acc`) memegang `hr.payroll` penuh, jadi tidak ada yang
+    // kehilangan akses yang selama ini dipakai.
     const access = await loadUserAccess((req as any).userId);
-    const bolehLihatGaji = !!access && (access.level >= 10
-      || access.perms.has('hr.payroll.view') || access.perms.has('hr.employees.view'));
+    const bolehLihatGaji = !!access && (access.level >= 10 || access.perms.has('hr.payroll.view'));
 
     const employees = await dbAll(
       `SELECT e.id, e.code as employee_code, e.name as first_name, '' as last_name,

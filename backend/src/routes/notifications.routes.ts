@@ -72,9 +72,11 @@ router.get('/unread-count', authMiddleware, async (req: Request, res: Response) 
 
 router.post('/', authMiddleware, async (req: Request, res: Response) => {
   try {
+    // Pengirim SELALU dari token; menerimanya dari body membuat siapa pun bisa
+    // mengirim notifikasi atas nama orang lain.
+    const sender_id = (req as any).userId;
     const {
       recipient_id,
-      sender_id,
       title,
       message,
       type,
@@ -117,19 +119,22 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
   }
 });
 
+// DR-P2-02: `recipient_id` dari TOKEN wajib ikut di setiap pembacaan dan mutasi.
+// Sebelumnya seluruh aksi per-ID hanya memakai id dari klien, jadi siapa pun
+// yang menebak nomor bisa menandai terbaca atau menghapus notifikasi orang lain.
 router.put('/:id/read', authMiddleware, async (req: Request, res: Response) => {
   try {
     const notification = await dbGet(
-      'SELECT * FROM notifications WHERE id = ?',
-      [req.params.id]
+      'SELECT * FROM notifications WHERE id = ? AND recipient_id = ?',
+      [req.params.id, (req as any).userId]
     );
 
     if (!notification) {
       return res.status(404).json({ error: 'Notification not found' });
     }
 
-    await dbRun('UPDATE notifications SET is_read = 1, read_at = NOW() WHERE id = ?', [
-      req.params.id,
+    await dbRun('UPDATE notifications SET is_read = 1, read_at = NOW() WHERE id = ? AND recipient_id = ?', [
+      req.params.id, (req as any).userId,
     ]);
 
     res.json({ message: 'Notification marked as read' });
@@ -142,8 +147,8 @@ router.put('/:id/read', authMiddleware, async (req: Request, res: Response) => {
 router.put('/:id/unread', authMiddleware, async (req: Request, res: Response) => {
   try {
     const notification = await dbGet(
-      'SELECT * FROM notifications WHERE id = ?',
-      [req.params.id]
+      'SELECT * FROM notifications WHERE id = ? AND recipient_id = ?',
+      [req.params.id, (req as any).userId]
     );
 
     if (!notification) {
@@ -183,15 +188,16 @@ router.post('/mark-all-read', authMiddleware, async (req: Request, res: Response
 router.delete('/:id', authMiddleware, async (req: Request, res: Response) => {
   try {
     const notification = await dbGet(
-      'SELECT * FROM notifications WHERE id = ?',
-      [req.params.id]
+      'SELECT * FROM notifications WHERE id = ? AND recipient_id = ?',
+      [req.params.id, (req as any).userId]
     );
 
     if (!notification) {
       return res.status(404).json({ error: 'Notification not found' });
     }
 
-    await dbRun('DELETE FROM notifications WHERE id = ?', [req.params.id]);
+    await dbRun('DELETE FROM notifications WHERE id = ? AND recipient_id = ?',
+      [req.params.id, (req as any).userId]);
 
     res.json({ message: 'Notification deleted' });
   } catch (error) {
@@ -208,16 +214,19 @@ router.post('/bulk-action', authMiddleware, async (req: Request, res: Response) 
       return res.status(400).json({ error: 'ids (array) and action are required' });
     }
 
+    // Bulk: ID milik user lain diabaikan diam-diam lewat predicate pemilik —
+    // bukan ditolak seluruhnya, supaya "tandai semua terbaca" tetap bekerja.
     if (action === 'read') {
       const placeholders = ids.map(() => '?').join(',');
       await dbRun(
-        `UPDATE notifications SET is_read = 1, read_at = NOW() WHERE id IN (${placeholders})`,
-        ids
+        `UPDATE notifications SET is_read = 1, read_at = NOW() WHERE id IN (${placeholders}) AND recipient_id = ?`,
+        [...ids, (req as any).userId]
       );
       res.json({ message: 'Notifications marked as read' });
     } else if (action === 'delete') {
       const placeholders = ids.map(() => '?').join(',');
-      await dbRun(`DELETE FROM notifications WHERE id IN (${placeholders})`, ids);
+      await dbRun(`DELETE FROM notifications WHERE id IN (${placeholders}) AND recipient_id = ?`,
+        [...ids, (req as any).userId]);
       res.json({ message: 'Notifications deleted' });
     } else {
       res.status(400).json({ error: 'Invalid action. Use read or delete.' });

@@ -41,6 +41,74 @@ const status = async (...a: Parameters<typeof call>) => (await call(...a)).statu
  * Fixture approval terisolasi: rule + step + dua request + empat user berbeda hak.
  * Seluruhnya dibuat sendiri supaya tidak menyentuh konfigurasi approval nyata.
  */
+/** Role yang HANYA punya hr.employees.view — tidak punya hr.payroll.view. */
+/** Dua notifikasi: satu milik user uji, satu milik orang lain. */
+async function seedNotifications(): Promise<any> {
+  try {
+    const { dbRun, dbGet } = await import('../src/config/database');
+    const tag = `UJI-NOTIF-${Date.now()}`;
+    const lain: any = await dbGet('SELECT id FROM users WHERE email = ? LIMIT 1', [ADMIN_EMAIL]);
+    const pemilikUji: any = await dbGet('SELECT id FROM users WHERE email LIKE ? ORDER BY id DESC LIMIT 1', ['rbac.plain.%']);
+    if (!lain?.id || !pemilikUji?.id) return null;
+
+    const a: any = await dbRun(
+      `INSERT INTO notifications (recipient_id, title, message, type) VALUES (?, ?, ?, 'info')`,
+      [lain.id, tag, 'milik orang lain']
+    );
+    const b: any = await dbRun(
+      `INSERT INTO notifications (recipient_id, title, message, type) VALUES (?, ?, ?, 'info')`,
+      [pemilikUji.id, tag, 'milik sendiri']
+    );
+    return { tag, milikOrangLain: a.insertId, milikSendiri: b.insertId };
+  } catch { return null; }
+}
+
+async function notificationExists(id: number): Promise<boolean> {
+  const { dbGet } = await import('../src/config/database');
+  const r: any = await dbGet('SELECT 1 AS ok FROM notifications WHERE id = ?', [id]);
+  return !!r;
+}
+
+async function cleanupNotifications(n: any): Promise<number> {
+  const { dbRun, dbGet } = await import('../src/config/database');
+  await dbRun('DELETE FROM notifications WHERE title = ?', [n.tag]);
+  const sisa: any = await dbGet('SELECT COUNT(*) AS n FROM notifications WHERE title = ?', [n.tag]);
+  return Number(sisa?.n ?? -1);
+}
+
+async function seedDirectoryRole(): Promise<any> {
+  try {
+    const { dbRun, dbGet } = await import('../src/config/database');
+    const tag = `UJI-DIR-${Date.now()}`;
+    const r: any = await dbRun(`INSERT INTO roles (name, description) VALUES (?, 'fixture uji')`, [tag]);
+    const perm: any = await dbGet(
+      `SELECT id FROM permissions WHERE resource = 'hr.employees' AND action = 'view' LIMIT 1`
+    );
+    if (perm) await dbRun('INSERT INTO role_permissions (role_id, permission_id) VALUES (?, ?)', [r.insertId, perm.id]);
+    const bcrypt = await import('bcrypt');
+    const email = `${tag}@uji.local`.toLowerCase();
+    const u: any = await dbRun(
+      `INSERT INTO users (username, email, password, full_name, role_id, user_level, is_active)
+       VALUES (?, ?, ?, 'Uji Direktori', ?, 1, 1)`,
+      [email, email, await bcrypt.hash('secret123', 10), r.insertId]
+    );
+    const login = await call('POST', '/auth/login', { email, password: 'secret123' });
+    return { tag, roleId: r.insertId, userId: u.insertId, token: login.json?.token };
+  } catch { return null; }
+}
+
+async function cleanupDirectoryRole(dir: any): Promise<number> {
+  const { dbRun, dbGet } = await import('../src/config/database');
+  await dbRun('DELETE FROM role_permissions WHERE role_id = ?', [dir.roleId]);
+  await dbRun('DELETE FROM users WHERE id = ?', [dir.userId]);
+  await dbRun('DELETE FROM roles WHERE id = ?', [dir.roleId]);
+  const sisa: any = await dbGet(
+    `SELECT (SELECT COUNT(*) FROM users WHERE id = ?) + (SELECT COUNT(*) FROM roles WHERE id = ?) AS n`,
+    [dir.userId, dir.roleId]
+  );
+  return Number(sisa?.n ?? -1);
+}
+
 async function seedApprovalFixture(): Promise<any> {
   try {
     const { dbRun, dbGet } = await import('../src/config/database');
@@ -508,6 +576,54 @@ async function main() {
       chk('fixture payroll dibersihkan tuntas', sisa, 0);
     }
   }
+
+  console.log('\n9b. Batas hr.employees.view vs hr.payroll.view (klarifikasi reviewer)');
+  // Keputusan: "Data Karyawan" adalah direktori, bukan kompensasi. Membuka angka
+  // gaji HANYA lewat `hr.payroll.view`. Tanpa batas ini, setiap role yang boleh
+  // melihat daftar nama otomatis melihat gaji seluruh perusahaan.
+  const dir = await seedDirectoryRole();
+  chk('role direktori dibuat', !!dir?.token, true);
+  if (dir?.token) {
+    try {
+      const lihat = await call('GET', '/hr/employees', undefined, dir.token);
+      chk('pemegang hr.employees.view tetap bisa melihat daftar', lihat.status, 200);
+      const baris = (lihat.json?.data || [])[0];
+      chk('tapi gajinya TETAP diredaksi', baris?.salary_redacted, true);
+      chk('angkanya null', baris?.basic_salary, null);
+      chk('namanya tetap ada', !!baris?.first_name, true);
+    } finally {
+      chk('role direktori dibersihkan', await cleanupDirectoryRole(dir), 0);
+    }
+  }
+
+  console.log('\n9c. Notifikasi orang lain tidak bisa disentuh (DR-P2-02)');
+  // Seluruh mutasi per-ID dan bulk dulu hanya memakai id dari klien — siapa pun
+  // yang menebak nomor bisa menandai terbaca atau menghapus notifikasi orang lain.
+  const notif = await seedNotifications();
+  chk('notifikasi uji dibuat', !!notif?.milikOrangLain, true);
+  if (notif?.milikOrangLain) {
+    try {
+      chk('tandai terbaca milik orang lain → 404',
+        await status('PUT', `/notifications/${notif.milikOrangLain}/read`, {}, plainToken), 404);
+      chk('hapus milik orang lain → 404',
+        await status('DELETE', `/notifications/${notif.milikOrangLain}`, undefined, plainToken), 404);
+
+      // Bulk: ID orang lain harus diabaikan, bukan ikut terhapus.
+      await call('POST', '/notifications/bulk-action',
+        { ids: [notif.milikOrangLain, notif.milikSendiri], action: 'delete' }, plainToken);
+      chk('bulk TIDAK menghapus milik orang lain', await notificationExists(notif.milikOrangLain), true);
+      chk('bulk tetap menghapus milik sendiri', await notificationExists(notif.milikSendiri), false);
+    } finally {
+      chk('notifikasi uji dibersihkan', await cleanupNotifications(notif), 0);
+    }
+  }
+
+  console.log('\n9d. Route alokasi FIFO/FEFO terjangkau (DR-P2-03)');
+  // `/:id` didaftarkan lebih dulu, jadi Express menangkap string "allocate-stock"
+  // sebagai id dan endpoint alokasi tidak pernah terjangkau sejak dibuat.
+  const alok = await call('GET', '/warehouses/allocate-stock?product_id=1&qty=1', undefined, master);
+  chk('bukan lagi "Warehouse not found"',
+    String(alok.json?.error || '').includes('Warehouse not found'), false);
 
   console.log('\n10. Akun nonaktif tidak bisa dipakai (DR-P1-01)');
   // Login dulu tidak memeriksa is_active sama sekali, dan middleware hanya

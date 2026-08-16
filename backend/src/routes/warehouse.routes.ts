@@ -120,6 +120,105 @@ router.post('/stock-movements', authMiddleware, async (req: Request, res: Respon
 // ===== PARAMETERIZED ROUTES (/:id) =====
 
 // Get single warehouse
+// DR-P2-03: route statis WAJIB didaftarkan sebelum `/:id`.
+//
+// Express mencocokkan berurutan, jadi `/:id` menangkap string "allocate-stock"
+// sebagai id dan mengembalikan 404 "Warehouse not found". Endpoint alokasi
+// FIFO/FEFO ini tidak pernah terjangkau sama sekali sejak dibuat.
+router.get('/allocate-stock', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { product_id, quantity, method = 'FEFO', warehouse_id } = req.query;
+    
+    if (!product_id || !quantity) {
+      return res.status(400).json({ error: 'product_id and quantity are required' });
+    }
+
+    const qtyNeeded = parseFloat(quantity as string);
+    const pickMethod = (method as string).toUpperCase();
+
+    // Build query based on picking method
+    let query = `
+      SELECT i.id, i.batch_id, i.location_id, i.quantity, i.uom,
+             b.batch_number, b.exp_date, b.mfg_date,
+             wl.code as location_code, wl.rack, wl.row, wl.bin,
+             w.id as warehouse_id, w.name as warehouse_name
+      FROM inventory_stocks i
+      JOIN batches b ON i.batch_id = b.id
+      JOIN warehouse_locations wl ON i.location_id = wl.id
+      JOIN warehouses w ON wl.warehouse_id = w.id
+      WHERE i.product_id = ? 
+        AND i.quantity > 0
+        AND b.status IN ('released', 'open')
+    `;
+
+    const params: any[] = [product_id];
+
+    if (warehouse_id) {
+      query += ` AND w.id = ?`;
+      params.push(warehouse_id);
+    }
+
+    // Order by expiry date (FEFO) or manufacturing date (FIFO)
+    if (pickMethod === 'FEFO') {
+      query += ` ORDER BY 
+        CASE WHEN b.exp_date IS NULL THEN 1 ELSE 0 END,
+        b.exp_date ASC,
+        b.mfg_date ASC`;
+    } else {
+      // FIFO
+      query += ` ORDER BY b.mfg_date ASC, b.batch_number ASC`;
+    }
+
+    const batches = await dbAll(query, params) as any[];
+
+    // Calculate allocation
+    const allocation = [];
+    let remainingQty = qtyNeeded;
+
+    for (const batch of batches) {
+      if (remainingQty <= 0) break;
+
+      const allocQty = Math.min(remainingQty, batch.quantity);
+      allocation.push({
+        batch_id: batch.batch_id,
+        batch_number: batch.batch_number,
+        location_id: batch.location_id,
+        location_code: batch.location_code,
+        rack: batch.rack,
+        row: batch.row,
+        bin: batch.bin,
+        warehouse_id: batch.warehouse_id,
+        warehouse: batch.warehouse_name,
+        allocated_qty: allocQty,
+        available_qty: batch.quantity,
+        uom: batch.uom,
+        exp_date: batch.exp_date,
+        mfg_date: batch.mfg_date,
+      });
+
+      remainingQty -= allocQty;
+    }
+
+    const canFulfill = remainingQty <= 0;
+
+    res.json({
+      data: {
+        product_id,
+        quantity_needed: qtyNeeded,
+        quantity_allocated: qtyNeeded - remainingQty,
+        quantity_short: remainingQty > 0 ? remainingQty : 0,
+        can_fulfill: canFulfill,
+        method: pickMethod,
+        allocation_count: allocation.length,
+        allocation,
+      },
+    });
+  } catch (error) {
+    console.error('Error allocating stock:', error);
+    res.status(500).json({ error: 'Failed to allocate stock' });
+  }
+});
+
 router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
   try {
     const warehouse = await dbGet('SELECT * FROM warehouses WHERE id = ?', [req.params.id]);
@@ -273,99 +372,6 @@ router.delete('/:warehouseId/locations/:id', authMiddleware, async (req: Request
  * - method: 'FIFO' or 'FEFO' (default: FEFO for safety)
  * - warehouse_id: Optional, specific warehouse
  */
-router.get('/allocate-stock', authMiddleware, async (req: Request, res: Response) => {
-  try {
-    const { product_id, quantity, method = 'FEFO', warehouse_id } = req.query;
-    
-    if (!product_id || !quantity) {
-      return res.status(400).json({ error: 'product_id and quantity are required' });
-    }
-
-    const qtyNeeded = parseFloat(quantity as string);
-    const pickMethod = (method as string).toUpperCase();
-
-    // Build query based on picking method
-    let query = `
-      SELECT i.id, i.batch_id, i.location_id, i.quantity, i.uom,
-             b.batch_number, b.exp_date, b.mfg_date,
-             wl.code as location_code, wl.rack, wl.row, wl.bin,
-             w.id as warehouse_id, w.name as warehouse_name
-      FROM inventory_stocks i
-      JOIN batches b ON i.batch_id = b.id
-      JOIN warehouse_locations wl ON i.location_id = wl.id
-      JOIN warehouses w ON wl.warehouse_id = w.id
-      WHERE i.product_id = ? 
-        AND i.quantity > 0
-        AND b.status IN ('released', 'open')
-    `;
-
-    const params: any[] = [product_id];
-
-    if (warehouse_id) {
-      query += ` AND w.id = ?`;
-      params.push(warehouse_id);
-    }
-
-    // Order by expiry date (FEFO) or manufacturing date (FIFO)
-    if (pickMethod === 'FEFO') {
-      query += ` ORDER BY 
-        CASE WHEN b.exp_date IS NULL THEN 1 ELSE 0 END,
-        b.exp_date ASC,
-        b.mfg_date ASC`;
-    } else {
-      // FIFO
-      query += ` ORDER BY b.mfg_date ASC, b.batch_number ASC`;
-    }
-
-    const batches = await dbAll(query, params) as any[];
-
-    // Calculate allocation
-    const allocation = [];
-    let remainingQty = qtyNeeded;
-
-    for (const batch of batches) {
-      if (remainingQty <= 0) break;
-
-      const allocQty = Math.min(remainingQty, batch.quantity);
-      allocation.push({
-        batch_id: batch.batch_id,
-        batch_number: batch.batch_number,
-        location_id: batch.location_id,
-        location_code: batch.location_code,
-        rack: batch.rack,
-        row: batch.row,
-        bin: batch.bin,
-        warehouse_id: batch.warehouse_id,
-        warehouse: batch.warehouse_name,
-        allocated_qty: allocQty,
-        available_qty: batch.quantity,
-        uom: batch.uom,
-        exp_date: batch.exp_date,
-        mfg_date: batch.mfg_date,
-      });
-
-      remainingQty -= allocQty;
-    }
-
-    const canFulfill = remainingQty <= 0;
-
-    res.json({
-      data: {
-        product_id,
-        quantity_needed: qtyNeeded,
-        quantity_allocated: qtyNeeded - remainingQty,
-        quantity_short: remainingQty > 0 ? remainingQty : 0,
-        can_fulfill: canFulfill,
-        method: pickMethod,
-        allocation_count: allocation.length,
-        allocation,
-      },
-    });
-  } catch (error) {
-    console.error('Error allocating stock:', error);
-    res.status(500).json({ error: 'Failed to allocate stock' });
-  }
-});
 
 /**
  * GET /api/warehouses/:warehouseId/stock-health

@@ -794,6 +794,16 @@ unique source proposal/project; kuantitas/material berasal dari snapshot kontrak
 yang disepakati atau aturan bisnis yang terdokumentasi; tes deal sukses + forced
 PR failure + retry tanpa duplikat.
 
+**Verifikasi 16 Agustus 2026 15:17 WIB — DITERAPKAN SEBAGIAN.** Commit
+`68433b30` mengganti nomor acak Estimator dengan `nextSequentialCode()` resmi
+Procurement dan backend tetap lulus `npx tsc --noEmit`. Sub-kriteria penomoran
+selesai. Handoff masih berjalan sesudah transaction deal, error masih hanya
+di-log lalu response sukses, belum ada status/outbox/retry/unique source, dan
+material tetap dibaca dari `ahsp_items` aktif. Test yang berubah hanya menerima
+format counter `NNNN+`; belum ada test deal → forced PR failure → retry. Karena
+itu DR-P1-06 tetap terbuka untuk integritas proses handoff, tanpa temuan baru
+yang terpisah pada commit ini.
+
 ### DR-P1-07 — Startup mengumumkan schema sukses walau tabel/kolom gagal
 
 [database.ts:60](backend/src/config/database.ts) menelan setiap error
@@ -2310,3 +2320,55 @@ masih terbuka.
 > Rantai perintah kami tidak menghentikan push saat `test:all` merah. Deploy
 > TIDAK dijalankan, dan perbaikannya menyusul di commit berikutnya — tapi gate-nya
 > memang bocor dan itu kesalahan kami.
+
+---
+
+## [DEV] Tanggapan atas P2 & klarifikasi permission — 16 Agustus 2026
+
+### [P1 — Perlu klarifikasi] `hr.employees.view` ikut membuka angka gaji
+
+**DIPUTUSKAN: hanya `hr.payroll.view` yang membuka angka gaji.**
+
+Alasannya: `hr.employees.view` adalah gate menu "Data Karyawan" — itu direktori,
+bukan kompensasi. Kalau permission direktori ikut membuka kompensasi, setiap role
+yang boleh melihat daftar nama otomatis melihat gaji seluruh perusahaan, dan
+pemisahan yang baru saja kami pasang jadi tidak ada artinya. Direktori dan
+kompensasi dua hal berbeda.
+
+Diperiksa aman: kedua role aktif produksi (`Admin`, `Manager Finannce & Acc`)
+memegang `hr.payroll` penuh, jadi tidak ada yang kehilangan akses yang selama ini
+dipakai.
+
+Tes: `test:rbac` #9b — role yang HANYA punya `hr.employees.view` tetap bisa
+membuka daftar (200) dan tetap melihat nama, tapi angkanya `null` dan ditandai
+`salary_redacted`. Ini persis batas yang Anda minta diuji.
+
+### DR-P2-02 — Notification ownership
+
+**DITERAPKAN.** Terkonfirmasi: `PUT /:id/read`, `PUT /:id/unread`, `DELETE /:id`,
+dan bulk semuanya hanya memakai id dari klien. `recipient_id` dari token kini
+ikut di setiap pembacaan dan mutasi, dan `sender_id` pada POST diambil dari token
+— menerimanya dari body membuat siapa pun bisa mengirim notifikasi atas nama
+orang lain.
+
+Bulk sengaja **mengabaikan** ID milik orang lain lewat predicate pemilik, bukan
+menolak seluruh permintaan, supaya "tandai semua terbaca" tetap bekerja.
+
+Tes: `test:rbac` #9c — menandai/menghapus milik orang lain 404, dan bulk yang
+memuat ID campuran hanya menghapus milik sendiri sementara milik orang lain
+dibuktikan **masih ada**.
+
+### DR-P2-03 — Route alokasi FIFO/FEFO tidak terjangkau
+
+**DITERAPKAN.** Terkonfirmasi: `/:id` di baris 123, `/allocate-stock` di baris
+276 — Express menangkap "allocate-stock" sebagai id. Endpoint itu tidak pernah
+terjangkau sejak dibuat, dan store frontend menerima 404 "Warehouse not found".
+Route statis dipindah ke sebelum `/:id`.
+
+Tes: `test:rbac` #9d — responsnya bukan lagi "Warehouse not found".
+
+test:all 851 lulus / 0 gagal.
+
+> **Perbaikan proses:** commit ronde lalu sempat ter-push dengan tes merah karena
+> rantai perintah kami tidak menghentikan push. Sejak ronde ini `test:all`
+> dijalankan sebagai gate eksplisit dan commit hanya berjalan kalau gate hijau.
