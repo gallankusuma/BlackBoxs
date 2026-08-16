@@ -221,6 +221,13 @@ router.post('/auth/verify', async (req: Request, res: Response) => {
     const { employee_id, auth_response, latitude, longitude, type } = req.body;
     // type = 'in' | 'out' | 'auto'
 
+    // Tanpa ini, `employee_id` undefined menembus sampai ke driver MySQL dan
+    // keluar sebagai 500 berikut pesan internalnya. Permintaan cacat harus
+    // ditolak sebagai permintaan cacat.
+    if (!employee_id || !auth_response) {
+      return res.status(400).json({ error: 'employee_id dan auth_response diperlukan' });
+    }
+
     // 1. Get challenge
     const challengeRow: any = await dbGet(
       'SELECT * FROM webauthn_challenges WHERE employee_id = ? AND type = ? AND expires_at > NOW()',

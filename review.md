@@ -1487,3 +1487,61 @@ credential lama secara eksplisit; credential tanpa office valid harus ditolak
 dan diarahkan re-enroll; gunakan business timezone; lock challenge + credential
 counter + attendance row dalam alur idempoten, konsumsi challenge sekali, dan
 uji replay/concurrency serta boundary tengah malam WIB.
+
+### Update verifikasi pada run yang sama
+
+Patch bergerak ketika review berlangsung, sehingga cakupan temuan P1 di atas
+perlu dipersempit (catatan lama dipertahankan sebagai histori):
+
+- `MobileOnboarding` sekarang sudah mengirim
+  `office_location_id: gpsForm.selected_location_id`
+  ([MobileOnboarding.vue:237](frontend/src/views/mobile/MobileOnboarding.vue));
+  kontrak onboarding ini sudah selaras dengan backend.
+- `MobileSettings` **masih** memakai kontrak lama: registrasi mengirim koordinat
+  mentah tanpa `office_location_id`
+  ([MobileSettings.vue:231](frontend/src/views/mobile/MobileSettings.vue)), dan
+  update lokasi melakukan hal yang sama
+  ([MobileSettings.vue:259](frontend/src/views/mobile/MobileSettings.vue)). Jadi
+  P1 tetap terbuka, tetapi dampaknya kini terbatas pada register/update melalui
+  Settings, bukan seluruh onboarding.
+- Boundary tanggal/jam WIB sudah diperbaiki melalui helper timezone bisnis
+  ([date.utils.ts:18](backend/src/utils/date.utils.ts)) dan dipakai pada jalur
+  attendance WebAuthn ([webauthn.routes.ts:301](backend/src/routes/webauthn.routes.ts)).
+  Butir UTC pada daftar sisa di atas sudah terverifikasi selesai.
+- Challenge authentication sekarang dihapus setelah counter berhasil di-update
+  ([webauthn.routes.ts:293](backend/src/routes/webauthn.routes.ts)). Ini memperkecil
+  replay window, tetapi belum atomic: dua request paralel masih dapat membaca
+  challenge yang sama sebelum salah satunya menghapus, dan write attendance
+  tetap berada di luar transaction/state lock.
+
+Validasi office pada registrasi juga masih dilakukan **sesudah**
+`verifyRegistrationResponse` ([webauthn.routes.ts:127](backend/src/routes/webauthn.routes.ts),
+[webauthn.routes.ts:145](backend/src/routes/webauthn.routes.ts)). Dengan
+`MobileSettings` yang masih salah kontrak, authenticator dapat selesai membuat
+credential tetapi server menolaknya sebelum penyimpanan. Pindahkan resolve
+office ke sebelum verifikasi response sebagaimana rekomendasi awal.
+
+### [P2] Test koordinat palsu dapat lulus hanya karena credential ID tidak ada/bukan milik fixture
+
+**Bukti:** test baru selalu menembak `/webauthn/credentials/1/location`, lalu
+menganggap status apa pun `>=400` dan `<500` sebagai bukti koordinat ditolak
+([auth-http.ts:152](backend/tests/auth-http.ts)). Handler memeriksa ownership
+lebih dulu; ID tidak ada menghasilkan 404 dan ID milik employee lain menghasilkan
+403 ([webauthn.routes.ts:398](backend/src/routes/webauthn.routes.ts)). Kedua hasil
+itu membuat test hijau tanpa pernah mengeksekusi validasi `office_location_id`.
+
+**Dampak:** kontrak security yang hendak dilindungi dapat kembali menerima
+koordinat buatan sendiri sementara suite tetap lulus; ini false positive pada
+regresi yang langsung memengaruhi validitas absensi/payroll.
+
+**Rekomendasi/acceptance:** targetkan credential yang dipastikan milik `tokA`
+atau unit-test handler dengan ownership valid; assert status tepat 400 dan code
+`OFFICE_LOCATION_REQUIRED`, lalu pastikan koordinat row tidak berubah. Tambahkan
+positive case memakai active office ID dan negative case inactive/unknown ID.
+
+### Verifikasi build run 14:48 WIB
+
+- `backend: npx tsc --noEmit` — lulus.
+- `frontend: npm run build` — lulus, 2.090 modul ditransformasi.
+- HTTP suite tidak dijalankan karena membuat/mengubah fixture; kelemahan test di
+  atas diverifikasi statis dari urutan handler dan assertion test.
