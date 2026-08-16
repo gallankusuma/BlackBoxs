@@ -1317,17 +1317,16 @@ router.post('/proposals', authMiddleware, async (req: Request, res: Response) =>
       return res.status(400).json({ error: 'project_name is required' });
     }
     
-    // Generate proposal number — MAX-based, not COUNT-based, so a deleted proposal
-    // in the same year can't leave the counter behind an existing proposal_number.
-    const year = new Date().getFullYear();
-    const maxRow = await dbGet(
-      `SELECT MAX(CAST(SUBSTRING_INDEX(proposal_number, '/', -1) AS UNSIGNED)) as maxNum FROM proposals WHERE YEAR(created_at) = ?`,
-      [year]
-    );
-    const nextNum = ((maxRow as any).maxNum || 0) + 1;
-    const proposalNumber = `PROP/${year}/${String(nextNum).padStart(4, '0')}`;
-    
-    const result = await dbRun(
+    // DR-P1-05: nomor atomic + header + seluruh item template SATU transaction.
+    //
+    // Sebelumnya nomornya `MAX(...)+1` lalu INSERT dengan autocommit: dua
+    // pembuatan bersamaan membaca MAX yang sama dan yang kalah keluar sebagai
+    // 500. Item template pun ditulis terpisah, jadi kegagalan di tengah
+    // meninggalkan proposal setengah jadi yang tetap terlihat sah.
+    const { proposalId, proposalNumber } = await withTransaction(async tx => {
+    const proposalNumber = await nextProposalNumber(tx);
+
+    const result = await tx.run(
       `INSERT INTO proposals (proposal_number, project_name, client, client_id, lokasi, revision, proposal_type, design_params, status, created_by)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?)`,
       [proposalNumber, project_name, client || null, client_id || null, lokasi || null, revision || 'Rev-0', 
@@ -1348,7 +1347,7 @@ router.post('/proposals', authMiddleware, async (req: Request, res: Response) =>
       // Pre-fetch all template AHSP entries for this work type
       let ahspLookup: Record<string, any> = {};
       if (prefix) {
-        const ahspRows = await dbAll(
+        const ahspRows = await tx.all(
           `SELECT id, kode, name, satuan, harga_satuan FROM ahsp_headers WHERE kode LIKE ? AND status='active'`,
           [`${prefix}.%`]
         );
@@ -1361,7 +1360,7 @@ router.post('/proposals', authMiddleware, async (req: Request, res: Response) =>
       for (let i = 0; i < template_sections.length; i++) {
         const section = template_sections[i];
         // Insert section header row
-        await dbRun(
+        await tx.run(
           `INSERT INTO proposal_items 
            (proposal_id, ahsp_code_snapshot, ahsp_name_snapshot, unit_snapshot, unit_price_snapshot,
             description, qty, total_price, order_no, section_label, is_section, section_order)
@@ -1381,7 +1380,7 @@ router.post('/proposals', authMiddleware, async (req: Request, res: Response) =>
             const ahspUnit = matched ? matched.satuan : '';
             const ahspPrice = matched ? parseFloat(matched.harga_satuan) || 0 : 0;
 
-            await dbRun(
+            await tx.run(
               `INSERT INTO proposal_items 
                (proposal_id, ahsp_id, ahsp_code_snapshot, ahsp_name_snapshot, unit_snapshot, unit_price_snapshot,
                 description, qty, total_price, order_no, section_label, is_section, section_order)
@@ -1393,6 +1392,9 @@ router.post('/proposals', authMiddleware, async (req: Request, res: Response) =>
         }
       }
     }
+
+    return { proposalId, proposalNumber };
+    });
     
     res.status(201).json({ 
       message: 'Proposal created', 
@@ -1427,16 +1429,26 @@ router.put('/proposals/:id', authMiddleware, async (req: Request, res: Response)
       });
     }
 
-    const lockedProposal = await proposalLock(req.params.id);
-    if (lockedProposal) return res.status(lockedProposal.status).json(lockedProposal.body);
-    
-    await dbRun(
-      `UPDATE proposals
-       SET project_name = ?, client = ?, client_id = ?, lokasi = ?, revision = ?
-       WHERE id = ?`,
-      [project_name, client, client_id || null, lokasi, revision, req.params.id]
-    );
-    
+    // DR-P1-05: pemeriksaan kunci dan penulisannya harus satu transaction.
+    //
+    // `proposalLock()` di luar transaction tidak mengunci apa pun — pelajaran
+    // yang sudah berulang di R26/R33. Permintaan submit yang berlomba bisa
+    // menyelip di antara pemeriksaan dan UPDATE, sehingga metadata proposal yang
+    // sudah submitted tetap berubah.
+    const hasil = await withTransaction(async tx => {
+      const terkunci = await proposalLockTx(req.params.id, tx);
+      if (terkunci) return { error: terkunci.status, body: terkunci.body };
+
+      await tx.run(
+        `UPDATE proposals
+         SET project_name = ?, client = ?, client_id = ?, lokasi = ?, revision = ?
+         WHERE id = ?`,
+        [project_name, client, client_id || null, lokasi, revision, req.params.id]
+      );
+      return { ok: true as const };
+    });
+
+    if ('error' in hasil) return res.status(hasil.error).json(hasil.body);
     res.json({ message: 'Proposal updated' });
   } catch (error) {
     console.error('Error updating proposal:', error);
@@ -1562,28 +1574,42 @@ router.delete('/proposals/:id', authMiddleware, async (req: Request, res: Respon
     // Proposal berstatus `deal` adalah kesepakatan yang sudah melahirkan project,
     // PO, dan pekerjaan di lapangan. Menghapusnya membuat dokumen turunan itu
     // kehilangan sumbernya. Yang submitted pun sudah dikirim ke pelanggan.
-    const proposal: any = await dbGet(
-      'SELECT id, status, project_id FROM proposals WHERE id = ?', [req.params.id]
-    );
-    if (!proposal) return res.status(404).json({ error: 'Proposal tidak ditemukan' });
+    // DR-P1-05: baca-periksa-hapus tanpa lock. Permintaan submit yang berlomba
+    // bisa lolos setelah pemeriksaan awal, sehingga proposal yang baru saja
+    // menjadi submitted tetap terhapus.
+    const hasil = await withTransaction(async tx => {
+      const proposal: any = await tx.get(
+        'SELECT id, status, project_id FROM proposals WHERE id = ? FOR UPDATE', [req.params.id]
+      );
+      if (!proposal) return { error: 404, body: { error: 'Proposal tidak ditemukan' } };
 
-    if (!isProposalEditable(proposal.status)) {
-      return res.status(409).json({
-        error: `Proposal berstatus "${proposal.status}" tidak bisa dihapus. Hanya draft dan review yang boleh.`,
-        code: 'PROPOSAL_LOCKED',
-        status_proposal: proposal.status,
-      });
-    }
+      if (!isProposalEditable(proposal.status)) {
+        return {
+          error: 409,
+          body: {
+            error: `Proposal berstatus "${proposal.status}" tidak bisa dihapus. Hanya draft dan review yang boleh.`,
+            code: 'PROPOSAL_LOCKED',
+            status_proposal: proposal.status,
+          },
+        };
+      }
 
-    if (proposal.project_id) {
-      return res.status(409).json({
-        error: 'Proposal ini sudah terhubung ke project, jadi tidak bisa dihapus.',
-        code: 'PROPOSAL_HAS_PROJECT',
-        project_id: proposal.project_id,
-      });
-    }
+      if (proposal.project_id) {
+        return {
+          error: 409,
+          body: {
+            error: 'Proposal ini sudah terhubung ke project, jadi tidak bisa dihapus.',
+            code: 'PROPOSAL_HAS_PROJECT',
+            project_id: proposal.project_id,
+          },
+        };
+      }
 
-    await dbRun('DELETE FROM proposals WHERE id = ?', [req.params.id]);
+      await tx.run('DELETE FROM proposals WHERE id = ?', [req.params.id]);
+      return { ok: true as const };
+    });
+
+    if ('error' in hasil) return res.status(hasil.error).json(hasil.body);
     res.json({ message: 'Proposal deleted' });
   } catch (error) {
     console.error('Error deleting proposal:', error);
@@ -2097,6 +2123,37 @@ const nextProjectNumber = async (tx: TxRunner): Promise<string> => {
 
   const got: any = await tx.get('SELECT LAST_INSERT_ID() AS n');
   return `PRJ-${year}-${String(Number(got?.n || seed + 1)).padStart(4, '0')}`;
+};
+
+/**
+ * Nomor proposal berikutnya, atomic (DR-P1-05).
+ *
+ * Versi lama memakai `MAX(...) + 1` lalu INSERT dengan autocommit. Dua pembuatan
+ * proposal bersamaan membaca MAX yang sama; yang kalah menabrak unique dan keluar
+ * sebagai 500 — kegagalan sistem untuk sesuatu yang seharusnya cuma antre.
+ *
+ * Memakai `document_counters` yang sama dengan nomor project dan dokumen
+ * procurement, di-seed dari nomor yang sudah ada supaya tidak mundur.
+ */
+const nextProposalNumber = async (tx: TxRunner): Promise<string> => {
+  const year = businessYear();
+
+  const row: any = await tx.get(
+    `SELECT MAX(CAST(SUBSTRING_INDEX(proposal_number, '/', -1) AS UNSIGNED)) AS maxNum
+     FROM proposals WHERE proposal_number LIKE ?`,
+    [`PROP/${year}/%`]
+  );
+  const seed = Number(row?.maxNum || 0);
+
+  await tx.run(
+    `INSERT INTO document_counters (prefix, date_part, last_no)
+     VALUES ('PROP', ?, LAST_INSERT_ID(? + 1))
+     ON DUPLICATE KEY UPDATE last_no = LAST_INSERT_ID(GREATEST(last_no, ?) + 1)`,
+    [year, seed, seed]
+  );
+
+  const got: any = await tx.get('SELECT LAST_INSERT_ID() AS n');
+  return `PROP/${year}/${String(Number(got?.n || seed + 1)).padStart(4, '0')}`;
 };
 
 type StatusOutcome =

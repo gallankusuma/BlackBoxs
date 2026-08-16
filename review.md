@@ -2464,4 +2464,206 @@ Tes: `test:rbac` #9a — MR dengan catatan teks biasa berhasil di-approve (pada
 kode lama ini 500), catatan karyawan **dibuktikan tetap utuh**, tautan ada di
 kolomnya, approve ulang 409, dan hanya satu PR terbuat.
 
+**Verifikasi reviewer 16 Agustus 2026 15:24 WIB — DITERAPKAN SEBAGIAN.** Commit
+`3dfa316d` benar-benar membungkus create dan approve dalam transaction, memakai
+counter resmi, mengunci MR sebelum approve, dan memisahkan tautan PR dari catatan
+karyawan. Backend lulus `npx tsc --noEmit`. Namun acceptance DR-P1-04 belum
+lengkap:
+
+- delete masih read-check, delete items, lalu delete header dalam tiga autocommit
+  tanpa lock/status predicate
+  ([material-request.routes.ts:279](backend/src/routes/material-request.routes.ts));
+- reject juga read-check-update tanpa lock atau `WHERE status='pending'`, sehingga
+  dapat menimpa hasil approve paralel menjadi `rejected` walau PR sudah terbuat
+  (baris 265–272);
+- create masih menerima project tanpa validasi server dan memakai
+  `item.quantity || 1`, sehingga quantity nol diam-diam berubah menjadi 1 dan
+  quantity negatif lolos;
+- test baru hanya approve ulang secara berurutan; belum ada failure injection,
+  create/delete rollback, atau approve paralel 20 request yang diminta;
+- ensure kolom baru masih bergantung pada tabel `material_requests` yang tidak
+  dibuat boot schema; ini tetap tercakup oleh DR-P1-07 yang belum selesai.
+
+Dengan race delete-vs-approve, items dapat terhapus lebih dulu, approve membuat
+PR kosong, lalu delete menghapus header MR yang sudah approved. Bungkus
+delete/reject dalam transaction, lock row dan recheck status; semua UPDATE/DELETE
+harus membawa predicate status dan affected-row check.
+
 test:all 860 lulus / 0 gagal.
+
+---
+
+## Live Auto Review — 16 Agustus 2026 15:24 WIB
+
+Baseline: commit baru `3dfa316d` (`fix(material-request): approve atomic &
+catatan karyawan tidak lagi meledak`). Source code tidak diubah reviewer.
+
+### [P1 / FEATURE-INTEGRITY] Dropdown project MR mobile selalu 401, sehingga MR dan PR baru kehilangan project attribution
+
+Route desktop parameterized `GET /:id` didaftarkan di
+[material-request.routes.ts:114](backend/src/routes/material-request.routes.ts),
+sedangkan route statis mobile `GET /projects/list` baru didaftarkan di baris 294.
+Express menangkap `projects` sebagai `:id`; `authMiddleware` lalu menolak token
+mobile sebelum handler `/projects/list` pernah tercapai. Frontend menelan error
+tanpa pesan di [MobileMaterialRequest.vue:341](frontend/src/views/mobile/MobileMaterialRequest.vue)
+dan tetap mengizinkan submit dengan `project_id = null` (baris 348–359). Patch
+create menyimpan nilai null tersebut dan approve meneruskannya ke PR.
+
+**Dampak:** karyawan tidak dapat memilih project dari PWA, tetapi MR tetap tampak
+berhasil. PR hasil approve menjadi commitment tanpa project, sehingga material,
+budget, dan cost-control EPC tidak dapat ditelusuri ke project yang meminta.
+
+**Rekomendasi/acceptance:** pindahkan `/projects/list` sebelum `/:id` atau batasi
+`:id` ke numerik; test dengan token mobile harus mendapat 200 dan daftar project
+aktif. Pada create, validasi `project_id` terhadap project aktif dan ambil
+`project_name` dari database, bukan body. Jika MR non-project memang diperlukan,
+jadikan request type/cost center eksplisit; selain itu tolak null/unknown/inactive
+project. Test end-to-end wajib membuktikan MR → PR mempertahankan project yang
+sama dan mismatch nama dari klien tidak tersimpan.
+
+### Verifikasi run ini
+
+| Pemeriksaan | Hasil |
+|---|---|
+| `backend: npx tsc --noEmit` | Lulus pada commit `3dfa316d` |
+| `test:all` | Tidak dijalankan reviewer; suite HTTP membuat fixture/data |
+
+---
+
+## System Design Review — 16 Agustus 2026 15:28 WIB
+
+Irisan yang diaudit run ini: **Project Controls — WBS/CBS, schedule, progress,
+Gantt, cost, S-curve/EVM**. Tidak ada perubahan source baru setelah commit
+`3dfa316d`; audit ini hanya membaca kontrak backend/frontend yang ada.
+
+### [FEATURE-REGRESSION / ARCH-RISK — prioritas tinggi] Project Controls yang terlihat di UI masih demo terputus dari transaksi proyek
+
+**Kemampuan saat ini.** Backend sudah memiliki CRUD project, task, milestone,
+expense, tautan PR/PO, serta ringkasan budget. Daftar project menghitung progress
+sebagai jumlah task `Done` dibagi jumlah task
+([project.routes.ts:17](backend/src/routes/project.routes.ts)). Project Detail
+menawarkan Tasks List/Kanban, Milestones, Gantt, Timesheets, MTO, Manpower, dan
+Cost Control ([ProjectDetail.vue:419](frontend/src/views/ProjectDetail.vue)).
+
+**Gap/proses yang putus.** Surface tersebut belum memakai satu source of truth:
+
+- `loadTasks()` dan `loadMilestones()` selalu mengisi data contoh, tidak pernah
+  memanggil endpoint backend
+  ([ProjectDetail.vue:579](frontend/src/views/ProjectDetail.vue)). Sesudah create,
+  update, atau delete berhasil, UI kembali memuat mock yang sama. Karena mock
+  membawa ID 1–6 dan endpoint update backend hanya memakai `WHERE id = ?` tanpa
+  project scope ([project.routes.ts:286](backend/src/routes/project.routes.ts)),
+  aksi dari project mana pun dapat mengubah task riil bernomor sama milik project
+  lain sambil layar menampilkan nama task contoh.
+- Daftar/detail project mengganti response kosong atau error dengan enam project
+  software fiktif, bukan empty/error state
+  ([ProjectsManagement.vue:305](frontend/src/views/ProjectsManagement.vue),
+  [ProjectDetail.vue:435](frontend/src/views/ProjectDetail.vue)). Data contoh
+  tidak dibedakan secara visual dari data bisnis.
+- Gantt hanya memplot due date pada rentang hardcoded 1 Januari–30 Juni 2026,
+  lebar bar selalu 80px; tidak memakai start date, duration, predecessor,
+  calendar, constraint, critical path, baseline, atau progress
+  ([ProjectGantt.vue:133](frontend/src/components/projects/ProjectGantt.vue)).
+- Model task historis hanya memiliki milestone, status, priority, dua tanggal,
+  dan assignee ([add_projects_module.sql:27](backend/database/migrations/add_projects_module.sql));
+  tidak ada WBS/CBS/cost code, bobot, quantity, dependency, baseline revision,
+  cut-off progress, evidence, atau approval. Akibatnya “progress” berbobot sama
+  per task dan tidak dapat menjadi physical progress, S-curve, atau earned value.
+- Cost summary menyebut seluruh nilai PO non-filtered sebagai `total_spent`, lalu
+  menjumlahkannya dengan expense dan bahkan mengubah `client_projects.actual_cost`
+  di dalam endpoint GET
+  ([project.routes.ts:770](backend/src/routes/project.routes.ts)). Commitment,
+  receipt/accrual, invoice, payment/cash, dan actual cost belum dipisah serta
+  belum terikat WBS/CBS yang sama dengan schedule.
+
+**Dampak bisnis EPC.** Project manager dapat melihat/mengubah task yang tidak
+merepresentasikan proyek aktif, progress 50% hanya karena satu dari dua task
+selesai walaupun bobot pekerjaan berbeda jauh, dan “actual” naik penuh saat PO
+dibuat walau barang belum diterima atau invoice belum diakui. Schedule, progress,
+procurement, dan finance tidak dapat direkonsiliasi pada work package/cost code;
+forecast completion, cash need, delay, dan margin per project tidak auditable.
+
+**Target design.** Pertahankan task/Kanban yang ada sebagai work-item ringan,
+tetapi bangun source of truth Project Controls terpisah dan terhubung:
+
+1. `project_wbs` hierarkis dan `project_cbs/cost_codes`, dengan mapping WBS↔CBS
+   serta owner/disciplines/work package; semua MR/PR/PO/GRN/expense/timesheet dan
+   contract BOQ line membawa project + WBS + cost code yang tervalidasi.
+2. Schedule activity + relationship (FS/SS/FF/SF, lag), calendar, constraint,
+   milestone, duration, responsible party, quantity/unit, dan weight. Baseline
+   schedule/budget dibekukan per revision; perubahan hanya lewat approved
+   rebaseline/change order, bukan overwrite.
+3. Periodic progress cut-off menyimpan planned, claimed, verified, approved,
+   evidence, quantity installed, dan approver. Roll-up memakai bobot baseline;
+   status task tidak langsung menjadi earned progress.
+4. Ledger project-control membedakan budget, commitment, received/accrued,
+   invoiced, paid, actual, forecast/EAC, dan cash flow. EVM snapshot menghasilkan
+   PV/EV/AC, SV/CV, SPI/CPI dan S-curve per cut-off dari ledger dan baseline yang
+   sama—bukan angka manual.
+
+**Dependensi dan migrasi.** Jangan hapus task, milestone, timesheet, RAB, atau
+cost-control yang ada. Hapus mock dari jalur produksi dan tampilkan empty/error
+state; migrasikan task riil menjadi work-item dan izinkan link opsional ke
+activity baru. Snapshot proposal/contract baseline dari review sebelumnya menjadi
+sumber awal budget/WBS; backfill PR/PO/expense lama ke bucket “Unallocated” per
+project lalu sediakan workflow mapping tanpa mengubah nilai historis. Seluruh
+tabel/index/FK baru wajib masuk boot ensure/versioned migration—bukan SQL manual.
+
+**Fase/prioritas.** Fase 0 (segera): sambungkan UI ke endpoint riil, hilangkan
+silent mock fallback, scope semua mutasi task/milestone ke project, dan tambah
+negative cross-project test. Fase 1: WBS/CBS + baseline + cost-code handoff.
+Fase 2: schedule logic dan progress cut-off/approval. Fase 3: EVM, S-curve,
+forecast, serta cash-flow terintegrasi.
+
+**Acceptance criteria yang dapat diuji:**
+
+1. Project kosong menampilkan empty state, kegagalan API menampilkan error, dan
+   tidak ada record fiktif; create/update/delete task terlihat konsisten setelah
+   reload penuh.
+2. User/project A tidak dapat membaca atau mengubah task/milestone project B;
+   setiap mutasi memakai project predicate dan affected-row check.
+3. Baseline v1 immutable; approved change order menghasilkan revision baru dan
+   laporan as-of-date tetap dapat merekonstruksi v1 maupun v2.
+4. Activity berbobot 70/30 dengan progress verified 50/100 menghasilkan EV 65%
+   secara deterministik; status Kanban saja tidak mengubah EV.
+5. Satu PO mengisi commitment, GRN/invoice mengisi accrual/actual sesuai aturan,
+   payment mengisi cash—tanpa menghitung nilai yang sama dua kali; semuanya
+   direkonsiliasi ke project/WBS/CBS/cost code.
+6. Import/backfill menempatkan transaksi legacy yang belum terpetakan ke
+   “Unallocated”, total project sebelum/sesudah migrasi sama, dan dashboard
+   menampilkan jumlah/nilai yang masih perlu dipetakan.
+
+---
+
+## [DEV] Tanggapan DR-P1-05 — Lifecycle Estimator — 16 Agustus 2026
+
+**DITERAPKAN.** Ketiga klaim terkonfirmasi di kode.
+
+**1. Create.** Nomor proposal `MAX(...)+1` lalu INSERT autocommit — dua pembuatan
+bersamaan membaca MAX yang sama dan yang kalah menabrak unique, keluar sebagai
+**500**: kegagalan sistem untuk sesuatu yang seharusnya cuma antre. Item template
+juga ditulis terpisah, jadi kegagalan di tengah meninggalkan proposal setengah
+jadi yang tetap terlihat sah.
+
+Sekarang `nextProposalNumber()` memakai `document_counters` yang sama dengan
+nomor project dan dokumen procurement (di-seed dari nomor yang ada supaya tidak
+mundur), dan header + section + seluruh child item berada dalam satu transaction.
+
+> Saat mengerjakan ini kami hampir meninggalkan lubang sendiri: dua panggilan di
+> dalam blok transaction masih memakai pool — termasuk sebuah **INSERT** section
+> header. Kalau dibiarkan, atomicity-nya bocor persis di tempat yang sedang
+> diperbaiki. Keduanya sudah dipindah ke `tx`.
+
+**2. Update.** `proposalLock()` dipanggil di luar transaction, jadi tidak mengunci
+apa pun — pola yang sudah berulang di R26/R33. Kini `proposalLockTx()` di dalam
+transaction yang sama dengan UPDATE-nya.
+
+**3. Delete.** Baca-periksa-hapus tanpa row lock. Kini `SELECT ... FOR UPDATE` +
+recheck status + DELETE dalam satu transaction.
+
+Tes: `test:mto-link` #39 — **5 pembuatan proposal serentak** semuanya berhasil
+dengan nomor unik berformat `PROP/TAHUN/NNNN` (pada kode lama sebagian keluar
+500), proposal bertemplate benar-benar membawa itemnya, serta proposal submitted
+tidak bisa dihapus maupun diubah metadatanya (409).
+
+test:all 866 lulus / 0 gagal.

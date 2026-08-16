@@ -761,6 +761,44 @@ async function main() {
   chk('layar project menerima tanda drift', typeof elProj?.formula_drift, 'boolean');
   chk('versi formula kontrak ikut terbawa', !!elProj?.formula_version_stored, true);
 
+  console.log('\n39. Pembuatan & penghapusan proposal atomic (DR-P1-05)');
+  // Nomor proposal dulu `MAX(...)+1` lalu INSERT autocommit: dua pembuatan
+  // bersamaan membaca MAX yang sama dan yang kalah keluar sebagai 500 —
+  // kegagalan sistem untuk sesuatu yang seharusnya cuma antre.
+  const N_PROP = 5;
+  const serentak = await Promise.all(
+    Array.from({ length: N_PROP }, (_, i) =>
+      call('POST', '/estimator/proposals', { project_name: `Uji atomic ${stamp}-${i}` }, master))
+  );
+  chk(`${N_PROP} proposal serentak semuanya berhasil`,
+    serentak.filter(r => r.status === 201).length, N_PROP);
+  const nomorProp = serentak.map(r => r.json?.proposal_number).filter(Boolean);
+  chk('semua dapat nomor', nomorProp.length, N_PROP);
+  chk('nomornya unik', new Set(nomorProp).size, nomorProp.length);
+  chk('formatnya PROP/TAHUN/NNNN', nomorProp.every((n: string) => /^PROP\/\d{4}\/\d{4}$/.test(n)), true);
+
+  // Template gagal separuh tidak boleh meninggalkan proposal setengah jadi.
+  const denganTemplate = await call('POST', '/estimator/proposals', {
+    project_name: `Uji template ${stamp}`,
+    proposal_type: 'civil_building',
+    template_sections: [{ code: 'A', name: 'Pekerjaan Persiapan', children: [{ num: '1', name: 'Mobilisasi' }] }],
+  }, master);
+  chk('proposal bertemplate terbuat', denganTemplate.status, 201);
+  const isiTemplate = await call('GET', `/estimator/proposals/${denganTemplate.json?.id}/items`, undefined, master);
+  chk('item template ikut tersimpan', (isiTemplate.json?.data ?? isiTemplate.json ?? []).length > 0, true);
+
+  // DELETE: proposal submitted tidak boleh terhapus, dan pemeriksaannya
+  // sekarang di dalam transaction dengan row lock.
+  const propUjiHapus = await call('POST', '/estimator/proposals', { project_name: `Uji hapus ${stamp}` }, master);
+  const hapusId = propUjiHapus.json?.id;
+  for (const st of ['review', 'submitted']) {
+    await call('PUT', `/estimator/proposals/${hapusId}/status`, { status: st }, master);
+  }
+  chk('proposal submitted tidak bisa dihapus',
+    (await call('DELETE', `/estimator/proposals/${hapusId}`, undefined, master)).status, 409);
+  chk('proposal submitted tidak bisa diubah metadatanya',
+    (await call('PUT', `/estimator/proposals/${hapusId}`, { project_name: 'diubah' }, master)).status, 409);
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }
