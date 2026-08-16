@@ -4013,3 +4013,56 @@ diuji adalah mekanisme yang bisa dijangkau: validasi input dan sifat sekali-paka
 challenge. Sisanya tercatat sebagai keterbatasan, bukan diklaim selesai.
 
 test:all 890 lulus / 0 gagal.
+
+---
+
+## Live Auto Review — 16 Agustus 2026 18:19 WIB
+
+### [P1][VERIFIKASI DR-P0-06 — DITERAPKAN SEBAGIAN] `office_location_id` belum menjadi FK maupun sumber lokasi saat absen; credential yatim/nonaktif tetap lolos
+
+**Hasil verifikasi tanggapan DEV.** Implementasi atomicity benar-benar sudah
+memindahkan konsumsi challenge, update counter, dan write attendance ke satu
+`withTransaction`; baris attendance existing dikunci `FOR UPDATE`, dan
+`check_in`/`check_out` final tidak lagi ditimpa
+([webauthn.routes.ts:327](backend/src/routes/webauthn.routes.ts)). Backend
+`npx tsc --noEmit` juga lulus. Subbutir implementation tersebut dapat dianggap
+diterapkan, dengan keterbatasan test concurrency/WebAuthn yang sudah diakui tim.
+
+Subbutir lokasi belum diterapkan sesuai klaim. `ensureCredentialOfficeLink()`
+hanya menambah kolom nullable dan menjalankan backfill; tidak ada `FOREIGN KEY`,
+index, atau constraint ke `office_locations`
+([database.ts:1241](backend/src/config/database.ts)). Lebih penting, jalur
+`auth/verify` masih mengambil `SELECT *` credential lalu memvalidasi GPS terhadap
+salinan `registered_lat`, `registered_lng`, `registered_radius`, dan
+`location_name` ([webauthn.routes.ts:244](backend/src/routes/webauthn.routes.ts),
+[webauthn.routes.ts:272](backend/src/routes/webauthn.routes.ts)); field baru
+`office_location_id` tidak dibaca, tidak di-join, dan tidak disyaratkan.
+
+Akibatnya credential lama yang backfill-nya gagal tetapi masih mempunyai
+koordinat tetap dapat absen, walaupun log boot menyatakan karyawan perlu
+mendaftar ulang. Memindahkan radius/koordinat kantor atau menetapkan
+`office_locations.is_active = 0` juga tidak mengubah keputusan verifikasi.
+Penghapusan kantor meninggalkan ID yatim karena constraint yang disebut “FK”
+tidak pernah dibuat. Ini mempertahankan trust boundary lokasi lama: site yang
+ditutup/dipindah tidak dapat mencabut area absensi, sehingga attendance dan
+input payroll dapat diterima dari lokasi yang seharusnya sudah tidak sah.
+
+**Rekomendasi konkret:** tambahkan index dan FK nyata
+`office_location_id -> office_locations(id)` dengan kebijakan delete eksplisit
+(disarankan `ON DELETE SET NULL` agar credential dapat ditolak/re-enroll tanpa
+menghapus audit credential). Saat authentication, resolve credential terhadap
+`office_locations` aktif menggunakan ID tersebut dan gunakan koordinat/radius
+master terkini sebagai source of truth; tolak NULL, orphan, atau inactive dengan
+kode stabil. Salinan nama/koordinat boleh dipertahankan hanya sebagai snapshot
+audit, bukan sebagai input keputusan akses. Backfill harus melaporkan hasil
+ambiguous/unmatched dan tidak menyatakan ensure berhasil bila DDL constraint
+gagal.
+
+**Acceptance criteria:** (1) credential `office_location_id IS NULL` atau ID
+yatim ditolak 403; (2) menonaktifkan kantor segera membuat credential terkait
+tidak dapat absen; (3) setelah koordinat/radius kantor dipindah, titik lama
+ditolak dan titik baru diterima tanpa update setiap credential; (4)
+`INFORMATION_SCHEMA` membuktikan index + FK beserta delete policy; (5) test
+register/update memastikan ID tersimpan, dan test service/route yang memakai
+verifier terinjeksi membuktikan replay paralel hanya satu commit serta state
+attendance final tidak berubah.
