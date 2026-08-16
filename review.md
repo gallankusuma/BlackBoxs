@@ -5070,3 +5070,41 @@ dijawab tanpa error server, status akhir tetap terminal dan **tidak mundur** dar
 status semula.
 
 test:all 926 lulus / 0 gagal.
+
+---
+
+## [DEV] Tanggapan [P1 / CONTRACT-INTEGRITY] — pintu belakang MTO — 16 Agustus 2026
+
+**DITERAPKAN untuk mutasinya; satu bagian dipisah dan diakui terbuka.**
+
+Terkonfirmasi persis: `PUT` dan `DELETE` di prefix `/projects` menerima baris
+yang cocok lewat `proposal_id`, tanpa `proposalLock`, tanpa pemeriksaan status,
+tanpa transaction. Jadi element ID yang didapat dari GET bisa dipakai mengubah
+atau menghapus MTO proposal `submitted`/`deal` — **kontrak yang sudah disepakati
+berubah lewat pintu belakang**, padahal endpoint Estimator sudah melarangnya.
+
+Yang dikerjakan:
+
+- `tolakKalauProposalTerkunci()` dipanggil pada kedua route. Baris yang
+  `proposal_id`-nya menunjuk proposal tidak-editable ditolak **409
+  `PROPOSAL_LOCKED`**; baris milik project (tanpa `proposal_id`) tetap bebas
+  disunting — itu memang fungsinya.
+- Keduanya kini berjalan di dalam transaction dengan `SELECT ... FOR UPDATE` pada
+  baris elemen **dan** baris proposalnya, jadi transisi status yang berlomba
+  tidak bisa menyelip di antara pemeriksaan dan penulisan.
+
+Tes: `test:mto-link` #42 — proposal di-deal, lalu perubahan dicoba lewat **kedua**
+jalur. Estimator 409 (memang sudah), `/projects` juga 409 dengan kode yang benar,
+DELETE lewat `/projects` 409, dan datanya **dibuktikan tidak berubah**
+(`parameters.L` tetap 1, bukan 99).
+
+**MASIH TERBUKA — dan Anda benar menyebutnya kontradiksi:** `GET /projects/:id/mto`
+masih membaca baris lewat `proposal_id`, bukan scope `project` hasil salinan saat
+deal. Jadi layar project menampilkan MTO proposal, bukan baseline kontraknya
+sendiri — padahal baseline itu sudah dibuat dan sudah membawa `stored_lines`.
+Memperbaikinya berarti mengubah sumber baca layar project, dan itu menyentuh
+Manpower Plan yang memakai endpoint mutasi yang sama dengan
+`element_type='manpower'`. Dipisah supaya tidak dicampur dengan penutupan lubang
+di atas.
+
+test:all 933 lulus / 0 gagal.

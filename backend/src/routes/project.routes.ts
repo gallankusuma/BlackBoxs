@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { enrichMtoElement, groupStoredLines } from '../modules/estimator/mto/enrich';
-import { dbQuery, dbGet, dbAll, dbRun } from '../config/database';
+import { dbQuery, dbGet, dbAll, dbRun, withTransaction, TxRunner } from '../config/database';
+import { isProposalEditable } from '../modules/estimator/mto/units';
 import { authMiddleware } from '../middleware/auth';
 import multer from 'multer';
 import path from 'path';
@@ -1449,6 +1450,33 @@ router.post('/:id/mto', authMiddleware, async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * Tolak mutasi MTO yang barisnya milik proposal terkunci (P1 CONTRACT-INTEGRITY).
+ *
+ * `PUT`/`DELETE` di prefix `/projects` menerima baris yang cocok lewat
+ * `proposal_id`, tanpa `proposalLock`, pemeriksaan status, maupun transaction.
+ * Jadi pengguna yang mendapat element ID dari GET bisa mengubah atau menghapus
+ * MTO proposal `submitted`/`deal` lewat jalur ini — padahal endpoint Estimator
+ * sudah melarangnya. Kontrak yang sudah disepakati bisa berubah dari pintu
+ * belakang.
+ */
+const tolakKalauProposalTerkunci = async (row: any, run: TxRunner): Promise<any | null> => {
+  if (!row?.proposal_id) return null; // baris milik project — bebas disunting
+  const proposal: any = await run.get(
+    'SELECT id, status FROM proposals WHERE id = ? FOR UPDATE', [row.proposal_id]
+  );
+  if (!proposal) return null;
+  if (isProposalEditable(proposal.status)) return null;
+  return {
+    status: 409,
+    body: {
+      error: `MTO ini milik proposal berstatus "${proposal.status}" dan tidak bisa diubah dari layar project.`,
+      code: 'PROPOSAL_LOCKED',
+      status_proposal: proposal.status,
+    },
+  };
+};
+
 // PUT update MTO element (recalculates quantities) — works for both project & proposal records
 router.put('/:id/mto/:elementId', authMiddleware, async (req: Request, res: Response) => {
   try {
@@ -1456,21 +1484,30 @@ router.put('/:id/mto/:elementId', authMiddleware, async (req: Request, res: Resp
     const proposalId = await getLinkedProposalId(projectId);
     const { element_type, element_name, parameters = {}, sort_order } = req.body;
     // Allow editing both project-owned and proposal-owned records
-    const existing: any = await dbGet(
-      proposalId
-        ? 'SELECT * FROM engineering_inputs WHERE id = ? AND (project_id = ? OR proposal_id = ?)'
-        : 'SELECT * FROM engineering_inputs WHERE id = ? AND project_id = ?',
-      proposalId ? [req.params.elementId, projectId, proposalId] : [req.params.elementId, projectId]
-    );
-    if (!existing) return res.status(404).json({ error: 'Element not found' });
-    const type = element_type || existing.element_type;
-    const params = Object.keys(parameters).length ? parameters : JSON.parse(existing.parameters || '{}');
-    const quantities = calculateQuantities(type, params);
-    await dbRun(
-      'UPDATE engineering_inputs SET element_type=?, element_name=?, parameters=?, quantities=?, sort_order=? WHERE id=?',
-      [type, element_name || existing.element_name, JSON.stringify(params), JSON.stringify(quantities), sort_order ?? existing.sort_order, req.params.elementId]
-    );
-    res.json({ quantities });
+    const hasil = await withTransaction(async tx => {
+      const existing: any = await tx.get(
+        proposalId
+          ? 'SELECT * FROM engineering_inputs WHERE id = ? AND (project_id = ? OR proposal_id = ?) FOR UPDATE'
+          : 'SELECT * FROM engineering_inputs WHERE id = ? AND project_id = ? FOR UPDATE',
+        proposalId ? [req.params.elementId, projectId, proposalId] : [req.params.elementId, projectId]
+      );
+      if (!existing) return { error: 404, body: { error: 'Element not found' } };
+
+      const terkunci = await tolakKalauProposalTerkunci(existing, tx);
+      if (terkunci) return { error: terkunci.status, body: terkunci.body };
+
+      const type = element_type || existing.element_type;
+      const params = Object.keys(parameters).length ? parameters : JSON.parse(existing.parameters || '{}');
+      const quantities = calculateQuantities(type, params);
+      await tx.run(
+        'UPDATE engineering_inputs SET element_type=?, element_name=?, parameters=?, quantities=?, sort_order=? WHERE id=?',
+        [type, element_name || existing.element_name, JSON.stringify(params), JSON.stringify(quantities), sort_order ?? existing.sort_order, req.params.elementId]
+      );
+      return { ok: true as const, quantities };
+    });
+
+    if ('error' in hasil) return res.status(hasil.error).json(hasil.body);
+    res.json({ quantities: hasil.quantities });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -1481,11 +1518,23 @@ router.delete('/:id/mto/:elementId', authMiddleware, async (req: Request, res: R
   try {
     const projectId = req.params.id;
     const proposalId = await getLinkedProposalId(projectId);
-    if (proposalId) {
-      await dbRun('DELETE FROM engineering_inputs WHERE id = ? AND (project_id = ? OR proposal_id = ?)', [req.params.elementId, projectId, proposalId]);
-    } else {
-      await dbRun('DELETE FROM engineering_inputs WHERE id = ? AND project_id = ?', [req.params.elementId, projectId]);
-    }
+    const hasil = await withTransaction(async tx => {
+      const existing: any = await tx.get(
+        proposalId
+          ? 'SELECT * FROM engineering_inputs WHERE id = ? AND (project_id = ? OR proposal_id = ?) FOR UPDATE'
+          : 'SELECT * FROM engineering_inputs WHERE id = ? AND project_id = ? FOR UPDATE',
+        proposalId ? [req.params.elementId, projectId, proposalId] : [req.params.elementId, projectId]
+      );
+      if (!existing) return { error: 404, body: { error: 'Element not found' } };
+
+      const terkunci = await tolakKalauProposalTerkunci(existing, tx);
+      if (terkunci) return { error: terkunci.status, body: terkunci.body };
+
+      await tx.run('DELETE FROM engineering_inputs WHERE id = ?', [req.params.elementId]);
+      return { ok: true as const };
+    });
+
+    if ('error' in hasil) return res.status(hasil.error).json(hasil.body);
     res.json({ message: 'Deleted' });
   } catch (err: any) {
     res.status(500).json({ error: err.message });

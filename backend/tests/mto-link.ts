@@ -855,6 +855,47 @@ async function main() {
     ['success', 'skipped'].includes(String(st2.json?.data?.status)), true);
   chk('status tidak mundur dari semula', String(st2.json?.data?.status), statusAwal);
 
+  console.log('\n42. MTO proposal deal tidak bisa diubah lewat prefix /projects (P1 CONTRACT)');
+  // `PUT`/`DELETE` di /projects menerima baris yang cocok lewat `proposal_id`,
+  // tanpa proposalLock maupun pemeriksaan status. Jadi element ID yang didapat
+  // dari GET bisa dipakai mengubah MTO proposal yang SUDAH DEAL — kontrak yang
+  // disepakati berubah lewat pintu belakang, padahal endpoint Estimator sudah
+  // melarangnya.
+  const propKontrak = await call('POST', '/estimator/proposals',
+    { project_name: `Uji pintu belakang ${stamp}`, client_id: klienId }, master);
+  const kId = propKontrak.json?.id;
+  const elKontrak = await call('POST', `/estimator/proposals/${kId}/mto`, {
+    element_type: 'foundation', element_name: 'P1',
+    parameters: { L: 1, W: 1, H: 0.3, depth: 1.2, qty: 12, waste_pct: 5 },
+  }, master);
+  const elId = elKontrak.json?.id;
+  for (const st of ['review', 'submitted', 'deal']) {
+    await call('PUT', `/estimator/proposals/${kId}/status`, { status: st }, master);
+  }
+  const cekK = await call('GET', `/estimator/proposals/${kId}`, undefined, master);
+  const projK = (cekK.json?.data ?? cekK.json)?.project_id;
+  chk('project terbentuk dari deal', !!projK, true);
+
+  // Jalur Estimator memang sudah menolak.
+  chk('lewat Estimator ditolak 409',
+    (await call('PUT', `/estimator/proposals/${kId}/mto/${elId}`,
+      { parameters: { L: 99, W: 99, H: 9, depth: 9, qty: 99 } }, master)).status, 409);
+
+  // Pintu belakang harus ikut tertutup.
+  const lewatProject = await call('PUT', `/projects/${projK}/mto/${elId}`,
+    { parameters: { L: 99, W: 99, H: 9, depth: 9, qty: 99 } }, master);
+  chk('lewat /projects juga ditolak', lewatProject.status, 409);
+  chk('kodenya PROPOSAL_LOCKED', lewatProject.json?.code, 'PROPOSAL_LOCKED');
+
+  const hapusLewatProject = await call('DELETE', `/projects/${projK}/mto/${elId}`, undefined, master);
+  chk('hapus lewat /projects ditolak', hapusLewatProject.status, 409);
+
+  // Dan datanya benar-benar tidak berubah.
+  const mtoAkhir = await call('GET', `/estimator/proposals/${kId}/mto`, undefined, master);
+  const elemenAkhir = (mtoAkhir.json?.elements || []).find((e: any) => e.id === elId);
+  chk('elemen masih ada', !!elemenAkhir, true);
+  chk('parameter aslinya utuh', Number(elemenAkhir?.parameters?.L), 1);
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }
