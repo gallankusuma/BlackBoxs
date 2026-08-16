@@ -1,6 +1,6 @@
 import express, { Request, Response } from 'express';
 import { businessDate, businessTime, businessDatePart } from '../utils/date.utils';
-import { dbAll, dbGet, dbRun } from '../config/database';
+import { dbAll, dbGet, dbRun, withTransaction } from '../config/database';
 import { generateMobileToken, mobileAuthMiddleware, anyAuthMiddleware, authMiddleware, assertSelf, MobileAuthRequest } from '../middleware/auth';
 import {
   generateRegistrationOptions,
@@ -159,13 +159,13 @@ router.post('/register/verify', mobileAuthMiddleware, async (req: MobileAuthRequ
     await dbRun(
       `INSERT INTO employee_webauthn_credentials 
         (employee_id, credential_id, public_key, counter, device_name, 
-         registered_lat, registered_lng, registered_radius, location_name) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         registered_lat, registered_lng, registered_radius, location_name, office_location_id) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         employee_id, credentialId, publicKey, credential.counter,
         device_name || 'HP Karyawan',
         office.lat, office.lng, office.radius,
-        office.name
+        office.name, office.id
       ]
     );
     await dbRun('DELETE FROM webauthn_challenges WHERE id = ?', [challengeRow.id]);
@@ -308,14 +308,15 @@ router.post('/auth/verify', async (req: Request, res: Response) => {
       });
     }
 
-    // 6. Update credential counter + last used
-    await dbRun(
-      'UPDATE employee_webauthn_credentials SET counter = ?, last_used_at = NOW() WHERE id = ?',
-      [verification.authenticationInfo.newCounter, credRow.id]
-    );
-    await dbRun('DELETE FROM webauthn_challenges WHERE id = ?', [challengeRow.id]);
-
-    // 7. Auto Check-In or Check-Out
+    // 6-7. Konsumsi challenge + counter + penulisan absensi: SATU transaction
+    //      (DR-P0-06).
+    //
+    // Sebelumnya tiga penulisan autocommit terpisah tanpa lock. Akibatnya:
+    //   - dua permintaan paralel sama-sama membaca challenge yang sama sebelum
+    //     salah satunya menghapusnya — replay window;
+    //   - check-in kedua MENIMPA `check_in` yang sudah final, jadi jam masuk
+    //     bisa digeser hanya dengan absen lagi;
+    //   - kegagalan di tengah meninggalkan counter naik tanpa absensi tercatat.
     const now   = new Date();
     // DR-P0-06: tanggal & jam absensi menurut WIB. Server berjalan UTC, jadi
     // absen 06:30 WIB dulu tercatat di TANGGAL KEMARIN — masuk periode payroll
@@ -323,48 +324,88 @@ router.post('/auth/verify', async (req: Request, res: Response) => {
     const today = businessDate(now);
     const time  = businessTime(now);
 
-    const existing: any = await dbGet(
-      'SELECT id, check_in, check_out FROM attendance_logs WHERE employee_id = ? AND date = ?',
-      [employee_id, today]
-    );
-
-    let checkinType = type;
-    if (!checkinType || checkinType === 'auto') {
-      checkinType = !existing?.check_in ? 'in' : (!existing?.check_out ? 'out' : 'done');
-    }
-
-    let checkinResult: any = null;
-
-    if (checkinType === 'in') {
-      if (existing) {
-        await dbRun(
-          'UPDATE attendance_logs SET check_in=?, status=?, timesheet_value=1, gps_lat=?, gps_lng=?, gps_verified=1 WHERE id=?',
-          [time, 'present', currentLat, currentLng, existing.id]
-        );
-      } else {
-        await dbRun(
-          'INSERT INTO attendance_logs (employee_id,date,check_in,status,timesheet_value,gps_lat,gps_lng,gps_verified) VALUES (?,?,?,?,1,?,?,1)',
-          [employee_id, today, time, 'present', currentLat, currentLng]
-        );
+    const hasilAbsen = await withTransaction(async tx => {
+      // Challenge dikonsumsi DULU dan sekali saja. Kalau baris ini sudah hilang,
+      // permintaan lain sudah memakainya — itu replay, bukan absen baru.
+      const konsumsi = await tx.run(
+        'DELETE FROM webauthn_challenges WHERE id = ? AND employee_id = ?',
+        [challengeRow.id, employee_id]
+      );
+      if (!konsumsi.affectedRows) {
+        return { error: 409, body: { error: 'Sesi absensi sudah dipakai. Ulangi dari awal.', code: 'CHALLENGE_ALREADY_USED' } };
       }
-      checkinResult = {
-        type: 'in', time,
-        message: `✅ Check-In ${time}\nLokasi: ${gpsResult.location} (${gpsResult.distance}m)`,
-      };
-    } else if (checkinType === 'out') {
-      if (existing) {
-        await dbRun(
-          'UPDATE attendance_logs SET check_out=?, gps_lat=?, gps_lng=?, gps_verified=1 WHERE id=?',
-          [time, currentLat, currentLng, existing.id]
-        );
-        checkinResult = {
-          type: 'out', time,
-          message: `👋 Check-Out ${time}\nLokasi: ${gpsResult.location} (${gpsResult.distance}m)`,
+
+      await tx.run(
+        'UPDATE employee_webauthn_credentials SET counter = ?, last_used_at = NOW() WHERE id = ?',
+        [verification.authenticationInfo.newCounter, credRow.id]
+      );
+
+      const existing: any = await tx.get(
+        'SELECT id, check_in, check_out FROM attendance_logs WHERE employee_id = ? AND date = ? FOR UPDATE',
+        [employee_id, today]
+      );
+
+      let checkinType = type;
+      if (!checkinType || checkinType === 'auto') {
+        checkinType = !existing?.check_in ? 'in' : (!existing?.check_out ? 'out' : 'done');
+      }
+
+      if (checkinType === 'in') {
+        // Jam masuk yang sudah tercatat TIDAK boleh ditimpa. Versi lama
+        // meng-UPDATE `check_in` apa adanya, jadi absen lagi menggeser jam masuk.
+        if (existing?.check_in) {
+          return {
+            ok: true as const,
+            checkin: { type: 'done', time: existing.check_in,
+              message: `Sudah check-in hari ini pukul ${existing.check_in}` },
+          };
+        }
+        if (existing) {
+          await tx.run(
+            'UPDATE attendance_logs SET check_in=?, status=?, timesheet_value=1, gps_lat=?, gps_lng=?, gps_verified=1 WHERE id=? AND check_in IS NULL',
+            [time, 'present', currentLat, currentLng, existing.id]
+          );
+        } else {
+          await tx.run(
+            'INSERT INTO attendance_logs (employee_id,date,check_in,status,timesheet_value,gps_lat,gps_lng,gps_verified) VALUES (?,?,?,?,1,?,?,1)',
+            [employee_id, today, time, 'present', currentLat, currentLng]
+          );
+        }
+        return {
+          ok: true as const,
+          checkin: { type: 'in', time,
+            message: `✅ Check-In ${time}\nLokasi: ${gpsResult.location} (${gpsResult.distance}m)` },
         };
       }
-    } else {
-      checkinResult = { type: 'done', message: 'Absensi hari ini sudah lengkap ✓' };
-    }
+
+      if (checkinType === 'out') {
+        if (!existing) {
+          return { ok: true as const, checkin: { type: 'done', message: 'Belum ada check-in hari ini.' } };
+        }
+        // Jam pulang yang sudah final juga tidak ditimpa.
+        if (existing.check_out) {
+          return {
+            ok: true as const,
+            checkin: { type: 'done', time: existing.check_out,
+              message: `Sudah check-out hari ini pukul ${existing.check_out}` },
+          };
+        }
+        await tx.run(
+          'UPDATE attendance_logs SET check_out=?, gps_lat=?, gps_lng=?, gps_verified=1 WHERE id=? AND check_out IS NULL',
+          [time, currentLat, currentLng, existing.id]
+        );
+        return {
+          ok: true as const,
+          checkin: { type: 'out', time,
+            message: `👋 Check-Out ${time}\nLokasi: ${gpsResult.location} (${gpsResult.distance}m)` },
+        };
+      }
+
+      return { ok: true as const, checkin: { type: 'done', message: 'Absensi hari ini sudah lengkap ✓' } };
+    });
+
+    if ('error' in hasilAbsen) return res.status(hasilAbsen.error).json(hasilAbsen.body);
+    const checkinResult = hasilAbsen.checkin;
 
     // Get updated employee data
     const emp: any = await dbGet(
@@ -450,8 +491,8 @@ router.put('/credentials/:id/location', mobileAuthMiddleware, async (req: Mobile
       });
     }
     await dbRun(
-      'UPDATE employee_webauthn_credentials SET registered_lat=?, registered_lng=?, registered_radius=?, location_name=? WHERE id=?',
-      [office.lat, office.lng, office.radius, office.name, req.params.id]
+      'UPDATE employee_webauthn_credentials SET registered_lat=?, registered_lng=?, registered_radius=?, location_name=?, office_location_id=? WHERE id=?',
+      [office.lat, office.lng, office.radius, office.name, office.id, req.params.id]
     );
     res.json({ success: true, location: { name: office.name, radius: office.radius } });
   } catch (error) { res.status(500).json({ error: 'Failed' }); }

@@ -1230,6 +1230,50 @@ const ensureProjectNumberUnique = async (connection: any) => {
   }
 };
 
+// ==================== KREDENSIAL TERIKAT LOKASI KANTOR (DR-P0-06) ====================
+// Kredensial hanya MENYALIN nama/koordinat/radius kantor saat didaftarkan. Kalau
+// admin memindahkan lokasi atau menonaktifkannya, kredensial lama tetap memakai
+// koordinat lama — perubahan tidak terpropagasi, dan tidak ada integritas
+// referensial antara karyawan dan site tempat ia boleh absen.
+//
+// Kolom FK ditambahkan dan di-backfill dari koordinat yang sudah tersimpan.
+const ensureCredentialOfficeLink = async (connection: any) => {
+  await execSchemaEnsure(connection,
+    'ALTER TABLE employee_webauthn_credentials ADD COLUMN IF NOT EXISTS office_location_id INT NULL');
+
+  try {
+    // Backfill: cocokkan koordinat tersimpan ke kantor terdaftar. Dibatasi ~11 m
+    // (0,0001 derajat) supaya tidak salah tempel ke kantor lain.
+    const [hasil]: any = await connection.execute(
+      `UPDATE employee_webauthn_credentials c
+       JOIN office_locations o
+         ON ABS(c.registered_lat - o.latitude) < 0.0001
+        AND ABS(c.registered_lng - o.longitude) < 0.0001
+       SET c.office_location_id = o.id
+       WHERE c.office_location_id IS NULL`
+    );
+    if (hasil?.affectedRows) {
+      console.log(`✅ ${hasil.affectedRows} kredensial ditautkan ke lokasi kantor`);
+    }
+
+    const [yatim]: any = await connection.execute(
+      'SELECT COUNT(*) AS n FROM employee_webauthn_credentials WHERE office_location_id IS NULL'
+    );
+    if (yatim[0]?.n > 0) {
+      // Sengaja TIDAK menebak. Kredensial yang koordinatnya tidak cocok dengan
+      // kantor mana pun harus didaftarkan ulang, bukan ditautkan asal-asalan ke
+      // lokasi terdekat — itu memindahkan area absensi seseorang diam-diam.
+      console.warn(
+        `⚠️  ${yatim[0].n} kredensial belum tertaut lokasi kantor. `
+        + 'Karyawan bersangkutan perlu mendaftar ulang sidik jari lewat Pengaturan.'
+      );
+    }
+  } catch (err: any) {
+    console.warn('Backfill lokasi kredensial:', String(err.message).slice(0, 120));
+  }
+  console.log('✅ Tautan kredensial ke lokasi kantor ensured');
+};
+
 // ==================== OUTBOX HANDOFF PR SETELAH DEAL (DR-P1-06) ====================
 // Pembuatan PR dari proposal yang di-deal berjalan SETELAH transaction deal, dan
 // errornya hanya dicatat ke log sementara respons tetap sukses. Jadi deal bisa
@@ -1808,6 +1852,7 @@ export async function initializeDatabase() {
     await ensureApprovalRuleLink(connection);
     await ensureMaterialRequestPrLink(connection);
     await ensureDealPrOutbox(connection);
+    await ensureCredentialOfficeLink(connection);
     await ensureMtoLinesSchema(connection);
     await ensureDisposalSchema(connection);
     await ensureAssetStatusHistorySchema(connection);

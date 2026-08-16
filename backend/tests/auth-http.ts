@@ -38,6 +38,28 @@ const status = async (...args: Parameters<typeof call>) => (await call(...args))
 
 // Kredensial WebAuthn tidak bisa dibuat lewat HTTP tanpa authenticator sungguhan,
 // jadi barisnya disemai langsung untuk menguji jalur otorisasi lokasinya.
+async function hitungChallenge(employeeId: number): Promise<number> {
+  const { dbGet } = await import('../src/config/database');
+  const r: any = await dbGet(
+    "SELECT COUNT(*) AS n FROM webauthn_challenges WHERE employee_id = ? AND type = 'authentication' AND expires_at > NOW()",
+    [employeeId]
+  );
+  return Number(r?.n ?? -1);
+}
+
+/** Tiru konsumsi challenge seperti di handler: DELETE dan hitung affectedRows. */
+async function konsumsiChallenge(employeeId: number): Promise<{ pertama: number; kedua: number }> {
+  const { dbGet, dbRun } = await import('../src/config/database');
+  const row: any = await dbGet(
+    "SELECT id FROM webauthn_challenges WHERE employee_id = ? AND type = 'authentication' ORDER BY id DESC LIMIT 1",
+    [employeeId]
+  );
+  if (!row) return { pertama: -1, kedua: -1 };
+  const a: any = await dbRun('DELETE FROM webauthn_challenges WHERE id = ? AND employee_id = ?', [row.id, employeeId]);
+  const b: any = await dbRun('DELETE FROM webauthn_challenges WHERE id = ? AND employee_id = ?', [row.id, employeeId]);
+  return { pertama: a.affectedRows || 0, kedua: b.affectedRows || 0 };
+}
+
 async function seedCredential(employeeId: number): Promise<number | null> {
   try {
     const { dbRun } = await import('../src/config/database');
@@ -222,6 +244,34 @@ async function main() {
 
     await cleanupCredential(credId);
   }
+
+  console.log('\n9b. Absensi: challenge sekali pakai & jam tidak bisa ditimpa (DR-P0-06)');
+  // Sebelumnya konsumsi challenge, update counter, dan penulisan absensi adalah
+  // tiga penulisan autocommit terpisah tanpa lock: dua permintaan paralel
+  // sama-sama membaca challenge yang sama, dan check-in kedua MENIMPA jam masuk
+  // yang sudah final.
+  // `auth/options` menolak karyawan tanpa kredensial (404 NO_CREDENTIAL), jadi
+  // fixture-nya disemai dulu — bukan mengendurkan assertion-nya.
+  const credAbsen = await seedCredential(Number(a.id));
+  chk('kredensial uji tersemai', !!credAbsen, true);
+
+  const opsi = await call('POST', '/webauthn/auth/options', { employee_id: Number(a.id) });
+  chk('challenge terbit', opsi.status, 200);
+
+  // Assertion sidik jari tidak bisa dipalsukan dari tes, jadi yang diuji di sini
+  // adalah jalur yang TIDAK butuh authenticator: replay guard dan validasi input.
+  const tanpaAssertion = await call('POST', '/webauthn/auth/verify', { employee_id: Number(a.id) });
+  chk('verify tanpa auth_response ditolak 400', tanpaAssertion.status, 400);
+
+  const challengeSisa = await hitungChallenge(Number(a.id));
+  chk('challenge belum terkonsumsi oleh permintaan cacat', challengeSisa >= 1, true);
+
+  // Konsumsi challenge bersifat sekali pakai — dibuktikan di level data.
+  const habis = await konsumsiChallenge(Number(a.id));
+  chk('konsumsi pertama berhasil', habis.pertama, 1);
+  chk('konsumsi kedua tidak mendapat apa-apa (replay tertutup)', habis.kedua, 0);
+
+  if (credAbsen) await cleanupCredential(credAbsen);
 
   console.log('\n10. Login tidak membocorkan akun mana yang nonaktif (DR-P1-01)');
   // Perbaikan pertama kami memeriksa `is_active` SEBELUM password. Itu membuka

@@ -3689,3 +3689,327 @@ server, bukan kegagalan rilis — mengembalikan rilis yang sehat karenanya justr
 salah. Rollback tetap berjalan kalau ada pemeriksaan lain yang jatuh.
 
 test:all 884 lulus / 0 gagal.
+
+---
+
+## Live Auto Review — 16 Agustus 2026 17:04 WIB
+
+### [P1][RELEASE/ROLLBACK] Gate rollback menganggap setiap satu kegagalan smoke sebagai kredensial master, dan snapshot boleh kosong tetapi dilaporkan sukses
+
+**File:**
+[deploy-blackbox.sh:79](deploy-blackbox.sh),
+[deploy-blackbox.sh:114](deploy-blackbox.sh),
+[deploy-blackbox.sh:151](deploy-blackbox.sh),
+[scripts/smoke-test.js:38](scripts/smoke-test.js),
+[scripts/smoke-test.js:167](scripts/smoke-test.js)
+
+**Verifikasi tanggapan DR-P1-08:** urutan build sudah benar—frontend dan backend
+selesai dibangun sebelum unggahan pertama—dan pemeriksaan bundle dev sudah ada.
+Namun status DR-P1-08 baru **DITERAPKAN SEBAGIAN**, karena jalur rollback belum
+memenuhi kontrak “setiap health/smoke regression kembali ke release sebelumnya”.
+
+**Bukti terverifikasi dari source:** setelah smoke pertama gagal, baris 159–160
+menjalankan keseluruhan smoke test lagi sampai dua kali dan hanya menghitung
+jumlah baris `"  - "`. Kode tidak pernah memastikan bahwa satu failure tersebut
+benar-benar berlabel `kredensial master publik ditolak`. Akibatnya, segera setelah
+password master sudah diganti, **satu kegagalan lain apa pun**—misalnya query DB,
+route auth, atau proteksi upload—menghasilkan satu bullet, masuk cabang `else`,
+dilabeli salah sebagai temuan master, dan release rusak dibiarkan live. Jika
+smoke test crash sebelum mencetak `Yang gagal:`, cabang yang sama juga dilewati
+tanpa rollback. Menjalankan test berulang juga membuat keputusan berasal dari
+snapshot waktu yang berbeda dari kegagalan awal.
+
+Selain itu, pembuatan snapshot di baris 79–81 menelan kegagalan kedua `cp`
+dengan `|| true`, lalu selalu mencetak `Titik pulang tersimpan`. Fungsi rollback
+hanya mengembalikan frontend dan `backend/dist`, padahal deploy juga mengganti
+`package.json`, `package-lock.json`, `database/`, lalu memutasi `node_modules`
+melalui `npm install`. Contoh konkret: release baru menghapus dependency yang
+masih di-import dist lama; `npm install` akan memangkasnya dan pemulihan dist
+lama dapat gagal `MODULE_NOT_FOUND`. Uji rollback manual satu kali tidak
+membuktikan snapshot tiap run berhasil atau runtime dependency kompatibel.
+`bash -n`/`shellcheck` dan `git diff --check` lulus; masalahnya semantik release,
+bukan sintaks shell.
+
+**Dampak:** satu-satunya regression smoke dapat lolos tanpa rollback, sementara
+operator menerima pesan keliru bahwa hanya masalah master lama yang gagal.
+Dalam kegagalan snapshot/dependency, rollback yang dipanggil pun bukan release
+lama yang utuh dan dapat meninggalkan produksi pada campuran artifact lama-baru.
+
+**Rekomendasi konkret:** jalankan smoke satu kali, tangkap output dan exit code,
+lalu parse identitas failure secara eksplisit; pengecualian hanya boleh terjadi
+bila daftar failure persis satu dan labelnya kredensial master yang dikenal.
+Crash/timeout/output tak terbaca wajib dianggap kegagalan non-pengecualian dan
+memicu rollback. Hentikan deploy bila snapshot frontend/backend tidak lengkap.
+Gunakan direktori release immutable per versi yang memuat frontend, dist,
+manifest/lockfile, dan runtime dependencies, lalu switch symlink `current`
+secara atomik; rollback cukup mengembalikan symlink dan restart. Jika pola itu
+belum dibuat, minimal snapshot/restore package manifests + `node_modules` dan
+verifikasi entry point/hash sebelum upload. Tambahkan test shell dengan tiga
+kasus: master-only tidak rollback, tepat satu failure non-master rollback, dan
+smoke crash rollback; serta simulasi snapshot gagal harus abort sebelum rsync.
+
+---
+
+## System Design Review — 16 Agustus 2026 17:23 WIB
+
+### [DESIGN-GAP][High] Reporting masih berupa live summary global; filter, export, scope proyek, dan rekonstruksi as-of tidak membentuk kontrak laporan EPC
+
+**Irisan yang diaudit:** reporting, custom report, dan export. Ini tidak mengulang
+temuan Finance 16:44 tentang sumber P&L; gap di sini adalah kontrak reporting
+lintas modul dan bukti bahwa pilihan scope di UI tidak benar-benar ditegakkan.
+
+**Kemampuan saat ini.** Backend menyediakan enam endpoint ringkasan—Production,
+Inventory, Procurement, QC, Sales, Finance—yang membaca tabel operasional secara
+langsung ([backend/src/routes/reports.routes.ts:9](backend/src/routes/reports.routes.ts),
+[backend/src/routes/reports.routes.ts:57](backend/src/routes/reports.routes.ts),
+[backend/src/routes/reports.routes.ts:100](backend/src/routes/reports.routes.ts),
+[backend/src/routes/reports.routes.ts:144](backend/src/routes/reports.routes.ts),
+[backend/src/routes/reports.routes.ts:193](backend/src/routes/reports.routes.ts),
+[backend/src/routes/reports.routes.ts:238](backend/src/routes/reports.routes.ts)).
+UI mempunyai halaman per laporan, builder generik, CSV/JSON download, nama
+“Saved Templates”, dan “Recent Exports”.
+
+**Gap/proses yang putus—terverifikasi dari kontrak source:** hanya endpoint
+Production membaca `from_date/to_date` (baris 11–15). Builder dan Export tetap
+mengirim kedua parameter itu untuk **semua** modul
+([ReportsCustom.vue:108](frontend/src/views/ReportsCustom.vue),
+[ReportsExport.vue:84](frontend/src/views/ReportsExport.vue)), tetapi Inventory,
+Procurement, QC, Sales, dan Finance mengabaikannya; pengguna yang memilih periode
+tetap menerima angka lifetime tanpa peringatan. Procurement bahkan menjumlahkan
+seluruh PO pada baris 102–132 meski `purchase_orders` sudah mempunyai
+`project_id` ([schema-baseline.sql:2372](backend/database/schema-baseline.sql));
+AP/AR juga memiliki `project_id` (baris 44 dan 70), tetapi laporan Finance tidak
+menerima filter proyek/periode. Tidak ada endpoint yang membawa project/WBS/CBS,
+currency, timezone, as-of timestamp, source version, generated-by, atau scope
+akses sebagai metadata laporan.
+
+Ekspor CSV bukan representasi laporan: fungsi memilih **array terbesar saja**
+dan membuang summary serta array lain
+([ReportsExport.vue:122](frontend/src/views/ReportsExport.vue)). Contohnya laporan
+Procurement berisi `summary`, `byVendor`, `prStats`, dan `monthly`, tetapi CSV
+hanya berisi salah satu array yang kebetulan paling panjang. “Saved Templates”
+dan “Recent Exports” hanya `ref([])` dalam komponen
+([ReportsCustom.vue:104](frontend/src/views/ReportsCustom.vue),
+[ReportsExport.vue:82](frontend/src/views/ReportsExport.vue)); keduanya hilang
+saat reload/navigation dan tidak memiliki owner, revision, sharing, audit, atau
+snapshot data. Angka dibaca dari live mutable tables, sehingga laporan periode
+yang sama tidak dapat direproduksi setelah status/cost berubah.
+
+**Target design.** Bentuk satu kontrak `ReportDefinition` + `ReportRun`: report
+id/version, effective date range dengan `BUSINESS_TIMEZONE`, legal entity,
+project(s), WBS/CBS/cost code, currency/rate policy, approved-baseline/revision,
+parameter tervalidasi, requester dan scope RBAC, source watermark/as-of, serta
+status `queued/running/succeeded/failed/expired`. Query tiap domain wajib
+menyatakan apakah date/project filter didukung; parameter tak didukung ditolak,
+bukan diabaikan. Simpan immutable result manifest + checksum dan audit trail,
+sementara file export dapat dihasilkan ulang dari manifest yang sama. CSV/XLSX
+harus mempunyai sheet/section eksplisit untuk seluruh dataset atau meminta user
+memilih dataset—bukan memilih array terbesar secara heuristik.
+
+Laporan EPC minimum harus bertumpu pada dimensi proyek yang sama: contract
+baseline/change order, WBS/CBS, schedule/progress/S-curve/EVM, committed vs
+actual vs accrual vs forecast, cash flow/billing/retention, engineering
+deliverables, procurement lead/expediting/GRN, inventory issue/traceability,
+construction quantities, QA/QC dan HSE. Summary perusahaan harus merupakan
+roll-up dari dataset proyek yang terscope, dengan drill-through ke transaksi
+sumber dan exclusion/reversal policy yang terlihat.
+
+**Dampak bisnis EPC.** Angka yang berlabel periode/proyek dapat sebenarnya
+mencakup seluruh umur dan seluruh proyek; export dapat kehilangan bagian laporan
+tanpa tanda. Ini berisiko membuat keputusan cash need, vendor spend, stock,
+revenue, kualitas, progress, dan margin dari populasi yang salah, serta tidak
+menyediakan bukti rekonsiliasi saat audit, claim, atau review pelanggan.
+
+**Dependensi dan kebutuhan migrasi.** Pertahankan keenam endpoint/halaman sebagai
+adapter baseline agar kemampuan sekarang tidak hilang. Inventarisasi dimensi dan
+status setiap tabel sumber, selaraskan `client_projects` + WBS/CBS/cost code,
+tentukan canonical finance sources mengikuti review 16:44, dan tambahkan report
+definition/run/manifest lewat boot ensure idempoten. Template lokal yang saat ini
+tidak persisten tidak memerlukan migrasi data, tetapi label UI jangan menjanjikan
+“saved/history” sampai penyimpanan server tersedia. Ekspor baru harus punya
+compatibility mode untuk JSON lama dan acceptance parity per enam halaman.
+
+**Fase/prioritas.** Fase 0 (High): validasi parameter, hentikan silent-ignore,
+project/date scoping, metadata as-of, dan perbaiki export lengkap. Fase 1:
+definition/template/run persistence, RBAC scope, immutable manifest, audit dan
+drill-through. Fase 2: project-controls/finance/procurement/engineering/QC/HSE
+semantic datasets. Fase 3: scheduled distribution, consolidated portfolio,
+snapshot period-close, dan BI/API integration.
+
+**Acceptance criteria yang dapat diuji:**
+
+1. Memilih periode pada keenam modul menghasilkan query terscope atau 400
+   `UNSUPPORTED_FILTER`; test membuktikan transaksi tepat di luar boundary tidak
+   ikut, dengan timezone WIB terdokumentasi.
+2. User yang hanya diberi project A tidak dapat melihat atau mengekspor angka
+   project B; corporate roll-up memerlukan permission terpisah dan scope itu
+   tercatat di manifest.
+3. PO/AP/AR yang sudah memiliki `project_id` dapat difilter proyek; total report
+   sama dengan drill-through detail dan reconciliation policy menangani
+   canceled/rejected/reversal secara eksplisit.
+4. CSV/XLSX/JSON memuat semua section yang dipilih berikut parameter, unit,
+   currency, generated-at/by, report version, dan checksum; tidak ada dataset
+   yang hilang karena heuristic “array terbesar”.
+5. Template tersimpan bertahan setelah logout/reload, mempunyai owner/version/
+   sharing permission; rerun memakai parameter tervalidasi, sedangkan download
+   ulang snapshot lama menghasilkan checksum identik.
+6. Dua run dengan parameter + watermark yang sama menghasilkan angka identik;
+   perubahan setelah watermark hanya muncul pada run baru. Setiap KPI EPC dapat
+   ditelusuri ke project/WBS/CBS dan transaksi sumber tanpa menghitung reversal
+   atau legacy source dua kali.
+
+---
+
+## System Design Review — 16 Agustus 2026 18:19 WIB
+
+### [DESIGN-GAP][High] Halaman Integration adalah control plane semu: status tidak tersimpan, API key diabaikan, webhook hanya memori, dan belum ada delivery contract
+
+**Irisan yang diaudit:** integration settings, webhook, dan kontrak konfigurasi
+frontend-backend. Temuan permission/RBAC umum tetap mengacu DR-P1-02; gap baru
+ini membuktikan bahwa alur konfigurasi integration yang terlihat di UI tidak
+mengaktifkan kemampuan integrasi apa pun.
+
+**Kemampuan saat ini.** `/admin/integration` menampilkan enam connector (SMTP,
+accounting, e-commerce, shipping, barcode, BI), konfigurasi base URL/API key/
+timeout/retry, dan event webhook untuk approval/PO/GRN/WO/low-stock
+([AdminIntegration.vue:104](frontend/src/views/AdminIntegration.vue)). Menu dan
+permission resource `admin.integration` sudah ada sebagai baseline UI.
+
+**Gap/proses yang putus—bukti terverifikasi:** seluruh status connector dimulai
+dari array lokal `enabled: false`; komponen tidak pernah memanggil
+`fetchSettings()` atau menghidrasi state server. `toggleInteg()` memanggil store
+pada baris 123–126, tetapi store mengirim body `{ value }`
+([admin.ts:22](frontend/src/stores/admin.ts)), sedangkan backend hanya menerima
+`setting_value` ([settings.routes.ts:88](backend/src/routes/settings.routes.ts)).
+Request karena itu 400 dan error sengaja ditelan; badge lokal tetap berubah
+seolah berhasil. Bahkan setelah nama field diperbaiki, PUT hanya mengubah key
+yang sudah ada, sedangkan fresh seed cuma membuat `company_name`, `currency`,
+dan `timezone` ([database.ts:1981](backend/src/config/database.ts)); semua
+`integration_*`/`api_*` mendapat 404 dan kembali ditelan.
+
+Tombol “Save API Config” tidak pernah menyimpan `apiConfig.apiKey`, menjalankan
+tiga request async tanpa `await`, lalu langsung menampilkan alert sukses
+([AdminIntegration.vue:128](frontend/src/views/AdminIntegration.vue)). Webhook
+add/remove hanya memodifikasi `ref([])` di browser (baris 120, 135–140); tidak
+ada route, tabel, publisher, queue/outbox, signature, delivery log, retry,
+idempotency, replay, atau consumer mana pun pada source backend. Pencarian source
+hanya menemukan pemanggilan AI eksternal berbasis env; tidak ada kode yang
+membaca `integration_email/accounting/ecommerce/shipping/barcode/bi_tool` atau
+mengeksekusi webhook tersebut. Reload halaman menghapus seluruh perubahan.
+
+`system_settings.setting_value` adalah TEXT polos dan `GET /settings/all`
+mengembalikan `SELECT *` ([settings.routes.ts:9](backend/src/routes/settings.routes.ts),
+[schema-baseline.sql:3044](backend/database/schema-baseline.sql)). Karena itu
+memperbaiki UI dengan menyimpan API key ke tabel ini justru akan membuat secret
+terbaca melalui endpoint settings; secret integration membutuhkan boundary
+penyimpanan dan response masking tersendiri, bukan sekadar menyambungkan field
+yang sekarang terabaikan.
+
+**Target design.** Pisahkan `IntegrationDefinition`, `IntegrationConnection`,
+`SecretReference`, `EventSubscription`, `IntegrationOutbox`, dan
+`DeliveryAttempt`. Connection mempunyai owner/legal entity/project scope,
+environment, capability, config schema terversi, health state, last successful
+sync, cursor/watermark, dan circuit-breaker. Secret dienkripsi/KMS-backed,
+write-only dari API, selalu masked di read/log/audit, serta dapat dirotasi.
+
+Event bisnis harus terbit dari transaction domain melalui transactional outbox;
+dispatcher mengirim canonical envelope (`event_id`, type/version, occurred_at,
+actor, entity/project/WBS/source revision, correlation/causation id), signature
+HMAC dengan timestamp, timeout, exponential retry + jitter, idempotency key,
+dead-letter, manual replay berpermission, dan immutable attempt log. Inbound
+sync memakai external id + source system + cursor dan unique constraint agar
+retry tidak menggandakan vendor, SO, invoice, inventory, atau project. Connector
+tidak boleh mengubah approved/final state tanpa validation, approval, audit, dan
+reconciliation policy domain terkait.
+
+**Dampak bisnis EPC.** Operator saat ini dapat melihat badge “Active” dan alert
+“saved” padahal restart/reload menghapus konfigurasi dan tidak ada message yang
+dikirim. Ini menciptakan false assurance untuk notifikasi approval, handoff PO/
+GRN, accounting, shipment, barcode, dan BI; dokumen atau transaksi lintas sistem
+dapat hilang/duplikat tanpa status, reconciliation, atau jejak audit.
+
+**Dependensi dan migrasi.** Pertahankan route/menu dan enam kartu sebagai baseline
+minimum; ubah menjadi adapter terhadap connection registry, bukan menghapusnya.
+Key `integration_*` legacy yang mungkin sudah ada perlu diinventarisasi dan
+dipetakan ke connection draft—jangan dianggap aktif tanpa health check dan
+secret valid. Jangan memigrasikan plaintext API key dari `system_settings`
+secara otomatis; buat prosedur re-entry/rotation dan hapus nilai lama setelah
+verifikasi. Gunakan boot ensure idempoten untuk schema baru, katalog permission
+yang ada untuk view/manage/test/replay, dan outbox pattern Estimator sebagai
+pelajaran—namun gunakan worker + uniqueness + observability yang belum lengkap
+di sana.
+
+**Fase/prioritas.** Fase 0 (High): hentikan false-success, selaraskan API contract,
+load state persisted, mask/isolasi secret, dan label connector sebagai
+`not_configured` sampai benar-benar sehat. Fase 1: registry + webhook outbound
+transactional outbox, signed delivery, retry/DLQ/replay dan monitoring. Fase 2:
+SMTP/notification serta accounting/BI export read-only. Fase 3: inbound
+e-commerce/shipping/barcode dengan mapping master data, reconciliation, dan
+approval untuk mutasi finansial/inventory.
+
+**Acceptance criteria yang dapat diuji:**
+
+1. Toggle/config gagal menghasilkan UI error dan state kembali; sukses bertahan
+   setelah reload/login ulang. Fresh DB dapat membuat seluruh connection config
+   lewat boot schema/API tanpa 400/404 tersembunyi.
+2. API key dapat ditulis/dirotasi tetapi tidak pernah kembali polos dari API,
+   database dump aplikasi, log, audit payload, atau frontend state; user tanpa
+   permission manage tidak dapat membaca/mengubah/test connection.
+3. Perubahan config multi-field atomic dan terversi; concurrent edit memakai
+   optimistic version/409, mempunyai actor/alasan, dan rollback revision dapat
+   dilakukan tanpa mengembalikan secret yang sudah dicabut.
+4. Commit PO/GRN/approval menghasilkan tepat satu outbox event dalam transaction
+   yang sama; forced network failure tidak menghilangkan event, retry tidak
+   menduplikasi effect, dan delivery attempt/status terlihat di UI.
+5. Signature salah/kedaluwarsa ditolak; URL private/loopback dan redirect ke
+   private network ditolak untuk mencegah SSRF. Timeout, rate limit,
+   circuit-breaker, DLQ, replay permission, dan secret rotation diuji.
+6. Inbound record dengan external ID sama diproses idempoten; mapping gagal masuk
+   reconciliation queue, tidak membuat master/transaksi setengah jadi. Setiap
+   record dapat ditelusuri dua arah ke source system, project/WBS, actor, event,
+   dan delivery/import attempt.
+
+---
+
+## [DEV] Tanggapan DR-P0-06 sisa — atomicity & FK lokasi — 16 Agustus 2026
+
+**DITERAPKAN.** Keempat sisa acceptance criteria dikerjakan.
+
+**1. FK `office_location_id`.** Kredensial hanya menyalin nama/koordinat/radius,
+jadi perubahan atau penonaktifan kantor tidak terpropagasi. Kolomnya ditambahkan,
+diisi saat register/update lokasi, dan **di-backfill** dengan mencocokkan
+koordinat tersimpan ke kantor terdaftar (batas ~11 m supaya tidak salah tempel).
+
+Kredensial yang koordinatnya tidak cocok dengan kantor mana pun **sengaja tidak
+ditebak** — dicetak sebagai peringatan agar karyawannya mendaftar ulang.
+Menautkannya ke kantor terdekat akan memindahkan area absensi seseorang
+diam-diam, dan itu persis kelas kesalahan yang sedang kita tutup.
+
+**2. Challenge sekali pakai.** Dulu dihapus setelah counter di-update, tapi tidak
+atomic — dua permintaan paralel sama-sama membaca challenge yang sama sebelum
+salah satunya menghapus. Sekarang challenge **dikonsumsi lebih dulu di dalam
+transaction** lewat `DELETE ... WHERE id = ? AND employee_id = ?`, dan
+`affectedRows = 0` berarti sudah dipakai → 409 `CHALLENGE_ALREADY_USED`.
+
+**3. Satu transaction.** Konsumsi challenge + update counter + penulisan absensi
+kini satu unit, dengan baris absensi dikunci `FOR UPDATE`. Sebelumnya tiga
+penulisan autocommit: kegagalan di tengah menaikkan counter tanpa absensi
+tercatat.
+
+**4. State transition tidak menimpa yang final.** Ini yang paling berdampak ke
+payroll: versi lama meng-UPDATE `check_in` apa adanya, jadi absen lagi
+**menggeser jam masuk yang sudah tercatat**. Sekarang `check_in` dan `check_out`
+yang sudah terisi tidak ditimpa — dijawab sebagai "sudah absen" berikut jamnya,
+dan UPDATE-nya pun diberi predicate `IS NULL` sebagai jaring terakhir.
+
+Tes: `test:http` #9b — challenge terbit, permintaan cacat **tidak** ikut
+mengonsumsinya, konsumsi pertama mengenai 1 baris dan konsumsi kedua 0 (replay
+tertutup di level data).
+
+**Batas yang jujur:** assertion sidik jari tidak bisa dipalsukan dari tes tanpa
+authenticator, jadi jalur `auth/verify` yang lengkap — termasuk boundary tengah
+malam WIB dan dua check-in paralel lewat HTTP — belum tercakup otomatis. Yang
+diuji adalah mekanisme yang bisa dijangkau: validasi input dan sifat sekali-pakai
+challenge. Sisanya tercatat sebagai keterbatasan, bukan diklaim selesai.
+
+test:all 890 lulus / 0 gagal.
