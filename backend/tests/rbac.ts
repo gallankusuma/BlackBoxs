@@ -51,6 +51,61 @@ async function hapusRuleUji(nama: string): Promise<void> {
   await dbRun('DELETE FROM approval_rules WHERE name = ?', [nama]);
 }
 
+/** Absensi terverifikasi GPS milik proyek A + satu baris tanpa proyek. */
+async function seedTimesheetFixture(): Promise<any> {
+  try {
+    const { dbRun, dbGet } = await import('../src/config/database');
+    const tag = `UJI-TS-${Date.now()}`;
+    // Tanggal LAMPAU: handler menolak tanggal masa depan, dan penolakan itu
+    // sempat membuat dua assertion lain lolos palsu karena tidak ada yang ditulis.
+    const tanggal = '2020-01-15';
+
+    const klien: any = await dbGet(`SELECT id FROM clients ORDER BY id LIMIT 1`);
+    const clientId = klien?.id ?? null;
+    const pa: any = await dbRun(
+      `INSERT INTO client_projects (client_id, project_number, project_name, status) VALUES (?, ?, 'Proyek Uji A', 'open')`, [clientId, `${tag}-A`]);
+    const pb: any = await dbRun(
+      `INSERT INTO client_projects (client_id, project_number, project_name, status) VALUES (?, ?, 'Proyek Uji B', 'open')`, [clientId, `${tag}-B`]);
+
+    const e1: any = await dbRun(
+      `INSERT INTO employees (code, name, position, status, salary_type) VALUES (?, 'Karyawan TS 1', 'Uji', 'ACTIVE', 'daily')`, [tag]);
+    const e2: any = await dbRun(
+      `INSERT INTO employees (code, name, position, status, salary_type) VALUES (?, 'Karyawan TS 2', 'Uji', 'ACTIVE', 'daily')`, [`${tag}-B`]);
+
+    // Sudah absen di proyek A lewat PWA — terverifikasi GPS.
+    await dbRun(
+      `INSERT INTO attendance_logs (employee_id,date,project_id,check_in,check_out,status,timesheet_value,gps_verified)
+       VALUES (?,?,?, '07:30:00','16:30:00','present',1,1)`,
+      [e1.insertId, tanggal, pa.insertId]
+    );
+    // Absen tanpa proyek — boleh diklaim proyek mana pun.
+    await dbRun(
+      `INSERT INTO attendance_logs (employee_id,date,check_in,status,timesheet_value) VALUES (?,?, '08:00:00','present',1)`,
+      [e2.insertId, tanggal]
+    );
+
+    return { tag, tanggal, projectA: pa.insertId, projectB: pb.insertId, employeeId: e1.insertId, employeeLain: e2.insertId };
+  } catch (e: any) { console.log(`  (fixture timesheet gagal: ${e.message})`); return null; }
+}
+
+async function attendanceRow(employeeId: number, tanggal: string): Promise<any> {
+  const { dbGet } = await import('../src/config/database');
+  return dbGet('SELECT project_id, check_in, check_out, gps_verified FROM attendance_logs WHERE employee_id=? AND date=?', [employeeId, tanggal]);
+}
+
+async function cleanupTimesheetFixture(ts: any): Promise<number> {
+  const { dbRun, dbGet } = await import('../src/config/database');
+  await dbRun('DELETE FROM attendance_logs WHERE employee_id IN (?, ?)', [ts.employeeId, ts.employeeLain]);
+  await dbRun('DELETE FROM employees WHERE id IN (?, ?)', [ts.employeeId, ts.employeeLain]);
+  await dbRun('DELETE FROM client_projects WHERE id IN (?, ?)', [ts.projectA, ts.projectB]);
+  const sisa: any = await dbGet(
+    `SELECT (SELECT COUNT(*) FROM employees WHERE id IN (?, ?))
+          + (SELECT COUNT(*) FROM client_projects WHERE id IN (?, ?)) AS n`,
+    [ts.employeeId, ts.employeeLain, ts.projectA, ts.projectB]
+  );
+  return Number(sisa?.n ?? -1);
+}
+
 async function countExpenseGaji(periodeLabel: string): Promise<number> {
   const { dbGet } = await import('../src/config/database');
   const r: any = await dbGet(
@@ -676,6 +731,40 @@ async function main() {
     } finally {
       const sisa = await cleanupPayrollFixture(fx);
       chk('fixture payroll dibersihkan tuntas', sisa, 0);
+    }
+  }
+
+  console.log('\n8a. Timesheet tidak mencuri absensi proyek lain (P1 DATA-INTEGRITY)');
+  // Pencarian dulu hanya (employee_id, date) lalu meng-overwrite project_id ke
+  // proyek dari request. Layar proyek B tidak memuat baris milik proyek A,
+  // menampilkan default "hadir", dan Save MEMINDAHKAN baris itu ke B.
+  const ts = await seedTimesheetFixture();
+  chk('fixture timesheet dibuat', !!ts?.employeeId, true);
+
+  if (ts?.employeeId) {
+    try {
+      // Layar proyek B menyimpan seluruh karyawan aktif dengan default hadir.
+      const simpan = await call('POST', '/hr/attendance/bulk', {
+        date: ts.tanggal, project_id: ts.projectB,
+        records: [{ employee_id: ts.employeeId, status: 'present', timesheet_value: 1, check_in: '09:00', check_out: '17:00' }],
+      }, master);
+      chk('permintaan diterima', simpan.status, 200);
+      chk('baris milik proyek lain DILEWATI', (simpan.json?.dilewati_milik_proyek_lain || []).length, 1);
+
+      const baris = await attendanceRow(ts.employeeId, ts.tanggal);
+      chk('absensi TETAP di proyek asal', Number(baris?.project_id), ts.projectA);
+      chk('jam terverifikasi tidak tertimpa', String(baris?.check_in).slice(0, 5), '07:30');
+
+      // Baris tanpa proyek boleh diklaim — itu memang fiturnya.
+      const simpan2 = await call('POST', '/hr/attendance/bulk', {
+        date: ts.tanggal, project_id: ts.projectB,
+        records: [{ employee_id: ts.employeeLain, status: 'present', timesheet_value: 1 }],
+      }, master);
+      chk('baris tanpa proyek boleh diklaim', (simpan2.json?.dilewati_milik_proyek_lain || []).length, 0);
+      const baris2 = await attendanceRow(ts.employeeLain, ts.tanggal);
+      chk('baris tanpa proyek jadi milik B', Number(baris2?.project_id), ts.projectB);
+    } finally {
+      chk('fixture timesheet dibersihkan', await cleanupTimesheetFixture(ts), 0);
     }
   }
 

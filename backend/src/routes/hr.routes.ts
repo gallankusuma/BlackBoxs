@@ -346,17 +346,75 @@ router.post('/attendance/bulk', authMiddleware, async (req: Request, res: Respon
     // Block future dates
     const todayStr = businessDate(); // DR-P0-06: WIB, bukan UTC
     if (date > todayStr) return res.status(400).json({ error: 'Tidak bisa input absensi untuk tanggal di masa depan' });
-    for (const r of records) {
-      const ex: any = await dbGet('SELECT id FROM attendance_logs WHERE employee_id=? AND date=?', [r.employee_id, date]);
-      if (ex) {
-        await dbRun('UPDATE attendance_logs SET status=?, timesheet_value=?, check_in=?, check_out=?, overtime_hours=?, project_id=?, notes=? WHERE id=?',
-          [r.status||'present', r.timesheet_value??1, r.check_in||null, r.check_out||null, r.overtime_hours??0, project_id||null, r.notes||null, ex.id]);
-      } else {
-        await dbRun('INSERT INTO attendance_logs (employee_id,date,project_id,status,timesheet_value,check_in,check_out,overtime_hours,notes) VALUES (?,?,?,?,?,?,?,?,?)',
-          [r.employee_id, date, project_id||null, r.status||'present', r.timesheet_value??1, r.check_in||null, r.check_out||null, r.overtime_hours??0, r.notes||null]);
+    // P1 DATA-INTEGRITY: dua kerusakan yang ditutup di sini.
+    //
+    // 1. MEMINDAHKAN ABSENSI PROYEK LAIN. Pencarian dulu hanya
+    //    `(employee_id, date)` lalu meng-overwrite `project_id` ke proyek dari
+    //    request. Layar proyek B tidak memuat baris milik proyek A, menampilkan
+    //    default "hadir", dan Save memindahkan baris itu ke B — jam dan biaya
+    //    tenaga kerja proyek A hilang, B mendapat beban palsu.
+    //
+    // 2. MENGHAPUS ABSENSI TERVERIFIKASI. UPDATE juga menimpa
+    //    `check_in`/`check_out` dengan nilai dari layar. Absensi yang sudah
+    //    diverifikasi sidik jari + GPS lewat PWA bisa tergantikan nilai default.
+    //
+    // Keduanya dijaga per baris, di dalam satu transaction.
+    const hasil = await withTransaction(async tx => {
+      let disimpan = 0;
+      const bentrok: any[] = [];
+      const jamDipertahankan: number[] = [];
+
+      for (const r of records) {
+        const ex: any = await tx.get(
+          'SELECT id, project_id, gps_verified, check_in, check_out FROM attendance_logs WHERE employee_id=? AND date=? FOR UPDATE',
+          [r.employee_id, date]
+        );
+
+        if (!ex) {
+          await tx.run(
+            'INSERT INTO attendance_logs (employee_id,date,project_id,status,timesheet_value,check_in,check_out,overtime_hours,notes) VALUES (?,?,?,?,?,?,?,?,?)',
+            [r.employee_id, date, project_id || null, r.status || 'present', r.timesheet_value ?? 1,
+              r.check_in || null, r.check_out || null, r.overtime_hours ?? 0, r.notes || null]
+          );
+          disimpan++;
+          continue;
+        }
+
+        // Milik proyek LAIN — tidak diambil alih. Dilaporkan, bukan didiamkan.
+        if (ex.project_id && project_id && Number(ex.project_id) !== Number(project_id)) {
+          bentrok.push({ employee_id: r.employee_id, project_id_asal: ex.project_id });
+          continue;
+        }
+
+        // Jam hasil verifikasi sidik jari + GPS dipertahankan apa adanya.
+        const pakaiJamTersimpan = !!ex.gps_verified;
+        if (pakaiJamTersimpan) jamDipertahankan.push(r.employee_id);
+
+        await tx.run(
+          `UPDATE attendance_logs
+           SET status=?, timesheet_value=?, check_in=?, check_out=?, overtime_hours=?, project_id=?, notes=?
+           WHERE id=?`,
+          [
+            r.status || 'present', r.timesheet_value ?? 1,
+            pakaiJamTersimpan ? ex.check_in : (r.check_in || null),
+            pakaiJamTersimpan ? ex.check_out : (r.check_out || null),
+            r.overtime_hours ?? 0, project_id || ex.project_id || null, r.notes || null, ex.id,
+          ]
+        );
+        disimpan++;
       }
-    }
-    res.json({ message: `${records.length} records saved` });
+
+      return { disimpan, bentrok, jamDipertahankan };
+    });
+
+    res.json({
+      message: `${hasil.disimpan} dari ${records.length} baris tersimpan`,
+      disimpan: hasil.disimpan,
+      // Absensi yang sudah menjadi milik proyek lain SENGAJA tidak dipindahkan.
+      dilewati_milik_proyek_lain: hasil.bentrok,
+      // Jam terverifikasi GPS dipertahankan, tidak ditimpa nilai layar.
+      jam_terverifikasi_dipertahankan: hasil.jamDipertahankan,
+    });
   } catch (error) { res.status(500).json({ error: 'Failed bulk attendance' }); }
 });
 

@@ -4466,3 +4466,124 @@ Tes: `test:rbac` #8c — user tanpa hak 403, tanpa token 401, periode tanpa pays
 final ditolak dan **dibuktikan tidak meninggalkan expense hantu**.
 
 test:all 901 lulus / 0 gagal.
+
+**Verifikasi reviewer 16 Agustus 2026 19:36 WIB — DITERAPKAN SEBAGIAN.** Commit
+`fd959461` benar memperbaiki `created_by`, memakai counter nomor atomic, dan
+membungkus pengecekan + kedua INSERT dalam satu transaction. Backend
+`npx tsc --noEmit` juga lulus. Namun acceptance belum terpenuhi: guard dua
+permission tersebut bersifat **OR**, bukan AND; lock hanya pada project tujuan
+tidak mengidempotensikan periode lintas project; row tetap langsung
+`approved` tanpa `approved_by/approved_at`; dan larangan satu periode pada lebih
+dari satu project masih menyalin total payroll global, bukan merekonsiliasi
+alokasi tenaga kerja lintas project. Dua regresi konkret dari patch dirinci pada
+Live Auto Review 19:36 WIB di bawah.
+
+---
+
+## Live Auto Review — 16 Agustus 2026 19:36 WIB
+
+Baseline: commit baru `fd959461` (`fix(payroll): gembok generate-expense & cegah
+pembebanan periode ganda`). Source aplikasi tidak diubah reviewer. Backend
+`npx tsc --noEmit` lulus; test HTTP tidak dijalankan reviewer karena membuat
+fixture/data.
+
+### [P1 / RBAC + DATA-EXPOSURE] Guard OR memberi pemegang hak expense akses ke payroll tanpa hak HR
+
+Endpoint memasang
+`requirePermission('hr.payroll.create', 'projects.expenses.create')`
+([hr.routes.ts:1040](backend/src/routes/hr.routes.ts)), tetapi helper
+`requirePermission()` secara eksplisit memakai semantik OR melalui
+`required.some(...)` ([permission.ts:58](backend/src/middleware/permission.ts),
+[permission.ts:72](backend/src/middleware/permission.ts)). Jadi role yang hanya
+memegang `projects.expenses.create` tetap lolos walaupun tidak mempunyai hak
+payroll. Handler lalu membaca seluruh payslip final perusahaan dan menaruh nama
+karyawan beserta net salary per orang, total gross, kasbon, dan net ke notes
+expense ([hr.routes.ts:1080](backend/src/routes/hr.routes.ts),
+[hr.routes.ts:1100](backend/src/routes/hr.routes.ts),
+[hr.routes.ts:1115](backend/src/routes/hr.routes.ts)). Response juga mengembalikan
+total payroll. Tes baru hanya memakai `plainToken` tanpa kedua permission; tidak
+menguji role yang memiliki salah satunya
+([rbac.ts:682](backend/tests/rbac.ts)).
+
+**Dampak:** pemberian hak operasional membuat expense project sekaligus membuka
+data kompensasi seluruh perusahaan dan kemampuan mem-posting expense payroll.
+Fakta bahwa dua role aktif saat ini kebetulan mempunyai kedua permission tidak
+menegakkan least privilege untuk role baru atau perubahan mapping berikutnya.
+
+**Rekomendasi/acceptance:** endpoint wajib menuntut **keduanya**—misalnya dua
+middleware berurutan atau helper `requireAllPermissions()`—dan tetap membatasi
+project sesuai scope user. Tambahkan dua role uji: hanya
+`projects.expenses.create` dan hanya `hr.payroll.create`; keduanya harus 403 dan
+tidak membuat row, sedangkan role dengan kedua hak boleh lanjut. Pastikan respons
+403 maupun log tidak mengandung nominal/nama payroll.
+
+### [P1 / CONCURRENCY + COST-INTEGRITY] Lock project tidak mencegah dua transaksi lintas project mem-posting periode yang sama
+
+Pengecekan lintas project kini berada dalam transaction, tetapi mutex-nya adalah
+`SELECT ... client_projects WHERE id=? FOR UPDATE`
+([hr.routes.ts:1051](backend/src/routes/hr.routes.ts)). Request bersamaan ke
+project A dan B mengunci **dua row berbeda**; keduanya dapat menjalankan SELECT
+duplikat biasa dan melihat belum ada salary expense
+([hr.routes.ts:1059](backend/src/routes/hr.routes.ts)) sebelum salah satunya
+commit. Setelah itu keduanya tetap membuat expense. Skema hanya mempunyai unique
+key pada `expense_number`, bukan identitas payroll period/posting
+([schema-baseline.sql:2056](backend/database/schema-baseline.sql),
+[schema-baseline.sql:2074](backend/database/schema-baseline.sql)); counter nomor
+atomic menghasilkan nomor berbeda sehingga tidak menolak duplikat bisnis.
+
+**Dampak:** dua klik, retry dari worker berbeda, atau request paralel untuk dua
+project tetap dapat membebankan 100% payroll dua kali. Transaction memperbaiki
+atomicity pasangan gaji/kasbon, tetapi belum menjamin idempotency lintas project
+yang diklaim patch.
+
+**Rekomendasi/acceptance:** gunakan identitas immutable untuk payroll run/posting,
+bukan pencarian `description LIKE`. Lock satu row payroll run/periode yang sama
+untuk semua project dan tegakkan unique key pada posting/allocation yang sesuai
+model bisnis. Untuk target ERP EPC, buat `payroll_project_allocations` per
+project/WBS/cost code dengan total seluruh alokasi sama dengan payroll global;
+posting mengonsumsi allocation ID secara idempoten. Test wajib menjalankan dua
+request paralel (`Promise.all`) ke project berbeda untuk periode/run yang sama,
+dan membuktikan tidak pernah tercipta pembebanan ganda maupun partial pair.
+
+---
+
+## [DEV] Tanggapan [P1 / DATA-INTEGRITY] — timesheet lintas proyek — 16 Agustus 2026
+
+**DITERAPKAN.** Terkonfirmasi persis, dan ada satu dampak yang lebih parah dari
+yang tertulis.
+
+Pencarian memang hanya `(employee_id, date)` lalu meng-overwrite `project_id` ke
+proyek dari request. **Tapi UPDATE-nya juga menimpa `check_in`/`check_out`** —
+jadi absensi yang sudah diverifikasi sidik jari + GPS lewat PWA bisa tergantikan
+nilai default dari layar timesheet. Bukan cuma alokasi proyeknya yang bergeser;
+bukti kehadirannya ikut hilang.
+
+Yang dikerjakan, dijaga per baris di dalam satu transaction:
+
+- **Baris milik proyek lain tidak diambil alih.** Kalau `project_id`-nya sudah
+  terisi dan berbeda, baris itu dilewati dan **dilaporkan** di respons
+  (`dilewati_milik_proyek_lain`) — bukan didiamkan, supaya layar bisa
+  memberitahu penggunanya alih-alih diam-diam gagal.
+- **Jam terverifikasi GPS dipertahankan.** Kalau `gps_verified = 1`,
+  `check_in`/`check_out` tersimpan dipakai apa adanya; hanya status, nilai
+  timesheet, lembur, dan catatan yang boleh diperbarui.
+- **Baris tanpa proyek tetap boleh diklaim** — itu memang fungsi layar ini, dan
+  sengaja tidak ikut ditutup.
+- **Satu transaction**, jadi kegagalan di tengah tidak lagi menyisakan sebagian
+  karyawan sudah berpindah.
+
+Tes: `test:rbac` #8a — absensi terverifikasi GPS milik proyek A tetap di A saat
+proyek B menyimpan, jamnya **dibuktikan tidak tertimpa** (`07:30` bertahan), dan
+baris tanpa proyek tetap bisa diklaim B.
+
+> Uji pertama kami memakai tanggal 2099 dan kena penolakan "tanggal masa depan" —
+> 400. Dua assertion lain ikut lolos PALSU karena tidak ada yang ditulis sama
+> sekali. Ketahuan karena assertion-nya spesifik, bukan sekadar "tidak error".
+
+**Belum:** layar masih mengirim SELURUH karyawan aktif dengan default hadir. Guard
+backend menutup kerusakannya, tapi mengubah layar agar hanya mengirim baris yang
+benar-benar disunting adalah perbaikan yang terpisah — dan tanpa itu, karyawan
+yang tidak hadir tetap bisa tercatat hadir kalau operator menekan Save tanpa
+memeriksa.
+
+test:all 909 lulus / 0 gagal.
