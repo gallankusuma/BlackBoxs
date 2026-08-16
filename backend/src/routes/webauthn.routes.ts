@@ -1,4 +1,5 @@
 import express, { Request, Response } from 'express';
+import { businessDate, businessTime, businessDatePart } from '../utils/date.utils';
 import { dbAll, dbGet, dbRun } from '../config/database';
 import { generateMobileToken, mobileAuthMiddleware, anyAuthMiddleware, authMiddleware, assertSelf, MobileAuthRequest } from '../middleware/auth';
 import {
@@ -83,10 +84,38 @@ router.post('/register/options', mobileAuthMiddleware, async (req: MobileAuthReq
   }
 });
 
+/**
+ * Lokasi kerja yang sah untuk sebuah kredensial (DR-P0-06).
+ *
+ * Koordinat dan radius TIDAK BOLEH datang dari karyawan. Sebelumnya
+ * `register/verify` dan `PUT /credentials/:id/location` menerima `latitude`,
+ * `longitude`, dan `radius` mentah dari body — karyawan tinggal mengirim
+ * koordinat rumahnya sendiri dan pemeriksaan GPS kehilangan seluruh artinya.
+ *
+ * Sekarang klien hanya memilih ID kantor; angkanya diambil dari
+ * `office_locations` yang dikelola admin.
+ */
+const resolveOfficeLocation = async (officeLocationId: any) => {
+  const id = Number(officeLocationId);
+  if (!id) return null;
+  const row: any = await dbGet(
+    'SELECT id, name, latitude, longitude, radius_m FROM office_locations WHERE id = ? AND is_active = 1',
+    [id]
+  );
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    lat: parseFloat(row.latitude),
+    lng: parseFloat(row.longitude),
+    radius: Number(row.radius_m) || 200,
+  };
+};
+
 // POST /webauthn/register/verify — save credential + GPS location
 router.post('/register/verify', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Response) => {
   try {
-    const { registration_response, device_name, latitude, longitude, location_name, radius } = req.body;
+    const { registration_response, device_name, office_location_id } = req.body;
     const employee_id = req.employeeId; // dari token
 
     const challengeRow: any = await dbGet(
@@ -111,9 +140,14 @@ router.post('/register/verify', mobileAuthMiddleware, async (req: MobileAuthRequ
     const credentialId = Buffer.from(credential.id).toString('base64url');
     const publicKey    = Buffer.from(credential.publicKey).toString('base64');
 
-    // Validate GPS required for registration
-    if (!latitude || !longitude) {
-      return res.status(400).json({ error: 'Koordinat GPS diperlukan untuk mendaftarkan sidik jari' });
+    // Lokasi kerja diambil dari daftar kantor yang dikelola admin, bukan dari
+    // koordinat yang dikirim karyawan.
+    const office = await resolveOfficeLocation(office_location_id);
+    if (!office) {
+      return res.status(400).json({
+        error: 'Pilih lokasi kerja yang terdaftar terlebih dahulu.',
+        code: 'OFFICE_LOCATION_REQUIRED',
+      });
     }
 
     // Save credential WITH registered GPS location
@@ -125,15 +159,15 @@ router.post('/register/verify', mobileAuthMiddleware, async (req: MobileAuthRequ
       [
         employee_id, credentialId, publicKey, credential.counter,
         device_name || 'HP Karyawan',
-        parseFloat(latitude), parseFloat(longitude), parseInt(radius) || 200,
-        location_name || 'Lokasi Kerja'
+        office.lat, office.lng, office.radius,
+        office.name
       ]
     );
     await dbRun('DELETE FROM webauthn_challenges WHERE id = ?', [challengeRow.id]);
 
     res.json({
       success: true,
-      message: `✅ Sidik jari + lokasi berhasil didaftarkan!\nRadius: ${radius || 200}m dari koordinat Anda saat ini.`,
+      message: `✅ Sidik jari berhasil didaftarkan untuk ${office.name}.\nRadius toleransi: ${office.radius}m.`,
     });
   } catch (error: any) {
     console.error('register/verify error:', error);
@@ -265,8 +299,11 @@ router.post('/auth/verify', async (req: Request, res: Response) => {
 
     // 7. Auto Check-In or Check-Out
     const now   = new Date();
-    const today = now.toISOString().slice(0, 10);
-    const time  = now.toTimeString().slice(0, 5);
+    // DR-P0-06: tanggal & jam absensi menurut WIB. Server berjalan UTC, jadi
+    // absen 06:30 WIB dulu tercatat di TANGGAL KEMARIN — masuk periode payroll
+    // yang salah, dan cek "sudah absen hari ini" melihat hari yang keliru.
+    const today = businessDate(now);
+    const time  = businessTime(now);
 
     const existing: any = await dbGet(
       'SELECT id, check_in, check_out FROM attendance_logs WHERE employee_id = ? AND date = ?',
@@ -384,12 +421,21 @@ router.delete('/credentials/:id', mobileAuthMiddleware, async (req: MobileAuthRe
 router.put('/credentials/:id/location', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Response) => {
   try {
     if (!(await ownsCredential(req, res))) return;
-    const { latitude, longitude, radius, location_name } = req.body;
+    // DR-P0-06: karyawan hanya boleh MEMILIH di antara kantor yang terdaftar.
+    // Sebelumnya ia bisa mengirim koordinat apa pun — termasuk rumahnya sendiri —
+    // sehingga absen "di lokasi" bisa dilakukan dari mana saja.
+    const office = await resolveOfficeLocation(req.body?.office_location_id);
+    if (!office) {
+      return res.status(400).json({
+        error: 'Pilih lokasi kerja yang terdaftar terlebih dahulu.',
+        code: 'OFFICE_LOCATION_REQUIRED',
+      });
+    }
     await dbRun(
       'UPDATE employee_webauthn_credentials SET registered_lat=?, registered_lng=?, registered_radius=?, location_name=? WHERE id=?',
-      [latitude, longitude, radius || 200, location_name || 'Lokasi Kerja', req.params.id]
+      [office.lat, office.lng, office.radius, office.name, req.params.id]
     );
-    res.json({ success: true });
+    res.json({ success: true, location: { name: office.name, radius: office.radius } });
   } catch (error) { res.status(500).json({ error: 'Failed' }); }
 });
 

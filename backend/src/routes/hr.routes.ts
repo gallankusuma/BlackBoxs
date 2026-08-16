@@ -1,4 +1,5 @@
 import express, { Request, Response } from 'express';
+import { businessDate, businessTime, businessDatePart } from '../utils/date.utils';
 import bcrypt from 'bcrypt';
 import { randomInt } from 'crypto';
 import { dbAll, dbGet, dbRun, withTransaction } from '../config/database';
@@ -331,7 +332,7 @@ router.post('/attendance/bulk', authMiddleware, async (req: Request, res: Respon
     const { date, project_id, records } = req.body;
     if (!date || !records?.length) return res.status(400).json({ error: 'date and records required' });
     // Block future dates
-    const todayStr = new Date().toISOString().slice(0, 10);
+    const todayStr = businessDate(); // DR-P0-06: WIB, bukan UTC
     if (date > todayStr) return res.status(400).json({ error: 'Tidak bisa input absensi untuk tanggal di masa depan' });
     for (const r of records) {
       const ex: any = await dbGet('SELECT id FROM attendance_logs WHERE employee_id=? AND date=?', [r.employee_id, date]);
@@ -353,7 +354,7 @@ router.put('/attendance/:id', authMiddleware, async (req: Request, res: Response
     const { check_in, check_out, status, timesheet_value, overtime_hours, notes, project_id, date } = req.body;
     // Block future dates
     if (date) {
-      const todayStr = new Date().toISOString().slice(0, 10);
+      const todayStr = businessDate(); // DR-P0-06: WIB, bukan UTC
       if (date > todayStr) return res.status(400).json({ error: 'Tidak bisa input absensi untuk tanggal di masa depan' });
     }
     const existing: any = await dbGet('SELECT id FROM attendance_logs WHERE id = ?', [req.params.id]);
@@ -930,40 +931,19 @@ router.post('/mobile/change-pin', mobileAuthMiddleware, async (req: MobileAuthRe
   } catch (error) { res.status(500).json({ error: 'Gagal mengganti PIN' }); }
 });
 
-// POST /hr/mobile/checkin — Self check-in from mobile
-router.post('/mobile/checkin', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Response) => {
-  try {
-    const { type, latitude, longitude, project_id } = req.body;
-    const employee_id = req.employeeId; // dari token — tidak bisa absen atas nama orang lain
-    if (!type) return res.status(400).json({ error: 'type required' });
-    const emp: any = await dbGet('SELECT id, name FROM employees WHERE id = ? AND status = ?', [employee_id, 'ACTIVE']);
-    if (!emp) return res.status(404).json({ error: 'Karyawan tidak ditemukan' });
-    const now = new Date();
-    const today = now.toISOString().slice(0, 10);
-    const timeStr = now.toTimeString().slice(0, 5);
-    const existing: any = await dbGet('SELECT * FROM attendance_logs WHERE employee_id=? AND date=?', [employee_id, today]);
-    const location = (latitude && longitude) ? `${latitude},${longitude}` : null;
+// POST /hr/mobile/checkin — DICABUT (DR-P0-06).
+//
+// Endpoint ini menerima absen hanya bermodal token PIN: tanpa assertion sidik
+// jari, dan GPS-nya opsional. Padahal layar menyebut mekanismenya "Sidik jari +
+// GPS", dan aplikasi mobile MEMANG memakai jalur WebAuthn
+// (`POST /webauthn/auth/verify`) — endpoint ini tidak dipanggil dari mana pun di
+// frontend. Ia murni jalur pintas yang membatalkan seluruh model keamanan
+// absensi: pemegang token dari PIN bisa absen dari mana saja, dan absensi itu
+// yang menjadi dasar payroll.
+//
+// Sengaja dihapus, bukan dinonaktifkan diam-diam, supaya pemanggil yang tersisa
+// (kalau ada) langsung terlihat sebagai 404.
 
-    if (type === 'in') {
-      if (existing) {
-        await dbRun('UPDATE attendance_logs SET check_in=?, status=?, timesheet_value=1 WHERE id=?',
-          [timeStr, 'present', existing.id]);
-      } else {
-        await dbRun(
-          'INSERT INTO attendance_logs (employee_id,date,project_id,check_in,status,timesheet_value,notes) VALUES (?,?,?,?,?,?,?)',
-          [employee_id, today, project_id||null, timeStr, 'present', 1, location ? `GPS: ${location}` : null]
-        );
-      }
-      res.json({ success: true, message: `Check-in ${timeStr} berhasil ✅`, time: timeStr, date: today });
-    } else if (type === 'out') {
-      if (!existing) return res.status(400).json({ error: 'Belum check-in hari ini' });
-      await dbRun('UPDATE attendance_logs SET check_out=? WHERE id=?', [timeStr, existing.id]);
-      res.json({ success: true, message: `Check-out ${timeStr} berhasil 👋`, time: timeStr, date: today });
-    } else {
-      res.status(400).json({ error: 'type must be "in" or "out"' });
-    }
-  } catch (error) { res.status(500).json({ error: 'Check-in gagal' }); }
-});
 
 // GET /hr/mobile/attendance/:employee_id — Recent attendance for mobile view
 router.get('/mobile/attendance/:employee_id', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Response) => {
@@ -979,7 +959,7 @@ router.get('/mobile/attendance/:employee_id', mobileAuthMiddleware, async (req: 
       [req.params.employee_id, m, y]
     );
     const totalDays = rows.reduce((s: number, r: any) => s + (parseFloat(r.timesheet_value) || 0), 0);
-    const today = new Date().toISOString().slice(0, 10);
+    const today = businessDate(); // DR-P0-06: WIB, bukan UTC
     const todayLog: any = await dbGet('SELECT * FROM attendance_logs WHERE employee_id=? AND date=?', [req.params.employee_id, today]);
     res.json({ data: rows, summary: { total_days: totalDays, month: m, year: y }, today: todayLog || null });
   } catch (error) { res.status(500).json({ error: 'Failed to fetch attendance' }); }
@@ -1058,7 +1038,7 @@ router.post('/payslip/generate-expense', authMiddleware, async (req: Request, re
     }
 
     const now = new Date();
-    const datePart = now.toISOString().slice(0, 10).replace(/-/g, '');
+    const datePart = businessDatePart(now); // DR-P0-06: WIB, bukan UTC
     const lastDay = new Date(+period_year, +period_month, 0).getDate();
     const expenseDate = `${period_year}-${String(period_month).padStart(2,'0')}-${lastDay}`;
     const createdExpenses: any[] = [];

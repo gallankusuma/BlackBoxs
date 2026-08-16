@@ -141,7 +141,21 @@ async function main() {
   chk('katalog gambar tidak ikut tertutup',
     await ambil('/uploads/product-images/uji-tidak-ada.jpg'), 404);
 
-  console.log('\n9. Registrasi publik & JWT di query string');
+  console.log('\n9. Absensi tidak bisa dilewati tanpa sidik jari (DR-P0-06)');
+  // Layar menyebut mekanismenya "Sidik jari + GPS", tapi ada endpoint paralel
+  // yang menerima absen hanya bermodal token PIN — tanpa assertion WebAuthn dan
+  // GPS opsional. Aplikasi mobile sendiri memakai /webauthn/auth/verify, jadi
+  // endpoint itu murni jalur pintas. Sudah dicabut.
+  chk('jalur absen PIN sudah tidak ada',
+    (await call('POST', '/hr/mobile/checkin', { type: 'in' }, tokA)).status, 404);
+
+  // Koordinat kerja tidak boleh datang dari karyawan.
+  const lokasiKarangan = await call('PUT', '/webauthn/credentials/1/location',
+    { latitude: -6.2, longitude: 106.8, radius: 99999, location_name: 'Rumah Saya' }, tokA);
+  chk('mengirim koordinat sendiri ditolak', lokasiKarangan.status >= 400, true);
+  chk('bukan 500 — ditolak dengan sadar', lokasiKarangan.status < 500, true);
+
+  console.log('\n10. Registrasi publik & JWT di query string');
   chk('register tanpa token', await status('POST', '/auth/register', { email: 'x@y.com', password: 'secret123', name: 'X' }), 401);
   // AST-007: JWT tidak lagi diterima dari URL di endpoint mana pun, termasuk
   // route unduhan — frontend memakai axios responseType 'blob'.

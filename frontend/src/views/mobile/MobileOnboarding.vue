@@ -238,10 +238,10 @@ async function doRegister() {
       employee_id:           emp.value.id,
       registration_response: attResponseToJSON(credential),
       device_name:           `HP ${emp.value.name?.split(' ')[0]} - ${navigator.platform || 'Mobile'}`,
-      location_name:         gpsForm.value.location_name,
-      latitude:              gpsForm.value.latitude,
-      longitude:             gpsForm.value.longitude,
-      radius:                gpsForm.value.radius,
+      // DR-P0-06: yang dikirim hanya ID kantor. Koordinat dan radius diambil
+      // server dari `office_locations` yang dikelola admin — dulu ketiganya
+      // dikirim dari sini, jadi karyawan bisa mendaftarkan koordinat rumahnya.
+      office_location_id:    gpsForm.value.selected_location_id,
     });
     registered.value = true;
   } catch (e: any) {

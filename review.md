@@ -657,6 +657,39 @@ karyawan); challenge sekali pakai + attendance write atomic; state transition
 tidak boleh menimpa check-in/out yang sudah final; gunakan `BUSINESS_TIMEZONE`;
 tes bypass HTTP, replay/concurrency, lokasi tampered, dan boundary 00:00 WIB.
 
+> **[DEV] DITERAPKAN sebagian besar.**
+>
+> Ketiga klaim terkonfirmasi. Satu hal yang membuat perbaikannya aman: aplikasi
+> mobile **memang sudah memakai jalur WebAuthn** (`MobileHome.vue` memanggil
+> `/webauthn/auth/verify`), dan `/hr/mobile/checkin` **tidak dipanggil dari mana
+> pun di frontend**. Jadi ia murni jalur pintas, bukan jalur yang dipakai.
+>
+> - **Jalur bypass dihapus**, bukan dinonaktifkan diam-diam, supaya pemanggil
+>   yang tersisa (kalau ada) langsung terlihat sebagai 404.
+> - **Lokasi kerja tidak lagi dari karyawan.** `register/verify` dan
+>   `PUT /credentials/:id/location` sekarang hanya menerima `office_location_id`;
+>   koordinat dan radius diambil dari `office_locations` yang dikelola admin
+>   (produksi: 2 lokasi aktif, radius 100 m dan 1000 m). `MobileOnboarding.vue`
+>   ikut diubah — layarnya memang sudah punya pemilihan kantor, cuma angkanya
+>   dulu dikirim dari klien.
+> - **BUSINESS_TIMEZONE dipakai.** Server produksi berjalan **UTC** (diverifikasi:
+>   `timedatectl` → UTC). WIB = UTC+7, jadi absen 00:00–06:59 WIB tercatat di
+>   TANGGAL KEMARIN — persis jam masuk shift pagi, dan itu masuk periode payroll
+>   yang salah sekaligus membuat cek "sudah absen hari ini" melihat hari keliru.
+>   Penolakan "tanggal di masa depan" juga ikut salah: pagi WIB, tanggal hari ini
+>   dianggap masa depan dan input absensi yang sah ditolak. Ditambahkan
+>   `utils/date.utils.ts` (`businessDate`/`businessTime`/`businessDatePart`);
+>   4 pemakaian tanggal UTC di `hr.routes.ts` dan 1 di `webauthn.routes.ts`
+>   diganti. Tidak ada lagi `toISOString().slice(0,10)` di jalur absensi.
+>
+> **BELUM:** challenge sekali pakai, attendance write atomic, dan penjagaan agar
+> state transition tidak menimpa check-in/out yang sudah final. Ketiganya
+> concurrency, bukan bypass — digarap di iterasi berikutnya bersama sisa P1.
+> Tes replay/concurrency dan boundary 00:00 WIB juga menyusul di sana.
+>
+> Tes: `test:http` #9 — jalur PIN sudah 404, dan pengiriman koordinat sendiri
+> ditolak dengan sadar (bukan 500).
+
 ---
 
 ## P1 — integritas dan otorisasi tinggi
@@ -1256,3 +1289,201 @@ membaca atau mengubah data produksi.
 | `backend: npx tsc --noEmit` | Lulus pada working tree |
 | `frontend: npm run build` | Lulus; 2.090 modul ditransform |
 | HTTP/smoke baru | Tidak dijalankan; pemeriksaan yang ditambahkan hanya membuktikan direct URL 403/404, belum membuktikan dokumen Finance tetap dapat dibuka |
+
+---
+
+## System Design Review — 16 Agustus 2026 14:45 WIB
+
+Irisan kapabilitas run ini: **Contract Baseline, Change Control, dan Progress
+Billing**. Baseline source commit `8127a152`; tidak ada perubahan source baru.
+
+### [P1 / ARCH-RISK] Baseline RAB project dapat diganti atau dilepas lewat relasi kedua yang tidak konsisten
+
+**Kemampuan saat ini:** saat proposal menjadi `deal`, backend membuat
+`client_projects`, menyimpan `proposal_id` dan `budget = total_project`, lalu
+menyalin MTO beserta line/formula version sebagai baseline project dalam satu
+transaction ([estimator.routes.ts:2188](backend/src/routes/estimator.routes.ts)).
+Project RAB sudah membandingkan item proposal dengan aktual PO sampai level
+`proposal_item_id` ([project.routes.ts:1047](backend/src/routes/project.routes.ts)).
+Fondasi ini harus dipertahankan.
+
+**Bukti gap/integritas:** layar RAB tidak memakai `client_projects.proposal_id`
+yang ditetapkan saat deal; ia mencari proposal dari relasi terbalik
+`proposals.project_id` ([project.routes.ts:1051](backend/src/routes/project.routes.ts)).
+Endpoint `available-proposals` menawarkan semua proposal yang belum tertaut,
+tanpa membatasi status `deal/submitted`, client, atau project asal
+([project.routes.ts:1217](backend/src/routes/project.routes.ts)). Endpoint link
+kemudian:
+
+1. melepaskan proposal lama;
+2. menautkan ID baru dari body;
+3. tidak mengubah `client_projects.proposal_id`/`budget`, tidak membuat snapshot,
+   tidak memakai transaction, tidak memeriksa affected row, dan hanya memakai
+   `authMiddleware`
+   ([project.routes.ts:1234](backend/src/routes/project.routes.ts)).
+
+Akibatnya satu project dapat memiliki dua jawaban berbeda untuk “proposal
+kontrak”: `client_projects.proposal_id` tetap proposal saat deal, sedangkan RAB
+menampilkan proposal pengganti. Lebih buruk, actual PO yang sudah menyimpan
+`proposal_item_id` lama tidak cocok dengan item proposal baru dan tidak masuk
+bucket `unallocated` (query itu hanya menerima `proposal_item_id IS NULL` di
+[project.routes.ts:1090](backend/src/routes/project.routes.ts)). Dashboard dapat
+terlihat memiliki biaya aktual jauh lebih kecil tepat setelah baseline diganti.
+Jika UPDATE kedua gagal setelah unlink pertama, project langsung kehilangan RAB.
+
+**Dampak bisnis EPC:** baseline biaya dan margin kontrak dapat berubah tanpa
+change order, approval, atau jejak audit; committed cost dapat hilang dari
+tampilan variance; forecast dan keputusan procurement/finance memakai sumber
+kebenaran berbeda. Ini risiko salah laporan project, bukan sekadar UX.
+
+**Perbaikan segera:** jadikan satu relasi kanonik—untuk project hasil deal,
+`client_projects.proposal_id`/snapshot kontrak—dan larang link/unlink bebas.
+Koreksi administratif harus transactional, berpermission khusus, memvalidasi
+client/status, mencatat alasan + before/after, serta tidak boleh membuang
+mapping actual cost lama. RAB harus membaca immutable baseline project, bukan
+live proposal yang bisa diganti.
+
+**Acceptance:** draft/review/unrelated-client proposal ditolak; user tanpa
+permission ditolak; failure injection tidak pernah meninggalkan project tanpa
+baseline; project hanya memiliki satu contract baseline ID; semua PO lama tetap
+muncul pada allocated/unallocated total setelah koreksi; audit menyimpan actor,
+alasan, dan snapshot sebelum/sesudah; tes paralel link/link dan link/unlink
+menghasilkan satu hasil konsisten.
+
+### [DESIGN-GAP — prioritas tinggi] Belum ada contract/change-order ledger yang menghubungkan deal, budget, progress, dan billing
+
+**Kemampuan saat ini:** estimator menghasilkan proposal/RAB dan project; cost
+control menghitung aktual PO; Sales memiliki list invoice dasar. Namun menu
+Contracts masih placeholder “coming soon”
+([SalesContracts.vue:1](frontend/src/views/SalesContracts.vue)), sedangkan tombol
+create/detail invoice juga belum berfungsi
+([SalesInvoices.vue:282](frontend/src/views/SalesInvoices.vue)). Backend invoice
+Sales hanya menerima `so_id`, angka amount, dan status dari body
+([sales.routes.ts:265](backend/src/routes/sales.routes.ts)); tidak ada hubungan
+dengan project contract baseline, progress certificate, retention, atau change
+order. Pencarian source aktif juga tidak menemukan model/route variation order,
+change order, claim, atau contract amendment.
+
+**Gap proses:** setelah proposal deal, nilai awal tersimpan sebagai budget
+project tetapi tidak ada dokumen kontrak versioned yang memisahkan original
+contract value, internal cost baseline, approved variation, pending exposure,
+dan revised contract value. Perubahan scope tidak punya workflow
+initiate→estimate→client submit→approve/reject, sehingga tidak dapat mengubah
+revenue/cost/schedule baseline secara terkontrol. Progress lapangan juga belum
+menjadi progress claim/payment certificate dengan retention, advance recovery,
+tax, dan invoice/AR linkage.
+
+**Target design:** tambahkan ledger kanonik tanpa mengganti fitur Estimator/RAB:
+
+- `contracts` menunjuk project, client, accepted proposal revision, original
+  contract value/currency, dates, payment/retention/LD terms, dan status;
+- immutable `contract_baseline_lines` memotret BOQ/RAB + WBS/CBS saat award;
+- `change_orders` + lines menyimpan source (client/site/RFI), scope, value/cost,
+  schedule impact, evidence, approval state, dan nomor dokumen atomic;
+- original baseline tetap utuh; `current_approved_contract_value = original +
+  approved CO`, sementara pending/potential exposure dilaporkan terpisah;
+- progress measurement menghasilkan valuation/progress certificate; billing
+  menghitung gross work, approved variation, retention, advance recovery, tax,
+  previous certificate, dan net due; invoice/AR dibuat idempoten dari certificate;
+- semua line terhubung ke project/WBS/CBS/cost code agar revenue, commitment,
+  actual, forecast, dan margin memakai dimensi yang sama.
+
+**Dependensi/migrasi dan fase:** fase 1 tetapkan contract source of truth lalu
+snapshot seluruh project deal yang ada dari proposal + MTO tanpa mengubah data
+lama; rekonsiliasi dua tabel invoice (`invoices`/`client_invoices`) sebelum
+membuat handoff baru. Fase 2 change-order workflow + approved baseline delta.
+Fase 3 progress certificate, retention/advance/tax, invoice/AR, cash-flow dan
+forecast integration. Compatibility adapter harus menjaga RAB, cost control,
+dan invoice lama tetap terbaca selama migrasi.
+
+**Acceptance criteria:**
+
+1. Deal membuat tepat satu contract + immutable baseline dengan checksum/total
+   yang sama dengan proposal disepakati; retry tidak menduplikasi.
+2. Edit proposal/master sesudah award tidak mengubah original contract, BOQ,
+   MTO, budget, atau histori margin project.
+3. Hanya CO approved yang mengubah revised value/budget/schedule; reject/cancel
+   tidak mengubah baseline dan seluruh state transition memiliki actor/audit.
+4. Progress certificate kumulatif mencegah overbilling per line; retention,
+   advance recovery, tax, previous certified, dan net due dapat direkonsiliasi.
+5. Satu certificate hanya dapat membuat satu invoice/AR; reversal memakai
+   credit/reversal document, bukan edit/hapus histori.
+6. Dashboard dapat merekonsiliasi original value + approved CO = current
+   contract value dan budget + commitments + actual + forecast pada WBS/CBS
+   yang sama untuk setiap project.
+
+---
+
+## Live Auto Review — 16 Agustus 2026 14:48 WIB
+
+Baseline: working tree di atas commit `2c4e96f4`, patch DR-P0-06 pada
+`hr.routes.ts` dan `webauthn.routes.ts` belum committed saat ditinjau. Source
+code tidak diubah reviewer.
+
+### [FEATURE-REGRESSION / P1] Kontrak API baru memblokir seluruh registrasi WebAuthn dari dua layar mobile
+
+Perbaikan backend sekarang mewajibkan `office_location_id` dan menolak payload
+tanpanya dengan `OFFICE_LOCATION_REQUIRED`
+([webauthn.routes.ts:117](backend/src/routes/webauthn.routes.ts)). Namun kedua
+consumer aktif masih mengirim kontrak lama:
+
+- onboarding sudah memiliki `selected_location_id`, tetapi POST verify hanya
+  mengirim `location_name`, `latitude`, `longitude`, dan `radius`
+  ([MobileOnboarding.vue:236](frontend/src/views/mobile/MobileOnboarding.vue));
+- Settings juga masih meminta karyawan capture GPS sendiri dan mengirim payload
+  lama pada register
+  ([MobileSettings.vue:212](frontend/src/views/mobile/MobileSettings.vue)) serta
+  update location ([MobileSettings.vue:259](frontend/src/views/mobile/MobileSettings.vue)).
+
+Akibatnya backend memverifikasi biometric response lebih dulu, lalu selalu
+menolak karena ID kantor `undefined`. Employee baru tidak dapat menyelesaikan
+onboarding/registrasi sidik jari; existing employee tidak dapat menambah
+credential atau memperbarui lokasi. Karena patch yang sama mencabut endpoint
+PIN-only `/hr/mobile/checkin`, employee tanpa credential yang berhasil tersimpan
+tidak punya jalur absensi lagi. Typecheck/build tidak menangkap mismatch payload
+runtime ini.
+
+**Rekomendasi konkret:** onboarding kirim
+`office_location_id: gpsForm.selected_location_id` dan jangan kirim koordinat.
+Ubah Settings menjadi office picker dari `/webauthn/offices`, lalu kirim ID pada
+register/update; hapus UX “capture GPS untuk menjadikan lokasi kerja”. Di backend,
+resolve/validasi office **sebelum** `verifyRegistrationResponse` agar request
+invalid tidak membuat credential di authenticator yang tidak pernah tercatat DB.
+Tambahkan contract test untuk kedua layar/jalur.
+
+**Acceptance:** onboarding dan Settings berhasil register memakai active office
+ID; missing/inactive/unknown ID ditolak sebelum biometric creation; body dengan
+koordinat/radius palsu tidak memengaruhi data; update location hanya menerima
+office ID; setelah sukses credential dapat dipakai check-in; error tidak
+meninggalkan credential/challenge yatim; build dan negative API tests lulus.
+
+### Verifikasi DR-P0-06 — diterapkan sebagian, belum boleh ditutup
+
+Yang sudah benar pada patch:
+
+- endpoint PIN-only `/hr/mobile/checkin` benar-benar dihapus, sehingga bypass
+  utama tertutup;
+- register/update tidak lagi mempercayai latitude/longitude/radius body dan
+  mengambil angka dari `office_locations` aktif.
+
+Sisa acceptance criteria lama yang masih terbukti terbuka:
+
+1. Credential hanya menyalin nama/koordinat/radius; tidak menyimpan FK
+   `office_location_id`. Perubahan/nonaktif office tidak terpropagasi dan tidak
+   ada integritas referensial atau assignment employee→site.
+2. Credential legacy tanpa `registered_lat/lng` masih **diloloskan** dengan
+   `gpsResult.valid = true`
+   ([webauthn.routes.ts:267](backend/src/routes/webauthn.routes.ts)).
+3. Attendance masih memakai tanggal UTC
+   `toISOString().slice(0, 10)`
+   ([webauthn.routes.ts:301](backend/src/routes/webauthn.routes.ts)); boundary
+   00:00–06:59 WIB tetap masuk hari sebelumnya.
+4. Challenge consumption, credential counter update, dan attendance write belum
+   satu transaction/one-time operation; check-in masih dapat menimpa `check_in`
+   pada row existing dan check-out paralel belum dilindungi state transition.
+
+**Acceptance tambahan:** tambahkan `office_location_id` FK dan backfill
+credential lama secara eksplisit; credential tanpa office valid harus ditolak
+dan diarahkan re-enroll; gunakan business timezone; lock challenge + credential
+counter + attendance row dalam alur idempoten, konsumsi challenge sekali, dan
+uji replay/concurrency serta boundary tengah malam WIB.
