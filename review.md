@@ -4066,3 +4066,263 @@ ditolak dan titik baru diterima tanpa update setiap credential; (4)
 register/update memastikan ID tersimpan, dan test service/route yang memakai
 verifier terinjeksi membuktikan replay paralel hanya satu commit serta state
 attendance final tidak berubah.
+
+---
+
+## System Design Review — 16 Agustus 2026 19:11 WIB
+
+### [DESIGN-GAP / ARCH-RISK][High] Asset Maintenance baru berupa jurnal manual setelah kejadian, belum menjadi CMMS yang mengendalikan availability, pekerjaan, spare part, dan biaya proyek
+
+**Irisan yang diaudit:** asset/equipment maintenance end-to-end. Temuan ini
+melengkapi gap equipment allocation pada Construction Review sebelumnya; fokus
+baru di sini adalah lifecycle pemeliharaan dan handoff-nya ke Inventory,
+Procurement, Finance, HR, serta project controls.
+
+**Kemampuan saat ini.** Asset register sudah mempunyai kategori, production
+line/P&ID, status (`active`, `idle`, `under_maintenance`), dokumen, depresiasi,
+disposal, dan `asset_maintenance_logs`. Pengguna dapat memasukkan histori
+preventive/corrective/inspection beserta deskripsi, biaya, tanggal, pelaksana,
+vendor, dan `next_due_date`
+([database.ts:675](backend/src/config/database.ts),
+[asset.routes.ts:758](backend/src/routes/asset.routes.ts)). Ini baseline berguna
+dan tidak boleh hilang.
+
+**Gap/proses yang putus—bukti terverifikasi.** Satu-satunya data maintenance
+adalah log completed tanpa nomor pekerjaan, request/failure, priority, approval,
+planner, jadwal mulai-selesai, state machine, checklist/reading, meter, downtime,
+failure code/root cause, spare part, labor, attachment/evidence, project/WBS/
+cost code, atau reference transaksi. `next_due_date` hanya disimpan; pencarian
+source menunjukkan tidak ada query due/overdue, generator pekerjaan, reminder,
+atau calendar. UI bahkan hanya mengirim tipe/deskripsi/biaya/tanggal dan tidak
+mengekspos next due, performed-by, maupun vendor
+([AssetDetail.vue:143](frontend/src/views/AssetDetail.vue),
+[AssetDetail.vue:359](frontend/src/views/AssetDetail.vue)).
+
+Status aset dan log maintenance tidak terhubung: membuat log tidak membawa aset
+ke/dari `under_maintenance`, sedangkan mengubah status tidak membuat work order
+atau downtime. Biaya adalah angka bebas yang tidak berasal dari issue spare part,
+jam teknisi, PO jasa/vendor, AP, atau alokasi proyek. Pelaksana dan vendor berupa
+teks, bukan FK employee/vendor, sehingga kompetensi, sertifikasi, dan liability
+tidak dapat diverifikasi. Log juga dapat diubah atau dihapus permanen tanpa
+reversal/alasan/audit ([asset.routes.ts:782](backend/src/routes/asset.routes.ts),
+[asset.routes.ts:800](backend/src/routes/asset.routes.ts)). Akibatnya histori
+yang mendasari availability, keselamatan, dan biaya aset tidak period-close-safe.
+
+**Target design.** Pertahankan asset register sebagai source of truth, lalu
+tambahkan `MaintenancePlan`, `MaintenanceRequest`, `MaintenanceWorkOrder`,
+`WorkOrderTask/Checklist`, `MeterReading`, `Downtime`, serta detail labor,
+material/spare, service, dan cost allocation. Work order memakai state machine
+`requested → triaged → planned → approved → scheduled → in_progress → completed
+→ verified → closed`, dengan jalur cancel/reopen/reversal beralasan. Plan dapat
+berbasis kalender atau meter/runtime dan menghasilkan WO idempoten. Asset,
+project/WBS/cost code, location, responsible crew/vendor, permit/LOTO, target
+downtime, dan document evidence menjadi referensi terkontrol.
+
+Close WO harus menjadi transaction boundary: validasi checklist/reading,
+selesaikan reservation dan inventory issue/return, catat labor/vendor service,
+post actual cost/commitment ke CBS/Finance, tutup downtime, update meter/next due,
+serta kembalikan status availability aset. Closed WO immutable; koreksi memakai
+reversal/superseding record agar audit dan rekonsiliasi periode tidak hilang.
+
+**Dampak bisnis EPC.** Sistem saat ini dapat menampilkan aset “active” ketika
+sedang rusak, tidak dapat mendeteksi PM/calibration overdue, membolehkan jadwal
+site memakai equipment yang unavailable, dan tidak bisa menjelaskan total cost
+of ownership atau cost overrun per proyek. Spare part dapat habis tanpa demand
+terencana; breakdown, downtime, warranty, inspeksi, serta tanggung jawab vendor/
+teknisi tidak traceable. Angka biaya manual juga berisiko dihitung ganda atau
+tidak pernah masuk Finance/CBS.
+
+**Dependensi dan migrasi.** Gunakan master `assets`, employee, vendor/supplier,
+item/warehouse, PO/AP, project/WBS/CBS, approval, notification, dan document
+control yang sudah ada; permission maintenance yang ada dipertahankan sampai
+mapping role produksi diverifikasi. Schema baru wajib lewat boot ensure idempoten
+dan terisolasi per project/legal entity. Migrasikan `asset_maintenance_logs`
+menjadi WO berstatus `closed` dengan provenance `legacy_log`; pertahankan ID,
+tanggal, creator, deskripsi, dan biaya asli, tetapi tandai project/meter/spare/
+approval sebagai unknown—jangan mengarang linkage historis. Endpoint log lama
+perlu adapter read-only selama masa kompatibilitas.
+
+**Fase/prioritas.** Fase 0 (High): nyatakan UI sebagai “completed history”,
+hentikan hard-delete, tampilkan next-due/overdue, dan selaraskan status
+maintenance. Fase 1: request + WO + plan kalender + approval/schedule/checklist
+dan notification. Fase 2: meter/runtime, downtime, labor/spare/service, inventory
+reservation/issue, project/CBS dan finance reconciliation. Fase 3: calibration/
+certificate, warranty/claim, reliability KPI (MTBF/MTTR/availability), mobile
+execution/offline, serta predictive condition monitoring.
+
+**Acceptance criteria yang dapat diuji:**
+
+1. Plan kalender atau meter yang due menghasilkan tepat satu WO per cycle;
+   retry/job paralel tidak menduplikasi WO, dan perubahan plan terversi.
+2. WO `in_progress` mengubah availability secara konsisten; asset maintenance,
+   disposed, atau sudah dialokasikan pada waktu tumpang tindih ditolak oleh
+   equipment scheduling dengan alasan terukur.
+3. WO tidak dapat closed sebelum checklist/reading dan mandatory evidence
+   lengkap. Forced failure saat close me-rollback inventory issue, labor/cost,
+   downtime, status aset, serta next due sebagai satu unit.
+4. Qty/cost spare sama dengan inventory transaction; jasa sama dengan PO/AP;
+   labor dan seluruh actual cost reconcile ke project/WBS/CBS tanpa double count.
+5. Closed WO tidak dapat diedit/dihapus. Reversal menyimpan actor, alasan,
+   approval, before/after, linked postings, dan menghasilkan koreksi ledger yang
+   dapat direkonsiliasi pada periode yang benar.
+6. User yang hanya berhak project A tidak dapat melihat/menjalankan WO project B;
+   teknisi/vendor yang expired skill, certification, induction, atau assignment
+   ditolak untuk task yang mensyaratkannya.
+7. Migrasi mempertahankan jumlah dan nilai total legacy log per aset; setiap row
+   dapat ditelusuri ke sumber lama, dan endpoint/UI baseline tetap dapat membaca
+   history selama compatibility window.
+
+---
+
+## System Design Review — 16 Agustus 2026 19:15 WIB
+
+### [DESIGN-GAP / ARCH-RISK][High] Workforce EPC berhenti pada employee directory, manpower estimate, attendance, dan payroll; belum ada competency-to-mobilization control
+
+**Irisan yang diaudit:** HR/workforce, skills, readiness, roster, mobilization,
+dan demobilization proyek. Gap payroll calculation dan labor-time allocation yang
+sudah dicatat sebelumnya tidak diulang di sini.
+
+**Kemampuan saat ini.** `employees` menyimpan identitas, kontak, department,
+position, hire date, status, dan rate/pay
+([schema-baseline.sql:1187](backend/database/schema-baseline.sql)). HR mempunyai
+employee directory/CSV import, attendance bertaut `project_id`, payslip, salary
+advance, serta mobile PIN. Detail proyek menampilkan “Manpower Mobilization
+Plan” mingguan dengan posisi/karyawan, jumlah, daily rate, peak manpower, dan
+estimasi biaya ([ManpowerPlan.vue:9](frontend/src/components/projects/ManpowerPlan.vue)).
+Semua ini baseline minimum yang perlu dipertahankan.
+
+**Gap/proses yang putus—bukti terverifikasi.** Manpower plan bukan transaksi HR:
+seluruh baris disimpan sebagai JSON `parameters` pada
+`engineering_inputs.element_type='manpower'`
+([ManpowerPlan.vue:363](frontend/src/components/projects/ManpowerPlan.vue)).
+Referensi karyawan hanya string `emp-{id}` di JSON, bukan FK; jumlah mingguan
+dapat lebih dari satu walau baris memilih satu employee. Karena tidak ada
+assignment/resource calendar/unique overlap, orang yang sama dapat “direncanakan”
+di beberapa proyek/site pada tanggal sama tanpa konflik atau kapasitas.
+
+`project_members` juga tidak menyelesaikannya: tabel hanya menghubungkan project
+ke akun desktop `users` dan role bebas, bukan employee lapangan
+([schema-baseline.sql:2129](backend/database/schema-baseline.sql)). Employee tanpa
+akun desktop tidak dapat dimobilisasi melalui model ini. Pencarian schema/routes/
+views tidak menemukan master skill/competency/training, certification/licence,
+medical fitness, passport/visa, site induction, roster/rotation, leave/
+availability, travel/accommodation, contractor worker, atau mobilization record.
+Attendance baru mencatat aktual setelah kejadian dan tidak membuktikan bahwa
+employee mempunyai assignment aktif, kompetensi, atau clearance site saat itu.
+
+**Proses EPC yang putus.** Demand posisi/crew pada estimate tidak dapat diubah
+menjadi nominasi orang → verifikasi readiness → approval → mobilization → roster
+→ site access/attendance → cost/payroll → demobilization. Tidak ada source of
+truth untuk siapa berhak berada di site mana, periode berapa, sebagai trade/role
+apa, dengan sertifikat mana, maupun siapa yang menyetujui pengecualian. Label UI
+“Terhubung ke data Team/HR” saat ini hanya berarti dropdown membaca employee dan
+rate; bukan linkage operasional yang dapat diaudit.
+
+**Target design.** Pisahkan tiga level: (1) `ProjectWorkforceDemand` terversi per
+project/WBS/work package/site/role/skill/week; (2) `WorkforceProfile` berisi
+skill/competency matrix, certificate/licence/training/medical/induction beserta
+issuer, evidence, validity, verification, dan renewal; (3)
+`WorkforceAssignment/Mobilization` yang mengikat employee/contractor worker ke
+demand, project/site, role, calendar/roster, cost code, mobilization/demobilization
+date, camp/travel, supervisor, dan approval.
+
+Assignment memakai state machine `nominated → compliance_review → approved →
+mobilizing → active → demobilizing → closed`, plus rejected/cancelled/suspended.
+Eligibility engine mengecek employment/contract status, overlapping capacity,
+skill level, certificate/medical/induction validity sepanjang assignment,
+leave/roster, serta site/project authorization. Approval/override harus
+beralasan, berbatas waktu, dan audit-able. Assignment aktif menjadi sumber bagi
+site access, attendance/timesheet, HSE headcount, payroll allowance, equipment/
+crew scheduling, forecast vs actual manpower, dan project cost.
+
+**Dampak bisnis EPC.** Tanpa kontrol ini, planner dapat menghitung satu orang
+berulang di dua proyek, memobilisasi trade yang tidak qualified, atau membiarkan
+sertifikat/medical/induction kedaluwarsa tanpa alarm. Site tidak memiliki daftar
+personnel-on-board yang sah; HR tidak dapat melihat bench/shortage/rotation;
+Project Controls tidak dapat merekonsiliasi demand, committed crew, attendance,
+dan cost. Risiko langsungnya adalah keterlambatan mobilisasi, idle labor,
+overtime/camp cost berlebih, temuan HSE/QA, serta akses dan payroll yang tetap
+aktif setelah demobilization.
+
+**Dependensi dan migrasi.** Pertahankan employee ID, Employees UI, attendance,
+payroll, dan Manpower Plan. Jangan repurpose `project_members`: itu membership
+akun kolaborasi; buat assignment employee terpisah. Migrasikan JSON manpower ke
+demand-plan revision dengan raw snapshot/checksum dan provenance. Key `emp-{id}`
+yang masih valid boleh dijadikan kandidat nominasi, tetapi jangan otomatis
+menjadi assignment karena quantity row dan eligibility historis tidak dapat
+direkonstruksi. Data yang tak cocok tetap `unresolved`, bukan dibuang/ditebak.
+Gunakan Document Control untuk evidence, HSE untuk induction/access, project/WBS/
+CBS untuk scope/cost, notification untuk expiry, serta permission existing sampai
+role produksi dipetakan eksplisit. Schema wajib boot-ensure idempoten dan semua
+query/unique overlap terscope legal entity/project.
+
+**Fase/prioritas.** Fase 0 (High): pindahkan manpower JSON ke plan/demand
+terversi, tegaskan bahwa dropdown employee adalah kandidat, dan buat availability
+calendar + overlap warning. Fase 1: skill/certificate/medical/induction register,
+assignment/mobilization state machine, approval, expiry notification, roster,
+dan personnel-on-board. Fase 2: attendance/site-access/payroll/HSE/project-cost
+handoff serta contractor workforce. Fase 3: competency gap/training plan,
+capacity/bench forecasting, travel/camp, succession, dan portfolio resource
+optimization.
+
+**Acceptance criteria yang dapat diuji:**
+
+1. Manpower demand mempunyai revision/baseline tersendiri dan tidak lagi menulis
+   engineering MTO; perubahan menyimpan delta/actor/alasan dan versi lama dapat
+   direkonstruksi.
+2. Assignment employee pada interval tumpang tindih ditolak 409 berdasarkan
+   calendar/capacity, kecuali override berpermission, alasan, limit kapasitas,
+   dan audit; concurrency paralel tetap menghasilkan satu keputusan konsisten.
+3. Employee dengan skill level kurang, certificate/medical/induction expired
+   pada salah satu hari assignment, status inactive, atau leave yang konflik
+   tidak dapat menjadi `active`; response menjelaskan requirement yang gagal.
+4. Check-in/site access project hanya diterima untuk assignment aktif pada site/
+   roster tersebut. Suspend/demobilize segera mencabut akses baru tanpa menghapus
+   attendance, payslip, atau histori assignment lama.
+5. Demand → nominated → approved → mobilized → attendance actual → payroll/cost
+   dapat direkonsiliasi per project/WBS/role/week; orang dan biaya tidak dihitung
+   ganda ketika bekerja lintas work package.
+6. User project A tidak dapat melihat personal document atau assignment project
+   B; evidence sensitif dimask/diunduh dengan permission dan seluruh view/update/
+   approval tercatat dalam audit.
+7. Migrasi mempertahankan seluruh JSON manpower lama beserta checksum. Row yang
+   tidak dapat di-resolve tampil di reconciliation queue, sementara UI baseline
+   tetap dapat membuka plan lama selama compatibility window.
+
+---
+
+## [DEV] Tanggapan [P0 / AUTHORIZATION] — module dipilih klien — 16 Agustus 2026
+
+**DITERAPKAN.** Temuan ini benar dan menohok: perbaikan DR-P0-02 kami mengikat
+permission ke `request.module`, tapi `module` itu sendiri datang dari klien.
+Penyerang tidak perlu menembus apa pun — cukup berbohong soal modulnya.
+
+- **`ENTITY_REGISTRY` server-side.** `entity_type` kini satu-satunya yang
+  dipercaya dari klien; modul, prefix permission, tabel, dan kolom nilai semuanya
+  ditentukan di server. `module` dari body **tidak dibaca sama sekali**.
+- **Entitas wajib ada.** Sebelum apa pun ditulis, barisnya dicari di tabel yang
+  ditentukan registry — `fund_request #999999` kini 404, bukan approval request
+  untuk dokumen yang tidak pernah ada.
+- **Pasangan tak dikenal ditolak** 400 `UNKNOWN_ENTITY_TYPE` berikut daftar yang
+  didukung.
+- **Prefix permission diturunkan dari `entity_type`**, bukan `request.module`,
+  jadi berbohong soal modul tidak lagi memilih permission mana yang diterima.
+
+**Kontrak kedua yang Anda tunjuk juga benar, dan itu membuat jalur SAH terkunci.**
+Layar konfigurasi membuat rule bermodul `pr`/`po`/`grn`, sedangkan permission
+bernamespace `procurement.*` — query `LIKE CONCAT(module, '.%')` tidak akan pernah
+menemukan apa pun, jadi approver non-master yang berhak **selalu** 403. Rule-nya
+sah, tapi tidak ada yang bisa memakainya.
+
+Dua sisi diperbaiki: pemilihan rule mencocokkan kunci kanonik **dan** alias lama
+(`pr`→`procurement`, dst.), dan layar konfigurasi sekarang mengambil daftar modul
+dari `GET /approval/entity-types` — kontrak yang sama dengan yang diterima server,
+bukan daftar yang disusunnya sendiri.
+
+Tes: `test:rbac` #7 — `fund_request` + entitas tidak ada → 404 `ENTITY_NOT_FOUND`;
+`entity_type` karangan → 400 `UNKNOWN_ENTITY_TYPE`; kontrak entity-types memetakan
+`fund_request → finance` dan **tidak** memuat kunci lama seperti `pr`. Matriks
+otorisasi lama (modul lain 403, tidak ditugaskan 403, `can_reject`, delegasi, dua
+approve paralel) tetap hijau.
+
+test:all 897 lulus / 0 gagal.

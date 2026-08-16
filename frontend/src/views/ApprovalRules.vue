@@ -128,14 +128,21 @@ import { ref, reactive, onMounted } from 'vue';
 import { useApprovalStore } from '../stores/approval';
 
 const store = useApprovalStore();
-const modules = ['pr', 'po', 'so', 'wo', 'batch_release', 'grn'];
+// P0: kunci modul diambil dari kontrak server, bukan daftar sendiri.
+//
+// Layar ini dulu membuat rule bermodul `pr`/`po`/`grn`, sedangkan permission
+// bernamespace `procurement.*`. Query otorisasi `p.resource LIKE
+// CONCAT(module, '.%')` tidak pernah menemukan apa pun, sehingga approver
+// non-master yang berhak SELALU 403 — rule-nya sah, tapi tidak ada yang bisa
+// memakainya.
+const modules = ref<string[]>([]);
 const showModal = ref(false);
 const editMode = ref(false);
 const editId = ref<number | null>(null);
 
 const defaultForm = () => ({
   name: '',
-  module: 'pr',
+  module: '',
   condition_field: '',
   min_value: null as number | null,
   max_value: null as number | null,
@@ -197,9 +204,21 @@ const deleteRule = async (id: number) => {
   }
 };
 
+async function muatModul() {
+  try {
+    const { api } = await import('../lib/api');
+    const res = await api.get('/approval/entity-types');
+    modules.value = res.data?.modules || [];
+    if (!form.module && modules.value.length) form.module = modules.value[0];
+  } catch {
+    modules.value = [];
+  }
+}
+
 onMounted(() => {
   store.fetchRules();
   store.fetchRoles();
   store.fetchUsers();
+  muatModul();
 });
 </script>

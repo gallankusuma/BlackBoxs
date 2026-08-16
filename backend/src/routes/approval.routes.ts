@@ -5,6 +5,66 @@ import { requirePermission } from '../middleware/permission';
 
 const router = Router();
 
+/**
+ * Registry entitas approval (P0 — 16 Agustus 2026).
+ *
+ * `POST /submit` dulu menerima `module`, `entity_type`, dan `entity_id` sebagai
+ * tiga input INDEPENDEN. Nilainya memang dibaca dari tabel, tapi rule dipilih
+ * dari `module` yang dikirim klien — jadi pemanggil tinggal mengirim
+ * `entity_type='fund_request'` dengan `module='assets'`, dan saat aksi permission
+ * dicocokkan ke modul palsu itu. Pemegang `assets.dispose.approve` kembali bisa
+ * menyetujui entitas Finance: bypass lintas resource yang justru ingin ditutup
+ * DR-P0-02.
+ *
+ * Sekarang `entity_type` adalah SATU-SATUNYA yang dipercaya dari klien, dan
+ * seluruh sisanya — modul, prefix permission, tabel, kolom nilai — ditentukan di
+ * sini. Pasangan yang tidak terdaftar ditolak sebelum apa pun ditulis.
+ */
+const ENTITY_REGISTRY: Record<string, {
+  module: string;
+  permissionPrefix: string;
+  table: string;
+  amountColumn?: string;
+  label: string;
+}> = {
+  fund_request:     { module: 'finance',     permissionPrefix: 'finance',     table: 'fund_requests',     amountColumn: 'amount',       label: 'Fund Request' },
+  purchase_request: { module: 'procurement', permissionPrefix: 'procurement', table: 'purchase_requests',                               label: 'Purchase Request' },
+  purchase_order:   { module: 'procurement', permissionPrefix: 'procurement', table: 'purchase_orders',   amountColumn: 'total_amount', label: 'Purchase Order' },
+  grn:              { module: 'procurement', permissionPrefix: 'procurement', table: 'goods_receipts',                                  label: 'Goods Receipt' },
+  payroll_request:  { module: 'hr',          permissionPrefix: 'hr',          table: 'payroll_requests',                                label: 'Payroll Request' },
+  kasbon_request:   { module: 'hr',          permissionPrefix: 'hr',          table: 'kasbon_requests',   amountColumn: 'amount',       label: 'Kasbon' },
+};
+
+/**
+ * Kunci modul lama yang dipakai layar konfigurasi (`pr`, `po`, `grn`, ...).
+ *
+ * Ini kontrak kedua yang membuat jalur SAH terkunci: layar membuat rule bermodul
+ * `pr`, sedangkan permission bernamespace `procurement.*`. Query
+ * `p.resource LIKE CONCAT(module, '.%')` tidak akan pernah menemukan apa pun,
+ * sehingga approver non-master yang berhak selalu 403.
+ */
+const MODULE_ALIAS: Record<string, string> = {
+  pr: 'procurement', po: 'procurement', grn: 'procurement',
+  so: 'sales', wo: 'production', batch_release: 'quality',
+};
+const canonicalModule = (m: any): string => MODULE_ALIAS[String(m || '')] || String(m || '');
+
+/** Semua kunci modul yang setara dengan modul kanonik tertentu. */
+const moduleKeysFor = (canonical: string): string[] => {
+  const keys = [canonical];
+  for (const [alias, target] of Object.entries(MODULE_ALIAS)) {
+    if (target === canonical) keys.push(alias);
+  }
+  return keys;
+};
+
+/** Prefix permission untuk sebuah request — dari entity_type, bukan module. */
+const permissionPrefixFor = (request: any): string => {
+  const reg = ENTITY_REGISTRY[String(request?.entity_type)];
+  if (reg) return reg.permissionPrefix;
+  return canonicalModule(request?.module);
+};
+
 type Runner = { all: (sql: string, params?: any[]) => Promise<any[]>; get: (sql: string, params?: any[]) => Promise<any> };
 const poolRunner: Runner = { all: dbAll as any, get: dbGet as any };
 
@@ -18,13 +78,10 @@ const poolRunner: Runner = { all: dbAll as any, get: dbGet as any };
 const resolveEntityAmount = async (
   entityType: string, entityId: any, run: Runner = poolRunner,
 ): Promise<number | null> => {
-  const sumber: Record<string, [string, string]> = {
-    fund_request: ['fund_requests', 'amount'],
-    purchase_order: ['purchase_orders', 'total_amount'],
-  };
-  const found = sumber[String(entityType)];
-  if (!found || !entityId) return null;
-  const [tabel, kolom] = found;
+  const reg = ENTITY_REGISTRY[String(entityType)];
+  if (!reg?.amountColumn || !entityId) return null;
+  const tabel = reg.table;
+  const kolom = reg.amountColumn;
   const row: any = await run.get(`SELECT ${kolom} AS nilai FROM ${tabel} WHERE id = ?`, [entityId]);
   const n = Number(row?.nilai);
   return isFinite(n) ? n : null;
@@ -40,11 +97,14 @@ const resolveEntityAmount = async (
 const selectRuleForRequest = async (
   moduleName: string, amount: number | null, run: Runner = poolRunner,
 ): Promise<any> => {
+  // Rule bisa tersimpan dengan kunci lama dari layar konfigurasi (`pr`, `po`,
+  // `grn`) maupun kunci kanonik. Keduanya dicocokkan.
+  const kunci = moduleKeysFor(canonicalModule(moduleName));
   const rules: any[] = await run.all(
     `SELECT id, sequence, condition_field, min_value, max_value
-     FROM approval_rules WHERE module = ? AND is_active = 1
+     FROM approval_rules WHERE module IN (${kunci.map(() => '?').join(',')}) AND is_active = 1
      ORDER BY sequence ASC, id ASC`,
-    [moduleName]
+    kunci
   );
   if (!rules.length) return null;
 
@@ -102,6 +162,10 @@ const resolveApprovalAuthority = async (
 
   // Permission harus milik MODUL requestnya, dan action-nya sesuai step.
   const aksi = stepActions(Number(request.current_step || 1));
+  // Prefix diambil dari `entity_type` lewat registry, BUKAN dari `request.module`
+  // yang asalnya dari klien. Tanpa ini, berbohong soal modul saat submit sudah
+  // cukup untuk memilih permission mana yang akan diterima.
+  const prefixPermission = permissionPrefixFor(request);
   const perm: any = await run.get(
     `SELECT 1 AS ok FROM permissions p
      JOIN role_permissions rp ON p.id = rp.permission_id
@@ -109,7 +173,7 @@ const resolveApprovalAuthority = async (
        AND p.resource LIKE CONCAT(?, '.%')
        AND p.action IN (${aksi.map(() => '?').join(',')})
      LIMIT 1`,
-    [user.role_id || 0, request.module, ...aksi]
+    [user.role_id || 0, prefixPermission, ...aksi]
   );
   if (!perm) return { allowed: false, canReject: false, reason: 'NO_APPROVE_PERMISSION_FOR_MODULE' };
 
@@ -170,6 +234,17 @@ const generateCode = (prefix: string) => {
 // `inbox` dan `history` SENGAJA tidak digembok. Keduanya pandangan per-user yang
 // sudah tersaring; menggemboknya justru menutup inbox milik approver sendiri.
 //
+// Kontrak entitas approval — supaya layar konfigurasi memakai kunci yang SAMA
+// dengan yang diterima server, bukan daftarnya sendiri.
+router.get('/entity-types', authMiddleware, async (_req: Request, res: Response) => {
+  res.json({
+    data: Object.entries(ENTITY_REGISTRY).map(([key, v]) => ({
+      entity_type: key, module: v.module, label: v.label,
+    })),
+    modules: Array.from(new Set(Object.values(ENTITY_REGISTRY).map(v => v.module))),
+  });
+});
+
 // ─── INBOX ──────────────────────────────────────────────
 
 // GET /inbox — unified pending approvals for current user
@@ -724,7 +799,34 @@ router.delete('/escalations/:id', authMiddleware, requirePermission('admin.appro
 router.post('/submit', authMiddleware, async (req: Request, res: Response) => {
   try {
     const userId = (req as any).userId;
-    const { module, entity_type, entity_id, notes } = req.body;
+    const { entity_type, entity_id, notes } = req.body;
+
+    // P0: `entity_type` adalah satu-satunya yang dipercaya dari klien. Modul,
+    // prefix permission, dan tabel entitasnya ditentukan registry — `module`
+    // dari body sengaja TIDAK dibaca sama sekali.
+    const reg = ENTITY_REGISTRY[String(entity_type)];
+    if (!reg) {
+      return res.status(400).json({
+        error: `Jenis entitas "${entity_type}" tidak dikenali untuk approval.`,
+        code: 'UNKNOWN_ENTITY_TYPE',
+        didukung: Object.keys(ENTITY_REGISTRY),
+      });
+    }
+    if (!entity_id) {
+      return res.status(400).json({ error: 'entity_id wajib diisi', code: 'ENTITY_ID_REQUIRED' });
+    }
+
+    // Entitasnya harus benar-benar ada. Tanpa ini, request approval bisa dibuat
+    // untuk dokumen yang tidak pernah ada.
+    const entitas: any = await dbGet(`SELECT id FROM ${reg.table} WHERE id = ?`, [entity_id]);
+    if (!entitas) {
+      return res.status(404).json({
+        error: `${reg.label} #${entity_id} tidak ditemukan.`,
+        code: 'ENTITY_NOT_FOUND',
+      });
+    }
+
+    const module = reg.module;
 
     // DR-P0-02: rule dipilih SEKALI di sini lalu dikunci ke requestnya, memakai
     // nilai entitas yang dibaca dari database — bukan dari body.

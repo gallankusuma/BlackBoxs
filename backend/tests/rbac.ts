@@ -523,6 +523,29 @@ async function main() {
       const tokDitugaskan = await loginAs(af.userDitugaskan.email);
       const tokDelegasi = await loginAs(af.userDelegasi.email);
 
+      // 0. Klien tidak boleh memilih sendiri modul approval untuk sebuah entitas.
+      //    Dulu `module` diambil apa adanya dari body: kirim
+      //    entity_type='fund_request' dengan module='assets', dan saat aksi
+      //    permission dicocokkan ke modul palsu itu — pemegang
+      //    `assets.dispose.approve` kembali bisa menyetujui entitas Finance.
+      const palsu = await call('POST', '/approval/submit',
+        { module: 'assets', entity_type: 'fund_request', entity_id: 999999 }, master);
+      chk('entitas yang tidak ada ditolak', palsu.status, 404);
+      chk('kodenya ENTITY_NOT_FOUND', palsu.json?.code, 'ENTITY_NOT_FOUND');
+
+      const tipeKarangan = await call('POST', '/approval/submit',
+        { module: 'assets', entity_type: 'entah_apa', entity_id: 1 }, master);
+      chk('jenis entitas tak dikenal ditolak', tipeKarangan.status, 400);
+      chk('kodenya UNKNOWN_ENTITY_TYPE', tipeKarangan.json?.code, 'UNKNOWN_ENTITY_TYPE');
+
+      // Kontrak entitas terbuka untuk UI, supaya layar tidak menyusun kuncinya sendiri.
+      const kontrak = await call('GET', '/approval/entity-types', undefined, master);
+      chk('kontrak entity-types tersedia', kontrak.status, 200);
+      chk('fund_request kanonik ke finance',
+        (kontrak.json?.data || []).find((d: any) => d.entity_type === 'fund_request')?.module, 'finance');
+      chk('modul kanonik tidak memuat kunci lama',
+        (kontrak.json?.modules || []).includes('pr'), false);
+
       // 1. Permission approve dari MODUL LAIN tidak boleh berlaku.
       const salahModul = await call('PUT', `/approval/inbox/${af.requestId}/approve`, {}, tokSalahModul);
       chk('permission approve modul lain ditolak', salahModul.status, 403);
