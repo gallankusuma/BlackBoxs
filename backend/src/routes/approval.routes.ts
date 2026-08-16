@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { dbAll, dbGet, dbRun, withTransaction, TxRunner } from '../config/database';
 import { authMiddleware } from '../middleware/auth';
+import { requirePermission } from '../middleware/permission';
 
 const router = Router();
 
@@ -160,6 +161,15 @@ const generateCode = (prefix: string) => {
   return `${prefix}-${datePart}-${rand}`;
 };
 
+// DR-P0-02 kriteria 4: KONFIGURASI approval digembok permission.
+//
+// Sebelumnya CRUD rules, delegation, dan escalation hanya butuh login. Itu bukan
+// sekadar kelalaian RBAC — ia melengkapi bypass aksi: user biasa bisa membuat
+// rule yang menjadikan DIRINYA approver, lalu menyetujui sendiri.
+//
+// `inbox` dan `history` SENGAJA tidak digembok. Keduanya pandangan per-user yang
+// sudah tersaring; menggemboknya justru menutup inbox milik approver sendiri.
+//
 // ─── INBOX ──────────────────────────────────────────────
 
 // GET /inbox — unified pending approvals for current user
@@ -510,7 +520,7 @@ router.get('/rules', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // POST /rules — create a new approval rule
-router.post('/rules', authMiddleware, async (req: Request, res: Response) => {
+router.post('/rules', authMiddleware, requirePermission('approval.approval-rules.create', 'admin.approval-config.create'), async (req: Request, res: Response) => {
   try {
     const { name, module, condition_field, min_value, max_value, approver_role_id, sequence, steps } = req.body;
 
@@ -539,7 +549,7 @@ router.post('/rules', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // PUT /rules/:id — update an approval rule
-router.put('/rules/:id', authMiddleware, async (req: Request, res: Response) => {
+router.put('/rules/:id', authMiddleware, requirePermission('approval.approval-rules.edit', 'admin.approval-config.edit'), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { name, module, condition_field, min_value, max_value, approver_role_id, sequence, is_active, steps } = req.body;
@@ -570,7 +580,7 @@ router.put('/rules/:id', authMiddleware, async (req: Request, res: Response) => 
 });
 
 // DELETE /rules/:id
-router.delete('/rules/:id', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/rules/:id', authMiddleware, requirePermission('approval.approval-rules.delete', 'admin.approval-config.delete'), async (req: Request, res: Response) => {
   try {
     await dbRun('DELETE FROM approval_rules WHERE id = ?', [req.params.id]);
     res.json({ success: true, message: 'Rule deleted' });
@@ -602,7 +612,7 @@ router.get('/delegations', authMiddleware, async (req: Request, res: Response) =
 });
 
 // POST /delegations — create delegation
-router.post('/delegations', authMiddleware, async (req: Request, res: Response) => {
+router.post('/delegations', authMiddleware, requirePermission('admin.approval-config.create', 'approval.approval-rules.create'), async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user?.userId;
     const { to_user_id, module, start_date, end_date, reason } = req.body;
@@ -621,7 +631,7 @@ router.post('/delegations', authMiddleware, async (req: Request, res: Response) 
 });
 
 // PUT /delegations/:id/deactivate
-router.put('/delegations/:id/deactivate', authMiddleware, async (req: Request, res: Response) => {
+router.put('/delegations/:id/deactivate', authMiddleware, requirePermission('admin.approval-config.edit', 'approval.approval-rules.edit'), async (req: Request, res: Response) => {
   try {
     await dbRun('UPDATE approval_delegations SET is_active = FALSE WHERE id = ?', [req.params.id]);
     res.json({ success: true, message: 'Delegation deactivated' });
@@ -632,7 +642,7 @@ router.put('/delegations/:id/deactivate', authMiddleware, async (req: Request, r
 });
 
 // DELETE /delegations/:id
-router.delete('/delegations/:id', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/delegations/:id', authMiddleware, requirePermission('admin.approval-config.delete', 'approval.approval-rules.delete'), async (req: Request, res: Response) => {
   try {
     await dbRun('DELETE FROM approval_delegations WHERE id = ?', [req.params.id]);
     res.json({ success: true, message: 'Delegation deleted' });
@@ -661,7 +671,7 @@ router.get('/escalations', authMiddleware, async (req: Request, res: Response) =
 });
 
 // POST /escalations
-router.post('/escalations', authMiddleware, async (req: Request, res: Response) => {
+router.post('/escalations', authMiddleware, requirePermission('admin.approval-config.create', 'approval.approval-rules.create'), async (req: Request, res: Response) => {
   try {
     const { module, hours_threshold, escalate_to_user_id, escalate_to_role_id, notify_requester, notify_admin } = req.body;
 
@@ -679,7 +689,7 @@ router.post('/escalations', authMiddleware, async (req: Request, res: Response) 
 });
 
 // PUT /escalations/:id
-router.put('/escalations/:id', authMiddleware, async (req: Request, res: Response) => {
+router.put('/escalations/:id', authMiddleware, requirePermission('admin.approval-config.edit', 'approval.approval-rules.edit'), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { module, hours_threshold, escalate_to_user_id, escalate_to_role_id, notify_requester, notify_admin, is_active } = req.body;
@@ -698,7 +708,7 @@ router.put('/escalations/:id', authMiddleware, async (req: Request, res: Respons
 });
 
 // DELETE /escalations/:id
-router.delete('/escalations/:id', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/escalations/:id', authMiddleware, requirePermission('admin.approval-config.delete', 'approval.approval-rules.delete'), async (req: Request, res: Response) => {
   try {
     await dbRun('DELETE FROM approval_escalations WHERE id = ?', [req.params.id]);
     res.json({ success: true, message: 'Escalation rule deleted' });

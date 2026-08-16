@@ -45,6 +45,12 @@ const status = async (...a: Parameters<typeof call>) => (await call(...a)).statu
 /** Dua notifikasi: satu milik user uji, satu milik orang lain. */
 /** MR uji beserta satu item; `notes` sengaja diisi TEKS BEBAS, bukan JSON. */
 /** Semua `permKey` yang dipakai menu sidebar. */
+async function hapusRuleUji(nama: string): Promise<void> {
+  const { dbRun } = await import('../src/config/database');
+  await dbRun('DELETE FROM approval_rule_steps WHERE rule_id IN (SELECT id FROM approval_rules WHERE name = ?)', [nama]);
+  await dbRun('DELETE FROM approval_rules WHERE name = ?', [nama]);
+}
+
 async function permKeysDariLayout(): Promise<string[]> {
   const fs = await import('fs');
   const path = await import('path');
@@ -660,6 +666,29 @@ async function main() {
       chk('role direktori dibersihkan', await cleanupDirectoryRole(dir), 0);
     }
   }
+
+  console.log('\n7b. Konfigurasi approval digembok permission (DR-P0-02 kriteria 4)');
+  // Ini melengkapi bypass aksi: kalau CRUD rule cuma butuh login, user biasa
+  // tinggal membuat rule yang menjadikan DIRINYA approver, lalu menyetujui
+  // sendiri — otorisasi aksi yang sudah diperketat jadi tidak ada artinya.
+  for (const [label, method, path, body] of [
+    ['buat rule', 'POST', '/approval/rules', { module: 'finance', name: 'uji' }],
+    ['ubah rule', 'PUT', '/approval/rules/1', { name: 'uji' }],
+    ['hapus rule', 'DELETE', '/approval/rules/1', undefined],
+    ['buat delegasi', 'POST', '/approval/delegations', { from_user_id: 1, to_user_id: 2, module: 'finance' }],
+    ['hapus delegasi', 'DELETE', '/approval/delegations/1', undefined],
+    ['buat eskalasi', 'POST', '/approval/escalations', { module: 'finance' }],
+  ] as [string, string, string, any][]) {
+    chk(`${label} oleh user tanpa hak`, await status(method, path, body, plainToken), 403);
+  }
+
+  // Inbox & history SENGAJA tidak digembok — pandangan per-user yang sudah
+  // tersaring. Menggemboknya justru menutup inbox milik approver sendiri.
+  chk('inbox tetap terbuka untuk user login',
+    await status('GET', '/approval/inbox', undefined, plainToken), 200);
+  chk('master tetap bisa membuat rule',
+    (await call('POST', '/approval/rules', { module: 'finance', name: `UJI-GEMBOK-${stamp}` }, master)).status < 400, true);
+  await hapusRuleUji(`UJI-GEMBOK-${stamp}`);
 
   console.log('\n8b. Permission key menu cocok dengan katalog backend (DR-P2-01)');
   // Sepuluh key di Layout.vue pernah berbeda dari katalog, mis.

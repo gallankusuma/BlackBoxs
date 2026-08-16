@@ -2696,8 +2696,10 @@ test:all 866 lulus / 0 gagal.
 ## System Design Review — 16 Agustus 2026 15:32 WIB
 
 Irisan yang diaudit run ini: **QA/QC EPC — quality plan/ITP, inspection,
-material traceability, NCR/CAPA, punch list, test pack, dan handover**. Tidak ada
-perubahan source baru setelah commit `89980355`; audit bersifat read-only.
+material traceability, NCR/CAPA, punch list, test pack, dan handover**. Saat audit
+dimulai belum ada perubahan source setelah `89980355`; commit RBAC `78c7b043`
+muncul kemudian pada run yang sama dan diverifikasi terpisah di bawah. Audit
+desain ini bersifat read-only.
 
 ### [ARCH-RISK / DESIGN-GAP — prioritas tinggi] Quality saat ini adalah QC product/batch, belum menjadi quality-control lifecycle proyek EPC
 
@@ -2825,3 +2827,79 @@ Penjaganya dibuktikan bergigi: satu key sengaja dirusak jadi
 > diverifikasi ulang.
 
 test:all 868 lulus / 0 gagal.
+
+**Verifikasi reviewer 16 Agustus 2026 15:32 WIB — DITERAPKAN SEBAGIAN.** Commit
+`78c7b043` sudah mengganti seluruh 10 `permKey` yang dicatat; perbandingan source
+menunjukkan targetnya ada di `PERMISSION_CATALOG`. Frontend lulus build penuh dan
+backend lulus `npx tsc --noEmit`. Sub-kriteria memperbaiki menu yang salah
+selesai.
+
+Acceptance DR-P2-01 belum seluruhnya tertutup:
+
+- test #8b membandingkan menu dengan seluruh baris tabel `permissions`, bukan
+  `PERMISSION_CATALOG` yang menjadi sumber kebenaran. `ensurePermissionCatalog()`
+  hanya menambah key yang kurang dan tidak menghapus key stale; karena itu row
+  typo/legacy di database dapat membuat key di luar katalog tetap lolos;
+- ekstraksi regex hanya menangkap literal single-quote dan hanya mensyaratkan
+  jumlah hasil lebih dari nol, sehingga key yang nanti berpindah ke konstanta,
+  memakai double-quote, atau gagal terambil sebagian tidak otomatis membuat tes
+  gagal;
+- belum ada tes visibility role non-master per menu, dan router guard masih
+  hanya memeriksa token tanpa permission. Jadi klaim UI/API sudah selaras belum
+  dibuktikan end-to-end.
+
+Ekspor katalog sebagai konstanta/manifest yang dapat dipakai atau diuji secara
+statis, pastikan jumlah/daftar seluruh menu diekstrak lengkap, lalu tambahkan tes
+role non-master dengan satu permission: menu tepat terlihat, menu lain hilang,
+direct route dan endpoint backend mengikuti kebijakan yang sama. Jangan
+menjalankan test tersebut terhadap role produksi; gunakan fixture dev yang
+dibersihkan seperti suite RBAC saat ini.
+
+---
+
+## [DEV] DR-P0-02 kriteria 4 — konfigurasi approval — 16 Agustus 2026
+
+**DITERAPKAN DI KODE — ⚠️ MENUNGGU KETOKAN PEMILIK SISTEM SEBELUM DEPLOY.**
+
+Celahnya nyata dan melengkapi bypass aksi: kalau CRUD rule hanya butuh login,
+user biasa tinggal membuat rule yang menjadikan **dirinya** approver lalu
+menyetujui sendiri — seluruh pengetatan otorisasi aksi jadi tidak ada artinya.
+
+Sembilan endpoint konfigurasi digembok: `rules` (create/edit/delete),
+`delegations` (create/deactivate/delete), `escalations` (create/edit/delete),
+memakai `approval.approval-rules.*` ATAU `admin.approval-config.*`.
+
+`inbox` dan `history` **sengaja TIDAK digembok**. Keduanya pandangan per-user
+yang sudah tersaring; menggemboknya justru menutup inbox milik approver sendiri —
+kebalikan dari tujuannya.
+
+### Kenapa belum di-deploy
+
+Verifikasi role produksi dijalankan lebih dulu sesuai aturan project, dan
+hasilnya **bukan lampu hijau penuh**:
+
+| Role | Punya `admin.approval-config` / `approval.approval-rules`? |
+|---|---|
+| `Admin` (3 user aktif) | ya, 6 permission masing-masing |
+| `Manager Finannce & Acc` (2 user aktif) | **tidak satu pun** |
+
+Jadi `beni` dan `takbir` akan kehilangan akses ke layar konfigurasi approval.
+Secara praktik tidak ada yang rusak — modul ini **belum dipakai sama sekali**
+(0 rule, 0 request, 0 delegasi), jadi tidak ada yang bisa "kehilangan" sesuatu
+yang belum pernah dipakai. Tapi ini tetap keputusan kebijakan, bukan keputusan
+teknis: apakah Manager Finance memang seharusnya boleh mengonfigurasi rule
+approval?
+
+Dua pilihan, dua-duanya sah:
+
+1. **Deploy apa adanya** — konfigurasi approval jadi murni fungsi Admin.
+2. **Beri permission dulu** ke `Manager Finannce & Acc`, baru deploy, kalau
+   mereka memang perlu mengelola rule.
+
+Kode sudah siap dan ter-push; deploy ditahan sampai ada keputusan.
+
+Tes: `test:rbac` #7b — enam endpoint konfigurasi 403 untuk user tanpa hak,
+inbox tetap 200 (membuktikan gemboknya tidak kebablasan), dan master tetap bisa
+membuat rule.
+
+test:all 876 lulus / 0 gagal.
