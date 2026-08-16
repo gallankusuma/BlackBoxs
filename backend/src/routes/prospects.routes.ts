@@ -110,7 +110,7 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
       source, temperature, status, interest, estimated_value, next_follow_up, assigned_to, notes } = req.body;
 
     if (!company_name) return res.status(400).json({ error: 'Company name is required' });
-    const userId = (req as any).user?.id || null;
+    const userId = (req as any).userId || null;
 
     const result = await dbRun(`
       INSERT INTO prospects (code, company_name, contact_name, contact_title, email, phone, industry, website,

@@ -1545,3 +1545,73 @@ positive case memakai active office ID dan negative case inactive/unknown ID.
 - `frontend: npm run build` — lulus, 2.090 modul ditransformasi.
 - HTTP suite tidak dijalankan karena membuat/mengubah fixture; kelemahan test di
   atas diverifikasi statis dari urutan handler dan assertion test.
+
+---
+
+## Live Auto Review — 16 Agustus 2026 14:56 WIB
+
+Baseline: working tree di atas commit `ab2713ef`; patch DR-P1-01 belum committed
+saat ditinjau. Source code tidak diubah reviewer.
+
+### [P1] `npm test` tidak dapat dimulai karena top-level await dikompilasi sebagai CommonJS
+
+**Bukti terverifikasi:** perubahan `authMiddleware` menjadi async diikuti dengan
+penambahan `await` langsung pada scope teratas test
+([auth-middleware.ts:40](backend/tests/auth-middleware.ts),
+[auth-middleware.ts:67](backend/tests/auth-middleware.ts)). Runner package adalah
+`tsx tests/auth-middleware.ts`, dan project ini dieksekusi dengan output CJS.
+Eksekusi reviewer menghasilkan exit code 1 sebelum satu assertion pun berjalan:
+
+```text
+Error: Transform failed with 9 errors
+Top-level await is currently not supported with the "cjs" output format
+```
+
+`npx tsc --noEmit` tetap lulus karena pemeriksaan itu tidak membuktikan test
+entrypoint dapat ditransformasi/dijalankan.
+
+**Dampak:** `npm test` dan otomatis `npm run test:all` selalu berhenti di langkah
+pertama. Seluruh regression suite HTTP/RBAC/procurement setelahnya tidak pernah
+berjalan, sehingga patch auth yang sensitif justru masuk tanpa safety net.
+
+**Rekomendasi konkret:** bungkus setup dan seluruh assertion async di
+`async function main()` lalu panggil `main().catch(...)`, mengikuti pola test
+lain; jangan mengubah package/module mode hanya untuk satu file.
+
+**Acceptance:** `npm test` exit 0 dan menjalankan seluruh assertion; satu
+assertion sengaja dibuat gagal harus menghasilkan exit 1; setelah dikembalikan,
+`npm run test:all` mencapai suite berikutnya (jalankan penuh hanya pada dev DB
+karena suite HTTP membuat fixture).
+
+**Diterapkan & diverifikasi pada run yang sama:** test sudah dibungkus dalam
+`async function main()` dengan terminal `.catch()`
+([auth-middleware.ts:37](backend/tests/auth-middleware.ts)). Reviewer menjalankan
+ulang `npm test`: **19 lulus, 0 gagal, exit 0**. Temuan P1 ini ditutup; test HTTP
+lanjutan tidak dijalankan karena membuat fixture.
+
+### [P2 / SECURITY] Pemeriksaan `is_active` sebelum password membuka oracle akun nonaktif
+
+**Bukti:** setelah menemukan email, login langsung membalas 403
+`ACCOUNT_INACTIVE` sebelum `verifyPassword()` dijalankan
+([auth.routes.ts:97](backend/src/routes/auth.routes.ts),
+[auth.routes.ts:111](backend/src/routes/auth.routes.ts),
+[auth.routes.ts:118](backend/src/routes/auth.routes.ts)). Artinya penyerang dapat
+mengirim password sembarang: email nonaktif memberi 403 + pesan khusus, sedangkan
+email yang tidak ada atau akun aktif dengan password salah memberi 401
+`Invalid credentials`. Komentar bahwa pemanggil “memang pemilik akun” belum
+terbukti pada titik itu karena password belum diverifikasi.
+
+**Dampak:** endpoint publik login menjadi oracle untuk mengonfirmasi keberadaan
+dan status email mantan/nonaktif user. Informasi ini mempermudah enumerasi akun,
+phishing terarah, dan credential stuffing.
+
+**Rekomendasi konkret:** verifikasi password lebih dahulu. Setelah kredensial
+benar, boleh tampilkan pesan akun nonaktif untuk UX; untuk password salah gunakan
+respons generik yang sama dengan email tidak ditemukan. Pertahankan pemeriksaan
+database pada token lama di middleware karena bagian itu sudah menutup sesi
+setelah deaktivasi.
+
+**Acceptance:** kombinasi email tidak ada, email aktif + password salah, dan
+email nonaktif + password salah mempunyai status/body generik yang sama; hanya
+email nonaktif + password benar boleh mendapat `ACCOUNT_INACTIVE`; akun aktif
+tetap login; token yang diterbitkan sebelum deaktivasi tetap ditolak 401.

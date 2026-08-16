@@ -126,7 +126,7 @@ router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
     );
     if (!doc) return res.status(404).json({ error: 'Document not found' });
     // Log view
-    const userId = (req as any).user?.id;
+    const userId = (req as any).userId;
     await dbRun('INSERT INTO document_access_log (document_id, user_id, action) VALUES (?,?,?)',
       [req.params.id, userId || null, 'view']);
     res.json({ data: doc });
@@ -212,7 +212,7 @@ router.get('/:id/download', authMiddleware, async (req: Request, res: Response) 
   try {
     const doc: any = await dbGet('SELECT file_url, file_name FROM documents WHERE id=?', [req.params.id]);
     if (!doc?.file_url) return res.status(404).json({ error: 'No file attached' });
-    const userId = (req as any).user?.id;
+    const userId = (req as any).userId;
     await dbRun('INSERT INTO document_access_log (document_id, user_id, action) VALUES (?,?,?)',
       [req.params.id, userId || null, 'download']);
     const filePath = path.join(process.cwd(), doc.file_url);

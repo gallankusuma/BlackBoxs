@@ -209,10 +209,16 @@ async function main() {
   chk('setelah diturunkan, token lama langsung kehilangan hak',
     (await call('POST', `/procurement/purchase-requests/${prId}/approve`, {}, approverToken)).status, 400);
 
-  // Akun dinonaktifkan → gagal tertutup
+  // Akun dinonaktifkan → gagal tertutup.
+  //
+  // DR-P1-01 mengubah KODEnya dari 400 jadi 401: penolakan kini terjadi di
+  // middleware, sebelum permintaan sampai ke handler approve. Itu memang yang
+  // diinginkan — akun nonaktif tidak seharusnya diperlakukan sebagai pemanggil
+  // sah yang lalu ditolak karena alasan bisnis, dan 401 membuat frontend
+  // mengeluarkan sesinya alih-alih menampilkan error validasi.
   await call('PUT', `/users/${approverId}`, { user_level: 4, is_active: false }, master);
   chk('akun nonaktif tidak bisa approve meski level tinggi',
-    (await call('POST', `/procurement/purchase-requests/${prId}/approve`, {}, approverToken)).status, 400);
+    (await call('POST', `/procurement/purchase-requests/${prId}/approve`, {}, approverToken)).status, 401);
 
   await call('DELETE', `/users/${approverId}`, undefined, master);
 

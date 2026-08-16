@@ -101,6 +101,20 @@ router.post(
         return res.status(401).json({ error: 'Invalid credentials' });
       }
 
+      // DR-P1-01: akun nonaktif tidak boleh login sama sekali. Sebelumnya
+      // `is_active` tidak diperiksa di mana pun pada jalur login, jadi akun yang
+      // sudah dinonaktifkan tetap bisa masuk dan bekerja seperti biasa.
+      //
+      // Pesannya dibedakan dari "kredensial salah" secara sengaja: yang
+      // bersangkutan memang pemilik akun, dan menyembunyikannya hanya membuat ia
+      // mengira sistemnya rusak.
+      if (!user.is_active) {
+        return res.status(403).json({
+          error: 'Akun Anda tidak aktif. Hubungi administrator.',
+          code: 'ACCOUNT_INACTIVE',
+        });
+      }
+
       // Verify password
       const isPasswordValid = await verifyPassword(password, user.password);
       if (!isPasswordValid) {

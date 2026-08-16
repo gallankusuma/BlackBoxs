@@ -190,7 +190,7 @@ router.get('/mps/:id', authMiddleware, async (req: Request, res: Response) => {
 router.post('/mps', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { period_year, period_month, scheme, notes } = req.body;
-    const userId = (req as any).user?.id || null;
+    const userId = (req as any).userId || null;
     const existing = await dbGet(
       'SELECT id FROM mps_headers WHERE period_year = ? AND period_month = ? AND scheme = ?',
       [period_year, period_month, scheme || 'MTO']
@@ -356,7 +356,7 @@ router.put('/mps/:id/week-data', authMiddleware, async (req: Request, res: Respo
 router.post('/mps/:id/confirm', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const userId = (req as any).user?.id || null;
+    const userId = (req as any).userId || null;
     const header = await dbGet('SELECT * FROM mps_headers WHERE id = ?', [id]) as any;
     if (!header) return res.status(404).json({ error: 'MPS not found' });
     if (header.status !== 'Draft') return res.status(400).json({ error: 'Only Draft MPS can be confirmed' });
@@ -374,7 +374,7 @@ router.post('/mps/:id/confirm', authMiddleware, async (req: Request, res: Respon
 router.post('/mps/:id/details/:detailId/generate-wo', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { id, detailId } = req.params;
-    const userId = (req as any).user?.id || null;
+    const userId = (req as any).userId || null;
     const header = await dbGet('SELECT * FROM mps_headers WHERE id = ?', [id]) as any;
     if (!header) return res.status(404).json({ error: 'MPS not found' });
     if (header.status !== 'Confirmed') return res.status(400).json({ error: 'MPS must be Confirmed' });

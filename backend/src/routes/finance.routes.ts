@@ -693,7 +693,7 @@ router.post('/fund-requests', authMiddleware, async (req: Request, res: Response
 
     const requestNumber = generateFinanceCode('FR');
     const totalAmount = items.reduce((s: number, it: any) => s + Number(it.amount || 0), 0);
-    const userId = (req as any).user?.id || null;
+    const userId = (req as any).userId || null;
 
     // Use first item's po_id/vendor_id as header defaults
     const headerPoId = items[0]?.po_id || null;
@@ -779,7 +779,7 @@ router.put('/fund-requests/:id/submit', authMiddleware, async (req: Request, res
       await dbRun(
         `INSERT INTO approval_requests (entity_type, entity_id, requester_id, status, created_at)
          VALUES ('fund_request', ?, ?, 'pending', CURRENT_TIMESTAMP)`,
-        [req.params.id, (req as any).user?.id || null]
+        [req.params.id, (req as any).userId || null]
       );
     } catch (e) {
       console.warn('Could not create approval_request for FR:', e);
@@ -801,7 +801,7 @@ router.put('/fund-requests/:id/approve', authMiddleware, async (req: Request, re
       return res.status(400).json({ error: 'Only submitted requests can be approved' });
     }
 
-    const approverId = (req as any).user?.id || null;
+    const approverId = (req as any).userId || null;
 
     // Approve all pending items
     const pendingItems = await dbAll(
@@ -835,7 +835,7 @@ router.put('/fund-requests/:id/reject', authMiddleware, async (req: Request, res
     }
 
     const { reason } = req.body;
-    const approverId = (req as any).user?.id || null;
+    const approverId = (req as any).userId || null;
 
     await dbRun(
       `UPDATE fund_request_items SET status = 'rejected', rejection_reason = ?, approved_by = ?, approved_at = CURRENT_TIMESTAMP
@@ -861,7 +861,7 @@ router.put('/fund-requests/:id/items/:itemId/approve', authMiddleware, async (re
     if (!item) return res.status(404).json({ error: 'Item not found' });
     if (item.status !== 'pending') return res.status(400).json({ error: 'Item is not pending' });
 
-    const approverId = (req as any).user?.id || null;
+    const approverId = (req as any).userId || null;
     await dbRun(
       `UPDATE fund_request_items SET status = 'approved', approved_by = ?, approved_at = CURRENT_TIMESTAMP WHERE id = ?`,
       [approverId, req.params.itemId]
@@ -887,7 +887,7 @@ router.put('/fund-requests/:id/items/:itemId/reject', authMiddleware, async (req
     if (item.status !== 'pending') return res.status(400).json({ error: 'Item is not pending' });
 
     const { reason } = req.body;
-    const approverId = (req as any).user?.id || null;
+    const approverId = (req as any).userId || null;
     await dbRun(
       `UPDATE fund_request_items SET status = 'rejected', rejection_reason = ?, approved_by = ?, approved_at = CURRENT_TIMESTAMP WHERE id = ?`,
       [reason || 'Rejected', approverId, req.params.itemId]
@@ -969,7 +969,7 @@ router.post('/accounts-payable/:id/payments', authMiddleware, async (req: Reques
     await dbRun(
       `INSERT INTO ap_payments (ap_id, payment_date, amount, payment_method, reference_number, notes, created_by)
        VALUES (?,?,?,?,?,?,?)`,
-      [req.params.id, payment_date||new Date().toISOString().slice(0,10), payAmt, payment_method||'Transfer', reference_number||null, notes||null, (req as any).user?.id||null]
+      [req.params.id, payment_date||new Date().toISOString().slice(0,10), payAmt, payment_method||'Transfer', reference_number||null, notes||null, (req as any).userId||null]
     );
     const newPaid = Number(ap.paid_amount||0) + payAmt;
     const newStatus = newPaid >= Number(ap.amount||0) ? 'paid' : 'partial';
@@ -1068,7 +1068,7 @@ router.post('/accounts-receivable/:id/payments', authMiddleware, async (req: Req
     await dbRun(
       `INSERT INTO ar_payments (ar_id, payment_date, amount, payment_method, reference_number, notes, created_by)
        VALUES (?,?,?,?,?,?,?)`,
-      [req.params.id, payment_date||new Date().toISOString().slice(0,10), payAmt, payment_method||'Transfer', reference_number||null, notes||null, (req as any).user?.id||null]
+      [req.params.id, payment_date||new Date().toISOString().slice(0,10), payAmt, payment_method||'Transfer', reference_number||null, notes||null, (req as any).userId||null]
     );
     const newPaid = Number(ar.paid_amount||0) + payAmt;
     const newStatus = newPaid >= Number(ar.amount||0) ? 'paid' : 'partial';
@@ -1189,7 +1189,7 @@ router.post('/fund-requests/:id/documents', authMiddleware, frDocUpload.single('
   try {
     const file = req.file;
     if (!file) return res.status(400).json({ error: 'No file uploaded' });
-    const userId = (req as any).user?.id || null;
+    const userId = (req as any).userId || null;
     const filePath = '/uploads/fund-requests/' + file.filename;
     const result = await dbRun(
       `INSERT INTO fund_request_documents (fund_request_id, file_name, original_name, file_path, file_size, file_type, uploaded_by)
@@ -1434,7 +1434,7 @@ router.post('/payment-schedule/:id/proof', authMiddleware, proofUpload.single('f
     const file = req.file;
     if (!file) return res.status(400).json({ error: 'No file uploaded' });
     const { source = 'po', notes } = req.body;
-    const userId = (req as any).user?.id || (req as any).user?.userId || null;
+    const userId = (req as any).userId || (req as any).user?.userId || null;
     const filePath = '/uploads/payment-proofs/' + file.filename;
 
     const result = await dbRun(
@@ -1532,7 +1532,7 @@ router.post('/payment-schedule/generate-fund-request', authMiddleware, async (re
     if (!ids || !Array.isArray(ids) || ids.length === 0) {
       return res.status(400).json({ error: 'ids required' });
     }
-    const userId = (req as any).user?.id || null;
+    const userId = (req as any).userId || null;
     const requestNumber = generateFinanceCode('FR');
     let totalAmount = 0;
     const frItems: any[] = [];

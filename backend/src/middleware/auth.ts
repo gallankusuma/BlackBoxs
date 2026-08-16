@@ -2,6 +2,7 @@ import jwt from 'jsonwebtoken';
 import path from 'path';
 import dotenv from 'dotenv';
 import { Request, Response, NextFunction } from 'express';
+import { dbGet } from '../config/database';
 
 // JWT_SECRET dibaca saat modul ini di-load, sedangkan dotenv.config() di
 // index.ts baru jalan setelah semua import. Muat sendiri di sini supaya tidak
@@ -35,7 +36,43 @@ interface AuthRequest extends Request {
   user?: any;
 }
 
-export const authMiddleware = (req: AuthRequest, res: Response, next: NextFunction) => {
+/**
+ * Status akun diperiksa ke DATABASE tiap request (DR-P1-01).
+ *
+ * Login dulu tidak memeriksa `is_active`, dan middleware hanya memverifikasi
+ * tanda tangan token. Akibatnya akun yang sudah dinonaktifkan tetap bisa login,
+ * dan token yang sudah terbit sebelum penonaktifan tetap berlaku sampai
+ * kedaluwarsa — 7 hari untuk desktop, 30 hari untuk mobile. Hanya endpoint yang
+ * kebetulan memakai `requirePermission()` yang memeriksanya, dan mayoritas modul
+ * belum memakainya.
+ *
+ * Diperiksa per request, bukan dari payload token, supaya penonaktifan langsung
+ * berlaku — prinsip yang sama dengan level & permission di `requirePermission`.
+ */
+/**
+ * Titik injeksi untuk tes unit.
+ *
+ * Middleware ini sengaja menyentuh database, dan itu membuatnya tidak lagi bisa
+ * diuji sebagai fungsi murni. Daripada melemahkan pemeriksaannya demi tes, atau
+ * memaksa tes unit menyediakan database, pencariannya dipisah ke objek ini —
+ * `tests/auth-middleware.ts` menggantinya dengan stub, sedangkan produksi selalu
+ * memakai yang asli.
+ */
+export const accountStatus = {
+  isUserActive: async (userId: number): Promise<boolean> => {
+    const row: any = await dbGet('SELECT is_active FROM users WHERE id = ?', [userId]);
+    return !!row && !!row.is_active;
+  },
+  isEmployeeActive: async (employeeId: number): Promise<boolean> => {
+    const row: any = await dbGet('SELECT status FROM employees WHERE id = ?', [employeeId]);
+    return !!row && String(row.status).toUpperCase() === 'ACTIVE';
+  },
+};
+
+const assertActiveUser = (userId: number) => accountStatus.isUserActive(userId);
+const assertActiveEmployee = (employeeId: number) => accountStatus.isEmployeeActive(employeeId);
+
+export const authMiddleware = async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     const token = bearerToken(req);
 
@@ -50,6 +87,13 @@ export const authMiddleware = (req: AuthRequest, res: Response, next: NextFuncti
     // seluruh endpoint admin dengan req.userId = undefined.
     if (decoded?.scope === MOBILE_SCOPE || !decoded?.userId) {
       return res.status(401).json({ error: 'Invalid token' });
+    }
+
+    if (!(await assertActiveUser(decoded.userId))) {
+      return res.status(401).json({
+        error: 'Akun tidak aktif. Hubungi administrator.',
+        code: 'ACCOUNT_INACTIVE',
+      });
     }
 
     req.userId = decoded.userId;
@@ -86,7 +130,7 @@ export const generateMobileToken = (employeeId: number) => {
   );
 };
 
-export const mobileAuthMiddleware = (req: MobileAuthRequest, res: Response, next: NextFunction) => {
+export const mobileAuthMiddleware = async (req: MobileAuthRequest, res: Response, next: NextFunction) => {
   const unauthorized = () =>
     res.status(401).json({ error: 'Sesi berakhir, silakan login ulang', code: 'MOBILE_AUTH_REQUIRED' });
 
@@ -98,6 +142,15 @@ export const mobileAuthMiddleware = (req: MobileAuthRequest, res: Response, next
     const decoded = jwt.verify(token, JWT_SECRET) as any;
     if (decoded?.scope !== MOBILE_SCOPE || !decoded?.employeeId) return unauthorized();
 
+    // Karyawan yang sudah tidak aktif tidak boleh memakai token lamanya —
+    // masa berlaku token mobile 30 hari.
+    if (!(await assertActiveEmployee(Number(decoded.employeeId)))) {
+      return res.status(401).json({
+        error: 'Akun karyawan tidak aktif. Hubungi HR.',
+        code: 'EMPLOYEE_INACTIVE',
+      });
+    }
+
     req.employeeId = Number(decoded.employeeId);
     next();
   } catch (error) {
@@ -107,7 +160,7 @@ export const mobileAuthMiddleware = (req: MobileAuthRequest, res: Response, next
 
 // Untuk resource yang sah diakses dua sisi — misal master lokasi kantor, dibaca
 // saat onboarding karyawan sekaligus dikelola admin dari desktop.
-export const anyAuthMiddleware = (req: MobileAuthRequest & AuthRequest, res: Response, next: NextFunction) => {
+export const anyAuthMiddleware = async (req: MobileAuthRequest & AuthRequest, res: Response, next: NextFunction) => {
   try {
     const token = bearerToken(req);
 
@@ -115,8 +168,14 @@ export const anyAuthMiddleware = (req: MobileAuthRequest & AuthRequest, res: Res
 
     const decoded = jwt.verify(token, JWT_SECRET) as any;
     if (decoded?.scope === MOBILE_SCOPE && decoded?.employeeId) {
+      if (!(await assertActiveEmployee(Number(decoded.employeeId)))) {
+        return res.status(401).json({ error: 'Akun karyawan tidak aktif', code: 'EMPLOYEE_INACTIVE' });
+      }
       req.employeeId = Number(decoded.employeeId);
     } else if (decoded?.userId) {
+      if (!(await assertActiveUser(decoded.userId))) {
+        return res.status(401).json({ error: 'Akun tidak aktif', code: 'ACCOUNT_INACTIVE' });
+      }
       req.userId = decoded.userId;
       req.user = decoded;
     } else {

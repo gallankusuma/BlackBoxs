@@ -251,7 +251,37 @@ async function main() {
       await status('POST', '/hr/payslip/save', periode, plainToken), 403);
   }
 
-  console.log('\n10. Bersih-bersih');
+  console.log('\n10. Akun nonaktif tidak bisa dipakai (DR-P1-01)');
+  // Login dulu tidak memeriksa is_active sama sekali, dan middleware hanya
+  // memverifikasi tanda tangan token — jadi akun yang sudah dinonaktifkan tetap
+  // bisa login DAN token lamanya tetap berlaku sampai kedaluwarsa (7 hari
+  // desktop, 30 hari mobile).
+  const nonaktifEmail = `rbac-nonaktif-${stamp}@uji.local`;
+  const nonaktif = await call('POST', '/users',
+    { name: 'RBAC Nonaktif', email: nonaktifEmail, password: 'secret123', role_id: roleId, user_level: 1 }, master);
+  const nonaktifId = nonaktif.json?.data?.id ?? nonaktif.json?.id;
+  chk('user uji dibuat', !!nonaktifId, true);
+
+  if (nonaktifId) {
+    cleanup.push(nonaktifId);
+
+    // Token diterbitkan SELAGI akun masih aktif.
+    const sebelum = await call('POST', '/auth/login', { email: nonaktifEmail, password: 'secret123' });
+    chk('login saat masih aktif berhasil', sebelum.status, 200);
+    const tokenLama = sebelum.json?.token;
+    chk('token lama bisa dipakai', await status('GET', '/notifications', undefined, tokenLama), 200);
+
+    // Dinonaktifkan.
+    await call('PUT', `/users/${nonaktifId}`, { is_active: 0 }, master);
+
+    chk('login setelah dinonaktifkan ditolak',
+      (await call('POST', '/auth/login', { email: nonaktifEmail, password: 'secret123' })).status, 403);
+
+    // Inti butirnya: token yang SUDAH terbit tidak boleh tetap berlaku.
+    chk('token lama ikut mati', await status('GET', '/notifications', undefined, tokenLama), 401);
+  }
+
+  console.log('\n11. Bersih-bersih');
   for (const id of cleanup) await call('DELETE', `/users/${id}`, undefined, master);
   for (const id of [roleId, editorRoleId]) if (id) await call('DELETE', `/roles/${id}`, undefined, master);
   console.log(`  ok   ${cleanup.length} user uji & 2 role uji dihapus`);
