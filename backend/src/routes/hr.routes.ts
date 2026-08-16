@@ -442,10 +442,14 @@ router.delete('/advances/:id', authMiddleware, async (req: Request, res: Respons
  * (`salary_advances`) milik karyawan itu pada periode itu. Tidak ada satu pun
  * angka yang berasal dari klien.
  */
+type SqlRunner = { all: (sql: string, params?: any[]) => Promise<any[]>; get: (sql: string, params?: any[]) => Promise<any> };
+
 const computePayslip = async (
   employee_id: any, month: any, year: any, project_id: any,
+  run: SqlRunner = { all: dbAll as any, get: dbGet as any },
+  lockAdvances = false,
 ): Promise<any> => {
-    const emp: any = await dbGet('SELECT * FROM employees WHERE id=?', [employee_id]);
+    const emp: any = await run.get('SELECT * FROM employees WHERE id=?', [employee_id]);
     if (!emp) return { error: 'Employee not found' };
 
     // ── Cut-off period: 26th prev month → 25th current month ──
@@ -459,7 +463,7 @@ const computePayslip = async (
     let where = 'WHERE a.employee_id=? AND a.date >= ? AND a.date <= ?';
     const params: any[] = [employee_id, periodStart, periodEnd];
     if (project_id) { where += ' AND a.project_id=?'; params.push(project_id); }
-    const logs: any[] = await dbAll(
+    const logs: any[] = await run.all(
       `SELECT a.*, p.project_name as project_name FROM attendance_logs a
        LEFT JOIN client_projects p ON a.project_id=p.id ${where} ORDER BY a.date ASC`, params
     );
@@ -507,7 +511,7 @@ const computePayslip = async (
       const suppParams: any[] = [employee_id, firstMonday, expandedEnd, periodStart, periodEnd];
       const projFilter = project_id ? ' AND a.project_id=?' : '';
       if (project_id) suppParams.push(project_id);
-      supplementalLogs = await dbAll(
+      supplementalLogs = await run.all(
         `SELECT a.*, p.project_name as project_name FROM attendance_logs a
          LEFT JOIN client_projects p ON a.project_id=p.id
          WHERE a.employee_id=? AND a.date >= ? AND a.date <= ?
@@ -644,13 +648,13 @@ const computePayslip = async (
     });
 
     // Advances for this employee in this period (pending OR already deducted for this period)
-    const pendingAdvances: any[] = await dbAll(
+    const pendingAdvances: any[] = await run.all(
       `SELECT * FROM salary_advances WHERE employee_id=?
        AND (
          (status='pending' AND (period_month IS NULL OR (period_month=? AND period_year=?)))
          OR (status='deducted' AND period_month=? AND period_year=?)
        )
-       ORDER BY advance_date ASC LIMIT 2`,
+       ORDER BY advance_date ASC LIMIT 2${lockAdvances ? ' FOR UPDATE' : ''}`,
       [employee_id, month, year, month, year]
     );
     const advance1 = pendingAdvances[0] ? parseFloat(pendingAdvances[0].amount) : 0;
@@ -721,27 +725,43 @@ router.get('/payslip', authMiddleware, async (req: Request, res: Response) => {
 // sementara hanya sebagian kasbon terpotong.
 router.post('/payslip/save', authMiddleware, requirePermission('hr.payroll.create', 'hr.payroll.edit'), async (req: Request, res: Response) => {
   try {
-    const { employee_id, period_month, period_year, project_id, notes } = req.body;
+    const { employee_id, period_month, period_year, notes } = req.body;
     if (!employee_id || !period_month || !period_year) {
       return res.status(400).json({ error: 'employee_id, period_month, period_year wajib diisi' });
     }
 
-    const hitung = await computePayslip(employee_id, period_month, period_year, project_id);
-    if (hitung?.error) return res.status(404).json(hitung);
-
-    const calc = hitung.calculation;
-    const att = hitung.attendance;
-    const adv = hitung.advances;
-    const ded = hitung.deductions;
-
+    // DR-P0-04 (susulan): `project_id` TIDAK lagi diambil dari body.
+    //
+    // Ronde sebelumnya kami menghapus angka dari klien, tapi klien masih
+    // mengendalikan DATASET-nya: `project_id` menyaring attendance yang jadi
+    // dasar gaji, jadi memilih project tanpa absensi memfinalisasi gaji nol.
+    // Tidak ada angka literal yang dikirim, tapi hasilnya sama saja.
+    //
+    // Unique key payslip adalah (employee, bulan, tahun) tanpa project — jadi
+    // model dokumennya memang satu payslip gabungan per periode. Perhitungan
+    // mengikuti itu: SELURUH absensi karyawan pada periode tersebut.
     const outcome = await withTransaction(async tx => {
+      // Perhitungan dijalankan DI DALAM transaction. Sebelumnya ia memakai pool
+      // biasa sebelum transaction dibuka, jadi kasbon/absensi/tarif bisa berubah
+      // di sela perhitungan dan commit — yang tersimpan snapshot basi.
+      const hitung = await computePayslip(
+        employee_id, period_month, period_year, null,
+        { all: tx.all as any, get: tx.get as any },
+        true, // kunci baris kasbon sampai commit
+      );
+      if (hitung?.error) return { error: 404, body: hitung };
+
+      const calc = hitung.calculation;
+      const att = hitung.attendance;
+      const adv = hitung.advances;
+      const ded = hitung.deductions;
       const existing: any = await tx.get(
         'SELECT id FROM payslip_records WHERE employee_id=? AND period_month=? AND period_year=? ORDER BY id DESC LIMIT 1 FOR UPDATE',
         [employee_id, period_month, period_year]
       );
 
       const nilai = [
-        project_id || null,
+        null, // project hanya metadata; tidak menyaring perhitungan
         att.total_days || 0, att.total_ot_hours || 0,
         calc.basic_salary || 0, calc.tunjangan || 0, calc.ot_pay || 0, calc.gross_salary || 0,
         adv.advance_1 || 0, adv.advance_2 || 0, 0,
@@ -770,19 +790,43 @@ router.post('/payslip/save', authMiddleware, requirePermission('hr.payroll.creat
         recordId = result.insertId;
       }
 
-      // `employee_id` diikutkan di WHERE sebagai jaring terakhir, walau daftarnya
-      // sudah berasal dari server.
-      let ditandai = 0;
-      for (const kasbon of (adv.records || [])) {
-        const r = await tx.run(
+      // Kasbon sudah dikunci `FOR UPDATE` oleh computePayslip di transaction ini,
+      // jadi tidak bisa berubah sampai commit.
+      //
+      // Komentar versi sebelumnya mengklaim periode/status "diverifikasi lagi"
+      // padahal SQL-nya hanya memeriksa id + employee_id. Sekarang hasilnya
+      // benar-benar dibuktikan: setelah semua UPDATE, baris-baris itu dibaca
+      // ulang dan wajib berstatus `deducted` dengan sisa nol. Kalau tidak,
+      // transaction dibatalkan — lebih baik gagal daripada memfinalisasi gaji
+      // di atas potongan yang tidak benar-benar terjadi.
+      const idKasbon = (adv.records || []).map((k: any) => Number(k.id)).filter(Boolean);
+      for (const id of idKasbon) {
+        await tx.run(
           "UPDATE salary_advances SET status='deducted', remaining=0, updated_at=CURRENT_TIMESTAMP WHERE id=? AND employee_id=?",
-          [kasbon.id, employee_id]
+          [id, employee_id]
         );
-        ditandai += r.affectedRows || 0;
       }
 
-      return { recordId, ditandai };
+      let ditandai = 0;
+      if (idKasbon.length) {
+        const cek: any[] = await tx.all(
+          `SELECT id, status, remaining FROM salary_advances
+           WHERE id IN (${idKasbon.map(() => '?').join(',')}) AND employee_id = ?`,
+          [...idKasbon, employee_id]
+        );
+        const belum = cek.filter(k => String(k.status) !== 'deducted' || Number(k.remaining) !== 0);
+        if (cek.length !== idKasbon.length || belum.length) {
+          throw new Error(
+            `Potongan kasbon tidak dapat dipastikan (${belum.length} dari ${idKasbon.length} tidak sesuai). Payslip dibatalkan.`
+          );
+        }
+        ditandai = cek.length;
+      }
+
+      return { recordId, ditandai, hitung, calc, ded };
     });
+
+    if ('error' in outcome) return res.status(outcome.error).json(outcome.body);
 
     res.status(201).json({
       message: 'Payslip saved',
@@ -790,9 +834,9 @@ router.post('/payslip/save', authMiddleware, requirePermission('hr.payroll.creat
         id: outcome.recordId,
         // Dikembalikan supaya layar memakai angka server, bukan angka yang
         // tadi ia kirim sendiri.
-        net_salary: hitung.net_salary,
-        gross_salary: calc.gross_salary,
-        total_deductions: ded.total,
+        net_salary: outcome.hitung.net_salary,
+        gross_salary: outcome.calc.gross_salary,
+        total_deductions: outcome.ded.total,
         advances_marked: outcome.ditandai,
       },
     });

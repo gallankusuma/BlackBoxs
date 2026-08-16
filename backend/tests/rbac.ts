@@ -34,6 +34,98 @@ async function call(method: string, path: string, body?: unknown, token?: string
 }
 const status = async (...a: Parameters<typeof call>) => (await call(...a)).status;
 
+// ─── Fixture payroll terisolasi (DR-P0-04) ────────────────────────────────────
+// Dibuat sendiri, bukan memakai karyawan yang sudah ada, supaya tes tidak
+// pernah menyentuh kasbon atau slip gaji orang sungguhan.
+/** Hapus approval request uji berikut action-nya; kembalikan sisa baris (harus 0). */
+async function cleanupApprovalFixture(requestId: number): Promise<number> {
+  const { dbRun, dbGet } = await import('../src/config/database');
+  await dbRun('DELETE FROM approval_actions WHERE request_id = ?', [requestId]);
+  await dbRun('DELETE FROM approval_requests WHERE id = ?', [requestId]);
+  const sisa: any = await dbGet(
+    `SELECT (SELECT COUNT(*) FROM approval_requests WHERE id = ?)
+          + (SELECT COUNT(*) FROM approval_actions WHERE request_id = ?) AS n`,
+    [requestId, requestId]
+  );
+  return Number(sisa?.n ?? -1);
+}
+
+async function seedPayrollFixture(): Promise<any> {
+  try {
+    const { dbRun } = await import('../src/config/database');
+    const tandaUnik = `UJI-PAYROLL-${Date.now()}`;
+
+    const emp: any = await dbRun(
+      `INSERT INTO employees (code, name, position, status, salary_type, basic_rate, tunjangan_rate, ot_rate, salary)
+       VALUES (?, 'Karyawan Uji Payroll', 'Uji', 'ACTIVE', 'daily', 100000, 0, 0, 0)`,
+      [tandaUnik]
+    );
+    const employeeId = emp.insertId;
+
+    // Karyawan kedua — kasbonnya TIDAK boleh tersentuh.
+    const lain: any = await dbRun(
+      `INSERT INTO employees (code, name, position, status, salary_type, basic_rate, salary)
+       VALUES (?, 'Karyawan Uji Pembanding', 'Uji', 'ACTIVE', 'daily', 100000, 0)`,
+      [`${tandaUnik}-B`]
+    );
+    const employeeLainId = lain.insertId;
+
+    // Satu hari absensi di dalam periode 12/2099 (cut-off 26 Nov – 25 Des).
+    //
+    // `status='present'` dan `timesheet_value` WAJIB: kalkulator menjumlahkan
+    // `timesheet_value * 8` dan hanya menghitung baris ber-status `present`.
+    // Fixture pertama kami tidak mengisi keduanya, jadi hasilnya nol — dan itu
+    // membuat tesnya lolos tanpa membuktikan server benar-benar menghitung.
+    await dbRun(
+      `INSERT INTO attendance_logs (employee_id, date, check_in, check_out, status, timesheet_value, overtime_hours)
+       VALUES (?, '2099-12-01', '08:00:00', '16:00:00', 'present', 1, 0)`,
+      [employeeId]
+    );
+
+    const k1: any = await dbRun(
+      `INSERT INTO salary_advances (employee_id, amount, remaining, description, advance_date, status)
+       VALUES (?, 50000, 50000, ?, '2099-12-01', 'pending')`,
+      [employeeId, tandaUnik]
+    );
+    const k2: any = await dbRun(
+      `INSERT INTO salary_advances (employee_id, amount, remaining, description, advance_date, status)
+       VALUES (?, 70000, 70000, ?, '2099-12-01', 'pending')`,
+      [employeeLainId, `${tandaUnik}-B`]
+    );
+
+    return {
+      tandaUnik, employeeId, employeeLainId,
+      kasbonSendiriId: k1.insertId, kasbonLuarId: k2.insertId,
+    };
+  } catch (e: any) {
+    console.log(`  (fixture payroll gagal dibuat: ${e.message})`);
+    return null;
+  }
+}
+
+async function advanceRow(id: number): Promise<any> {
+  const { dbGet } = await import('../src/config/database');
+  return dbGet('SELECT status, remaining FROM salary_advances WHERE id = ?', [id]);
+}
+
+/** Hapus seluruh fixture; kembalikan jumlah baris yang MASIH tersisa (harus 0). */
+async function cleanupPayrollFixture(fx: any): Promise<number> {
+  const { dbRun, dbGet } = await import('../src/config/database');
+  const ids = [fx.employeeId, fx.employeeLainId];
+  await dbRun(`DELETE FROM payslip_records WHERE employee_id IN (?, ?)`, ids);
+  await dbRun(`DELETE FROM salary_advances WHERE employee_id IN (?, ?)`, ids);
+  await dbRun(`DELETE FROM attendance_logs WHERE employee_id IN (?, ?)`, ids);
+  await dbRun(`DELETE FROM employees WHERE id IN (?, ?)`, ids);
+  const sisa: any = await dbGet(
+    `SELECT (SELECT COUNT(*) FROM employees WHERE id IN (?, ?))
+          + (SELECT COUNT(*) FROM salary_advances WHERE employee_id IN (?, ?))
+          + (SELECT COUNT(*) FROM payslip_records WHERE employee_id IN (?, ?))
+          + (SELECT COUNT(*) FROM attendance_logs WHERE employee_id IN (?, ?)) AS n`,
+    [...ids, ...ids, ...ids, ...ids]
+  );
+  return Number(sisa?.n ?? -1);
+}
+
 async function main() {
   const stamp = Date.now().toString().slice(-6);
   const cleanup: number[] = [];
@@ -172,6 +264,11 @@ async function main() {
     // diproses dua kali.
     chk('approve ulang ditolak 409',
       await status('PUT', `/approval/inbox/${areqId}/approve`, {}, master), 409);
+
+    // Tes sebelumnya meninggalkan approval_request + action-nya di database —
+    // dilaporkan tim reviewer. Fixture harus hilang seperti tidak pernah ada.
+    const sisaApproval = await cleanupApprovalFixture(areqId);
+    chk('fixture approval dibersihkan tuntas', sisaApproval, 0);
   }
 
   console.log('\n8. HR: PIN & data gaji tidak terbuka untuk semua (DR-P0-03)');
@@ -207,48 +304,59 @@ async function main() {
     await status('GET', '/hr/position-rates', undefined, master), 200);
 
   console.log('\n9. Payslip tidak mempercayai angka dari klien (DR-P0-04)');
-  // Versi lama menyimpan calculation/advances/deductions/net_salary apa adanya
-  // dari body. Siapa pun yang bisa memanggil endpoint ini tinggal mengubah
-  // angkanya lewat DevTools dan memfinalisasi gaji sembarang.
-  const empList = await call('GET', '/hr/employees', undefined, master);
-  const empUji = (empList.json?.data || [])[0];
-  chk('ada karyawan untuk diuji payslip', !!empUji?.id, true);
+  // ⚠️ Versi pertama tes ini BERBAHAYA dan ditemukan tim reviewer: ia memilih
+  // karyawan pertama dari database nyata. Query kasbon memasukkan setiap kasbon
+  // `pending` ber-`period_month IS NULL` ke periode APA PUN, jadi periode 2099
+  // sama sekali tidak membuatnya aman — endpoint save akan melunasi kasbon
+  // karyawan sungguhan dan meninggalkan dokumen gaji palsu.
+  //
+  // Sekarang seluruh fixture dibuat sendiri dan dibersihkan di `finally`.
+  const fx = await seedPayrollFixture();
+  chk('fixture payroll dibuat', !!fx?.employeeId, true);
 
-  if (empUji?.id) {
-    // Periode jauh di depan supaya tidak menyentuh data gaji sungguhan.
-    const periode = { employee_id: empUji.id, period_month: 12, period_year: 2099 };
-    const PALSU = 999999999;
+  if (fx?.employeeId) {
+    try {
+      const PALSU = 999999999;
+      const kasbonLuarSebelum = await advanceRow(fx.kasbonLuarId);
 
-    const simpan = await call('POST', '/hr/payslip/save', {
-      ...periode,
-      calculation: { basic_salary: PALSU, tunjangan: PALSU, ot_pay: PALSU, gross_salary: PALSU, total_days: 99, total_ot_hours: 99 },
-      advances: { advance_1: 0, advance_2: 0, records: [{ id: 999999 }] },
-      deductions: { bpjs_kes: 0, bpjs_tk: 0, pph21: 0, total: 0 },
-      net_salary: PALSU,
-      notes: 'uji DR-P0-04',
-    }, master);
+      const simpan = await call('POST', '/hr/payslip/save', {
+        employee_id: fx.employeeId, period_month: 12, period_year: 2099,
+        // Semua ini harus DIABAIKAN server.
+        project_id: 999999,
+        calculation: { basic_salary: PALSU, tunjangan: PALSU, ot_pay: PALSU, gross_salary: PALSU, total_days: 99 },
+        advances: { advance_1: 0, advance_2: 0, records: [{ id: fx.kasbonLuarId }] },
+        deductions: { bpjs_kes: 0, bpjs_tk: 0, pph21: 0, total: 0 },
+        net_salary: PALSU,
+        notes: 'uji DR-P0-04',
+      }, master);
 
-    chk('payslip tersimpan', simpan.status, 201);
-    chk('net_salary palsu TIDAK dipakai', simpan.json?.data?.net_salary === PALSU, false);
-    chk('gross_salary palsu TIDAK dipakai', simpan.json?.data?.gross_salary === PALSU, false);
+      chk('payslip tersimpan', simpan.status, 201);
+      chk('net_salary palsu diabaikan', simpan.json?.data?.net_salary === PALSU, false);
 
-    // Tanpa absensi di periode itu, hitungan server = 0. Itu yang harus tersimpan.
-    chk('server menghitung sendiri (0, bukan angka klien)', Number(simpan.json?.data?.gross_salary), 0);
+      // Fixture punya 1 hari absensi bertarif 100.000 → server harus menghitung
+      // itu, bukan 0 dan bukan angka klien.
+      chk('server menghitung dari absensi fixture', Number(simpan.json?.data?.gross_salary), 100000);
 
-    // Kasbon milik id karangan tidak boleh ikut ditandai lunas.
-    chk('kasbon id karangan tidak ditandai', Number(simpan.json?.data?.advances_marked), 0);
+      // Inti temuan reviewer: kasbon MILIK ORANG LAIN tidak boleh tersentuh,
+      // walau id-nya dikirim klien.
+      const kasbonLuarSesudah = await advanceRow(fx.kasbonLuarId);
+      chk('kasbon karyawan lain TIDAK berubah statusnya',
+        kasbonLuarSesudah?.status, kasbonLuarSebelum?.status);
+      chk('kasbon karyawan lain TIDAK berubah sisanya',
+        Number(kasbonLuarSesudah?.remaining), Number(kasbonLuarSebelum?.remaining));
 
-    // Yang tersimpan di database juga harus angka server, bukan angka klien.
-    const riwayat = await call('GET', `/hr/payslip/history?employee_id=${empUji.id}&period_year=2099`, undefined, master);
-    const tersimpan = (riwayat.json?.data || []).find((r: any) => Number(r.period_month) === 12);
-    if (tersimpan) {
-      chk('yang tersimpan bukan angka palsu', Number(tersimpan.net_salary) === PALSU, false);
-    } else {
-      chk('payslip uji terbaca kembali', false, true);
+      // Kasbon milik karyawan fixture memang harus terpotong.
+      const kasbonSendiri = await advanceRow(fx.kasbonSendiriId);
+      chk('kasbon sendiri terpotong', kasbonSendiri?.status, 'deducted');
+      chk('sisa kasbon sendiri nol', Number(kasbonSendiri?.remaining), 0);
+
+      chk('simpan payslip oleh user tanpa hak',
+        await status('POST', '/hr/payslip/save',
+          { employee_id: fx.employeeId, period_month: 12, period_year: 2099 }, plainToken), 403);
+    } finally {
+      const sisa = await cleanupPayrollFixture(fx);
+      chk('fixture payroll dibersihkan tuntas', sisa, 0);
     }
-
-    chk('simpan payslip oleh user tanpa hak',
-      await status('POST', '/hr/payslip/save', periode, plainToken), 403);
   }
 
   console.log('\n10. Akun nonaktif tidak bisa dipakai (DR-P1-01)');

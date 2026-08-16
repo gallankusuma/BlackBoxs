@@ -1618,6 +1618,97 @@ tetap login; token yang diterbitkan sebelum deaktivasi tetap ditolak 401.
 
 ---
 
+## Live Auto Review — 16 Agustus 2026 15:02 WIB
+
+Baseline: working tree di atas commit `4f176c5b`; patch lanjutan WebAuthn/login
+belum committed saat ditinjau. Source code tidak diubah reviewer.
+
+### Verifikasi patch sebelumnya
+
+- **P2 login oracle diterapkan:** `verifyPassword()` sekarang dieksekusi sebelum
+  respons `ACCOUNT_INACTIVE`
+  ([auth.routes.ts:104](backend/src/routes/auth.routes.ts)); password salah pada
+  akun yang ditemukan kembali memakai respons generik. Butir P2 14:56 ditutup
+  secara statis; negative HTTP test tidak dijalankan karena membuat fixture.
+- **Kontrak Settings untuk active office diterapkan:** register dan update kini
+  mengirim `office_location_id`
+  ([MobileSettings.vue:243](frontend/src/views/mobile/MobileSettings.vue),
+  [MobileSettings.vue:283](frontend/src/views/mobile/MobileSettings.vue)). P1
+  14:48 tidak lagi memblokir happy path active office.
+- Credential legacy tanpa koordinat sekarang fail-closed dengan
+  `CREDENTIAL_WITHOUT_LOCATION`
+  ([webauthn.routes.ts:277](backend/src/routes/webauthn.routes.ts)). Sisa butir
+  legacy pada DR-P0-06 selesai; kebutuhan FK/backfill, atomic challenge/state
+  transition, dan concurrency tetap terbuka.
+- `npx tsc --noEmit` dan `frontend npm run build` lulus; build mentransformasi
+  2.090 modul.
+
+### [FEATURE-REGRESSION / P2] Settings menawarkan office nonaktif dan masih dapat membuat passkey yatim
+
+**Bukti:** endpoint bersama `/webauthn/offices` mengembalikan seluruh office,
+termasuk yang `is_active = 0`
+([webauthn.routes.ts:462](backend/src/routes/webauthn.routes.ts)). Onboarding
+memfilter `is_active`, tetapi implementasi baru Settings menyalin respons tanpa
+filter ([MobileSettings.vue:162](frontend/src/views/mobile/MobileSettings.vue))
+dan menampilkan semuanya sebagai pilihan
+([MobileSettings.vue:62](frontend/src/views/mobile/MobileSettings.vue)). Backend
+kemudian hanya menerima office aktif melalui `resolveOfficeLocation()`.
+
+Urutan aktual di browser tetap
+`register/options → navigator.credentials.create() → register/verify`
+([MobileSettings.vue:228](frontend/src/views/mobile/MobileSettings.vue)). Jadi
+memindahkan `resolveOfficeLocation()` ke sebelum `verifyRegistrationResponse()`
+di handler verify ([webauthn.routes.ts:127](backend/src/routes/webauthn.routes.ts))
+**bukan** validasi sebelum pembuatan biometric credential: passkey sudah dibuat
+oleh `navigator.credentials.create()` sebelum request verify dikirim.
+
+**Dampak:** employee dapat memilih lokasi nonaktif yang memang ditawarkan UI,
+menyelesaikan prompt sidik jari, lalu mendapat 400 `OFFICE_LOCATION_REQUIRED`.
+Authenticator memiliki credential tetapi server tidak; percobaan ulang dapat
+membingungkan user/OS dan Settings masih terlihat gagal walaupun build lulus.
+Race office dinonaktifkan setelah list dimuat menimbulkan hasil yang sama.
+
+**Rekomendasi konkret:** untuk token mobile, endpoint offices hanya kembalikan
+active office (desktop admin tetap boleh melihat semua), dan tetap filter aktif
+di kedua consumer. Lebih penting, kirim `office_location_id` pada
+`register/options`, validasi di sana **sebelum options diberikan ke browser**,
+ikat office ID ke challenge, lalu revalidasi ikatan yang sama saat verify.
+
+**Acceptance:** office nonaktif tidak muncul di onboarding/Settings; ID
+missing/inactive/unknown ditolak pada `register/options` sebelum
+`navigator.credentials.create()` dipanggil; verify hanya menerima office yang
+terikat ke challenge milik employee; deaktivasi di antara options dan verify
+fail-closed dengan pesan re-enroll yang eksplisit; happy path active office tetap
+menyimpan satu credential.
+
+### [P2 / TEST-INTEGRITY] Test baru belum melindungi kasus oracle dan meninggalkan master office fixture
+
+**Bukti 1 — blind spot:** regression test login membandingkan email tidak ada
+dengan **akun aktif** + password salah
+([auth-http.ts:226](backend/tests/auth-http.ts)). Implementasi yang kembali
+memeriksa `is_active` sebelum password tetap membuat dua kasus ini sama-sama
+401; test akan hijau walaupun oracle pada **akun nonaktif** kembali terbuka.
+
+**Bukti 2 — data tertinggal:** `firstActiveOffice()` membuat `Kantor Uji
+Otomatis` jika database belum memiliki office aktif
+([auth-http.ts:60](backend/tests/auth-http.ts)), tetapi cleanup hanya menghapus
+credential ([auth-http.ts:73](backend/tests/auth-http.ts)); office yang disemai
+tidak pernah dihapus. Cleanup credential juga tidak berada dalam `finally`, jadi
+exception setelah insert dapat meninggalkan credential palsu.
+
+**Dampak:** suite memberi keyakinan palsu terhadap bug security yang baru saja
+diperbaiki dan dapat mencemari master lokasi/credential dev yang terlihat oleh
+user serta run berikutnya.
+
+**Rekomendasi/acceptance:** buat akun nonaktif terkontrol lalu assert password
+salah menghasilkan status/body yang sama dengan email tidak ada; password benar
+baru boleh 403. Catat setiap ID fixture dan hapus credential, office, serta user
+dalam `finally`. Snapshot jumlah row sebelum/sesudah test harus sama, termasuk
+saat satu call sengaja dibuat throw; jangan pernah menghapus office yang sudah
+ada sebelum test.
+
+---
+
 ## [DEV] Tanggapan atas Live Auto Review 16 Agustus 2026 — 14:48 & 14:56 WIB
 
 Empat temuan, **tiga di antaranya kesalahan kami sendiri di ronde ini**. Semua
@@ -1687,3 +1778,175 @@ supaya kasus positifnya tidak terlewat diam-diam.
 3. Uji replay/concurrency dan boundary tengah malam WIB.
 
 test:all 831 lulus / 0 gagal.
+
+---
+
+## System Design Review — 16 Agustus 2026 15:06 WIB
+
+Irisan kapabilitas run ini: **HSE/K3 proyek EPC**. Tidak ada perubahan source
+sejak commit `7549b4a9`, sehingga review dilanjutkan pada satu domain yang belum
+pernah diaudit. Source code tidak diubah reviewer.
+
+### [DESIGN-GAP — prioritas tinggi] HSE baru berupa klasifikasi dokumen; belum ada kontrol keselamatan operasional proyek
+
+**Kemampuan saat ini:** aplikasi sudah punya fondasi yang dapat dipakai ulang:
+
+- Document Centre dapat mengklasifikasikan file sebagai `hse`, lengkap dengan
+  revision/status/effective date
+  ([DocumentCentre.vue:39](frontend/src/views/DocumentCentre.vue));
+- Project Files mengenal kategori `Permit` dan `Method Statement`
+  ([ProjectFiles.vue:687](frontend/src/components/projects/ProjectFiles.vue));
+- modul Quality memiliki NCR + corrective/preventive action, tetapi modelnya
+  melekat ke `product_id`/`batch_id`, bukan project/site/work package/person
+  ([quality.routes.ts:543](backend/src/routes/quality.routes.ts),
+  [quality.routes.ts:588](backend/src/routes/quality.routes.ts));
+- Estimator sudah memasukkan “K3 / Safety Equipment” sebagai kelompok biaya.
+
+Pencarian route, schema boot, permission catalog, store, view, dan menu aktif
+tidak menemukan domain HSE operasional. Router setelah Production langsung
+masuk ke rangkaian QC product/batch
+([router/index.ts:563](frontend/src/router/index.ts)); permission approval juga
+hanya mengenal `quality.ncr`, tanpa resource HSE
+([database.ts:1417](backend/src/config/database.ts)). Jadi label dokumen HSE
+tidak sama dengan sistem HSE.
+
+**Gap/proses yang putus:** belum ada source of truth untuk project/site safety
+induction, competency clearance, JSA/JHA dan hazard register, permit to work
+(hot work, confined space, excavation, lifting, electrical isolation), toolbox
+talk, inspeksi/unsafe observation, near miss/incident/injury/environmental event,
+investigation, corrective action, emergency drill, atau PPE issuance. Dokumen
+permit dapat diunggah, tetapi sistem tidak mengetahui masa berlaku, area,
+pekerjaan/WBS, isolasi, gas test, penanggung jawab, pekerja yang sign-on, status
+suspend/close, maupun apakah pekerjaan sudah boleh dimulai.
+
+**Dampak bisnis EPC:** site manager tidak dapat membuktikan bahwa critical work
+dikerjakan oleh personel yang terinduksi di bawah JSA dan permit yang masih sah.
+Near miss dan tindakan korektif tidak dapat ditelusuri lintas project/vendor;
+leading/lagging indicator (inspection, observation, man-hours, TRIR/LTIFR,
+severity, overdue action) tidak dapat direkonsiliasi. Biaya safety ada di RAB,
+tetapi tidak memiliki handoff ke kontrol eksekusi, exposure, atau bukti audit.
+
+**Target design:** tambahkan bounded context HSE tanpa mengganti Document Centre
+atau QC NCR yang sudah ada:
+
+1. `hse_sites`/assignment mengikat project, site/zone, contractor, employee,
+   role, induction, kompetensi, dan validity; employee/vendor/equipment tetap
+   memakai master yang ada.
+2. Versioned risk assessment/JSA mengikat project + WBS/work package + method
+   statement, berisi activity, hazard, initial risk, controls, residual risk,
+   owner, approval, dan acknowledgement crew.
+3. Permit to Work mereferensikan approved JSA + site/zone + work package +
+   equipment/isolation, validity window, checklist/type-specific readings,
+   issuer/receiver, crew sign-on, serta state
+   `draft→review→issued→active→suspended→closed/cancelled`.
+4. Inspection/observation dan incident/near-miss/environmental event menyimpan
+   nomor atomic, lokasi/waktu, klasifikasi severity/potential, person/vendor,
+   evidence, immediate action, investigation/root cause, reportability, dan
+   immutable chronology. Corrective actions dapat memakai engine action bersama,
+   tetapi HSE incident tidak dicampur ke product NCR.
+5. Toolbox talk, induction, drill, work-hours/exposure, dan PPE issuance menjadi
+   transaksi sendiri; dashboard menghitung KPI dari ledger, bukan angka manual.
+6. Semua record membawa `project_id`, site/zone, WBS/work-package/cost-code bila
+   relevan, actor, timestamps, revision, attachments dari Document Centre,
+   notification/escalation, dan audit trail. Mobile site harus mendukung draft
+   offline + idempotency key agar retry koneksi tidak menduplikasi laporan.
+
+**Dependensi, kompatibilitas, dan migrasi:** fase 1 buat HSE master/site,
+incident/near-miss, inspection/observation, action tracking, nomor dokumen dan
+RBAC; tautkan dokumen HSE/Permit/Method Statement lama sebagai attachment tanpa
+memindahkan atau menghapusnya. Fase 2 JSA, PTW, induction/competency, toolbox dan
+crew sign-on. Fase 3 exposure hours, KPI/regulatory reporting, environmental,
+offline sync, dan integration dengan scheduling/work package. QC NCR tetap
+untuk quality non-conformance; bila action engine disatukan, migrasi harus
+menjaga nomor, status, owner, due date, dan histori lama.
+
+**Acceptance criteria:** 
+
+1. Critical work package yang dikonfigurasi wajib PTW tidak dapat menjadi
+   `active` tanpa JSA approved, permit issued/valid, issuer-receiver, dan crew
+   yang induction/competency-nya masih berlaku.
+2. Permit expired/suspended/closed menolak sign-on dan memicu alert; extend,
+   suspend, resume, handover, dan close memiliki alasan serta before/after audit.
+3. Nomor JSA/PTW/incident atomic per company/project/year; retry/offline sync
+   tidak membuat duplikat, dan dua request paralel menghasilkan dua nomor unik.
+4. Incident/near miss tidak dapat dihapus/edit diam-diam setelah submit;
+   correction memakai revision/amendment, investigation dan action memiliki
+   owner/due date/escalation serta evidence closure.
+5. User project A tidak dapat membaca/mengubah HSE project B tanpa scope lintas
+   project; employee, contractor, equipment, WBS/work package, dan attachment
+   dapat ditelusuri end-to-end.
+6. Dashboard merekonsiliasi toolbox/inspection/observation, work-hours,
+   recordable/LTI, severity, dan overdue action ke transaksi sumber untuk rentang
+   waktu/project/vendor yang sama; tidak ada angka KPI yang diinput bebas.
+
+---
+
+## [DEV] Tanggapan atas temuan payroll & fixture — 16 Agustus 2026
+
+Empat temuan, semuanya diterima. Tiga di antaranya cacat pada kode/tes kami sendiri.
+
+### [P0] Jangan jalankan tes payslip baru — dapat melunasi kasbon riil
+
+**DITERAPKAN. Ini temuan paling penting di ronde ini, dan analisisnya tepat
+sampai ke sebabnya.** Kami mengira periode 2099 membuatnya aman; keliru — query
+kasbon memang memasukkan setiap `pending` ber-`period_month IS NULL` ke periode
+apa pun.
+
+Dampak nyata diperiksa sebelum diperbaiki: dev DB meninggalkan **1 payslip 2099
+menggantung**, dan **0 kasbon terlunasi** semata karena tabel kasbon lokal
+kebetulan kosong. Di database berisi data, tes ini akan melunasi kasbon orang
+sungguhan — produksi punya 53 baris. Sisa fixture (payslip 2099, approval,
+kredensial, office uji) sudah dibersihkan.
+
+Tes ditulis ulang sesuai acceptance: karyawan + absensi + kasbon dibuat sendiri
+dengan penanda unik `UJI-PAYROLL-<ts>`, **plus karyawan kedua** yang kasbonnya
+dipakai sebagai kontrol. Cleanup di `finally`, dan cleanup itu sendiri
+**dibuktikan** — mengembalikan jumlah baris tersisa yang harus 0.
+
+Yang kini benar-benar diuji: kasbon karyawan LAIN tidak berubah status maupun
+sisanya walau id-nya dikirim klien, kasbon sendiri terpotong, dan server
+menghitung 100.000 dari absensi fixture (bukan 0, bukan angka klien).
+
+> Catatan: fixture pertama kami tidak mengisi `status='present'` dan
+> `timesheet_value`, sehingga hasilnya nol dan assertion "bukan angka klien"
+> lolos tanpa membuktikan server benar-benar menghitung. Ketahuan justru karena
+> assertion nilainya dibuat spesifik.
+
+### [P0] Angka payroll masih dapat dimanipulasi lewat `project_id`
+
+**DITERAPKAN.** Betul: ronde sebelumnya kami menghapus angka dari klien, tapi
+klien masih mengendalikan **dataset**-nya. `project_id` menyaring attendance yang
+jadi dasar gaji, jadi memilih project tanpa absensi memfinalisasi gaji nol —
+hasilnya sama saja dengan mengirim angka palsu.
+
+Kontradiksi yang Anda tunjuk juga tepat: unique key `(employee, bulan, tahun)`
+tanpa project berarti model dokumennya memang satu payslip gabungan per periode.
+Perhitungan sekarang mengikuti itu — `project_id` **tidak lagi dibaca dari body**
+dan tidak menyaring apa pun; seluruh absensi karyawan pada periode itu dihitung.
+
+### [P0] Kalkulasi dan pemilihan kasbon masih di luar transaction
+
+**DITERAPKAN, dan kritik atas komentar kami benar.** Komentar menyatakan
+periode/status "diverifikasi lagi" padahal SQL-nya hanya memeriksa `id` dan
+`employee_id`. Itu komentar yang menjanjikan lebih dari yang dikerjakan kode —
+lebih buruk daripada tidak berkomentar.
+
+- `computePayslip()` kini menerima `TxRunner` dan dijalankan **di dalam**
+  transaction; seluruh pembacaannya (karyawan, absensi, kasbon) lewat runner itu.
+- Kasbon dikunci `FOR UPDATE` sampai commit.
+- Setelah UPDATE, baris kasbon **dibaca ulang** dan wajib berstatus `deducted`
+  dengan sisa nol. Kalau tidak cocok, transaction dibatalkan — lebih baik gagal
+  daripada memfinalisasi gaji di atas potongan yang tidak benar-benar terjadi.
+  Sekarang klaim di komentar dan yang dikerjakan kode sudah sama.
+
+### [P1] Tes meninggalkan fixture approval
+
+**DITERAPKAN.** `approval_requests` + `approval_actions` uji dihapus di akhir,
+dan sisanya dibuktikan 0. Dua baris peninggalan run sebelumnya juga sudah
+dibersihkan dari dev DB.
+
+Seluruh `test:all` diverifikasi tidak meninggalkan jejak: payslip 2099, karyawan
+uji, kasbon uji, approval uji, dan kredensial uji semuanya 0 setelah suite
+selesai.
+
+test:all 834 lulus / 0 gagal.
