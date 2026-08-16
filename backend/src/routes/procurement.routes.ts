@@ -123,7 +123,11 @@ const businessDatePart = (): string =>
     year: 'numeric', month: '2-digit', day: '2-digit',
   }).format(new Date()).replace(/-/g, '');
 
-const nextSequentialCode = async (
+// Diekspor supaya modul lain memakai penomoran yang SAMA. Estimator dulu membuat
+// nomor PR sendiri dengan akhiran acak 4 digit (DR-P1-06); nomor acak itu lalu
+// menjadi seed bagi counter ini dan mendorongnya melewati 9999 — nomor jadi
+// 5 digit dan format resminya rusak.
+export const nextSequentialCode = async (
   prefix: string, table: string, column: string, tx: TxRunner
 ): Promise<string> => {
   const datePart = businessDatePart();

@@ -4,6 +4,7 @@ import { checkUnitCompatibility, isProposalEditable } from '../modules/estimator
 import { enrichMtoElement, groupStoredLines } from '../modules/estimator/mto/enrich';
 import { authMiddleware } from '../middleware/auth';
 import { dbAll, dbGet, dbRun , withTransaction, TxRunner} from '../config/database';
+import { nextSequentialCode } from './procurement.routes';
 
 const router = Router();
 
@@ -2336,11 +2337,12 @@ router.put('/proposals/:id/status', authMiddleware, async (req: Request, res: Re
           }));
 
           if (materialList.length > 0) {
-            // Generate PR number
-            const now = new Date();
-            const datePart = now.toISOString().slice(0, 10).replace(/-/g, '');
-            const rand = Math.floor(1000 + Math.random() * 9000);
-            const prNumber = `PR-${datePart}-${rand}`;
+            // DR-P1-06: nomor PR memakai generator resmi Procurement, bukan
+            // akhiran acak 4 digit. Nomor acak itu bukan hanya rawan tabrakan —
+            // ia juga menjadi seed bagi counter berurutan Procurement dan
+            // mendorongnya melewati 9999, sehingga format PR-YYYYMMDD-NNNN rusak.
+            const prNumber = await withTransaction(tx2 =>
+              nextSequentialCode('PR', 'purchase_requests', 'pr_number', tx2));
 
             const estimatedTotal = materialList.reduce((sum, item) => sum + (item.qty * item.price), 0);
 

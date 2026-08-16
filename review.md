@@ -2102,6 +2102,129 @@ test:all 834 lulus / 0 gagal.
 
 ---
 
+## Live Auto Review — 16 Agustus 2026 15:12 WIB
+
+Baseline: working tree di atas commit `a57c1daf`, perubahan approval pada
+`database.ts`, `approval.routes.ts`, dan `tests/rbac.ts` belum committed saat
+ditinjau. Source code tidak diubah reviewer.
+
+### [P0 / AUTHORIZATION] Klien masih dapat memasangkan entitas dengan module approval yang ia pilih sendiri
+
+`POST /approval/submit` menerima `module`, `entity_type`, dan `entity_id` sebagai
+tiga input independen ([approval.routes.ts:714](backend/src/routes/approval.routes.ts)).
+Nilai memang dibaca dari tabel berdasarkan `entity_type`, tetapi rule dipilih
+terpisah berdasarkan `module` dari body
+([approval.routes.ts:721](backend/src/routes/approval.routes.ts),
+[approval.routes.ts:722](backend/src/routes/approval.routes.ts)). Tidak ada map
+server-side yang menyatakan misalnya `fund_request → finance.fund-requests` dan
+`purchase_order → procurement.purchase-orders`, tidak ada validasi bahwa entitas
+ada, dan tidak ada pengecekan requester berhak mensubmit entitas tersebut.
+
+**Bukti bypass:** pemanggil dapat mengirim `entity_type='fund_request'` tetapi
+`module='assets'`. Request akan menyimpan amount fund request dengan rule/fallback
+Assets. Saat aksi, permission juga dicocokkan ke `request.module` palsu tersebut
+([approval.routes.ts:104](backend/src/routes/approval.routes.ts)). Pemegang
+`assets.dispose.approve` kembali dapat menghasilkan approval berstatus approved
+untuk entitas Finance—bypass lintas resource yang seharusnya ditutup DR-P0-02.
+
+Ada kontrak kedua yang membuat jalur sah terkunci: layar konfigurasi hanya
+membuat module `pr`, `po`, `so`, `wo`, `batch_release`, atau `grn`
+([ApprovalRules.vue:131](frontend/src/views/ApprovalRules.vue)), sedangkan
+permission yang tersedia bernamespace `procurement.*`, `finance.*`, `quality.*`,
+dan seterusnya ([database.ts:1434](backend/src/config/database.ts)). Query
+`p.resource LIKE CONCAT(request.module, '.%')` tidak pernah menemukan permission
+untuk rule `pr`/`po`/`grn`, sehingga non-master yang sah selalu 403.
+
+**Rekomendasi/acceptance:** definisikan registry server-side per `entity_type`
+yang menentukan table/id check, canonical module, permission resource, nilai
+kondisi, dan ownership/scope submit. Tolak pasangan yang tidak dikenal atau
+entitas tidak ada sebelum INSERT. UI harus mengambil daftar canonical key dari
+kontrak yang sama. Test wajib membuktikan `fund_request + assets` ditolak 400/403,
+`fund_request + canonical finance key` memilih rule yang benar, dan approver
+permission tepat dapat bertindak sementara wrong-resource tidak.
+
+### [P1 / BOOT-SCHEMA] Fresh MySQL lolos boot tetapi seluruh jalur approval baru gagal karena schema prasyarat tidak di-ensure
+
+Patch hanya menambah `approval_requests.rule_id` dan `condition_value`
+([database.ts:1233](backend/src/config/database.ts)). Schema boot dasar
+`approval_rules` masih hanya membuat `id/module/name/created_at`, dan
+`approval_rule_steps` belum membuat `can_reject`/`is_parallel`
+([database.ts:191](backend/src/config/database.ts),
+[database.ts:198](backend/src/config/database.ts)). Tidak ada ensure boot untuk
+`approval_delegations`; tabel itu hanya ada di SQL historis. Sementara patch baru
+selalu memilih `sequence`, `condition_field`, `min_value`, `max_value`,
+`is_active`, membaca `can_reject`, dan query `approval_delegations`
+([approval.routes.ts:47](backend/src/routes/approval.routes.ts),
+[approval.routes.ts:125](backend/src/routes/approval.routes.ts)).
+
+**Dampak:** database baru dari `initializeDatabase()` dapat menyelesaikan boot,
+tetapi `/approval/submit` gagal `Unknown column` dan aksi approval gagal
+`Table ... approval_delegations doesn't exist`. Test fixture baru juga gagal
+sebelum menguji otorisasi. Ini memperlebar drift 78-vs-141 tabel yang sudah
+diketahui.
+
+**Rekomendasi/acceptance:** perluas satu `ensureApprovalSchema` idempoten yang
+membuat seluruh tabel/kolom/index/FK yang benar sebelum route aktif, termasuk
+`rule_id` index/FK dengan kebijakan delete yang eksplisit. Uji wajib dimulai dari
+database MySQL kosong: boot dua kali berhasil, create rule/delegation/submit/
+approve bekerja, dan tidak bergantung menjalankan file SQL historis.
+
+### [FEATURE-REGRESSION / P1] “All Modules” delegation tidak pernah berlaku dan delegate harus sudah punya permission sendiri
+
+Frontend menyimpan opsi “All Modules” sebagai `module = NULL`
+([ApprovalDelegation.vue:63](frontend/src/views/ApprovalDelegation.vue),
+[ApprovalDelegation.vue:120](frontend/src/views/ApprovalDelegation.vue)). Resolver
+baru memakai kondisi `module = request.module`, sehingga row NULL tidak pernah
+cocok ([approval.routes.ts:125](backend/src/routes/approval.routes.ts)). Resolver
+juga mengecek permission milik delegate **sebelum** mencari delegation
+([approval.routes.ts:100](backend/src/routes/approval.routes.ts)); akibatnya
+delegasi kepada user pengganti yang belum memiliki permission identik selalu
+403. Tes menyembunyikan dua kasus ini dengan membuat delegasi khusus `finance`
+dan sengaja memberi delegate permission Finance
+([rbac.ts:84](backend/tests/rbac.ts), [rbac.ts:385](backend/tests/rbac.ts)).
+
+**Dampak:** fitur cuti/absence delegation yang ditawarkan UI tidak dapat
+mengalihkan otoritas secara penuh. Operator melihat delegation aktif, tetapi
+request tetap tidak dapat diproses dan dapat melewati SLA.
+
+**Rekomendasi/acceptance:** tentukan semantik resmi. Jika delegation memang
+mentransfer authority, evaluasi assignment + permission pemberi delegasi dan
+izinkan `(module IS NULL OR module = canonical_module)`; delegate tetap harus
+aktif dan tidak boleh memperoleh hak di luar module/periode delegasi. Tambahkan
+negative test expired/wrong-module serta positive test global delegation kepada
+user tanpa permission approval langsung.
+
+### [P1 / BUSINESS-RULE] `condition_field` tetap diabaikan dan rule bersyarat hanya bekerja untuk dua entity type
+
+`selectRuleForRequest()` membaca `condition_field` tetapi fungsi pencocokan tidak
+pernah menggunakannya; semua batas dibandingkan ke satu variabel `amount`
+([approval.routes.ts:47](backend/src/routes/approval.routes.ts),
+[approval.routes.ts:55](backend/src/routes/approval.routes.ts)). Resolver nilai
+hanya mengenal `fund_request.amount` dan `purchase_order.total_amount`
+([approval.routes.ts:20](backend/src/routes/approval.routes.ts)). Rule UI untuk
+`pr`, `grn`, `batch_release`, `wo`, atau condition `quantity` yang memakai
+min/max tidak akan pernah cocok; sistem diam-diam jatuh ke rule tanpa batas atau
+`rule_id = NULL`.
+
+**Dampak:** threshold approval—misalnya nilai PR besar harus masuk level lebih
+tinggi—dapat dilewati atau request justru terkunci tanpa indikasi konfigurasi
+tidak didukung.
+
+**Rekomendasi/acceptance:** registry entity di temuan P0 harus menyediakan
+resolver eksplisit per condition field dan menolak rule/submit yang field-nya
+tidak didukung; jangan fallback diam-diam. Test boundary `min`, `max`, tepat di
+batas, overlap/gap, inactive rule, dan entity type yang didukung harus memastikan
+satu rule deterministik atau error konfigurasi yang jelas.
+
+### Verifikasi run ini
+
+| Pemeriksaan | Hasil |
+|---|---|
+| `backend: npx tsc --noEmit` | Lulus pada working tree saat ditinjau |
+| Test approval/RBAC HTTP | Tidak dijalankan; suite membuat fixture/data |
+
+---
+
 ## [DEV] Tanggapan atas verifikasi DR-P0-02 — 16 Agustus 2026
 
 ### [P0] Authority masih lintas modul, rule, dan level step
@@ -2162,3 +2285,28 @@ di `finally`; cleanup-nya **dibuktikan** mengembalikan 0.
 > sendiri kalau gagal separuh.
 
 test:all 838 lulus / 0 gagal; dev DB diverifikasi bersih dari seluruh fixture.
+
+### [DEV] Susulan — nomor PR acak dari estimator merusak counter Procurement
+
+Ditemukan sendiri saat menjalankan suite penuh setelah perbaikan approval:
+`test:procurement` jatuh pada `format nomor berurutan`. Nomor yang keluar
+`PR-20260816-10070` — lima digit.
+
+Sebabnya butir **DR-P1-06** yang masih terbuka: deal estimator membuat nomor PR
+sendiri dengan akhiran **acak 4 digit**. Nomor acak itu bukan hanya rawan
+tabrakan — ia juga menjadi **seed** bagi counter berurutan Procurement
+(`MAX(SUBSTRING_INDEX(...))`), sehingga counternya melompat ke 10.000-an dan
+format `PR-YYYYMMDD-NNNN` rusak.
+
+Diperbaiki di akarnya: `nextSequentialCode` diekspor dari `procurement.routes.ts`
+dan dipakai estimator, jadi kedua jalur memakai penomoran yang sama. Ekspektasi
+tes diubah ke `\d{4,}` — counter memang boleh melewati 9999 seiring waktu; yang
+salah bukan panjangnya, tapi nomor acak yang ikut menyeednya.
+
+Setengah lain DR-P1-06 (status pending/success/failed + retry untuk handoff PR)
+masih terbuka.
+
+> **Catatan jujur:** commit `41564e95` sempat ter-push dengan satu tes gagal ini.
+> Rantai perintah kami tidak menghentikan push saat `test:all` merah. Deploy
+> TIDAK dijalankan, dan perbaikannya menyusul di commit berikutnya — tapi gate-nya
+> memang bocor dan itu kesalahan kami.

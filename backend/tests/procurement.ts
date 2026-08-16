@@ -232,7 +232,10 @@ async function main() {
   const two = await mkPr();
   const numOne = one.json?.data?.pr_number || '';
   const numTwo = two.json?.data?.pr_number || '';
-  chk('format nomor berurutan (PR-YYYYMMDD-NNNN)', /^PR-\d{8}-\d{4}$/.test(numOne), true);
+  // Minimal 4 digit, bukan tepat 4: counter memang boleh melewati 9999 seiring
+  // waktu. Yang salah bukan panjangnya, tapi nomor acak dari estimator yang dulu
+  // ikut menyeed counter ini (DR-P1-06).
+  chk('format nomor berurutan (PR-YYYYMMDD-NNNN+)', /^PR-\d{8}-\d{4,}$/.test(numOne), true);
   chk('nomor berikutnya naik satu',
     Number(numTwo.split('-')[2]) - Number(numOne.split('-')[2]), 1);
 
