@@ -88,7 +88,19 @@ function expect(label, got, oneOf, extra = '') {
   else if (login.status === 500) bad('query ke tabel users', 'HTTP 500 — kemungkinan backend tidak bisa konek database');
   else bad('query ke tabel users', `HTTP ${login.status}, diharapkan 401`);
 
-  console.log('\n3. Otorisasi ditegakkan');
+  console.log('\n3. Kredensial publik tidak berlaku');
+  // Sampai 16 Agustus 2026, `auth.routes.ts` memuat `password === 'master'`
+  // sebagai literal di repo PUBLIK, dan baris user master di database memang
+  // berpassword itu. Siapa pun yang membaca GitHub bisa login sebagai master
+  // penuh. Dua pintu, dan keduanya harus tetap tertutup.
+  const publik = await req('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ email: 'master@admin.com', password: 'master' }),
+  });
+  if (publik.status === 401) ok('kredensial master publik ditolak', 'HTTP 401');
+  else bad('kredensial master publik ditolak', `HTTP ${publik.status} — AKUN MASTER TERBUKA UNTUK PUBLIK`);
+
+  console.log('\n4. Otorisasi ditegakkan');
   // Tanpa token semuanya harus 401. Kalau 200, ada endpoint terbuka; kalau 404,
   // route-nya hilang dari build.
   for (const [label, path] of [
@@ -103,7 +115,7 @@ function expect(label, got, oneOf, extra = '') {
     else bad(`${label} menolak tanpa token`, `HTTP ${r.status} — seharusnya 401`);
   }
 
-  console.log('\n4. Endpoint kunci terdaftar (bukan 404)');
+  console.log('\n5. Endpoint kunci terdaftar (bukan 404)');
   // Kalkulator MTO dan preview batch adalah jalur yang dipakai layar estimator;
   // kalau hilang dari build, angka di layar berhenti muncul tanpa error jelas.
   for (const [label, path, method] of [
@@ -116,12 +128,15 @@ function expect(label, got, oneOf, extra = '') {
     else ok(`${label} terdaftar`, `HTTP ${r.status}`);
   }
 
-  console.log('\n5. Berkas unggahan terlayani');
+  console.log('\n6. Jalur berkas unggahan');
+  // ⚠️ Versi pertama pemeriksaan ini menembak `/uploads/` — DIREKTORI — dan
+  // menerima 403 sebagai "lulus". Itu rasa aman palsu: direktori memang ditolak,
+  // tapi BERKAS di dalamnya terlayani 200 tanpa token sama sekali (DR-P0-05).
+  // Yang benar diuji adalah berkasnya, bukan direktorinya.
   const uploads = await req('/uploads/');
-  // 403 (direktori tidak boleh dilihat isinya) maupun 404 sama-sama wajar.
-  // Yang tidak wajar adalah 502/000 — berarti nginx atau backend tidak menjawab.
   if ([403, 404, 200, 301].includes(uploads.status)) ok('jalur /uploads menjawab', `HTTP ${uploads.status}`);
   else bad('jalur /uploads menjawab', `HTTP ${uploads.status}`);
+  console.log('  catatan: akses berkas tanpa token belum diuji di sini — lihat DR-P0-05.');
 
   console.log(`\n${'='.repeat(46)}`);
   console.log(`${pass} lulus, ${fail} gagal`);

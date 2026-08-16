@@ -1,3 +1,4 @@
+import 'dotenv/config';
 /**
  * Tes autentikasi & otorisasi end-to-end lewat HTTP.
  *
@@ -9,7 +10,7 @@
  */
 const API = process.env.API || 'http://localhost:3005/api';
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'master@admin.com';
-const ADMIN_PASS = process.env.ADMIN_PASS || 'master';
+const ADMIN_PASS = process.env.ADMIN_PASS || process.env.MASTER_PASSWORD || 'master';
 const EMP_A = process.env.EMP_A || 'TEST-A';
 const EMP_B = process.env.EMP_B || 'TEST-B';
 
@@ -93,7 +94,34 @@ async function main() {
   chk('admin → offices (anyAuth)', await status('GET', '/webauthn/offices', undefined, adminToken), 200);
   chk('mobile → offices (anyAuth)', await status('GET', '/webauthn/offices', undefined, tokA), 200);
 
-  console.log('\n6. Registrasi publik & JWT di query string');
+  console.log('\n6. Kredensial master publik tidak berlaku (DR-P0)');
+  // Sampai 16 Agustus 2026 `auth.routes.ts` memuat `password === 'master'`
+  // sebagai literal, di repo PUBLIK — dan baris user master di database memang
+  // berpassword itu. Dua pintu: bypass di kode DAN user database. Mencabut yang
+  // pertama saja tidak menutup apa pun, karena login biasa tetap tembus.
+  const masterPublik = await call('POST', '/auth/login',
+    { email: 'master@admin.com', password: 'master' });
+  chk('login master dengan password publik ditolak', masterPublik.status, 401);
+  chk('tidak ada token yang terbit', !masterPublik.json?.token, true);
+
+  console.log('\n7. Token mobile tidak membuka modul R&D (DR-P0-01)');
+  // rnd.routes.ts dulu mendefinisikan authMiddleware sendiri yang hanya
+  // menjalankan jwt.verify(). Kedua jenis token ditandatangani secret yang sama,
+  // jadi token karyawan meloloskan seluruh 40 endpoint R&D — baca, ubah, hapus,
+  // dan unggah dokumen.
+  for (const [label, method, path] of [
+    ['daftar project R&D', 'GET', '/rnd/projects'],
+    ['buat project R&D', 'POST', '/rnd/projects'],
+    ['daftar formulation', 'GET', '/rnd/formulations'],
+  ] as [string, string, string][]) {
+    const r = await call(method, path, method === 'POST' ? { name: 'uji' } : undefined, tokA);
+    chk(`${label} menolak token mobile`, r.status, 401);
+  }
+  // Token desktop yang sah tetap harus lolos — bukan sekadar menutup semuanya.
+  const rndAdmin = await call('GET', '/rnd/projects', undefined, adminToken);
+  chk('token desktop tetap diterima R&D', rndAdmin.status < 400, true);
+
+  console.log('\n8. Registrasi publik & JWT di query string');
   chk('register tanpa token', await status('POST', '/auth/register', { email: 'x@y.com', password: 'secret123', name: 'X' }), 401);
   // AST-007: JWT tidak lagi diterima dari URL di endpoint mana pun, termasuk
   // route unduhan — frontend memakai axios responseType 'blob'.

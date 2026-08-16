@@ -1,10 +1,11 @@
+import 'dotenv/config';
 /**
  * Tes tautan MTO → RAB (EST-MTO-013..016).
  * Prasyarat: backend jalan. Jalankan: npm run test:mto-link
  */
 const API = process.env.API || 'http://localhost:3005/api';
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'master@admin.com';
-const ADMIN_PASS = process.env.ADMIN_PASS || 'master';
+const ADMIN_PASS = process.env.ADMIN_PASS || process.env.MASTER_PASSWORD || 'master';
 
 let pass = 0, fail = 0;
 const chk = (label: string, actual: unknown, expected: unknown) => {

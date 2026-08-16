@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'crypto';
 import { Router, Request, Response } from 'express';
 import { body, validationResult } from 'express-validator';
 import { dbAll, dbGet, dbRun, MASTER_EMAIL, MASTER_FALLBACK_ID } from '../config/database';
@@ -5,6 +6,49 @@ import { hashPassword, verifyPassword, validateEmail } from '../utils/auth.utils
 import { generateToken, authMiddleware } from '../middleware/auth';
 
 const router = Router();
+
+/**
+ * Perbandingan yang tidak membocorkan hasil lewat lama eksekusi.
+ * Panjang yang berbeda tetap terdeteksi lebih dulu — itu kebocoran yang bisa
+ * diterima dan sudah lazim.
+ */
+const secretEquals = (a: string, b: string): boolean => {
+  const ba = Buffer.from(String(a ?? ''));
+  const bb = Buffer.from(String(b ?? ''));
+  if (ba.length !== bb.length) return false;
+  return timingSafeEqual(ba, bb);
+};
+
+/**
+ * Password master — DR-P0 (review 16 Agustus 2026).
+ *
+ * Sebelumnya jalur ini berbunyi `password === 'master'`, literal, di repo yang
+ * PUBLIK. Artinya siapa pun yang membuka GitHub bisa login ke produksi sebagai
+ * master penuh: user_level 10 dan seluruh permission, tanpa menyentuh database.
+ * Terbuka sejak review pertama 4 Agustus.
+ *
+ * Sekarang dibaca dari `MASTER_PASSWORD` di `.env` server, jadi kode tidak lagi
+ * memuat kredensial apa pun.
+ *
+ * FAIL CLOSED: kalau tidak diisi — atau masih diisi 'master' yang sudah terlanjur
+ * publik — jalur master MATI. Tidak ada default diam-diam, karena default itulah
+ * yang membuat lubang ini bertahan dua belas hari.
+ */
+const masterLoginPassword = (): string | null => {
+  const value = process.env.MASTER_PASSWORD || '';
+  if (!value) return null;
+  if (value === 'master') {
+    console.error(
+      '🚨 MASTER_PASSWORD masih bernilai "master" — kredensial itu sudah publik di repo. '
+      + 'Jalur login master DINONAKTIFKAN sampai diganti.'
+    );
+    return null;
+  }
+  if (value.length < 12) {
+    console.warn(`⚠️  MASTER_PASSWORD hanya ${value.length} karakter. Disarankan minimal 12.`);
+  }
+  return value;
+};
 
 // POST /api/auth/login
 router.post(
@@ -22,8 +66,9 @@ router.post(
     try {
       const { email, password } = req.body;
 
-      // Hardcoded master user (hidden from database)
-      if (email === MASTER_EMAIL && password === 'master') {
+      // Master user — password dari .env, bukan dari kode. Lihat masterLoginPassword().
+      const masterPass = masterLoginPassword();
+      if (masterPass && email === MASTER_EMAIL && secretEquals(password, masterPass)) {
         // Token harus menunjuk ke baris users yang NYATA: banyak tabel punya FK
         // created_by → users(id), jadi id yang tidak ada di tabel membuat master
         // gagal membuat aset, dokumen, dsb. ensureMasterUserRow() menjamin

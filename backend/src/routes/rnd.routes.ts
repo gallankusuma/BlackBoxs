@@ -1,20 +1,23 @@
 import { Router, Request, Response } from 'express';
 import pool from '../config/database';
 import { RowDataPacket, ResultSetHeader } from 'mysql2';
+import { authMiddleware } from '../middleware/auth';
 
 const router = Router();
 
-// Helper
-const authMiddleware = (req: Request, res: Response, next: Function) => {
-  const token = req.headers.authorization?.split(' ')[1];
-  if (!token) return res.status(401).json({ error: 'Unauthorized' });
-  try {
-    const jwt = require('jsonwebtoken');
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'erp-secret-key-2024');
-    (req as any).user = decoded;
-    next();
-  } catch { return res.status(401).json({ error: 'Invalid token' }); }
-};
+// DR-P0-01: middleware lokal DIHAPUS dari sini.
+//
+// Versi lama hanya menjalankan `jwt.verify()`. Token mobile dan token desktop
+// ditandatangani JWT_SECRET yang sama, jadi verify saja meloloskan keduanya —
+// setiap karyawan yang bisa login PWA dapat membaca, mengubah, menghapus, dan
+// mengunggah seluruh dokumen R&D lewat 40 endpoint di file ini. Pemisahan scope
+// yang sudah benar di middleware pusat tidak berlaku sama sekali di modul ini.
+//
+// Middleware pusat menolak token ber-`scope: 'mobile'` dan token tanpa `userId`.
+//
+// Ia juga memuat `process.env.JWT_SECRET || 'erp-secret-key-2024'` — secret
+// cadangan yang tertulis di repo publik. Kalau JWT_SECRET pernah kosong, siapa
+// pun bisa menandatangani token sendiri.
 
 // ==================== R&D PROJECTS ====================
 
@@ -67,7 +70,7 @@ router.post('/projects', authMiddleware, async (req: Request, res: Response) => 
     const [result] = await pool.query<ResultSetHeader>(
       `INSERT INTO rnd_projects (project_code, name, project_type, category, description, objectives, expected_output, status, priority, risk_level, confidentiality, regulatory_requirements, target_market, target_product, project_leader_id, department_id, start_date, target_end_date, budget, tags, notes, created_by)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [projectCode, b.name, b.project_type||'new_product', b.category||'chemical', b.description, b.objectives, b.expected_output, b.status||'draft', b.priority||'medium', b.risk_level||'medium', b.confidentiality||'internal', b.regulatory_requirements, b.target_market, b.target_product, toNull(b.project_leader_id), toNull(b.department_id), toNull(b.start_date), toNull(b.target_end_date), b.budget||0, b.tags, b.notes, (req as any).user?.id]
+      [projectCode, b.name, b.project_type||'new_product', b.category||'chemical', b.description, b.objectives, b.expected_output, b.status||'draft', b.priority||'medium', b.risk_level||'medium', b.confidentiality||'internal', b.regulatory_requirements, b.target_market, b.target_product, toNull(b.project_leader_id), toNull(b.department_id), toNull(b.start_date), toNull(b.target_end_date), b.budget||0, b.tags, b.notes, (req as any).userId]
     );
     res.status(201).json({ data: { id: result.insertId, project_code: projectCode }, message: 'Project created' });
   } catch (err: any) { res.status(500).json({ error: err.message }); }
@@ -183,7 +186,7 @@ router.post('/formulations', authMiddleware, async (req: Request, res: Response)
     const [result] = await pool.query<ResultSetHeader>(
       `INSERT INTO rnd_formulations (formula_code, name, version, project_id, product_type_id, status, target_specs, description, notes, created_by)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [formula_code, name, version || '1.0', project_id, product_type_id, status || 'draft', target_specs, description, notes, (req as any).user?.id]
+      [formula_code, name, version || '1.0', project_id, product_type_id, status || 'draft', target_specs, description, notes, (req as any).userId]
     );
     // Insert ingredients if provided
     if (ingredients && Array.isArray(ingredients)) {
@@ -274,7 +277,7 @@ router.post('/lab-tests', authMiddleware, async (req: Request, res: Response) =>
     const [result] = await pool.query<ResultSetHeader>(
       `INSERT INTO rnd_lab_tests (test_code, test_name, formulation_id, project_id, batch_number, test_type, method, equipment, status, test_date, tested_by, parameters, results, conclusion, notes, created_by)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [test_code, test_name, formulation_id, project_id, batch_number, test_type || 'chemical', method, equipment, status || 'scheduled', test_date, tested_by, parameters ? JSON.stringify(parameters) : null, results ? JSON.stringify(results) : null, conclusion || 'pending', notes, (req as any).user?.id]
+      [test_code, test_name, formulation_id, project_id, batch_number, test_type || 'chemical', method, equipment, status || 'scheduled', test_date, tested_by, parameters ? JSON.stringify(parameters) : null, results ? JSON.stringify(results) : null, conclusion || 'pending', notes, (req as any).userId]
     );
     res.status(201).json({ data: { id: result.insertId }, message: 'Lab test created' });
   } catch (err: any) { res.status(500).json({ error: err.message }); }
@@ -341,7 +344,7 @@ router.post('/stability', authMiddleware, async (req: Request, res: Response) =>
     const [result] = await pool.query<ResultSetHeader>(
       `INSERT INTO rnd_stability_studies (study_code, name, formulation_id, batch_number, status, storage_condition, duration_months, start_date, end_date, protocol, created_by)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [study_code, name, formulation_id, batch_number, status || 'planned', storage_condition || '25°C / 60% RH', duration_months || 12, start_date, end_date, protocol, (req as any).user?.id]
+      [study_code, name, formulation_id, batch_number, status || 'planned', storage_condition || '25°C / 60% RH', duration_months || 12, start_date, end_date, protocol, (req as any).userId]
     );
     // Create checkpoints if provided
     if (checkpoints && Array.isArray(checkpoints)) {
@@ -559,7 +562,7 @@ router.post('/documents', authMiddleware, upload.single('file'), async (req: Req
       [project_id || null, formulation_id || null, lab_test_id || null, stability_study_id || null,
        doc_type || 'other', title || file?.originalname || 'Untitled', description,
        file?.originalname, file ? `/uploads/rnd/${file.filename}` : null,
-       file?.size || 0, file?.mimetype, version || '1.0', (req as any).user?.id, folder_id || null]
+       file?.size || 0, file?.mimetype, version || '1.0', (req as any).userId, folder_id || null]
     );
     res.status(201).json({ data: { id: result.insertId, file_path: file ? `/uploads/rnd/${file.filename}` : null }, message: 'Document uploaded' });
   } catch (err: any) { res.status(500).json({ error: err.message }); }

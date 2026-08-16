@@ -1,3 +1,4 @@
+import 'dotenv/config';
 /**
  * Tes alur PIN login mobile (P0 #5 dari review tim reviewer).
  *
@@ -9,7 +10,7 @@
  */
 const API = process.env.API || 'http://localhost:3005/api';
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'master@admin.com';
-const ADMIN_PASS = process.env.ADMIN_PASS || 'master';
+const ADMIN_PASS = process.env.ADMIN_PASS || process.env.MASTER_PASSWORD || 'master';
 const EMP_A = process.env.EMP_A || 'TEST-A';
 const EMP_B = process.env.EMP_B || 'TEST-B';
 

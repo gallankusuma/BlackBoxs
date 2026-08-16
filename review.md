@@ -219,3 +219,478 @@ Dari 5 temuan P0 yang disebut reviewer, **4 sudah tertutup** (registrasi publik,
 Prioritas berikutnya: perluas `requirePermission` ke finance/HR/procurement/inventory → butir 9 & 10 (transaction + nomor dokumen) → butir 16 (drift skema tabel, katalog permission-nya sudah beres).
 
 Verifikasi: `npm run test:all` **109/109** (19 middleware + 34 HTTP + 28 PIN + 28 RBAC), `tsc --noEmit` dan `vue-tsc --noEmit` bersih.
+
+---
+
+# Deep Review Analyst — 16 Agustus 2026
+
+Baseline: commit `402640e7` (`main` = `origin/main`). Audit ini membaca HEAD saat
+ini, bukan mengulang klaim review lama. Scope: autentikasi/otorisasi, HR mobile,
+approval, upload, integritas transaksi, Estimator lifecycle, kontrak permission
+frontend-backend, reproducibility database, dan jalur deploy.
+
+Status seluruh butir di bawah: **Terbuka — untuk tim development**.
+
+## Ringkasan risiko
+
+| Severity | Jumlah | Tema |
+|---|---:|---|
+| P0 | 6 | scope token, approval bypass, takeover akun karyawan, payroll tampering, stored XSS/data exposure, bypass absensi |
+| P1 | 8 | akun nonaktif, perluasan RBAC, audit identity, MR atomicity, Estimator race, handoff PR, schema drift, deploy ordering |
+| P2 | 3 | permission key UI, notification ownership, route shadowing |
+
+**Release blocker lama tetap berlaku:** butir P0 #1 di bagian atas dokumen ini,
+login `master@admin.com` / `master`, masih aktif. Selama kredensial publik itu
+belum dicabut, seluruh proteksi internal di bawah dapat dilewati dari luar.
+
+> **[DEV] DITERAPKAN — dan temuan Anda ternyata masih kurang satu pintu.**
+>
+> Benar sepenuhnya, dan lebih buruk dari yang tertulis. Saat menutupnya kami
+> menemukan bahwa kredensial ini punya **DUA** pintu, bukan satu:
+>
+> 1. Literal `password === 'master'` di `auth.routes.ts:26`.
+> 2. Baris user master di **database** — id 99999, username `master`,
+>    `user_level` 10, aktif — yang password bcrypt-nya memang `master`.
+>
+> Kalau hanya nomor 1 yang dicabut, login `master@admin.com` / `master` **tetap
+> tembus** lewat jalur login biasa. Kami verifikasi langsung di produksi
+> (perbandingan bcrypt dijalankan di server, hash tidak ditarik ke mana pun):
+>
+> ```
+> MASTER_PASSWORD di .env produksi : BELUM ADA
+> id=99999 user=master level=10 aktif=1 → password 'master' cocok? YA — TERBUKA
+> ```
+>
+> Yang dikerjakan:
+>
+> - `auth.routes.ts` tidak lagi memuat kredensial apa pun. Jalur master membaca
+>   `MASTER_PASSWORD` dari `.env` server, dibandingkan `timingSafeEqual`.
+> - **Fail closed**: kalau tidak diisi, jalur master mati. Nilai `master` ditolak
+>   mentah-mentah berikut `console.error`, karena nilai itu sudah publik.
+> - `scripts/set-master-password.js` untuk mengganti password baris database
+>   (input tersembunyi, tidak masuk shell history, hanya hash yang ditulis, dan
+>   ia membuktikan sendiri password lama sudah tidak berlaku).
+>
+> Penggantian password produksi adalah langkah pemilik server — kami tidak
+> menyentuh kredensial. **Sampai itu dijalankan, pintu nomor 2 masih terbuka.**
+>
+> Tes: `test:http` #6 (login publik → 401, tidak ada token terbit) dan
+> `scripts/smoke-test.js` bagian 3, yang kini menembak kredensial ini setiap
+> deploy.
+
+---
+
+## P0 — wajib ditutup sebelum menganggap security baseline selesai
+
+### DR-P0-01 — Token mobile diterima sebagai token desktop di seluruh modul R&D
+
+**Bukti:** [rnd.routes.ts:8](backend/src/routes/rnd.routes.ts) mendefinisikan
+`authMiddleware` lokal yang hanya menjalankan `jwt.verify()`. Middleware itu
+tidak memeriksa `scope: 'mobile'` dan dipakai oleh seluruh endpoint R&D, termasuk
+create/update/delete project, formulation, lab test, stability study, task,
+milestone, folder, dan dokumen. Token mobile dan desktop ditandatangani secret
+yang sama.
+
+**Dampak:** setiap karyawan yang berhasil login PWA dapat memakai token
+mobilenya untuk membaca, mengubah, menghapus, dan mengunggah dokumen R&D.
+Pemisahan token yang sudah benar di middleware pusat tidak berlaku di modul ini.
+
+**Reproduksi:** kirim token hasil `POST /api/hr/mobile/login` sebagai Bearer ke
+`GET /api/rnd/projects`. Secara kontrak harus `401`; middleware saat ini akan
+meloloskannya.
+
+**Acceptance criteria:**
+
+1. Hapus middleware lokal dan impor `authMiddleware` pusat.
+2. Token mobile mendapat `401` pada minimal satu GET dan seluruh kelas mutasi
+   R&D; token desktop sah tetap lolos.
+3. Tambahkan kasus ini ke `test:http` agar middleware lokal serupa tidak muncul
+   lagi.
+
+> **[DEV] DITERAPKAN.** `rnd.routes.ts` sekarang mengimpor `authMiddleware` pusat;
+> middleware lokalnya dihapus. Ketiga acceptance criteria terpenuhi — `test:http`
+> #7 menguji token mobile ditolak pada GET dan mutasi R&D, **dan** memastikan
+> token desktop sah tetap lolos (bukan sekadar menutup semuanya).
+>
+> Dua hal tambahan yang kami temukan di middleware yang sama:
+>
+> - Ia memuat `process.env.JWT_SECRET || 'erp-secret-key-2024'` — secret cadangan
+>   tertulis di repo publik. Kalau `JWT_SECRET` pernah kosong, siapa pun bisa
+>   menandatangani token sendiri. Ikut hilang bersama middleware-nya.
+> - Ia menyimpan identitas sebagai `req.user = decoded`, lalu 5 tempat membaca
+>   `req.user?.id` — padahal payload memakai `userId`. Jadi `created_by` untuk
+>   project, formulation, lab test, stability study, dan dokumen R&D **selalu
+>   NULL**. Ini bagian DR-P1-03 untuk modul R&D; sudah ikut diperbaiki di sini.
+
+### DR-P0-02 — Approval dapat disetujui/ditolak oleh user yang bukan approver
+
+**Bukti:** inbox melakukan filtering permission/step di
+[approval.routes.ts:31](backend/src/routes/approval.routes.ts), tetapi aksi
+`PUT /inbox/:id/approve` di baris 165 dan `reject` di baris 208 hanya memakai
+`authMiddleware`. Handler mengambil request berdasarkan ID lalu langsung
+menulis `approval_actions`; tidak ada pengecekan permission, role, user yang
+ditugaskan pada step, delegasi aktif, atau `can_reject`. CRUD rules/delegation/
+escalation juga hanya membutuhkan login.
+
+**Dampak:** menyembunyikan item dari inbox tidak melindungi aksi. User desktop
+biasa yang mengetahui/menebak ID dapat menyetujui atau menolak request, bahkan
+mengubah rule approval agar dirinya menjadi approver.
+
+**Acceptance criteria:**
+
+1. Otorisasi aksi dihitung ulang dari database pada request aksi, bukan dari
+   hasil filtering UI/inbox atau payload token.
+2. Lock `approval_requests ... FOR UPDATE`, validasi current step + assignee/
+   role/delegation, lalu tulis action dan perpindahan step dalam satu transaction.
+3. User tanpa hak mendapat `403` meskipun mengetahui ID; dua approve paralel
+   hanya menghasilkan satu action/perpindahan step.
+4. Lindungi konfigurasi dengan permission katalog yang sudah ada:
+   `admin.approval-config.*` / `approval.approval-rules.*`.
+
+### DR-P0-03 — User desktop biasa dapat mengambil alih akun mobile karyawan
+
+**Bukti:** daftar employee di [hr.routes.ts:76](backend/src/routes/hr.routes.ts)
+membocorkan NIK dan angka gaji kepada semua token desktop. Endpoint reset PIN
+di baris 103 dan bulk `generate-missing-pins` di baris 127 juga hanya memakai
+`authMiddleware`, lalu mengembalikan PIN polos pada respons.
+
+**Rantai serangan:**
+
+1. Login sebagai user desktop level rendah.
+2. Ambil NIK melalui `GET /api/hr/employees`.
+3. Panggil `POST /api/hr/employees/:id/reset-pin`; baca PIN dari respons.
+4. Login mobile sebagai korban, ganti PIN, daftar credential WebAuthn penyerang,
+   lalu baca payslip/attendance korban.
+
+**Dampak tambahan:** `GET /hr/position-rates`, employee detail, payslip history,
+dan data salary lain juga hanya memerlukan login; ini kebocoran data pribadi dan
+kompensasi lintas departemen.
+
+**Acceptance criteria:**
+
+1. Reset/bulk PIN membutuhkan minimal `hr.employees.edit`; pembacaan gaji dan
+   payroll membutuhkan `hr.payroll.view` atau permission HR relevan yang sudah
+   ada di katalog.
+2. Daftar employee generik meredaksi salary/rate/PIN status untuk pemanggil yang
+   hanya membutuhkan dropdown nama.
+3. Tes memakai token desktop tanpa permission: employee salary, reset PIN, bulk
+   PIN, payslip history, dan position rates semuanya `403`.
+
+### DR-P0-04 — Finalisasi payslip mempercayai angka dan ID advance dari klien
+
+**Bukti:** [hr.routes.ts:656](backend/src/routes/hr.routes.ts) menerima
+`calculation`, `advances`, `deductions`, dan `net_salary` dari body lalu
+menyimpannya langsung. Baris 699–703 menandai setiap `advances.records[].id`
+sebagai deducted tanpa memeriksa employee, periode, status, atau jumlah. Update/
+insert payslip dan mutasi salary advance tidak berada dalam transaction.
+
+**Dampak:** selain endpoint belum ber-RBAC, bahkan user HR yang sah dapat
+mengubah request lewat DevTools dan memfinalisasi gaji arbitrer atau menandai
+kasbon milik karyawan lain sudah lunas. Kegagalan di tengah loop meninggalkan
+payslip final tetapi hanya sebagian advance terpotong.
+
+**Acceptance criteria:** hitung ulang seluruh komponen di server dari attendance,
+employee rates, dan advance yang di-lock; validasi kepemilikan/periode/status;
+simpan payslip + advance dalam satu transaction; pasang UNIQUE
+`(employee_id, period_month, period_year)`; tambah tes payload angka palsu,
+advance lintas employee, dan rollback failure.
+
+### DR-P0-05 — Upload publik + upload tanpa validasi membentuk stored XSS dan kebocoran dokumen
+
+**Bukti utama:** [index.ts:180](backend/src/index.ts) melayani seluruh folder
+`uploads` tanpa auth. Ini melewati route download ber-auth yang sudah dibuat.
+Folder tersebut berisi asset documents, project files, dokumen umum, bid/PR,
+fund request, payment proof, R&D, dan foto MR.
+
+Beberapa uploader masih menyimpan ekstensi dari `originalname` tanpa magic-byte
+validation: [documents.routes.ts:14](backend/src/routes/documents.routes.ts),
+[project.routes.ts:416](backend/src/routes/project.routes.ts),
+[finance.routes.ts:13](backend/src/routes/finance.routes.ts),
+[rnd.routes.ts:515](backend/src/routes/rnd.routes.ts), dan
+[material-request.routes.ts:13](backend/src/routes/material-request.routes.ts).
+Project upload juga tidak memiliki size limit.
+
+**Dampak:** user ber-token dapat mengunggah `.html`/`.svg` berisi script, lalu
+mengirim URL `/uploads/...` pada domain aplikasi. Script same-origin dapat
+membaca JWT desktop dari `localStorage`. Bahkan pada modul yang validasi filenya
+sudah benar (Asset/Procurement), siapa pun yang memperoleh URL dapat mengunduh
+dokumen tanpa auth.
+
+**Acceptance criteria:**
+
+1. Tidak ada static mount global untuk dokumen bisnis; unduh/preview melalui
+   endpoint ber-auth atau signed URL sempit dan singkat.
+2. Semua uploader memakai whitelist ekstensi + MIME + magic bytes, nama server
+   acak, batas ukuran, cleanup orphan, dan handler Multer `413`.
+3. File aktif (HTML/SVG/script/executable) ditolak; file pasif dikirim dengan
+   `Content-Disposition` dan `nosniff` yang sesuai.
+4. Tes mengetahui nama file valid lalu memastikan akses langsung tanpa token
+   tetap `401/404`—bukan hanya menguji route download.
+
+### DR-P0-06 — Absensi fingerprint + GPS dapat dilewati dengan token PIN biasa
+
+**Bukti:** UI menyebut “Sidik jari + GPS”, tetapi
+[hr.routes.ts:839](backend/src/routes/hr.routes.ts) menyediakan
+`POST /hr/mobile/checkin` yang hanya memerlukan `mobileAuthMiddleware`; GPS
+opsional dan tidak ada WebAuthn assertion. Endpoint WebAuthn sendiri menerima
+koordinat/radius lokasi dari karyawan saat register
+([webauthn.routes.ts:87](backend/src/routes/webauthn.routes.ts)) dan membolehkan
+karyawan memindahkannya di baris 384.
+
+Kedua jalur juga memakai `toISOString().slice(0,10)` untuk tanggal attendance
+([hr.routes.ts:846](backend/src/routes/hr.routes.ts),
+[webauthn.routes.ts:267](backend/src/routes/webauthn.routes.ts)). Antara
+00:00–06:59 WIB, tanggal UTC masih hari sebelumnya, sehingga attendance masuk
+ke tanggal/period payroll yang salah.
+
+**Dampak:** pemegang token dari PIN dapat absen dari mana pun tanpa fingerprint
+atau GPS, mengubah check-in/out yang menjadi basis payroll, dan pada pagi hari
+WIB record masuk hari yang salah.
+
+**Acceptance criteria:** hapus/tutup jalur bypass; ikat credential ke
+`office_location_id` yang dikelola admin (jangan percaya koordinat/radius dari
+karyawan); challenge sekali pakai + attendance write atomic; state transition
+tidak boleh menimpa check-in/out yang sudah final; gunakan `BUSINESS_TIMEZONE`;
+tes bypass HTTP, replay/concurrency, lokasi tampered, dan boundary 00:00 WIB.
+
+---
+
+## P1 — integritas dan otorisasi tinggi
+
+### DR-P1-01 — Akun nonaktif masih dapat login dan memakai token lama
+
+[auth.routes.ts:49](backend/src/routes/auth.routes.ts) mengambil user berdasarkan
+email tetapi tidak memeriksa `is_active`. Middleware pusat di
+[auth.ts:38](backend/src/middleware/auth.ts) juga hanya memverifikasi signature/
+payload, tidak status database. Hanya endpoint yang kebetulan memakai
+`requirePermission()` yang mengecek user aktif; mayoritas modul belum memakainya.
+
+**Acceptance criteria:** user nonaktif ditolak saat login; token yang diterbitkan
+sebelum deaktivasi tidak bisa memakai endpoint bisnis; tambah tes “login saat
+inactive” dan “deactivate after token issuance”.
+
+### DR-P1-02 — Backend RBAC masih belum menjadi default
+
+Audit mekanis menemukan **405** registrasi endpoint mutasi desktop yang memakai
+auth; hanya **65** terlihat memakai permission guard/guard khusus. **340** sisanya
+tidak memiliki `requirePermission()` pada deklarasi route (sebagian kecil memang
+self-service atau punya cek internal, jadi angka ini adalah inventory audit,
+bukan klaim bahwa semua 340 identik).
+
+Contoh berisiko: Finance approve/pay, HR payroll/attendance, Inventory transfer/
+adjustment, Estimator proposal/AHSP, Document Centre, office locations, master
+data, Production/QC, dan konfigurasi Approval. Permission untuk mayoritas resource
+tersebut sudah ada di `PERMISSION_CATALOG`.
+
+**Acceptance criteria:** buat matriks route → permission → role produksi;
+verifikasi mapping produksi sebelum enforcement; terapkan per modul dan tambah
+negative test token tanpa permission. Pertahankan pengecualian approval
+Procurement berbasis level sampai mapping role produksi dibereskan, sesuai aturan
+project.
+
+### DR-P1-03 — 22 audit/ownership write memakai identitas yang selalu undefined
+
+`authMiddleware` menyimpan identitas sebagai `req.userId` dan payload
+`req.user.userId`, tetapi terdapat **22** akses ke `req.user?.id` pada lima file:
+Finance, Documents, R&D, PPIC, dan Prospects. Contoh:
+[finance.routes.ts:696](backend/src/routes/finance.routes.ts), baris 804;
+[documents.routes.ts:129](backend/src/routes/documents.routes.ts), baris 215;
+[ppic.routes.ts:193](backend/src/routes/ppic.routes.ts); dan
+[prospects.routes.ts:113](backend/src/routes/prospects.routes.ts).
+
+**Dampak:** `requester_id`, `approved_by`, payment creator, document access log,
+MPS creator, R&D creator, dan prospect creator menjadi NULL. Jejak audit Finance
+yang seharusnya paling kuat justru hilang.
+
+**Acceptance criteria:** satu sumber identitas (`req.userId`) dengan tipe request
+yang eksplisit; larang fallback `|| null` untuk kolom audit wajib; tes memastikan
+ID di database sama dengan token pada tiap modul terdampak.
+
+### DR-P1-04 — Material Request dapat menghasilkan MR/PR parsial dan duplikat
+
+**Bukti:** create header + loop items tanpa transaction
+([material-request.routes.ts:138](backend/src/routes/material-request.routes.ts));
+nomor memakai `COUNT(*)+1` dan tanggal UTC (baris 151–158); approve membaca
+`pending`, mengubah status, membuat PR, lalu link metadata tanpa transaction atau
+row lock (baris 183–238). PR memakai random 4 digit. `notes` dibuat sebagai plain
+text, tetapi approve menjalankan `JSON.parse(mr.notes)` di baris 237.
+
+**Dampak konkret:** MR dengan catatan normal seperti “urgent” akan melempar saat
+approve **setelah** status dan PR terlanjur dibuat; dua approve paralel dapat
+membuat dua PR; kegagalan item meninggalkan header tanpa item lengkap.
+
+**Acceptance criteria:** seluruh create/approve/delete multi-write transactional;
+approve mulai dari `SELECT ... FOR UPDATE` + recheck; document counter atomic;
+link PR disimpan pada kolom khusus/JSON yang dinormalisasi aman; idempotency unik
+per MR; validasi item/qty/project di server; tes failure injection dan 20 approve
+paralel.
+
+### DR-P1-05 — Lifecycle Estimator masih punya jalur non-atomic/race di luar tes MTO
+
+1. Create proposal memakai `MAX()+1`, lalu INSERT header dan template children
+   dengan autocommit di [estimator.routes.ts:1307](backend/src/routes/estimator.routes.ts).
+   Collision menghasilkan 500; kegagalan child meninggalkan proposal setengah
+   terbuat.
+2. Update proposal melakukan `proposalLock()` di luar transaction lalu UPDATE
+   (baris 1408–1437). Delete juga read-check-delete tanpa row lock
+   (baris 1557–1585). Request submit/deal yang berlomba dapat membuat metadata
+   proposal submitted berubah atau proposal submitted terhapus setelah check
+   awal lolos.
+
+**Acceptance criteria:** counter proposal atomic; create header + template +
+summary satu transaction; update/delete lock row dan recheck status di transaction
+yang sama; tes race update-vs-submit dan delete-vs-submit. Pola
+`proposalLockTx()` yang sudah dipakai jalur MTO dapat direuse.
+
+### DR-P1-06 — Deal sukses dapat kehilangan handoff Procurement tanpa status/retry
+
+[estimator.routes.ts:2276](backend/src/routes/estimator.routes.ts) membuat PR
+setelah transaction deal. Error hanya dicatat ke log dan respons tetap sukses;
+tidak ada `pending/success/failed`, outbox, atau retry. Nomor PR masih random
+4 digit (baris 2339–2343), bukan counter Procurement. Material juga dibaca dari
+komposisi `ahsp_items` saat deal, bukan baseline komposisi kontrak—perubahan
+master AHSP setelah submit dapat mengubah kebutuhan procurement.
+
+**Acceptance criteria:** simpan job/outbox handoff dalam transaction deal;
+worker idempoten + retry + status terlihat UI; gunakan generator PR resmi dan
+unique source proposal/project; kuantitas/material berasal dari snapshot kontrak
+yang disepakati atau aturan bisnis yang terdokumentasi; tes deal sukses + forced
+PR failure + retry tanpa duplikat.
+
+### DR-P1-07 — Startup mengumumkan schema sukses walau tabel/kolom gagal
+
+[database.ts:60](backend/src/config/database.ts) menelan setiap error
+`execSchemaEnsure`; fallback ALTER juga mengembalikan “handled” walau gagal.
+Loop schema utama di baris 1575–1588 hanya log warning lalu tetap mencetak
+“initialized successfully”. Pencarian source menemukan tabel aktif seperti
+`material_requests`, `material_request_items`, `document_categories`,
+`employee_webauthn_credentials`, `webauthn_challenges`, `office_locations`, dan
+`payroll_requests` tidak dibuat oleh schema/ensure yang dijalankan boot.
+
+Ini memperluas temuan lama #16: fresh database bisa boot “sehat” tetapi modul
+gagal pada request pertama.
+
+**Acceptance criteria:** setiap schema change masuk ensure/migration yang
+versioned; error DDL kritis menggagalkan startup; jalankan contract test dari
+database kosong yang boot server lalu menyentuh minimal satu endpoint per modul;
+validasi daftar tabel/kolom/index/FK yang dibutuhkan, bukan hanya jumlah tabel.
+
+### DR-P1-08 — Frontend sudah live sebelum backend selesai dikompilasi
+
+[deploy-blackbox.sh:49](deploy-blackbox.sh) membangun lalu mengunggah frontend
+di baris 56; backend baru di-`tsc` pada baris 62. Jika compile backend gagal,
+frontend baru sudah live terhadap backend lama—tepat risiko yang komentar script
+sendiri ingin cegah. Tidak ada rollback frontend setelah restart/smoke gagal.
+
+**Acceptance criteria:** semua build/typecheck/test dan validasi `VITE_API_URL`
+selesai sebelum upload pertama; deploy kedua artifact sebagai satu release yang
+dapat di-switch/rollback; jika health/smoke gagal, otomatis kembalikan frontend
+dan backend ke release sebelumnya.
+
+---
+
+## P2 — correctness dan UX
+
+### DR-P2-01 — Sepuluh permission key menu tidak cocok dengan katalog backend
+
+[Layout.vue:330](frontend/src/components/Layout.vue) memeriksa resource yang
+berbeda dari [database.ts:1399](backend/src/config/database.ts). Mismatch unik:
+
+- `estimator.proposals` vs `estimator.estimator-proposals`
+- `estimator.ahsp` vs `estimator.estimator-ahsp`
+- `estimator.masters` vs `estimator.estimator-masters`
+- `procurement.overview` vs `procurement.procurement-dashboard`
+- `procurement.history` vs `procurement.procurement-history`
+- `master-data.item-types` vs `master_data.item-types`
+- `master-data.warehouse-locations` vs `master_data.warehouse-locations`
+- `master-data.vendors` vs `master_data.suppliers`
+- `admin.notification-settings` vs `admin.notifications`
+- `admin.integration-settings` vs `admin.integration`
+
+Non-master yang memiliki permission katalog tetap kehilangan menu. Karena router
+hanya memeriksa keberadaan token, direct URL masih terbuka—dan banyak backend
+route belum RBAC—sehingga UI dan API berbeda pendapat.
+
+**Acceptance criteria:** gunakan konstanta resource bersama/generated, samakan
+menu + route guard + backend, dan tes visibility untuk role non-master per menu.
+
+### DR-P2-02 — Notification ownership tidak diperiksa pada mutasi per-ID/bulk
+
+`GET /notifications` sudah scoped ke recipient, tetapi PUT read/unread di
+[notifications.routes.ts:120](backend/src/routes/notifications.routes.ts),
+DELETE baris 183, dan bulk action baris 203 hanya memakai ID dari klien tanpa
+`recipient_id = req.userId`. POST juga menerima `sender_id` dari body.
+
+**Acceptance criteria:** semua update/delete menyertakan owner dari token;
+sender selalu dari token; bulk mengabaikan/menolak ID milik user lain; negative
+IDOR tests untuk read, unread, delete, dan bulk.
+
+### DR-P2-03 — FIFO/FEFO allocation route tidak pernah terjangkau
+
+[warehouse.routes.ts:123](backend/src/routes/warehouse.routes.ts) mendaftarkan
+`GET /:id` sebelum `GET /allocate-stock` di baris 276. Express menangkap string
+`allocate-stock` sebagai `id`, sehingga store frontend
+[warehouse.ts:179](frontend/src/stores/warehouse.ts) menerima 404 “Warehouse not
+found”, bukan hasil allocation.
+
+**Acceptance criteria:** letakkan static route sebelum `/:id` atau batasi ID ke
+angka; tes HTTP `GET /warehouses/allocate-stock?...` mengembalikan kontrak
+allocation, bukan handler detail warehouse.
+
+---
+
+## Carry-over yang belum boleh dianggap selesai
+
+1. **Hardcoded master credential** — P0 lama #1, masih terbuka.
+2. **Estimator revision workflow (R31)** — submitted revision lama belum punya
+   alur “Create Revision” immutable.
+3. **Steel Profile Master (R06)** — kode sudah lebih baik, tetapi keputusan
+   Engineering untuk CNP legacy/UNP/siku dan larangan fallback profil asing belum
+   final; structural-steel quotation belum layak disebut settled.
+4. **CRM Notes ownership** — semua user masih membaca/mengubah/menghapus notes
+   user lain.
+
+## Verifikasi reviewer
+
+| Pemeriksaan | Hasil |
+|---|---|
+| `backend: npx tsc --noEmit` | Lulus |
+| `frontend: npm run build` | Lulus; 2.090 modul ditransform |
+| Auth unit | 19/19 lulus |
+| MTO calculator unit | 141/141 lulus |
+| Depreciation unit | 26/26 lulus |
+| Smoke produksi read-only | 12/12 lulus |
+
+Lulus build/smoke **tidak membantah temuan**: smoke hanya memeriksa request tanpa
+token, health/DB dasar, keberadaan endpoint, dan jalur `/uploads`; ia tidak
+menguji pemisahan mobile→R&D, permission antar-user desktop, ownership, transaksi,
+atau upload file aktif.
+
+> **[DEV] Diterima tanpa bantahan — dan kritik ini tepat sasaran.**
+>
+> Pemeriksaan `/uploads` di smoke test kami menembak **direktori**, menerima 403,
+> lalu mencatatnya "lulus". Yang sebenarnya perlu diuji adalah **berkas** di
+> dalamnya. Kami buktikan ke produksi:
+>
+> ```
+> https://blackboxs.io/uploads/bids/03fc0849-….jpg  →  HTTP 200, tanpa token
+> ```
+>
+> Jadi pemeriksaan itu bukan cuma tidak memadai — ia memberi rasa aman palsu
+> tentang persis lubang yang sedang terbuka. Labelnya sudah dijujurkan dan
+> menunjuk DR-P0-05; assertion sebenarnya menyusul bersama perbaikannya.
+>
+> Cakupan smoke test juga sudah ditambah: kredensial master publik kini diuji
+> setiap deploy. `test:all` penuh tidak dijalankan pada audit read-only ini
+karena suite HTTP membuat/mengubah fixture database.
+
+## Urutan eksekusi yang disarankan
+
+1. Cabut master hardcoded → DR-P0-01 R&D scope → DR-P0-02 Approval bypass.
+2. DR-P0-03/04 HR + Payroll dan DR-P0-06 attendance.
+3. DR-P0-05 tutup static uploads dan seragamkan seluruh uploader.
+4. DR-P1-01/02/03 fondasi identity + RBAC, lalu rollout per modul setelah audit
+   mapping role produksi.
+5. DR-P1-04/05/06 transaksi MR + Estimator/Procurement handoff.
+6. DR-P1-07 schema reproducibility → DR-P1-08 atomic deploy.
+7. Tutup P2 dan carry-over Estimator/Notes.

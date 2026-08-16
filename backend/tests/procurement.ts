@@ -1,3 +1,4 @@
+import 'dotenv/config';
 /**
  * Tes modul Procurement — berangkat dari keluhan pengguna di sistem yang live.
  *
@@ -10,7 +11,7 @@
  */
 const API = process.env.API || 'http://localhost:3005/api';
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'master@admin.com';
-const ADMIN_PASS = process.env.ADMIN_PASS || 'master';
+const ADMIN_PASS = process.env.ADMIN_PASS || process.env.MASTER_PASSWORD || 'master';
 
 let pass = 0, fail = 0;
 const chk = (label: string, actual: unknown, expected: unknown) => {
