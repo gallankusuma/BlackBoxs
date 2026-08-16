@@ -230,6 +230,15 @@ Dua hal yang **sengaja belum** diganti dan itu bukan kelalaian:
    apa-apa. Edit yang di `sites-enabled`, atau edit keduanya.
 2. `mv /var/www/A /var/www/B` akan menaruh A **di dalam** B kalau B sudah ada.
    Cek dulu tujuannya kosong atau belum ada sama sekali.
+3. **`/uploads` dilayani nginx, bukan Node.** `location ^~ /uploads/` memakai
+   `alias` langsung ke disk, dan `^~` membuat permintaannya TIDAK pernah sampai
+   ke Express. Penjagaan apa pun yang ditulis di `index.ts` untuk jalur ini
+   **tidak berlaku di produksi** — 16 Agustus 2026 perbaikan DR-P0-05 sempat
+   lolos tes lokal (403) tapi produksi tetap 200, dan hanya smoke test yang
+   menangkapnya. Sekarang konfigurasinya dipisah: `product-images` dan
+   `mr-photos` dilayani nginx (dipakai `<img>` di PWA mobile, tidak bisa membawa
+   header Authorization), sisanya di-`proxy_pass` ke Node yang menolaknya 403.
+   Kalau menambah folder unggahan baru, tentukan dulu ia masuk kelompok mana.
 
 ## Verifikasi sebelum commit
 

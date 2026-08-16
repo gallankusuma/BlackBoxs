@@ -592,6 +592,44 @@ dokumen tanpa auth.
 >
 > Tes: `test:http` #8 (5 assertion) dan `scripts/smoke-test.js` bagian 6
 > (6 assertion) yang berjalan tiap deploy.
+>
+> ---
+>
+> **SUSULAN — perbaikan di aplikasi saja TIDAK CUKUP, dan smoke test yang
+> menangkapnya.**
+>
+> Setelah deploy, smoke test produksi tetap merah: berkas yang lokal sudah 403
+> masih **200 di produksi**. Sebabnya `/uploads` **tidak dilayani Node sama
+> sekali**:
+>
+> ```nginx
+> location ^~ /uploads/ {
+>     alias /var/www/blackboxs/backend/uploads/;
+> }
+> ```
+>
+> `^~` membuat nginx melayani berkasnya langsung dari disk; middleware Express
+> yang baru ditulis tidak pernah dijalankan. Tanpa smoke test, butir ini akan
+> kami laporkan tertutup padahal 181 dokumen masih terbuka.
+>
+> nginx `sites-enabled/blackboxs.io` sudah diubah (backup + `nginx -t` +
+> rollback otomatis kalau gagal):
+> - `^~ /uploads/product-images/` dan `^~ /uploads/mr-photos/` → tetap dilayani
+>   nginx, `nosniff`, dengan nested location yang menolak berkas aktif;
+> - `^~ /uploads/` sisanya → `proxy_pass` ke aplikasi, yang membalas 403.
+>
+> Terverifikasi di produksi setelah reload:
+>
+> ```
+> gambar katalog  200   (PWA mobile utuh)
+> dokumen bid     403   (sebelumnya 200)
+> berkas .html    403
+> halaman utama   200
+> API health      200
+> ```
+>
+> Jebakan ini dicatat di `CLAUDE.md` supaya tidak terulang: penjagaan jalur
+> `/uploads` yang ditulis di kode tidak berlaku sampai nginx meneruskannya.
 
 ### DR-P0-06 — Absensi fingerprint + GPS dapat dilewati dengan token PIN biasa
 
