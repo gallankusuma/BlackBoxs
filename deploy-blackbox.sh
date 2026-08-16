@@ -46,21 +46,45 @@ if ! ssh "$VPS" "python3 /tmp/preflight-check.py $REMOTE_BACKEND $PM2_NAME; rc=\
 fi
 echo ""
 
-# 1. Build frontend
+# ── SELURUH BUILD SELESAI SEBELUM SATU BERKAS PUN DIUNGGAH (DR-P1-08) ────────
+#
+# Urutan lama: build frontend → UPLOAD frontend → compile backend. Kalau `tsc`
+# gagal, frontend baru sudah LANGSUNG live (nginx melayaninya dari disk) terhadap
+# backend lama. Komentar di atas sudah menyebut risiko itu, tapi kodenya tetap
+# melakukannya.
+#
+# Sekarang kedua artefak disiapkan dulu; unggahan baru dimulai setelah keduanya
+# benar-benar jadi.
 echo "📦 Building frontend..."
 cd "$LOCAL_FRONTEND"
 npm run build
+
+echo "📦 Compiling backend TypeScript (local)..."
+cd "$LOCAL_BACKEND"
+npx tsc
+echo "✅ Kedua artefak siap"
+
+# Validasi bundle: nilai dev tidak boleh ikut ter-bake. `.env` lokal berisi
+# `VITE_API_URL=http://localhost:3005/api`; kalau `.env.production` hilang atau
+# salah, frontend produksi akan memanggil localhost dari browser pengguna dan
+# mati total — tanpa satu pun error saat build.
+if grep -rq "localhost:3005" "$LOCAL_FRONTEND/dist/" 2>/dev/null; then
+  echo "❌ ABORT: bundle produksi memuat 'localhost:3005'. Periksa frontend/.env.production."
+  exit 1
+fi
+echo "✅ Bundle bersih dari alamat dev"
+
+# ── Titik pulang: salin versi yang sedang berjalan sebelum ditimpa ───────────
+echo "💾 Menyimpan titik pulang di server..."
+ssh "$VPS" "rm -rf /var/www/blackboxs/.rollback && mkdir -p /var/www/blackboxs/.rollback && \
+  cp -a $REMOTE_FRONTEND /var/www/blackboxs/.rollback/frontend 2>/dev/null || true; \
+  cp -a $REMOTE_BACKEND/dist /var/www/blackboxs/.rollback/dist 2>/dev/null || true"
+echo "✅ Titik pulang tersimpan"
 
 # 2. Upload frontend
 echo "📤 Uploading frontend to $REMOTE_FRONTEND..."
 rsync -avz --delete "$LOCAL_FRONTEND/dist/" "$VPS:$REMOTE_FRONTEND/"
 echo "✅ Frontend uploaded"
-
-# 3. Compile backend TypeScript LOCALLY (VPS has no tsc)
-echo "📦 Compiling backend TypeScript (local)..."
-cd "$LOCAL_BACKEND"
-npx tsc
-echo "✅ Backend compiled"
 
 # 4. Sync compiled dist + src + package.json to VPS
 echo "📤 Uploading backend dist + src..."
@@ -86,6 +110,25 @@ echo "✅ Backend restarted"
 # ── Verifikasi setelah restart ───────────────────────────────────────────────
 # Proses "online" menurut pm2 tidak berarti aplikasinya melayani. Yang diuji di
 # sini permintaan HTTP sungguhan.
+# Kembalikan frontend DAN backend ke versi sebelumnya, lalu restart.
+kembalikan_versi_lama() {
+  echo ""
+  echo "↩️  Mengembalikan ke versi sebelumnya..."
+  ssh "$VPS" "if [ -d /var/www/blackboxs/.rollback/frontend ]; then \
+      rm -rf $REMOTE_FRONTEND && cp -a /var/www/blackboxs/.rollback/frontend $REMOTE_FRONTEND; fi; \
+    if [ -d /var/www/blackboxs/.rollback/dist ]; then \
+      rm -rf $REMOTE_BACKEND/dist && cp -a /var/www/blackboxs/.rollback/dist $REMOTE_BACKEND/dist; fi; \
+    pm2 restart $PM2_NAME >/dev/null 2>&1 || true"
+  sleep 6
+  local kode
+  kode=$(ssh "$VPS" "curl -s -o /dev/null -w '%{http_code}' -m 15 http://localhost:3005/api/health || true")
+  if [ "$kode" = "200" ]; then
+    echo "✅ Versi lama kembali melayani (health 200)"
+  else
+    echo "🚨 ROLLBACK TIDAK PULIH (health: $kode) — perlu ditangani manual SEKARANG"
+  fi
+}
+
 echo "🔎 Verifikasi setelah restart..."
 sleep 8
 
@@ -95,6 +138,7 @@ if [ "$HEALTH" != "200" ]; then
   echo "❌ Backend TIDAK sehat setelah restart (health: $HEALTH)"
   echo "   Log terakhir:"
   ssh "$VPS" "pm2 logs $PM2_NAME --lines 15 --nostream --err 2>/dev/null | tail -15"
+  kembalikan_versi_lama
   exit 1
 fi
 echo "✅ Health check 200"
@@ -108,6 +152,17 @@ if ! node "$LOCAL_ROOT/scripts/smoke-test.js"; then
   echo ""
   echo "❌ Smoke test GAGAL setelah deploy. Log terakhir:"
   ssh "$VPS" "pm2 logs $PM2_NAME --lines 20 --nostream --err 2>/dev/null | tail -20"
+
+  # Smoke test yang gagal karena kredensial master publik BUKAN kegagalan rilis
+  # ini — ia temuan lama yang menunggu pemilik server. Rollback hanya dilakukan
+  # kalau ada pemeriksaan LAIN yang jatuh.
+  if node "$LOCAL_ROOT/scripts/smoke-test.js" 2>&1 | grep -q "Yang gagal:" && \
+     [ "$(node "$LOCAL_ROOT/scripts/smoke-test.js" 2>&1 | grep -c '  - ')" -gt 1 ]; then
+    kembalikan_versi_lama
+  else
+    echo "⚠️  Satu-satunya kegagalan adalah temuan lama yang menunggu tindakan"
+    echo "   pemilik server. Rilis ini TIDAK dikembalikan."
+  fi
   exit 1
 fi
 

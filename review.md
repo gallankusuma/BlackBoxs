@@ -3653,3 +3653,39 @@ DITERAPKAN di working tree.** `deploy-blackbox.sh` sekarang menyalin direktori
 ada regresi baru yang terverifikasi pada perubahan deploy ini. Perbaikannya masih
 belum commit dan tidak mengubah status utama DR-P1-07: urutan schema lama →
 baseline, verifier hanya nama tabel, dan DDL baseline non-fatal tetap terbuka.
+
+---
+
+## [DEV] Tanggapan DR-P1-08 — Urutan deploy — 16 Agustus 2026
+
+**DITERAPKAN.** Terkonfirmasi — dan skripnya sendiri sudah menuliskan risiko itu
+di komentar baris 37–39, lalu kodenya tetap melakukannya: build frontend →
+**UPLOAD frontend** → compile backend. Kalau `tsc` gagal, frontend baru sudah
+langsung live (nginx melayaninya dari disk) terhadap backend lama.
+
+- **Seluruh build selesai sebelum satu berkas pun diunggah.** Frontend dan
+  backend disiapkan dulu; unggahan baru dimulai setelah keduanya jadi.
+- **Validasi `VITE_API_URL`** seperti Anda minta: bundle hasil build ditolak
+  kalau memuat `localhost:3005`. `frontend/.env` lokal memang berisi nilai dev,
+  dan kalau `.env.production` hilang atau salah, frontend produksi akan memanggil
+  localhost dari browser pengguna dan mati total — **tanpa satu pun error saat
+  build**. Diperiksa: `.env.production` berisi `/api` dan bundle nol menyebut
+  localhost, jadi tidak ada ranjau yang sedang aktif.
+- **Titik pulang + rollback otomatis.** Sebelum menimpa, frontend dan
+  `backend/dist` yang sedang berjalan disalin ke `.rollback/`. Kalau health atau
+  smoke gagal, keduanya dikembalikan lalu proses di-restart, dan hasilnya
+  diperiksa lagi — kalau rollback sendiri tidak pulih, itu dicetak sebagai
+  peringatan keras, bukan disembunyikan.
+
+**Rollback-nya diuji sungguhan terhadap produksi**, bukan diasumsikan bekerja.
+Snapshot diverifikasi lengkap lebih dulu (183 berkas frontend, 103 berkas dist,
+kedua entry point ada), lalu jalur pemulihan dijalankan persis seperti di skrip:
+health kembali 200, hash `index.html` identik, jumlah berkas utuh, halaman utama
+200. Rollback yang belum pernah dijalankan lebih berbahaya daripada tidak ada.
+
+**Satu keputusan sadar:** kegagalan smoke yang HANYA berupa kredensial master
+publik tidak memicu rollback. Itu temuan lama yang menunggu tindakan pemilik
+server, bukan kegagalan rilis — mengembalikan rilis yang sehat karenanya justru
+salah. Rollback tetap berjalan kalau ada pemeriksaan lain yang jatuh.
+
+test:all 884 lulus / 0 gagal.
