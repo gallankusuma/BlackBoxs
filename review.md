@@ -4485,25 +4485,28 @@ Live Auto Review 19:36 WIB di bawah.
 Baseline: commit baru `fd959461` (`fix(payroll): gembok generate-expense & cegah
 pembebanan periode ganda`). Source aplikasi tidak diubah reviewer. Backend
 `npx tsc --noEmit` lulus; test HTTP tidak dijalankan reviewer karena membuat
-fixture/data.
+fixture/data. Selama review berlangsung muncul working-tree baru pada
+`hr.routes.ts` untuk menindaklanjuti temuan timesheet/attendance dan kemudian
+menjadi commit `0f3bd132`; diff tersebut ikut diaudit tanpa diubah reviewer, dan
+typecheck tetap lulus.
 
 ### [P1 / RBAC + DATA-EXPOSURE] Guard OR memberi pemegang hak expense akses ke payroll tanpa hak HR
 
 Endpoint memasang
 `requirePermission('hr.payroll.create', 'projects.expenses.create')`
-([hr.routes.ts:1040](backend/src/routes/hr.routes.ts)), tetapi helper
+([hr.routes.ts:1098](backend/src/routes/hr.routes.ts)), tetapi helper
 `requirePermission()` secara eksplisit memakai semantik OR melalui
 `required.some(...)` ([permission.ts:58](backend/src/middleware/permission.ts),
 [permission.ts:72](backend/src/middleware/permission.ts)). Jadi role yang hanya
 memegang `projects.expenses.create` tetap lolos walaupun tidak mempunyai hak
 payroll. Handler lalu membaca seluruh payslip final perusahaan dan menaruh nama
 karyawan beserta net salary per orang, total gross, kasbon, dan net ke notes
-expense ([hr.routes.ts:1080](backend/src/routes/hr.routes.ts),
-[hr.routes.ts:1100](backend/src/routes/hr.routes.ts),
-[hr.routes.ts:1115](backend/src/routes/hr.routes.ts)). Response juga mengembalikan
+expense ([hr.routes.ts:1138](backend/src/routes/hr.routes.ts),
+[hr.routes.ts:1158](backend/src/routes/hr.routes.ts),
+[hr.routes.ts:1173](backend/src/routes/hr.routes.ts)). Response juga mengembalikan
 total payroll. Tes baru hanya memakai `plainToken` tanpa kedua permission; tidak
 menguji role yang memiliki salah satunya
-([rbac.ts:682](backend/tests/rbac.ts)).
+([rbac.ts:771](backend/tests/rbac.ts)).
 
 **Dampak:** pemberian hak operasional membuat expense project sekaligus membuka
 data kompensasi seluruh perusahaan dan kemampuan mem-posting expense payroll.
@@ -4521,10 +4524,10 @@ tidak membuat row, sedangkan role dengan kedua hak boleh lanjut. Pastikan respon
 
 Pengecekan lintas project kini berada dalam transaction, tetapi mutex-nya adalah
 `SELECT ... client_projects WHERE id=? FOR UPDATE`
-([hr.routes.ts:1051](backend/src/routes/hr.routes.ts)). Request bersamaan ke
+([hr.routes.ts:1109](backend/src/routes/hr.routes.ts)). Request bersamaan ke
 project A dan B mengunci **dua row berbeda**; keduanya dapat menjalankan SELECT
 duplikat biasa dan melihat belum ada salary expense
-([hr.routes.ts:1059](backend/src/routes/hr.routes.ts)) sebelum salah satunya
+([hr.routes.ts:1117](backend/src/routes/hr.routes.ts)) sebelum salah satunya
 commit. Setelah itu keduanya tetap membuat expense. Skema hanya mempunyai unique
 key pada `expense_number`, bukan identitas payroll period/posting
 ([schema-baseline.sql:2056](backend/database/schema-baseline.sql),
@@ -4544,6 +4547,67 @@ project/WBS/cost code dengan total seluruh alokasi sama dengan payroll global;
 posting mengonsumsi allocation ID secara idempoten. Test wajib menjalankan dua
 request paralel (`Promise.all`) ke project berbeda untuk periode/run yang sama,
 dan membuktikan tidak pernah tercipta pembebanan ganda maupun partial pair.
+
+### [P1 / VERIFIKASI DATA-INTEGRITY — DITERAPKAN SEBAGIAN] Bulk tidak lagi memindahkan row antar-project, tetapi masih dapat mengklaim dan mengubah attendance terverifikasi
+
+Working-tree baru benar menaruh seluruh bulk save dalam satu transaction dan
+melewati row yang sudah mempunyai `project_id` berbeda
+([hr.routes.ts:362](backend/src/routes/hr.routes.ts),
+[hr.routes.ts:383](backend/src/routes/hr.routes.ts)). Itu menutup overwrite A→B
+dan partial commit dari temuan System Design Review 16:30 WIB. Namun layar
+project masih menginisialisasi **setiap** karyawan aktif sebagai `present` lalu
+mengirim semuanya saat Save
+([ProjectTimesheets.vue:171](frontend/src/components/projects/ProjectTimesheets.vue),
+[ProjectTimesheets.vue:198](frontend/src/components/projects/ProjectTimesheets.vue)).
+
+Untuk employee yang belum punya row, backend tetap membuat attendance baru;
+untuk row WebAuthn/GPS yang `project_id`-nya masih `NULL`, kondisi bentrok tidak
+berlaku dan row diklaim ke project pemanggil. Flag `gps_verified` hanya
+mempertahankan `check_in/check_out`; `status`, `timesheet_value`, overtime,
+project, dan notes tetap ditimpa payload project
+([hr.routes.ts:373](backend/src/routes/hr.routes.ts),
+[hr.routes.ts:389](backend/src/routes/hr.routes.ts),
+[hr.routes.ts:393](backend/src/routes/hr.routes.ts)). Response daftar konflik
+juga tidak dibaca consumer, sehingga baris yang dilewati tidak terlihat oleh
+operator ([ProjectTimesheets.vue:206](frontend/src/components/projects/ProjectTimesheets.vue),
+[AttendanceView.vue:1418](frontend/src/views/AttendanceView.vue)).
+
+**Dampak:** project pertama yang menekan Save masih dapat membuat seluruh
+karyawan aktif hadir atau mengubah dasar hitung payroll attendance terverifikasi,
+meski jam biometric tampak utuh. Project lain bisa menerima 200 tanpa tahu bahwa
+sebagian/all row tidak tersimpan.
+
+**Rekomendasi/acceptance:** fase-0 wajib menghentikan default-present dan hanya
+mengirim employee yang dipilih; jangan izinkan jalur timesheet mengubah field
+kehadiran/payroll pada row terverifikasi. Tampilkan konflik sebagai hasil parsial
+yang harus diputuskan operator. Target tetap memisahkan `attendance_logs` global
+dari `labor_time_allocations` project/WBS. Test harus membuktikan Save tanpa
+pilihan tidak membuat row, row GPS tidak berubah pada seluruh field payroll,
+konflik terlihat di UI, dan rollback child ke-N mengembalikan semua perubahan.
+
+### [P1 / API-CONTRACT] Filter tanggal yang dikirim Project Timesheets diabaikan backend
+
+Project Timesheets meminta
+`GET /hr/attendance?date=<tanggal>&project_id=<id>`
+([ProjectTimesheets.vue:179](frontend/src/components/projects/ProjectTimesheets.vue)),
+tetapi handler hanya membaca `project_id`, `month`, `year`, dan `employee_id`;
+parameter `date` tidak pernah masuk WHERE
+([hr.routes.ts:300](backend/src/routes/hr.routes.ts),
+[hr.routes.ts:305](backend/src/routes/hr.routes.ts)). Backend mengembalikan semua
+tanggal project. Frontend lalu mengiterasi semuanya ke satu `dailyRec` tanpa
+memeriksa tanggal, sehingga record lama menimpa tampilan tanggal yang sedang
+dipilih ([ProjectTimesheets.vue:181](frontend/src/components/projects/ProjectTimesheets.vue),
+[ProjectTimesheets.vue:183](frontend/src/components/projects/ProjectTimesheets.vue)).
+
+**Dampak:** mengganti tanggal dapat menampilkan status/jam/catatan dari hari lain;
+Save berikutnya menyalin state hari lama ke tanggal pilihan dan mencemari
+attendance, payroll, serta biaya project.
+
+**Rekomendasi/acceptance:** validasi `date` sebagai business date dan tambahkan
+predicate exact `a.date = ?`; frontend tetap harus memfilter/menolak response
+yang tanggalnya berbeda. Buat fixture satu employee dengan nilai berbeda pada
+dua hari, lalu buktikan masing-masing tanggal hanya memuat dan menyimpan row-nya
+sendiri tanpa cross-date copy.
 
 ---
 
@@ -4587,3 +4651,51 @@ yang tidak hadir tetap bisa tercatat hadir kalau operator menekan Save tanpa
 memeriksa.
 
 test:all 909 lulus / 0 gagal.
+
+**Verifikasi reviewer 16 Agustus 2026 19:36 WIB — DITERAPKAN SEBAGIAN.** Commit
+`0f3bd132` terverifikasi menutup pemindahan row yang sudah dimiliki project lain,
+mempertahankan `check_in/check_out` GPS, dan mengatomikkan bulk save. Namun status
+“DITERAPKAN” belum dapat menutup butir induk: tim sendiri mengakui consumer masih
+mengirim semua karyawan default hadir; row tanpa project tetap diklaim; dan test
+#8a hanya membaca `project_id`, `check_in`, `check_out`, serta `gps_verified`,
+sehingga overwrite `status`, `timesheet_value`, overtime, dan notes pada
+attendance terverifikasi tidak diuji. Consumer juga belum membaca daftar konflik.
+Hasil dan acceptance tersisa tercatat pada dua butir Live Auto Review 19:36 WIB
+di atas.
+
+---
+
+## [DEV] Tanggapan [P1 / TRANSACTION-FINANCE] — pembayaran AP/AR — 16 Agustus 2026
+
+**DITERAPKAN.** Seluruh klaim terkonfirmasi, termasuk yang paling menohok:
+`PUT .../:id/pay` mengubah aggregate **tanpa menulis event apa pun**. Terbukti di
+produksi — 131 baris AP, tapi `ap_payments` dan `ar_payments` **nol baris**. Jadi
+setiap pembayaran yang pernah dicatat lewat jalur itu tidak punya jejak sama
+sekali; rekonsiliasi tidak punya apa pun untuk dibandingkan.
+
+Keempat endpoint (`/pay` dan `/payments`, AP dan AR) kini melewati satu jalur
+`catatPembayaran()`:
+
+- **Lock + transaction.** Baris tagihan dikunci `FOR UPDATE`; event, aggregate,
+  dan jadwal pembayaran PO ditulis dalam satu unit.
+- **Batas sisa tagihan.** `PAYMENT_EXCEEDS_OUTSTANDING` — sebelumnya kelebihan
+  bayar diterima lalu ditandai `paid`. Produksi diperiksa dulu: 0 kelebihan bayar
+  yang sudah ada, jadi batasan ini tidak menolak data yang sudah berjalan.
+- **Sudah lunas ditolak** `ALREADY_SETTLED`, bukan menambah saldo terus.
+- **Idempotensi lewat `reference_number`.** Referensi yang sama untuk tagihan
+  yang sama ditolak `DUPLICATE_PAYMENT_REFERENCE` — retry jaringan tidak
+  menggandakan pembayaran.
+- **`/pay` sekarang juga menulis event**, jadi satu transaksi bank selalu
+  menghasilkan satu catatan, apa pun jalur yang dipakai layar.
+
+Tes: `test:rbac` #7b — kelebihan bayar ditolak; pembayaran sah menulis event dan
+sisanya dihitung server; referensi ganda ditolak dan **dibuktikan tidak membuat
+event kedua**; **dua pembayaran paralel** 300rb pada sisa 600rb menghasilkan total
+**tepat** 1.000.000 dengan 3 event — pada kode lama keduanya membaca saldo yang
+sama dan satu pembayaran hilang.
+
+**Belum:** reversal yang mengacu event asal. Koreksi masih harus lewat
+penghapusan manual. Itu perubahan model tersendiri (event immutable + reversal
+entry), dan dicatat sebagai terbuka.
+
+test:all 922 lulus / 0 gagal.

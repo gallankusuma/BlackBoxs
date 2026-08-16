@@ -1,5 +1,6 @@
 import express, { Request, Response } from 'express';
-import { dbAll, dbGet, dbRun } from '../config/database';
+import { dbAll, dbGet, dbRun, withTransaction } from '../config/database';
+import { businessDate } from '../utils/date.utils';
 import { authMiddleware } from '../middleware/auth';
 import multer from 'multer';
 import path from 'path';
@@ -560,28 +561,140 @@ router.get('/margin-analysis/summary', authMiddleware, async (req: Request, res:
 });
 // ===== AP PAYMENT =====
 
+/**
+ * Catat pembayaran AP/AR sebagai SATU unit (P1 TRANSACTION/FINANCE).
+ *
+ * Sebelumnya ada dua jalur yang berbeda perlakuan untuk transaksi bank yang sama:
+ *
+ *   - `PUT .../:id/pay`      : membaca `paid_amount`, menambah nominal klien,
+ *                              lalu UPDATE — tanpa transaction, tanpa lock, dan
+ *                              TANPA menulis event sama sekali.
+ *   - `POST .../:id/payments`: INSERT event lalu UPDATE aggregate dan jadwal
+ *                              lewat autocommit terpisah.
+ *
+ * Akibatnya: dua permintaan paralel sama-sama membaca saldo lama dan saling
+ * menimpa (satu pembayaran hilang); kegagalan setelah INSERT meninggalkan
+ * history tanpa aggregate; dan tidak ada batas `pembayaran <= sisa tagihan`,
+ * jadi kelebihan bayar diterima lalu ditandai `paid`.
+ *
+ * Sekarang keduanya memakai jalur ini: lock baris, validasi sisa tagihan, tulis
+ * event, perbarui aggregate dan jadwal — satu transaction.
+ */
+const catatPembayaran = async (opts: {
+  jenis: 'AP' | 'AR';
+  id: any;
+  jumlah: number;
+  payment_date?: string;
+  payment_method?: string;
+  reference_number?: string | null;
+  notes?: string | null;
+  userId?: any;
+}): Promise<any> => {
+  const tabel = opts.jenis === 'AP' ? 'accounts_payable' : 'accounts_receivable';
+  const tabelEvent = opts.jenis === 'AP' ? 'ap_payments' : 'ar_payments';
+  const kolomFk = opts.jenis === 'AP' ? 'ap_id' : 'ar_id';
+
+  if (!Number.isFinite(opts.jumlah) || opts.jumlah <= 0) {
+    return { error: 400, body: { error: 'Nominal pembayaran harus lebih dari nol' } };
+  }
+
+  return withTransaction(async tx => {
+    const row: any = await tx.get(`SELECT * FROM ${tabel} WHERE id = ? FOR UPDATE`, [opts.id]);
+    if (!row) return { error: 404, body: { error: `${opts.jenis} tidak ditemukan` } };
+
+    const tagihan = Number(row.amount || 0);
+    const sudahDibayar = Number(row.paid_amount || 0);
+    const sisa = Math.round((tagihan - sudahDibayar) * 100) / 100;
+
+    if (sisa <= 0) {
+      return {
+        error: 409,
+        body: { error: `${opts.jenis} ini sudah lunas.`, code: 'ALREADY_SETTLED', sisa: 0 },
+      };
+    }
+
+    // Batas yang sebelumnya tidak ada sama sekali: kelebihan bayar diterima dan
+    // tetap ditandai `paid`, sehingga rekonsiliasi tidak bisa menentukan angka
+    // mana yang sah.
+    if (opts.jumlah > sisa + 0.005) {
+      return {
+        error: 400,
+        body: {
+          error: `Pembayaran ${opts.jumlah} melebihi sisa tagihan ${sisa}.`,
+          code: 'PAYMENT_EXCEEDS_OUTSTANDING',
+          sisa,
+        },
+      };
+    }
+
+    // Idempotensi: nomor referensi yang sama untuk tagihan yang sama tidak
+    // dicatat dua kali — retry jaringan tidak boleh menggandakan pembayaran.
+    if (opts.reference_number) {
+      const kembar: any = await tx.get(
+        `SELECT id, amount FROM ${tabelEvent} WHERE ${kolomFk} = ? AND reference_number = ? LIMIT 1`,
+        [opts.id, opts.reference_number]
+      );
+      if (kembar) {
+        return {
+          error: 409,
+          body: {
+            error: `Pembayaran dengan referensi "${opts.reference_number}" sudah tercatat.`,
+            code: 'DUPLICATE_PAYMENT_REFERENCE',
+            existing_id: kembar.id,
+          },
+        };
+      }
+    }
+
+    const eventResult = await tx.run(
+      `INSERT INTO ${tabelEvent} (${kolomFk}, payment_date, amount, payment_method, reference_number, notes, created_by)
+       VALUES (?,?,?,?,?,?,?)`,
+      [opts.id, opts.payment_date || businessDate(), opts.jumlah,
+        opts.payment_method || 'Transfer', opts.reference_number || null,
+        opts.notes || null, opts.userId || null]
+    );
+
+    const totalBaru = Math.round((sudahDibayar + opts.jumlah) * 100) / 100;
+    const statusBaru = totalBaru >= tagihan ? 'paid' : 'partial';
+
+    await tx.run(`UPDATE ${tabel} SET paid_amount = ?, status = ? WHERE id = ?`,
+      [totalBaru, statusBaru, opts.id]);
+
+    if (opts.jenis === 'AP' && row.po_schedule_id) {
+      await tx.run(
+        'UPDATE purchase_order_payment_schedules SET paid_amount = ?, status = ?, ap_id = ? WHERE id = ?',
+        [totalBaru, statusBaru, opts.id, row.po_schedule_id]
+      );
+    }
+
+    return {
+      ok: true as const,
+      data: {
+        payment_id: eventResult.insertId,
+        paid_amount: totalBaru,
+        status: statusBaru,
+        sisa: Math.round((tagihan - totalBaru) * 100) / 100,
+      },
+    };
+  });
+};
+
 router.put('/accounts-payable/:id/pay', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { amount } = req.body;
-    const paymentAmount = Number(amount);
-    if (!Number.isFinite(paymentAmount) || paymentAmount <= 0) {
-      return res.status(400).json({ error: 'Positive payment amount required' });
-    }
-    
-    const ap: any = await dbGet('SELECT * FROM accounts_payable WHERE id = ?', [req.params.id]);
-    if (!ap) return res.status(404).json({ error: 'AP record not found' });
-    
-    const newPaid = Number(ap.paid_amount || 0) + paymentAmount;
-    const newStatus = newPaid >= ap.amount ? 'paid' : 'partial';
-    
-    await dbRun('UPDATE accounts_payable SET paid_amount = ?, status = ? WHERE id = ?', [newPaid, newStatus, req.params.id]);
-    if (ap.po_schedule_id) {
-      await dbRun(
-        'UPDATE purchase_order_payment_schedules SET paid_amount = ?, status = ?, ap_id = ? WHERE id = ?',
-        [newPaid, newStatus, req.params.id, ap.po_schedule_id]
-      );
-    }
-    res.json({ success: true, message: 'Payment recorded', data: { paid_amount: newPaid, status: newStatus } });
+    const payload = { payment_method: undefined, reference_number: undefined, notes: undefined, payment_date: undefined } as any;
+
+    // P1: `/pay` dulu hanya mengubah aggregate TANPA menulis event apa pun,
+    // sementara `/payments` menulis event lalu memperbarui aggregate terpisah.
+    // Keduanya kini melewati jalur yang sama, jadi satu transaksi bank selalu
+    // menghasilkan satu catatan yang konsisten.
+    const hasil = await catatPembayaran({
+      jenis: 'AP', id: req.params.id, jumlah: Number(amount),
+      ...payload, userId: (req as any).userId,
+    });
+
+    if ('error' in hasil) return res.status(hasil.error).json(hasil.body);
+    res.json({ success: true, message: 'Payment recorded', data: hasil.data });
   } catch (error) {
     console.error('Error recording AP payment:', error);
     res.status(500).json({ error: 'Failed to record payment' });
@@ -593,19 +706,19 @@ router.put('/accounts-payable/:id/pay', authMiddleware, async (req: Request, res
 router.put('/accounts-receivable/:id/pay', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { amount } = req.body;
-    const paymentAmount = Number(amount);
-    if (!Number.isFinite(paymentAmount) || paymentAmount <= 0) {
-      return res.status(400).json({ error: 'Positive payment amount required' });
-    }
-    
-    const ar: any = await dbGet('SELECT * FROM accounts_receivable WHERE id = ?', [req.params.id]);
-    if (!ar) return res.status(404).json({ error: 'AR record not found' });
-    
-    const newPaid = Number(ar.paid_amount || 0) + paymentAmount;
-    const newStatus = newPaid >= ar.amount ? 'paid' : 'partial';
-    
-    await dbRun('UPDATE accounts_receivable SET paid_amount = ?, status = ? WHERE id = ?', [newPaid, newStatus, req.params.id]);
-    res.json({ success: true, message: 'Payment recorded', data: { paid_amount: newPaid, status: newStatus } });
+    const payload = { payment_method: undefined, reference_number: undefined, notes: undefined, payment_date: undefined } as any;
+
+    // P1: `/pay` dulu hanya mengubah aggregate TANPA menulis event apa pun,
+    // sementara `/payments` menulis event lalu memperbarui aggregate terpisah.
+    // Keduanya kini melewati jalur yang sama, jadi satu transaksi bank selalu
+    // menghasilkan satu catatan yang konsisten.
+    const hasil = await catatPembayaran({
+      jenis: 'AR', id: req.params.id, jumlah: Number(amount),
+      ...payload, userId: (req as any).userId,
+    });
+
+    if ('error' in hasil) return res.status(hasil.error).json(hasil.body);
+    res.json({ success: true, message: 'Payment recorded', data: hasil.data });
   } catch (error) {
     console.error('Error recording AR payment:', error);
     res.status(500).json({ error: 'Failed to record payment' });
@@ -960,25 +1073,24 @@ router.put('/accounts-payable/:id', authMiddleware, async (req: Request, res: Re
 // POST /accounts-payable/:id/payments — record payment
 router.post('/accounts-payable/:id/payments', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const { payment_date, amount, payment_method, reference_number, notes } = req.body;
-    const payAmt = Number(amount);
-    if (!payAmt || payAmt <= 0) return res.status(400).json({ error: 'Valid amount required' });
-    const ap: any = await dbGet('SELECT * FROM accounts_payable WHERE id=?', [req.params.id]);
-    if (!ap) return res.status(404).json({ error: 'AP not found' });
+    const { amount, payment_date, payment_method, reference_number, notes } = req.body;
+    const payload = { payment_date, payment_method, reference_number, notes } as any;
 
-    await dbRun(
-      `INSERT INTO ap_payments (ap_id, payment_date, amount, payment_method, reference_number, notes, created_by)
-       VALUES (?,?,?,?,?,?,?)`,
-      [req.params.id, payment_date||new Date().toISOString().slice(0,10), payAmt, payment_method||'Transfer', reference_number||null, notes||null, (req as any).userId||null]
-    );
-    const newPaid = Number(ap.paid_amount||0) + payAmt;
-    const newStatus = newPaid >= Number(ap.amount||0) ? 'paid' : 'partial';
-    await dbRun('UPDATE accounts_payable SET paid_amount=?, status=? WHERE id=?', [newPaid, newStatus, req.params.id]);
-    if (ap.po_schedule_id) {
-      await dbRun('UPDATE purchase_order_payment_schedules SET paid_amount=?, status=? WHERE id=?', [newPaid, newStatus, ap.po_schedule_id]);
-    }
-    res.json({ success: true, data: { paid_amount: newPaid, status: newStatus } });
-  } catch (e) { res.status(500).json({ error: 'Failed to record payment' }); }
+    // P1: `/pay` dulu hanya mengubah aggregate TANPA menulis event apa pun,
+    // sementara `/payments` menulis event lalu memperbarui aggregate terpisah.
+    // Keduanya kini melewati jalur yang sama, jadi satu transaksi bank selalu
+    // menghasilkan satu catatan yang konsisten.
+    const hasil = await catatPembayaran({
+      jenis: 'AP', id: req.params.id, jumlah: Number(amount),
+      ...payload, userId: (req as any).userId,
+    });
+
+    if ('error' in hasil) return res.status(hasil.error).json(hasil.body);
+    res.json({ success: true, message: 'Payment recorded', data: hasil.data });
+  } catch (error) {
+    console.error('Error recording AP payment:', error);
+    res.status(500).json({ error: 'Failed to record payment' });
+  }
 });
 
 // GET /accounts-payable/aging — AP aging buckets
@@ -1059,22 +1171,24 @@ router.put('/accounts-receivable/:id', authMiddleware, async (req: Request, res:
 // POST /accounts-receivable/:id/payments — record collection
 router.post('/accounts-receivable/:id/payments', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const { payment_date, amount, payment_method, reference_number, notes } = req.body;
-    const payAmt = Number(amount);
-    if (!payAmt || payAmt <= 0) return res.status(400).json({ error: 'Valid amount required' });
-    const ar: any = await dbGet('SELECT * FROM accounts_receivable WHERE id=?', [req.params.id]);
-    if (!ar) return res.status(404).json({ error: 'AR not found' });
+    const { amount, payment_date, payment_method, reference_number, notes } = req.body;
+    const payload = { payment_date, payment_method, reference_number, notes } as any;
 
-    await dbRun(
-      `INSERT INTO ar_payments (ar_id, payment_date, amount, payment_method, reference_number, notes, created_by)
-       VALUES (?,?,?,?,?,?,?)`,
-      [req.params.id, payment_date||new Date().toISOString().slice(0,10), payAmt, payment_method||'Transfer', reference_number||null, notes||null, (req as any).userId||null]
-    );
-    const newPaid = Number(ar.paid_amount||0) + payAmt;
-    const newStatus = newPaid >= Number(ar.amount||0) ? 'paid' : 'partial';
-    await dbRun('UPDATE accounts_receivable SET paid_amount=?, status=? WHERE id=?', [newPaid, newStatus, req.params.id]);
-    res.json({ success: true, data: { paid_amount: newPaid, status: newStatus } });
-  } catch (e) { res.status(500).json({ error: 'Failed to record collection' }); }
+    // P1: `/pay` dulu hanya mengubah aggregate TANPA menulis event apa pun,
+    // sementara `/payments` menulis event lalu memperbarui aggregate terpisah.
+    // Keduanya kini melewati jalur yang sama, jadi satu transaksi bank selalu
+    // menghasilkan satu catatan yang konsisten.
+    const hasil = await catatPembayaran({
+      jenis: 'AR', id: req.params.id, jumlah: Number(amount),
+      ...payload, userId: (req as any).userId,
+    });
+
+    if ('error' in hasil) return res.status(hasil.error).json(hasil.body);
+    res.json({ success: true, message: 'Payment recorded', data: hasil.data });
+  } catch (error) {
+    console.error('Error recording AR payment:', error);
+    res.status(500).json({ error: 'Failed to record payment' });
+  }
 });
 
 // GET /ar-aging — AR aging buckets

@@ -52,6 +52,40 @@ async function hapusRuleUji(nama: string): Promise<void> {
 }
 
 /** Absensi terverifikasi GPS milik proyek A + satu baris tanpa proyek. */
+async function seedAP(jumlah: number): Promise<any> {
+  try {
+    const { dbRun } = await import('../src/config/database');
+    const tag = `UJI-AP-${Date.now()}`;
+    const r: any = await dbRun(
+      `INSERT INTO accounts_payable (invoice_number, amount, paid_amount, status, due_date)
+       VALUES (?, ?, 0, 'unpaid', CURDATE())`, [tag, jumlah]
+    );
+    return { tag, id: r.insertId };
+  } catch (e: any) { console.log(`  (fixture AP gagal: ${e.message})`); return null; }
+}
+
+async function apRow(id: number): Promise<any> {
+  const { dbGet } = await import('../src/config/database');
+  return dbGet('SELECT paid_amount, status FROM accounts_payable WHERE id=?', [id]);
+}
+
+async function countPayments(apId: number): Promise<number> {
+  const { dbGet } = await import('../src/config/database');
+  const r: any = await dbGet('SELECT COUNT(*) AS n FROM ap_payments WHERE ap_id=?', [apId]);
+  return Number(r?.n ?? -1);
+}
+
+async function cleanupAP(ap: any): Promise<number> {
+  const { dbRun, dbGet } = await import('../src/config/database');
+  await dbRun('DELETE FROM ap_payments WHERE ap_id=?', [ap.id]);
+  await dbRun('DELETE FROM accounts_payable WHERE id=?', [ap.id]);
+  const sisa: any = await dbGet(
+    `SELECT (SELECT COUNT(*) FROM accounts_payable WHERE id=?) + (SELECT COUNT(*) FROM ap_payments WHERE ap_id=?) AS n`,
+    [ap.id, ap.id]
+  );
+  return Number(sisa?.n ?? -1);
+}
+
 async function seedTimesheetFixture(): Promise<any> {
   try {
     const { dbRun, dbGet } = await import('../src/config/database');
@@ -731,6 +765,52 @@ async function main() {
     } finally {
       const sisa = await cleanupPayrollFixture(fx);
       chk('fixture payroll dibersihkan tuntas', sisa, 0);
+    }
+  }
+
+  console.log('\n7b. Pembayaran AP: tidak hilang, tidak ganda, tidak melebihi tagihan (P1)');
+  // `/pay` dulu membaca paid_amount lalu UPDATE tanpa lock DAN tanpa menulis
+  // event apa pun; `/payments` menulis event lalu memperbarui aggregate
+  // terpisah. Dua permintaan paralel sama-sama membaca saldo lama dan saling
+  // menimpa — satu pembayaran hilang tanpa jejak.
+  const ap = await seedAP(1000000);
+  chk('AP uji dibuat', !!ap?.id, true);
+
+  if (ap?.id) {
+    try {
+      // Kelebihan bayar ditolak — dulu diterima lalu ditandai `paid`.
+      const lebih = await call('PUT', `/finance/accounts-payable/${ap.id}/pay`, { amount: 1500000 }, master);
+      chk('kelebihan bayar ditolak', lebih.status, 400);
+      chk('kodenya PAYMENT_EXCEEDS_OUTSTANDING', lebih.json?.code, 'PAYMENT_EXCEEDS_OUTSTANDING');
+
+      // Pembayaran sah menulis event, bukan cuma aggregate.
+      const bayar = await call('POST', `/finance/accounts-payable/${ap.id}/payments`,
+        { amount: 400000, reference_number: `${ap.tag}-TRF1` }, master);
+      chk('pembayaran tercatat', bayar.status, 200);
+      chk('sisa dihitung server', Number(bayar.json?.data?.sisa), 600000);
+      chk('event pembayaran tertulis', await countPayments(ap.id), 1);
+
+      // Referensi yang sama tidak boleh dicatat dua kali.
+      const ulang = await call('POST', `/finance/accounts-payable/${ap.id}/payments`,
+        { amount: 400000, reference_number: `${ap.tag}-TRF1` }, master);
+      chk('referensi ganda ditolak', ulang.json?.code, 'DUPLICATE_PAYMENT_REFERENCE');
+      chk('tidak ada event kedua', await countPayments(ap.id), 1);
+
+      // Dua pembayaran paralel: keduanya boleh sukses, tapi TOTALNYA harus benar.
+      await Promise.all([
+        call('POST', `/finance/accounts-payable/${ap.id}/payments`, { amount: 300000, reference_number: `${ap.tag}-A` }, master),
+        call('POST', `/finance/accounts-payable/${ap.id}/payments`, { amount: 300000, reference_number: `${ap.tag}-B` }, master),
+      ]);
+      const akhir = await apRow(ap.id);
+      chk('tidak ada pembayaran yang hilang', Number(akhir?.paid_amount), 1000000);
+      chk('status jadi lunas', akhir?.status, 'paid');
+      chk('seluruh event tercatat', await countPayments(ap.id), 3);
+
+      // Sudah lunas → pembayaran berikutnya ditolak.
+      chk('bayar lagi setelah lunas ditolak',
+        (await call('PUT', `/finance/accounts-payable/${ap.id}/pay`, { amount: 1 }, master)).json?.code, 'ALREADY_SETTLED');
+    } finally {
+      chk('AP uji dibersihkan', await cleanupAP(ap), 0);
     }
   }
 
