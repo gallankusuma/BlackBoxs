@@ -2166,6 +2166,147 @@ type StatusOutcome =
       proposal: any;
     };
 
+/**
+ * Proses handoff PR untuk sebuah proposal yang sudah deal (DR-P1-06).
+ *
+ * IDEMPOTEN: kalau job-nya sudah `success`, ia langsung mengembalikan hasil lama
+ * tanpa membuat PR kedua. Aman dipanggil ulang berapa kali pun.
+ *
+ * Dipisahkan dari transaction deal dengan sengaja — kegagalan procurement tidak
+ * boleh membatalkan kontrak yang sudah sah. Bedanya dengan versi lama: kegagalan
+ * itu sekarang TERCATAT dan bisa diulang, bukan hilang ke log sementara respons
+ * mengaku sukses.
+ */
+const processDealPrJob = async (proposalId: any, userId: any): Promise<any> => {
+  const job: any = await dbGet('SELECT * FROM deal_pr_jobs WHERE proposal_id = ?', [proposalId]);
+  if (!job) return null;
+  if (job.status === 'success') {
+    return { status: 'success', pr_id: job.pr_id, pr_number: job.pr_number, attempts: job.attempts };
+  }
+
+  const proposal: any = await dbGet(
+    'SELECT id, proposal_number, project_name, project_id FROM proposals WHERE id = ?', [proposalId]
+  );
+  if (!proposal) return { status: 'failed', error: 'Proposal tidak ditemukan' };
+
+  await dbRun('UPDATE deal_pr_jobs SET attempts = attempts + 1 WHERE proposal_id = ?', [proposalId]);
+
+  try {
+    const proposalItems: any[] = await dbAll(
+      `SELECT pi.ahsp_id, pi.qty FROM proposal_items pi
+       WHERE pi.proposal_id = ? AND pi.ahsp_id IS NOT NULL`,
+      [proposalId]
+    );
+
+    const materialList: any[] = [];
+    if (proposalItems.length > 0) {
+      const ahspIds = proposalItems.map(pi => pi.ahsp_id);
+      const ahspMaterials: any[] = await dbAll(
+        `SELECT ai.ahsp_id, ai.resource_id, ai.resource_name, ai.resource_satuan,
+                ai.koefisien, ai.resource_harga
+         FROM ahsp_items ai
+         WHERE ai.ahsp_id IN (${ahspIds.map(() => '?').join(',')}) AND ai.section = 'B'
+         ORDER BY ai.resource_name`,
+        ahspIds
+      );
+
+      const qtyMap: Record<number, number> = {};
+      for (const pi of proposalItems) qtyMap[pi.ahsp_id] = (qtyMap[pi.ahsp_id] || 0) + Number(pi.qty);
+
+      const materialMap: Record<number, { name: string; satuan: string; harga: number; totalQty: number }> = {};
+      for (const mat of ahspMaterials) {
+        const needed = Number(mat.koefisien) * (qtyMap[mat.ahsp_id] || 0);
+        if (needed <= 0) continue;
+        const rid = mat.resource_id;
+        if (!materialMap[rid]) {
+          materialMap[rid] = {
+            name: mat.resource_name, satuan: mat.resource_satuan,
+            harga: Number(mat.resource_harga) || 0, totalQty: 0,
+          };
+        }
+        materialMap[rid].totalQty += needed;
+      }
+
+      for (const [rid, m] of Object.entries(materialMap)) {
+        materialList.push({
+          productId: null, productName: '', name: m.name,
+          qty: Math.ceil(m.totalQty * 1000) / 1000,
+          uom: m.satuan, specification: `Resource ID: ${rid}`, price: m.harga,
+        });
+      }
+    }
+
+    // Proposal tanpa material bukan kegagalan — tidak ada yang perlu dibeli.
+    // Dibedakan dari `failed` supaya tidak terus-menerus diulang percuma.
+    if (materialList.length === 0) {
+      await dbRun(
+        `UPDATE deal_pr_jobs SET status = 'skipped', last_error = NULL WHERE proposal_id = ?`,
+        [proposalId]
+      );
+      return { status: 'skipped', reason: 'Proposal tidak memuat material yang perlu dibeli' };
+    }
+
+    const hasil = await withTransaction(async tx => {
+      // Dikunci supaya dua retry bersamaan tidak sama-sama membuat PR.
+      const kunci: any = await tx.get('SELECT status, pr_id, pr_number FROM deal_pr_jobs WHERE proposal_id = ? FOR UPDATE', [proposalId]);
+      if (kunci?.status === 'success') return { pr_id: kunci.pr_id, pr_number: kunci.pr_number };
+
+      const prNumber = await nextSequentialCode('PR', 'purchase_requests', 'pr_number', tx);
+      const estimatedTotal = materialList.reduce((sum, i) => sum + (i.qty * i.price), 0);
+
+      const prResult = await tx.run(
+        `INSERT INTO purchase_requests (pr_number, requestor_id, project_id, status, notes)
+         VALUES (?, ?, ?, 'DRAFT', ?)`,
+        [prNumber, userId || null, proposal.project_id || null,
+          JSON.stringify({
+            noteText: `Auto-generated from proposal ${proposal.proposal_number} - ${proposal.project_name}`,
+            itemType: 'non-inventory',
+            items: materialList,
+            estimatedTotal,
+            source_proposal_id: Number(proposalId),
+          })]
+      );
+
+      await tx.run(
+        `UPDATE deal_pr_jobs SET status = 'success', pr_id = ?, pr_number = ?, last_error = NULL WHERE proposal_id = ?`,
+        [prResult.insertId, prNumber, proposalId]
+      );
+      return { pr_id: prResult.insertId, pr_number: prNumber };
+    });
+
+    console.log(`✅ Handoff PR ${hasil.pr_number} untuk proposal ${proposalId}`);
+    return { status: 'success', ...hasil };
+  } catch (err: any) {
+    // Kegagalan DICATAT, bukan hilang ke log.
+    await dbRun(
+      `UPDATE deal_pr_jobs SET status = 'failed', last_error = ? WHERE proposal_id = ?`,
+      [String(err?.message || err).slice(0, 500), proposalId]
+    );
+    console.error(`⚠️ Handoff PR proposal ${proposalId} gagal:`, err?.message);
+    return { status: 'failed', error: String(err?.message || err).slice(0, 200) };
+  }
+};
+
+// GET status handoff — supaya kegagalannya terlihat, bukan cuma tersimpan.
+router.get('/proposals/:id/pr-handoff', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const job: any = await dbGet('SELECT * FROM deal_pr_jobs WHERE proposal_id = ?', [req.params.id]);
+    if (!job) return res.status(404).json({ error: 'Belum ada handoff untuk proposal ini', code: 'NO_HANDOFF' });
+    res.json({ data: job });
+  } catch (err: any) { res.status(500).json({ error: err.message }); }
+});
+
+// POST retry — idempoten; kalau sudah sukses tidak membuat PR kedua.
+router.post('/proposals/:id/pr-handoff/retry', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const job: any = await dbGet('SELECT status FROM deal_pr_jobs WHERE proposal_id = ?', [req.params.id]);
+    if (!job) return res.status(404).json({ error: 'Belum ada handoff untuk proposal ini', code: 'NO_HANDOFF' });
+
+    const hasil = await processDealPrJob(req.params.id, (req as any).userId);
+    res.json({ message: 'Handoff diproses ulang', data: hasil });
+  } catch (err: any) { res.status(500).json({ error: err.message }); }
+});
+
 router.put('/proposals/:id/status', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { status: newStatus } = req.body;
@@ -2317,6 +2458,19 @@ router.put('/proposals/:id/status', authMiddleware, async (req: Request, res: Re
       }
 
       await writeStatus();
+
+      // DR-P1-06: pekerjaan handoff dicatat DI DALAM transaction deal.
+      //
+      // Sebelumnya PR dibuat setelah transaction dan errornya hanya masuk log,
+      // sementara respons tetap sukses — deal bisa berhasil sambil diam-diam
+      // kehilangan handoff ke Procurement tanpa satu pun tanda di layar.
+      //
+      // INSERT IGNORE + UNIQUE(proposal_id) membuat retry idempoten.
+      await tx.run(
+        `INSERT IGNORE INTO deal_pr_jobs (proposal_id, project_id, status) VALUES (?, ?, 'pending')`,
+        [proposalId, projectId]
+      );
+
       console.log(`[Proposal ${proposalId} → deal] ${baselineCount} elemen MTO disalin sebagai baseline project ${projectId}`);
       return { ok: true, projectId, projectNumber, createdProject: true, proposal };
     });
@@ -2331,102 +2485,14 @@ router.put('/proposals/:id/status', authMiddleware, async (req: Request, res: Re
     let prId: number | null = null;
     let prNumber_out: string | null = null;
 
-    // PR hanya dibuat saat project baru benar-benar dibuat di transaction di
-    // atas. Ini downstream process yang sengaja di LUAR transaction deal —
-    // kegagalannya tidak boleh membatalkan kontrak yang sudah sah.
+    // DR-P1-06: handoff diproses sebagai JOB, bukan efek samping yang errornya
+    // hilang ke log. Statusnya terlihat di respons dan bisa diulang lewat
+    // POST /proposals/:id/pr-handoff/retry.
+    let handoff: any = null;
     if (outcome.createdProject) {
-      // === Auto-create Purchase Request from proposal materials ===
-      try {
-        // Get all proposal items with their AHSP ids
-        const proposalItems = await dbAll(
-          `SELECT pi.ahsp_id, pi.qty, pi.ahsp_name_snapshot, pi.unit_snapshot
-           FROM proposal_items pi
-           WHERE pi.proposal_id = ? AND pi.ahsp_id IS NOT NULL`,
-          [proposalId]
-        ) as any[];
-
-        if (proposalItems.length > 0) {
-          // Get all materials (section B) from the AHSPs used in this proposal
-          const ahspIds = proposalItems.map((pi: any) => pi.ahsp_id);
-          const placeholders = ahspIds.map(() => '?').join(',');
-          const ahspMaterials = await dbAll(
-            `SELECT ai.ahsp_id, ai.resource_id, ai.resource_name, ai.resource_satuan, 
-                    ai.koefisien, ai.resource_harga
-             FROM ahsp_items ai
-             WHERE ai.ahsp_id IN (${placeholders}) AND ai.section = 'B'
-             ORDER BY ai.resource_name`,
-            ahspIds
-          ) as any[];
-
-          // Build a qty lookup: ahsp_id → proposal qty
-          const qtyMap: Record<number, number> = {};
-          for (const pi of proposalItems) {
-            qtyMap[pi.ahsp_id] = (qtyMap[pi.ahsp_id] || 0) + Number(pi.qty);
-          }
-
-          // Aggregate materials: group by resource_id, sum (koefisien × proposal_qty)
-          const materialMap: Record<number, { name: string; satuan: string; harga: number; totalQty: number }> = {};
-          for (const mat of ahspMaterials) {
-            const proposalQty = qtyMap[mat.ahsp_id] || 0;
-            const neededQty = Number(mat.koefisien) * proposalQty;
-            if (neededQty <= 0) continue;
-
-            const rid = mat.resource_id;
-            if (!materialMap[rid]) {
-              materialMap[rid] = {
-                name: mat.resource_name,
-                satuan: mat.resource_satuan,
-                harga: Number(mat.resource_harga) || 0,
-                totalQty: 0
-              };
-            }
-            materialMap[rid].totalQty += neededQty;
-          }
-
-          const materialList = Object.entries(materialMap).map(([rid, m]) => ({
-            productId: null,
-            productName: '',
-            name: m.name,
-            qty: Math.ceil(m.totalQty * 1000) / 1000, // round up to 3 decimals
-            uom: m.satuan,
-            specification: `Resource ID: ${rid}`,
-            price: m.harga
-          }));
-
-          if (materialList.length > 0) {
-            // DR-P1-06: nomor PR memakai generator resmi Procurement, bukan
-            // akhiran acak 4 digit. Nomor acak itu bukan hanya rawan tabrakan —
-            // ia juga menjadi seed bagi counter berurutan Procurement dan
-            // mendorongnya melewati 9999, sehingga format PR-YYYYMMDD-NNNN rusak.
-            const prNumber = await withTransaction(tx2 =>
-              nextSequentialCode('PR', 'purchase_requests', 'pr_number', tx2));
-
-            const estimatedTotal = materialList.reduce((sum, item) => sum + (item.qty * item.price), 0);
-
-            const prResult = await dbRun(
-              `INSERT INTO purchase_requests (pr_number, requestor_id, project_id, status, notes)
-               VALUES (?, ?, ?, 'DRAFT', ?)`,
-              [
-                prNumber,
-                userId,
-                projectId,
-                JSON.stringify({
-                  noteText: `Auto-generated from proposal ${proposal.proposal_number} - ${proposal.project_name}`,
-                  itemType: 'non-inventory',
-                  items: materialList,
-                  estimatedTotal
-                })
-              ]
-            );
-
-            prId = prResult.insertId;
-            prNumber_out = prNumber;
-            console.log(`✅ Auto-created PR ${prNumber} with ${materialList.length} materials for project ${projectNumberOut}`);
-          }
-        }
-      } catch (prError) {
-        console.error('⚠️ Failed to auto-create PR (project still created):', prError);
-      }
+      handoff = await processDealPrJob(proposalId, userId);
+      prId = handoff?.pr_id || null;
+      prNumber_out = handoff?.pr_number || null;
     }
 
     res.json({ 
@@ -2435,7 +2501,10 @@ router.put('/proposals/:id/status', authMiddleware, async (req: Request, res: Re
       project_id: projectId,
       project_number: projectNumberOut || null,
       pr_id: prId || null,
-      pr_number: prNumber_out || null
+      pr_number: prNumber_out || null,
+      // DR-P1-06: status handoff ikut dikembalikan supaya kegagalannya terlihat
+      // di layar, bukan hanya tersimpan diam-diam.
+      pr_handoff: handoff,
     });
   } catch (error: any) {
     // EST-MTO-R32: kalau dua permintaan deal berlomba, yang kalah menabrak

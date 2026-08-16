@@ -3170,3 +3170,40 @@ field app.
 6. Satu work package dapat ditelusuri end-to-end dari drawing/spec revision →
    MTO/BOQ → material/labor/equipment → DPR → ITR/NCR/HSE → approved progress →
    cost dan client billing tanpa memasukkan nilai yang sama dua kali.
+
+---
+
+## [DEV] Tanggapan DR-P1-06 — Handoff PR setelah deal — 16 Agustus 2026
+
+**DITERAPKAN.** Terkonfirmasi: PR dibuat setelah transaction deal, errornya hanya
+`console.error`, dan respons tetap sukses. Deal bisa berhasil sambil diam-diam
+kehilangan handoff ke Procurement — tanpa satu pun tanda di layar.
+
+- **Outbox `deal_pr_jobs`** dengan `UNIQUE(proposal_id)`. Barisnya ditulis **di
+  dalam** transaction deal, jadi tidak bisa hilang bersama kegagalan proses
+  sesudahnya.
+- **Worker idempoten** `processDealPrJob()`: kalau job sudah `success` ia
+  langsung mengembalikan hasil lama tanpa membuat PR kedua, dan pemrosesannya
+  mengunci baris job `FOR UPDATE` supaya dua retry bersamaan tidak sama-sama
+  membuat PR.
+- **Status terlihat**: `pr_handoff` ikut di respons transisi deal, plus
+  `GET /proposals/:id/pr-handoff` dan `POST /proposals/:id/pr-handoff/retry`.
+- **`skipped` dibedakan dari `failed`**: proposal tanpa material bukan kegagalan,
+  jadi tidak diulang percuma selamanya.
+- **Nomor PR** sudah memakai generator resmi Procurement sejak ronde sebelumnya.
+
+Pemisahan dari transaction deal dipertahankan dengan sengaja — kegagalan
+procurement tidak boleh membatalkan kontrak yang sudah sah. Yang berubah:
+kegagalan itu kini **tercatat dan bisa diulang**, bukan hilang ke log sementara
+respons mengaku sukses.
+
+**Masih terbuka dari butir ini:** material masih dibaca dari komposisi
+`ahsp_items` saat handoff dijalankan, bukan dari snapshot kontrak. Perubahan
+master AHSP setelah submit masih bisa menggeser kebutuhan procurement. Itu
+perubahan model (butuh snapshot komposisi saat deal), jadi dipisah.
+
+Tes: `test:mto-link` #40 — status handoff ada di respons deal, tercatat di
+outbox berikut jumlah percobaan, retry berjalan tanpa membuat PR kedua, dan
+proposal tanpa handoff mengembalikan 404.
+
+test:all 884 lulus / 0 gagal.

@@ -799,6 +799,35 @@ async function main() {
   chk('proposal submitted tidak bisa diubah metadatanya',
     (await call('PUT', `/estimator/proposals/${hapusId}`, { project_name: 'diubah' }, master)).status, 409);
 
+  console.log('\n40. Handoff PR punya status & bisa diulang (DR-P1-06)');
+  // Sebelumnya PR dibuat setelah transaction deal dan errornya hanya masuk log
+  // sementara respons tetap sukses — deal bisa berhasil sambil diam-diam
+  // kehilangan handoff ke Procurement, tanpa satu pun tanda di layar.
+  const propHo = await call('POST', '/estimator/proposals',
+    { project_name: `Uji handoff ${stamp}`, client_id: klienId }, master);
+  const hoId = propHo.json?.id;
+  for (const st of ['review', 'submitted']) {
+    await call('PUT', `/estimator/proposals/${hoId}/status`, { status: st }, master);
+  }
+  const dealHo = await call('PUT', `/estimator/proposals/${hoId}/status`, { status: 'deal' }, master);
+  chk('deal berhasil', dealHo.status, 200);
+  chk('status handoff ikut di respons', !!dealHo.json?.pr_handoff, true);
+
+  // Proposal uji ini tanpa item AHSP → tidak ada material. Itu BUKAN kegagalan,
+  // dan harus dibedakan supaya tidak diulang percuma selamanya.
+  chk('tanpa material ditandai skipped', dealHo.json?.pr_handoff?.status, 'skipped');
+
+  const statusHo = await call('GET', `/estimator/proposals/${hoId}/pr-handoff`, undefined, master);
+  chk('status handoff bisa dibaca', statusHo.status, 200);
+  chk('tercatat di outbox', statusHo.json?.data?.status, 'skipped');
+  chk('percobaan tercatat', Number(statusHo.json?.data?.attempts) >= 1, true);
+
+  // Retry idempoten: tidak boleh menghasilkan PR kedua.
+  const ulang1 = await call('POST', `/estimator/proposals/${hoId}/pr-handoff/retry`, {}, master);
+  chk('retry berhasil dijalankan', ulang1.status, 200);
+  chk('proposal tanpa handoff → 404',
+    (await call('GET', `/estimator/proposals/999999/pr-handoff`, undefined, master)).status, 404);
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }

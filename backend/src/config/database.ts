@@ -1230,6 +1230,32 @@ const ensureProjectNumberUnique = async (connection: any) => {
   }
 };
 
+// ==================== OUTBOX HANDOFF PR SETELAH DEAL (DR-P1-06) ====================
+// Pembuatan PR dari proposal yang di-deal berjalan SETELAH transaction deal, dan
+// errornya hanya dicatat ke log sementara respons tetap sukses. Jadi deal bisa
+// berhasil sambil diam-diam kehilangan handoff ke Procurement, tanpa satu pun
+// tanda di layar.
+//
+// Barisnya ditulis DI DALAM transaction deal, jadi ia tidak bisa hilang bersama
+// kegagalan proses sesudahnya. UNIQUE pada proposal_id membuat pemrosesan
+// idempoten: retry berapa kali pun tidak menghasilkan PR kedua.
+const ensureDealPrOutbox = async (connection: any) => {
+  await execSchemaEnsure(connection, `CREATE TABLE IF NOT EXISTS deal_pr_jobs (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    proposal_id INT NOT NULL,
+    project_id INT NULL,
+    status ENUM('pending','success','failed','skipped') NOT NULL DEFAULT 'pending',
+    attempts INT NOT NULL DEFAULT 0,
+    last_error TEXT NULL,
+    pr_id INT NULL,
+    pr_number VARCHAR(100) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_deal_pr_proposal (proposal_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  console.log('✅ Outbox handoff PR ensured');
+};
+
 // ==================== TAUTAN PR PADA MATERIAL REQUEST (DR-P1-04) ====================
 // Nomor PR hasil approve dulu disimpan dengan MENIMPA kolom `notes` memakai JSON.
 // `notes` diisi karyawan sebagai teks bebas dari layar mobile, jadi approve
@@ -1682,6 +1708,7 @@ export async function initializeDatabase() {
     await ensurePayslipPeriodUnique(connection);
     await ensureApprovalRuleLink(connection);
     await ensureMaterialRequestPrLink(connection);
+    await ensureDealPrOutbox(connection);
     await ensureMtoLinesSchema(connection);
     await ensureDisposalSchema(connection);
     await ensureAssetStatusHistorySchema(connection);
