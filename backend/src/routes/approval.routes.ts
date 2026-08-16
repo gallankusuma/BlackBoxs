@@ -4,19 +4,91 @@ import { authMiddleware } from '../middleware/auth';
 
 const router = Router();
 
+type Runner = { all: (sql: string, params?: any[]) => Promise<any[]>; get: (sql: string, params?: any[]) => Promise<any> };
+const poolRunner: Runner = { all: dbAll as any, get: dbGet as any };
+
+/**
+ * Nilai entitas yang menentukan rule mana yang berlaku (DR-P0-02).
+ *
+ * Diambil dari DATABASE, bukan dari body. Menerima angkanya dari klien berarti
+ * klien memilih sendiri rule approval mana yang mengaturnya — kelas kesalahan
+ * yang sama dengan `project_id` pada payslip.
+ */
+const resolveEntityAmount = async (
+  entityType: string, entityId: any, run: Runner = poolRunner,
+): Promise<number | null> => {
+  const sumber: Record<string, [string, string]> = {
+    fund_request: ['fund_requests', 'amount'],
+    purchase_order: ['purchase_orders', 'total_amount'],
+  };
+  const found = sumber[String(entityType)];
+  if (!found || !entityId) return null;
+  const [tabel, kolom] = found;
+  const row: any = await run.get(`SELECT ${kolom} AS nilai FROM ${tabel} WHERE id = ?`, [entityId]);
+  const n = Number(row?.nilai);
+  return isFinite(n) ? n : null;
+};
+
+/**
+ * Pilih SATU rule aktif yang berlaku untuk sebuah request.
+ *
+ * Dicocokkan lewat module + rentang nilai. Rule yang lebih spesifik (punya batas)
+ * didahulukan atas rule tanpa batas, lalu urut `sequence` supaya pilihannya
+ * deterministik.
+ */
+const selectRuleForRequest = async (
+  moduleName: string, amount: number | null, run: Runner = poolRunner,
+): Promise<any> => {
+  const rules: any[] = await run.all(
+    `SELECT id, sequence, condition_field, min_value, max_value
+     FROM approval_rules WHERE module = ? AND is_active = 1
+     ORDER BY sequence ASC, id ASC`,
+    [moduleName]
+  );
+  if (!rules.length) return null;
+
+  const cocok = (r: any): boolean => {
+    const punyaBatas = r.min_value != null || r.max_value != null;
+    if (!punyaBatas) return true;
+    if (amount == null) return false; // rule bersyarat butuh nilai
+    if (r.min_value != null && amount < Number(r.min_value)) return false;
+    if (r.max_value != null && amount > Number(r.max_value)) return false;
+    return true;
+  };
+
+  const berbatas = rules.filter(r => (r.min_value != null || r.max_value != null) && cocok(r));
+  if (berbatas.length) return berbatas[0];
+  return rules.find(r => r.min_value == null && r.max_value == null) || null;
+};
+
+/** Action permission yang sah untuk sebuah step. */
+const stepActions = (stepOrder: number): string[] => ['approve', `approve_${stepOrder}`];
+
 /**
  * Otorisasi aksi approval (DR-P0-02).
  *
- * Sebelumnya `approve` dan `reject` sama sekali tidak memeriksa apa pun: siapa
- * pun yang punya token desktop dan tahu/menebak ID request bisa menyetujui atau
- * menolaknya. Filter permission hanya ada di INBOX — menyembunyikan item dari
- * daftar tidak melindungi aksinya.
+ * Sebelumnya `approve` dan `reject` tidak memeriksa apa pun: siapa pun yang punya
+ * token desktop dan tahu/menebak ID request bisa menyetujui atau menolaknya.
+ * Filter permission hanya ada di INBOX — menyembunyikan item dari daftar tidak
+ * melindungi aksinya.
+ *
+ * Perbaikan pertama masih menyisakan tiga celah, semuanya ditemukan reviewer:
+ *
+ * 1. Permission approve APA PUN di seluruh ERP diterima. Pemegang
+ *    `assets.dispose.approve` bisa menyetujui request Finance. Sekarang resource
+ *    permission wajib berawalan modul requestnya, dan action-nya wajib sesuai
+ *    step (`approve` atau `approve_<step>`).
+ * 2. Step dari SEMUA rule bermodul sama ikut tergabung. Sekarang hanya step milik
+ *    `request.rule_id` — rule yang dikunci saat submit.
+ * 3. `approval_delegations` tidak dibaca sama sekali. Sekarang delegasi aktif
+ *    (modul cocok, dalam rentang tanggal) mewarisi penugasan pemberi delegasi,
+ *    tanpa mengubah penugasan aslinya.
  *
  * Dihitung ulang dari DATABASE setiap aksi: bukan dari payload token (level di
  * token basi sampai 7 hari setelah hak dicabut), bukan dari hasil filter inbox.
  */
 const resolveApprovalAuthority = async (
-  userId: number, request: any, run: TxRunner,
+  userId: number, request: any, run: Runner,
 ): Promise<{ allowed: boolean; canReject: boolean; reason?: string }> => {
   const user: any = await run.get(
     'SELECT role_id, user_level, is_active FROM users WHERE id = ?', [userId]
@@ -27,41 +99,52 @@ const resolveApprovalAuthority = async (
   // Master melewati seluruh pemeriksaan, sama seperti requirePermission().
   if (Number(user.user_level || 0) >= 10) return { allowed: true, canReject: true };
 
+  // Permission harus milik MODUL requestnya, dan action-nya sesuai step.
+  const aksi = stepActions(Number(request.current_step || 1));
   const perm: any = await run.get(
     `SELECT 1 AS ok FROM permissions p
      JOIN role_permissions rp ON p.id = rp.permission_id
-     WHERE rp.role_id = ? AND p.action IN ('approve', 'approve_1', 'approve_2') LIMIT 1`,
-    [user.role_id || 0]
+     WHERE rp.role_id = ?
+       AND p.resource LIKE CONCAT(?, '.%')
+       AND p.action IN (${aksi.map(() => '?').join(',')})
+     LIMIT 1`,
+    [user.role_id || 0, request.module, ...aksi]
   );
-  if (!perm) return { allowed: false, canReject: false, reason: 'NO_APPROVE_PERMISSION' };
+  if (!perm) return { allowed: false, canReject: false, reason: 'NO_APPROVE_PERMISSION_FOR_MODULE' };
 
-  const steps: any[] = await run.all(
-    `SELECT ars.approver_user_id, ars.approver_role_id, ars.can_reject
-     FROM approval_rule_steps ars
-     JOIN approval_rules arl ON arl.id = ars.rule_id
-     WHERE arl.module = ? AND ars.step_order = ?`,
-    [request.module, request.current_step]
-  );
-
-  if (steps.length === 0) {
-    // Modul tanpa rule sama sekali: pemegang permission approve boleh bertindak.
-    // Ini fallback yang sama dengan inbox — dipertahankan supaya modul yang
-    // belum dikonfigurasi tetap bisa jalan, bukan mati diam-diam.
-    const anyRule: any = await run.get(
-      `SELECT 1 AS ok FROM approval_rule_steps ars
-       JOIN approval_rules arl ON arl.id = ars.rule_id
-       WHERE arl.module = ? LIMIT 1`,
-      [request.module]
+  // Rule yang dipakai request ini — bukan semua rule bermodul sama.
+  if (!request.rule_id) {
+    // Request lama/modul tanpa rule: pemegang permission modul boleh bertindak.
+    // Fallback ini sengaja dipertahankan supaya modul yang belum dikonfigurasi
+    // tidak mati, TAPI kini permissionnya benar-benar terikat modul.
+    const adaRule: any = await run.get(
+      'SELECT 1 AS ok FROM approval_rules WHERE module = ? AND is_active = 1 LIMIT 1', [request.module]
     );
-    if (!anyRule) return { allowed: true, canReject: true };
-    // Rule ADA tapi tidak untuk step ini — berarti bukan giliran orang ini.
-    return { allowed: false, canReject: false, reason: 'NOT_ASSIGNED_TO_STEP' };
+    if (!adaRule) return { allowed: true, canReject: true };
+    return { allowed: false, canReject: false, reason: 'REQUEST_WITHOUT_RULE' };
   }
 
-  // `approver_role_id` ikut dihormati; inbox lama hanya melihat approver_user_id
-  // sehingga step yang ditugaskan ke ROLE jatuh ke cabang "siapa saja".
+  const steps: any[] = await run.all(
+    `SELECT approver_user_id, approver_role_id, can_reject
+     FROM approval_rule_steps WHERE rule_id = ? AND step_order = ?`,
+    [request.rule_id, request.current_step]
+  );
+  if (!steps.length) return { allowed: false, canReject: false, reason: 'NO_STEP_DEFINED' };
+
+  // Delegasi aktif: user ini mewarisi penugasan orang yang mendelegasikan.
+  const delegasi: any[] = await run.all(
+    `SELECT from_user_id FROM approval_delegations
+     WHERE to_user_id = ? AND is_active = 1 AND module = ?
+       AND (start_date IS NULL OR start_date <= CURDATE())
+       AND (end_date IS NULL OR end_date >= CURDATE())`,
+    [userId, request.module]
+  );
+  const mewakili = new Set<number>(delegasi.map((d: any) => Number(d.from_user_id)));
+
   const match = steps.find(st =>
-    (st.approver_user_id != null && Number(st.approver_user_id) === Number(userId))
+    (st.approver_user_id != null && (
+      Number(st.approver_user_id) === Number(userId) || mewakili.has(Number(st.approver_user_id))
+    ))
     || (st.approver_role_id != null && Number(st.approver_role_id) === Number(user.role_id))
     || (st.approver_user_id == null && st.approver_role_id == null)
   );
@@ -288,13 +371,14 @@ const actOnRequest = async (
     // module punya lebih dari satu rule — pilihan yang sama setiap kali, bukan
     // bergantung urutan baris. Menyimpan rule_id di request adalah perbaikan
     // yang benar, tapi itu perubahan model data tersendiri.
-    const nextStep: any = await tx.get(
-      `SELECT ars.step_order FROM approval_rule_steps ars
-       JOIN approval_rules arl ON ars.rule_id = arl.id
-       WHERE arl.module = ? AND ars.step_order = ?
-       ORDER BY arl.id, ars.id LIMIT 1`,
-      [request.module, request.current_step + 1]
-    );
+    // Step berikutnya diambil dari RULE YANG SAMA. Versi sebelumnya mencarinya
+    // lewat `module`, jadi alur bisa berpindah ke rule lain di tengah jalan —
+    // `ORDER BY` hanya membuat hasil yang salah itu deterministik.
+    const nextStep: any = request.rule_id ? await tx.get(
+      `SELECT step_order FROM approval_rule_steps
+       WHERE rule_id = ? AND step_order = ? LIMIT 1`,
+      [request.rule_id, request.current_step + 1]
+    ) : null;
 
     if (nextStep) {
       await tx.run('UPDATE approval_requests SET current_step = ? WHERE id = ?',
@@ -629,14 +713,19 @@ router.delete('/escalations/:id', authMiddleware, async (req: Request, res: Resp
 // POST /submit — submit a new approval request
 router.post('/submit', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).user?.userId;
+    const userId = (req as any).userId;
     const { module, entity_type, entity_id, notes } = req.body;
+
+    // DR-P0-02: rule dipilih SEKALI di sini lalu dikunci ke requestnya, memakai
+    // nilai entitas yang dibaca dari database — bukan dari body.
+    const nilai = await resolveEntityAmount(entity_type, entity_id);
+    const rule = await selectRuleForRequest(module, nilai);
 
     const requestNumber = generateCode('APR');
     const result = await dbRun(
-      `INSERT INTO approval_requests (request_number, module, entity_type, entity_id, requester_id, current_step, status, notes)
-       VALUES (?, ?, ?, ?, ?, 1, 'pending', ?)`,
-      [requestNumber, module, entity_type, entity_id, userId, notes || null]
+      `INSERT INTO approval_requests (request_number, module, entity_type, entity_id, requester_id, current_step, status, notes, rule_id, condition_value)
+       VALUES (?, ?, ?, ?, ?, 1, 'pending', ?, ?, ?)`,
+      [requestNumber, module, entity_type, entity_id, userId, notes || null, rule?.id || null, nilai]
     );
 
     res.status(201).json({ success: true, data: { id: result.insertId, request_number: requestNumber } });

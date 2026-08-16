@@ -980,6 +980,15 @@ resource secara eksplisit per entity/module dan wajibkan action sesuai step.
 Masukkan delegasi aktif dengan batas tanggal/module, tanpa mengubah assignment
 asli. Jangan memakai fallback lintas resource.
 
+**Verifikasi 16 Agustus 2026 15:12 WIB — DITERAPKAN SEBAGIAN.** Working tree di
+atas `a57c1daf` sudah mengikat permission ke prefix module + step, menyimpan
+`rule_id`, mencari next step dalam rule yang sama, serta mulai membaca delegasi.
+Lock/transaction aksi tetap benar. Namun `module` masih dipercaya langsung dari
+body dan belum dipetakan dari `entity_type`; namespace UI (`pr`, `po`, `grn`,
+dst.) juga tidak cocok dengan prefix permission (`procurement.*`, `finance.*`).
+Karena itu kriteria mapping eksplisit dan delegasi penuh belum lolos; detail
+residual dicatat pada Live Auto Review 15:12 WIB.
+
 ### [P1] Tes baru memberi coverage semu dan meninggalkan fixture approval
 
 [rbac.ts:155](backend/tests/rbac.ts) hanya membandingkan user dengan **nol
@@ -1087,6 +1096,13 @@ yang ditentukan server. Jika bisnis memang membutuhkan payslip per project,
 ubah model dokumen, unique key, UI, dan finance handoff secara konsisten; jangan
 mengandalkan filter body yang bebas.
 
+**Verifikasi 16 Agustus 2026 15:06 WIB — DITERAPKAN pada boundary finalisasi.**
+Commit `a57c1daf` menghapus `project_id` dari body `/payslip/save`, menghitung
+ulang seluruh attendance dengan `project_id = null`, dan menyimpan satu payslip
+global per employee/periode. Angka final tidak lagi dapat diperkecil dengan
+memilih project dari klien. Kontrak UI preview dan handoff biaya project belum
+ikut diselaraskan; regresi lintas modulnya dicatat pada review 15:06 di bawah.
+
 ### [P0] Kalkulasi dan pemilihan kasbon masih di luar transaction
 
 `computePayslip()` dipanggil di [hr.routes.ts:728](backend/src/routes/hr.routes.ts),
@@ -1106,6 +1122,14 @@ lock employee/rate, attendance snapshot yang relevan, dan kasbon dengan
 perhitungan dan jumlah affected row harus cocok; perubahan concurrent harus
 rollback/retry, bukan memfinalisasi snapshot basi.
 
+**Verifikasi 16 Agustus 2026 15:06 WIB — DITERAPKAN SEBAGIAN.** Perhitungan
+sekarang memakai runner transaction; kasbon dipilih `FOR UPDATE`, di-update,
+lalu dibaca ulang dan transaksi gagal bila status/sisa tidak sesuai. Namun
+employee/rate di [hr.routes.ts:452](backend/src/routes/hr.routes.ts) serta
+attendance utama dan supplemental di [hr.routes.ts:463](backend/src/routes/hr.routes.ts)
+dan [hr.routes.ts:514](backend/src/routes/hr.routes.ts) masih `SELECT` biasa.
+Acceptance lock/conflict untuk dua sumber nilai tersebut tetap terbuka.
+
 ### [P0] Jangan jalankan tes payslip baru—dapat melunasi kasbon riil
 
 [rbac.ts:214](backend/tests/rbac.ts) memilih karyawan pertama dari database
@@ -1124,6 +1148,13 @@ employee + attendance + kasbon temporer yang dikenali unik, bungkus cleanup
 payslip/kasbon/attendance/employee dalam `finally`, dan buktikan data di luar
 fixture tidak berubah. Alternatif lebih aman: ekstrak kalkulator menjadi fungsi
 murni dan uji tanpa HTTP/database.
+
+**Verifikasi 16 Agustus 2026 15:06 WIB — DITERAPKAN untuk risiko data riil.**
+Tes sekarang membuat dua employee, attendance, dan kasbon sintetis; hanya
+employee fixture yang difinalisasi, kasbon pembanding dibuktikan tidak berubah,
+dan cleanup normal berada di `finally`. Suite HTTP sengaja tidak dijalankan oleh
+reviewer karena tetap mutating. Sisa kebocoran saat setup fixture gagal parsial
+dicatat sebagai P3 pada review 15:06.
 
 ### Verifikasi run ini
 
@@ -1881,6 +1912,124 @@ menjaga nomor, status, owner, due date, dan histori lama.
 
 ---
 
+## Live Auto Review — 16 Agustus 2026 15:06 WIB
+
+Baseline: commit baru `a57c1daf` (`fix(payroll): hitung di dalam transaction,
+project_id bukan dari klien, tes diisolasi`). Source code tidak diubah reviewer.
+
+### [FEATURE-REGRESSION / P1] Preview payroll masih per-project, tetapi Save menyimpan payroll global yang berbeda
+
+Backend finalisasi sekarang benar menghitung satu payslip global per
+employee/periode: `/payslip/save` mengabaikan `project_id` dan memanggil
+`computePayslip(..., null)` ([hr.routes.ts:726](backend/src/routes/hr.routes.ts),
+[hr.routes.ts:747](backend/src/routes/hr.routes.ts)). Namun endpoint preview GET
+masih menerima `project_id` dan menyaring attendance
+([hr.routes.ts:696](backend/src/routes/hr.routes.ts),
+[hr.routes.ts:463](backend/src/routes/hr.routes.ts)). Frontend tetap memakai
+preview terfilter itu untuk tabel/modal dan kemudian mengirim Save, tetapi
+mengabaikan angka yang dihitung ulang dalam response
+([AttendanceView.vue:1675](frontend/src/views/AttendanceView.vue),
+[AttendanceView.vue:1725](frontend/src/views/AttendanceView.vue),
+[AttendanceView.vue:1728](frontend/src/views/AttendanceView.vue)). Jalur project
+timesheet juga masih menampilkan slip terfilter
+([ProjectTimesheets.vue:229](frontend/src/components/projects/ProjectTimesheets.vue)).
+
+**Bukti perilaku:** bila employee memiliki attendance di project A dan B, filter
+A menampilkan gross/net A. Tombol Save lalu menyimpan A+B dengan `project_id =
+NULL`, sementara UI tetap memberi sukses berdasarkan request preview A. Riwayat
+dan dokumen final dapat berbeda material dari angka yang baru saja disetujui
+operator.
+
+**Dampak:** HR dapat memfinalisasi payroll tanpa melihat nominal final; audit
+tidak dapat membuktikan angka yang dikonfirmasi pengguna. Analitik project yang
+sudah ada juga kehilangan makna bila UI dipaksa menampilkan global di semua
+konteks tanpa pemisahan dokumen final dan allocation view.
+
+**Rekomendasi:** pertahankan satu payslip global sebagai source of truth, tetapi
+hapus project filter dari semua preview yang mempunyai aksi finalisasi. Jika
+preview project tetap dibutuhkan, beri kontrak/label eksplisit “analitik alokasi,
+tidak dapat difinalisasi”, dan setelah Save render response server atau fetch
+history final. Tambahkan test kontrak UI/API untuk employee dengan attendance di
+dua project.
+
+**Acceptance:** angka yang terlihat tepat sebelum konfirmasi sama dengan angka
+response dan history final; project filter tidak dapat mengubah entitlement
+payslip; view analitik project tetap tersedia tanpa tombol finalisasi dan total
+lintas project merekonsiliasi ke payslip global.
+
+### [P1 / RBAC + FINANCIAL-INTEGRITY] Semua token desktop dapat membuat expense payroll berstatus approved dan menggandakan total ke beberapa project
+
+`POST /hr/payslip/generate-expense` hanya memakai `authMiddleware`, tanpa
+`requirePermission` ([hr.routes.ts:1028](backend/src/routes/hr.routes.ts)).
+Handler menerima `project_id` bebas, mengambil **seluruh** payslip final periode
+tanpa alokasi/project filter ([hr.routes.ts:1056](backend/src/routes/hr.routes.ts)),
+lalu langsung memasukkan expense gaji dan kasbon dengan status `approved`
+([hr.routes.ts:1090](backend/src/routes/hr.routes.ts),
+[hr.routes.ts:1103](backend/src/routes/hr.routes.ts)). Cek duplikat hanya per
+project, sehingga request yang sama ke project A lalu B sama-sama lolos dan
+membebankan 100% payroll perusahaan ke kedua project.
+
+**Dampak:** user desktop tanpa hak payroll/finance dapat menciptakan biaya yang
+langsung approved; satu payroll dapat dihitung berkali-kali ke cost control,
+margin, dan payment/fund schedule project yang berbeda. Dua INSERT expense juga
+tidak berada dalam satu transaction, sehingga kegagalan kedua meninggalkan gaji
+tanpa pasangan kasbon lalu retry ditolak oleh cek duplikat pertama.
+
+**Rekomendasi:** minimal pasang permission existing yang sesuai untuk payroll
+dan project expense (setelah memverifikasi mapping role produksi sesuai aturan
+AGENTS.md), jangan auto-approve tanpa approval policy yang sah, dan bungkus
+idempotency check + kedua insert dalam satu transaction. Untuk target design,
+buat ledger `payroll_project_allocations` yang diturunkan server-side dari
+attendance/project hours/cost rule; `generate-expense` hanya mengonsumsi
+allocation per project, bukan menyalin total payslip global.
+
+**Acceptance:** token tanpa hak mendapat 403 dan tidak membuat row; allocation
+semua project berjumlah tepat sama dengan total payroll global; satu allocation
+tidak bisa diposting dua kali; request paralel/retry idempoten; kegagalan salah
+satu insert me-rollback semuanya; expense tidak menjadi approved tanpa actor dan
+jejak approval yang berwenang.
+
+### [P1 / TRANSACTION-INTEGRITY] Snapshot tarif dan attendance masih dapat berubah saat payroll difinalisasi
+
+Commit `a57c1daf` telah memindahkan kalkulasi ke transaction dan mengunci
+kasbon, tetapi employee/rate dan attendance tetap dibaca tanpa locking read
+([hr.routes.ts:452](backend/src/routes/hr.routes.ts),
+[hr.routes.ts:463](backend/src/routes/hr.routes.ts),
+[hr.routes.ts:514](backend/src/routes/hr.routes.ts)). Transaction snapshot
+menjaga konsistensi bacaan sendiri, tetapi tidak mencegah transaksi lain
+mengubah tarif atau attendance setelah dibaca dan commit sebelum payslip selesai.
+Payslip dapat final dari snapshot lama tanpa conflict yang terlihat.
+
+**Rekomendasi/acceptance:** lock employee dan seluruh row attendance yang menjadi
+dasar hitung dengan urutan lock konsisten, atau gunakan version/checksum revision
+dan optimistic conflict check sebelum commit. Dua finalisasi paralel harus
+memberi satu hasil idempoten; edit attendance/rate paralel harus menunggu atau
+membuat finalisasi rollback/retry, tidak sukses dengan angka basi.
+
+### [P3 / TEST-INTEGRITY] Setup fixture payroll yang gagal parsial tidak masuk cleanup
+
+`seedPayrollFixture()` melakukan beberapa INSERT autocommit, lalu menangkap
+exception dan mengembalikan `null` ([rbac.ts:53](backend/tests/rbac.ts),
+[rbac.ts:100](backend/tests/rbac.ts)). Cleanup di `finally` hanya dijalankan bila
+fungsi berhasil mengembalikan `employeeId` ([rbac.ts:314](backend/tests/rbac.ts),
+[rbac.ts:317](backend/tests/rbac.ts)). Bila INSERT kedua/attendance/kasbon gagal,
+employee atau row sebelumnya tertinggal di DB dan tes hanya mencatat assertion
+gagal tanpa mengetahui ID yang harus dibersihkan.
+
+**Rekomendasi/acceptance:** buat fixture dalam transaction yang rollback saat
+setup gagal, atau simpan ID segera setelah setiap INSERT dan cleanup prefix unik
+di outer `finally`. Paksa satu langkah setup gagal dalam test cleanup dan
+buktikan jumlah row bertanda `UJI-PAYROLL-*` kembali ke baseline.
+
+### Verifikasi run ini
+
+| Pemeriksaan | Hasil |
+|---|---|
+| `backend: npx tsc --noEmit` | Lulus pada commit `a57c1daf` |
+| HTTP/RBAC suite | Tidak dijalankan; suite membuat fixture/data |
+
+---
+
 ## [DEV] Tanggapan atas temuan payroll & fixture — 16 Agustus 2026
 
 Empat temuan, semuanya diterima. Tiga di antaranya cacat pada kode/tes kami sendiri.
@@ -1950,3 +2099,66 @@ uji, kasbon uji, approval uji, dan kredensial uji semuanya 0 setelah suite
 selesai.
 
 test:all 834 lulus / 0 gagal.
+
+---
+
+## [DEV] Tanggapan atas verifikasi DR-P0-02 — 16 Agustus 2026
+
+### [P0] Authority masih lintas modul, rule, dan level step
+
+**DITERAPKAN.** Ketiga bypass terkonfirmasi dan diperbaiki. Produksi masih 0 rule
+dan 0 request, jadi model datanya bisa dibetulkan tanpa merusak apa pun.
+
+1. **Permission lintas modul.** Betul — query hanya memeriksa `p.action`, jadi
+   pemegang `assets.*.approve` bisa menyetujui request Finance. Sekarang resource
+   permission wajib **berawalan modul requestnya**
+   (`p.resource LIKE CONCAT(module, '.%')`), dan action-nya wajib sesuai step:
+   `approve` atau `approve_<step_order>`. Kode penolakannya dibedakan
+   (`NO_APPROVE_PERMISSION_FOR_MODULE`) supaya bisa diuji secara spesifik.
+
+2. **Step tergabung lintas rule.** Betul, dan `ORDER BY` memang hanya membuat
+   hasil yang salah itu deterministik. `approval_requests` sekarang menyimpan
+   `rule_id` dan `condition_value`; rule dipilih **sekali saat submit** dari rule
+   aktif modul itu, dicocokkan lewat rentang `min_value`/`max_value`, dengan rule
+   berbatas didahulukan lalu urut `sequence`. Seluruh query authority dan
+   pencarian step berikutnya memakai `rule_id` itu.
+
+   Nilai pembandingnya dibaca **dari database** (`fund_requests.amount`,
+   `purchase_orders.total_amount`), bukan dari body — menerimanya dari klien
+   berarti klien memilih sendiri rule yang mengaturnya, kelas kesalahan yang sama
+   dengan `project_id` pada payslip.
+
+3. **Delegasi tidak dibaca.** Betul. Delegasi aktif (modul cocok, dalam rentang
+   tanggal, `is_active`) kini mewarisi penugasan pemberi delegasi, tanpa mengubah
+   penugasan aslinya.
+
+Fallback "modul tanpa rule" dipertahankan supaya modul yang belum dikonfigurasi
+tidak mati, **tetapi permissionnya kini benar-benar terikat modul**. Request yang
+punya rule aktif tapi tanpa `rule_id` ditolak (`REQUEST_WITHOUT_RULE`) alih-alih
+jatuh ke fallback.
+
+**Masih terbuka:** kriteria 4 — CRUD rules/delegation/escalation masih
+`authMiddleware` saja.
+
+### [P1] Coverage semu & fixture approval tertinggal
+
+**DITERAPKAN.** Kritik bahwa membandingkan "nol permission vs master" tidak
+menguji apa pun itu tepat — tes lama tetap hijau untuk seluruh bypass di atas.
+
+Matriksnya sekarang: permission modul lain (403 + kode spesifik), permission
+modul benar tapi tidak ditugaskan (403 + kode spesifik), `can_reject = 0` menolak
+reject, delegasi aktif berhasil, **dua approve paralel lewat `Promise.all`** yang
+harus menghasilkan tepat satu 200 **dan tepat satu baris action**, serta 401
+tanpa token.
+
+Fixture rule + step + dua request + lima user/role dibuat sendiri dan dibersihkan
+di `finally`; cleanup-nya **dibuktikan** mengembalikan 0.
+
+> Satu hal yang kami temukan sendiri saat mengerjakan ini: percobaan pertama gagal
+> di tengah pembuatan fixture, dan karena `af` bernilai null, cleanup di `finally`
+> tidak punya apa pun untuk dihapus — 5 user, 5 role, dan 2 rule menggantung.
+> Persis bentuk masalah yang Anda laporkan, cuma lewat jalur lain. Sekarang
+> penyemaian menyapu sisa run sebelumnya lebih dulu DAN membersihkan dirinya
+> sendiri kalau gagal separuh.
+
+test:all 838 lulus / 0 gagal; dev DB diverifikasi bersih dari seluruh fixture.

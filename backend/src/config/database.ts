@@ -1230,6 +1230,23 @@ const ensureProjectNumberUnique = async (connection: any) => {
   }
 };
 
+// ==================== RULE APPROVAL TERIKAT KE REQUEST (DR-P0-02) ====================
+// `approval_requests` tidak menyimpan rule mana yang berlaku, sehingga otorisasi
+// dan pencarian step berikutnya hanya bisa mencocokkan lewat `module`. Semua
+// step dari SEMUA rule bermodul sama ikut tergabung — approver yang ditugaskan
+// pada satu rule bisa bertindak atas request yang seharusnya memakai rule lain,
+// dan `condition_field`/`min_value`/`max_value`/`is_active` tidak pernah
+// dievaluasi.
+//
+// Rule dipilih sekali saat submit lalu dikunci ke requestnya.
+const ensureApprovalRuleLink = async (connection: any) => {
+  await execSchemaEnsure(connection,
+    'ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS rule_id INT NULL');
+  await execSchemaEnsure(connection,
+    'ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS condition_value DECIMAL(15,2) NULL');
+  console.log('✅ Rule approval terikat ke request ensured');
+};
+
 // ==================== SATU PAYSLIP PER KARYAWAN PER PERIODE (DR-P0-04) ====================
 // `POST /payslip/save` memakai pola upsert dengan kunci
 // (employee_id, period_month, period_year) — pencariannya bahkan
@@ -1650,6 +1667,7 @@ export async function initializeDatabase() {
     await ensureOneProjectPerProposal(connection);
     await ensureProjectNumberUnique(connection);
     await ensurePayslipPeriodUnique(connection);
+    await ensureApprovalRuleLink(connection);
     await ensureMtoLinesSchema(connection);
     await ensureDisposalSchema(connection);
     await ensureAssetStatusHistorySchema(connection);

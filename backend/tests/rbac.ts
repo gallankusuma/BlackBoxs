@@ -37,15 +37,147 @@ const status = async (...a: Parameters<typeof call>) => (await call(...a)).statu
 // ─── Fixture payroll terisolasi (DR-P0-04) ────────────────────────────────────
 // Dibuat sendiri, bukan memakai karyawan yang sudah ada, supaya tes tidak
 // pernah menyentuh kasbon atau slip gaji orang sungguhan.
-/** Hapus approval request uji berikut action-nya; kembalikan sisa baris (harus 0). */
-async function cleanupApprovalFixture(requestId: number): Promise<number> {
+/**
+ * Fixture approval terisolasi: rule + step + dua request + empat user berbeda hak.
+ * Seluruhnya dibuat sendiri supaya tidak menyentuh konfigurasi approval nyata.
+ */
+async function seedApprovalFixture(): Promise<any> {
+  try {
+    const { dbRun, dbGet } = await import('../src/config/database');
+    // Sapu sisa run sebelumnya lebih dulu — tes idempoten tidak boleh menumpuk.
+    await cleanupApprovalDebris();
+    const tag = `UJI-APPR-${Date.now()}`;
+
+    const buatUser = async (suffix: string, resourcePrefix: string | null) => {
+      const email = `${tag}-${suffix}@uji.local`.toLowerCase();
+      const r: any = await dbRun(
+        `INSERT INTO roles (name, description) VALUES (?, 'fixture uji')`, [`${tag}-${suffix}`]
+      );
+      const roleId = r.insertId;
+      if (resourcePrefix) {
+        // Beri SATU permission approve pada resource yang diminta.
+        const perm: any = await dbGet(
+          `SELECT id FROM permissions WHERE resource LIKE CONCAT(?, '.%') AND action = 'approve' LIMIT 1`,
+          [resourcePrefix]
+        );
+        if (perm) await dbRun('INSERT INTO role_permissions (role_id, permission_id) VALUES (?, ?)', [roleId, perm.id]);
+      }
+      const bcrypt = await import('bcrypt');
+      const u: any = await dbRun(
+        `INSERT INTO users (username, email, password, full_name, role_id, user_level, is_active)
+         VALUES (?, ?, ?, 'Uji Approval', ?, 1, 1)`,
+        [email, email, await bcrypt.hash('secret123', 10), roleId]
+      );
+      return { id: u.insertId, roleId, email };
+    };
+
+    const userSalahModul = await buatUser('salahmodul', 'assets');
+    const userBenarTakDitugaskan = await buatUser('takditugaskan', 'finance');
+    const userDitugaskan = await buatUser('ditugaskan', 'finance');
+    const userDelegasi = await buatUser('delegasi', 'finance');
+    const userPemberi = await buatUser('pemberi', 'finance');
+
+    const rule: any = await dbRun(
+      `INSERT INTO approval_rules (module, name, sequence, is_active) VALUES ('finance', ?, 1, 1)`, [tag]
+    );
+    const ruleId = rule.insertId;
+    // can_reject = 0: boleh menyetujui, tidak boleh menolak.
+    await dbRun(
+      `INSERT INTO approval_rule_steps (rule_id, step_order, approver_user_id, can_reject) VALUES (?, 1, ?, 0)`,
+      [ruleId, userDitugaskan.id]
+    );
+
+    // Rule kedua untuk menguji delegasi, dengan approver berbeda.
+    const rule2: any = await dbRun(
+      `INSERT INTO approval_rules (module, name, sequence, is_active) VALUES ('finance', ?, 2, 1)`, [`${tag}-2`]
+    );
+    await dbRun(
+      `INSERT INTO approval_rule_steps (rule_id, step_order, approver_user_id, can_reject) VALUES (?, 1, ?, 1)`,
+      [rule2.insertId, userPemberi.id]
+    );
+    await dbRun(
+      `INSERT INTO approval_delegations (from_user_id, to_user_id, module, start_date, end_date, is_active)
+       VALUES (?, ?, 'finance', CURDATE(), DATE_ADD(CURDATE(), INTERVAL 7 DAY), 1)`,
+      [userPemberi.id, userDelegasi.id]
+    );
+
+    const buatRequest = async (rid: number) => {
+      const r: any = await dbRun(
+        `INSERT INTO approval_requests (request_number, module, entity_type, entity_id, requester_id, current_step, status, notes, rule_id)
+         VALUES (?, 'finance', 'fund_request', 999999, 1, 1, 'pending', ?, ?)`,
+        [`${tag}-${rid}-${Math.random().toString(36).slice(2, 7)}`, tag, rid]
+      );
+      return r.insertId;
+    };
+
+    return {
+      tag, ruleId, ruleId2: rule2.insertId,
+      requestId: await buatRequest(ruleId),
+      requestId2: await buatRequest(rule2.insertId),
+      userSalahModul, userBenarTakDitugaskan, userDitugaskan, userDelegasi, userPemberi,
+    };
+  } catch (e: any) {
+    // Pembuatan fixture bisa gagal di tengah — dan yang terlanjur dibuat akan
+    // menggantung selamanya kalau tidak dibereskan di sini. Itu persis yang
+    // terjadi pada percobaan pertama: 5 user, 5 role, dan 2 rule tertinggal
+    // karena `af` bernilai null sehingga cleanup di `finally` tidak punya apa pun
+    // untuk dihapus.
+    console.log(`  (fixture approval gagal: ${e.message} — membersihkan sisa)`);
+    try { await cleanupApprovalDebris(); } catch { /* biar tidak menutupi error asli */ }
+    return null;
+  }
+}
+
+/** Sapu bersih sisa fixture approval dari run mana pun yang gagal separuh. */
+async function cleanupApprovalDebris(): Promise<void> {
+  const { dbRun } = await import('../src/config/database');
+  await dbRun(`DELETE FROM approval_delegations WHERE from_user_id IN (SELECT id FROM users WHERE email LIKE 'uji-appr-%')`);
+  await dbRun(`DELETE FROM approval_actions WHERE request_id IN (SELECT id FROM approval_requests WHERE notes LIKE 'UJI-APPR-%')`);
+  await dbRun(`DELETE FROM approval_requests WHERE notes LIKE 'UJI-APPR-%'`);
+  await dbRun(`DELETE FROM approval_rule_steps WHERE rule_id IN (SELECT id FROM approval_rules WHERE name LIKE 'UJI-APPR-%')`);
+  await dbRun(`DELETE FROM approval_rules WHERE name LIKE 'UJI-APPR-%'`);
+  await dbRun(`DELETE FROM role_permissions WHERE role_id IN (SELECT id FROM roles WHERE name LIKE 'UJI-APPR-%')`);
+  await dbRun(`DELETE FROM users WHERE email LIKE 'uji-appr-%'`);
+  await dbRun(`DELETE FROM roles WHERE name LIKE 'UJI-APPR-%'`);
+}
+
+async function loginAs(email: string): Promise<string> {
+  const r = await call('POST', '/auth/login', { email, password: 'secret123' });
+  return r.json?.token || '';
+}
+
+async function countActions(requestId: number): Promise<number> {
+  const { dbGet } = await import('../src/config/database');
+  const r: any = await dbGet('SELECT COUNT(*) n FROM approval_actions WHERE request_id = ?', [requestId]);
+  return Number(r?.n ?? -1);
+}
+
+/** Hapus seluruh fixture approval; kembalikan sisa baris (harus 0). */
+async function cleanupApprovalFixture(af: any): Promise<number> {
   const { dbRun, dbGet } = await import('../src/config/database');
-  await dbRun('DELETE FROM approval_actions WHERE request_id = ?', [requestId]);
-  await dbRun('DELETE FROM approval_requests WHERE id = ?', [requestId]);
+  const reqIds = [af.requestId, af.requestId2].filter(Boolean);
+  const userIds = [af.userSalahModul, af.userBenarTakDitugaskan, af.userDitugaskan, af.userDelegasi, af.userPemberi]
+    .filter(Boolean).map((u: any) => u.id);
+  const roleIds = [af.userSalahModul, af.userBenarTakDitugaskan, af.userDitugaskan, af.userDelegasi, af.userPemberi]
+    .filter(Boolean).map((u: any) => u.roleId);
+
+  if (reqIds.length) {
+    await dbRun(`DELETE FROM approval_actions WHERE request_id IN (${reqIds.map(() => '?').join(',')})`, reqIds);
+    await dbRun(`DELETE FROM approval_requests WHERE id IN (${reqIds.map(() => '?').join(',')})`, reqIds);
+  }
+  await dbRun('DELETE FROM approval_delegations WHERE module = ? AND to_user_id IN (?, ?)',
+    ['finance', af.userDelegasi?.id || 0, af.userPemberi?.id || 0]);
+  await dbRun('DELETE FROM approval_rule_steps WHERE rule_id IN (?, ?)', [af.ruleId, af.ruleId2]);
+  await dbRun('DELETE FROM approval_rules WHERE id IN (?, ?)', [af.ruleId, af.ruleId2]);
+  if (roleIds.length) await dbRun(`DELETE FROM role_permissions WHERE role_id IN (${roleIds.map(() => '?').join(',')})`, roleIds);
+  if (userIds.length) await dbRun(`DELETE FROM users WHERE id IN (${userIds.map(() => '?').join(',')})`, userIds);
+  if (roleIds.length) await dbRun(`DELETE FROM roles WHERE id IN (${roleIds.map(() => '?').join(',')})`, roleIds);
+
   const sisa: any = await dbGet(
-    `SELECT (SELECT COUNT(*) FROM approval_requests WHERE id = ?)
-          + (SELECT COUNT(*) FROM approval_actions WHERE request_id = ?) AS n`,
-    [requestId, requestId]
+    `SELECT (SELECT COUNT(*) FROM approval_requests WHERE notes = ?)
+          + (SELECT COUNT(*) FROM approval_rules WHERE name LIKE CONCAT(?, '%'))
+          + (SELECT COUNT(*) FROM users WHERE email LIKE CONCAT(?, '%')) AS n`,
+    [af.tag, af.tag, af.tag.toLowerCase()]
   );
   return Number(sisa?.n ?? -1);
 }
@@ -237,38 +369,56 @@ async function main() {
   chk('master → kategori aset', await status('GET', '/assets/categories', undefined, master), 200);
   chk('master → KPI summary', await status('GET', '/assets/summary', undefined, master), 200);
 
-  console.log('\n7. Aksi approval tidak bisa dipakai non-approver (DR-P0-02)');
-  // Inbox memang sudah difilter permission, tapi AKSInya dulu tidak memeriksa
-  // apa pun: siapa pun yang tahu/menebak ID request bisa menyetujuinya. Filter
-  // di daftar tidak melindungi aksi.
-  //
-  // Modul approval belum dipakai di produksi (0 rule, 0 request), jadi request
-  // uji dibuat sendiri lewat master lalu dihapus lagi.
-  const areq = await call('POST', '/approval/submit', {
-    module: 'finance', entity_type: 'fund_request', entity_id: 999999, notes: 'uji DR-P0-02',
-  }, master);
-  const areqId = areq.json?.data?.id ?? areq.json?.id;
+  console.log('\n7. Otorisasi approval terikat rule, modul, step, dan delegasi (DR-P0-02)');
+  // Tes pertama kami hanya membandingkan user tanpa permission melawan master —
+  // itu tetap hijau walaupun pemegang permission approve modul LAIN bisa
+  // menyetujui request Finance. Ditemukan tim reviewer. Sekarang matriksnya
+  // diuji sungguhan di atas fixture rule/request terisolasi.
+  const af = await seedApprovalFixture();
+  chk('fixture approval dibuat', !!af?.requestId, true);
 
-  chk('request approval uji terbuat', !!areqId, true);
-  if (areqId) {
-    // `plainToken` = user tanpa satu pun permission approve.
-    chk('approve oleh user tanpa hak', await status('PUT', `/approval/inbox/${areqId}/approve`, {}, plainToken), 403);
-    chk('reject oleh user tanpa hak', await status('PUT', `/approval/inbox/${areqId}/reject`, {}, plainToken), 403);
-    chk('tanpa token sama sekali', await status('PUT', `/approval/inbox/${areqId}/approve`, {}), 401);
+  if (af?.requestId) {
+    try {
+      const tokSalahModul = await loginAs(af.userSalahModul.email);
+      const tokBenarTakDitugaskan = await loginAs(af.userBenarTakDitugaskan.email);
+      const tokDitugaskan = await loginAs(af.userDitugaskan.email);
+      const tokDelegasi = await loginAs(af.userDelegasi.email);
 
-    // Yang berwenang tetap harus bisa — proteksi tidak boleh mengunci semuanya.
-    const olehMaster = await call('PUT', `/approval/inbox/${areqId}/approve`, {}, master);
-    chk('master tetap bisa approve', olehMaster.status, 200);
+      // 1. Permission approve dari MODUL LAIN tidak boleh berlaku.
+      const salahModul = await call('PUT', `/approval/inbox/${af.requestId}/approve`, {}, tokSalahModul);
+      chk('permission approve modul lain ditolak', salahModul.status, 403);
+      chk('alasannya modul, bukan sekadar tanpa hak',
+        salahModul.json?.code, 'NO_APPROVE_PERMISSION_FOR_MODULE');
 
-    // Setelah selesai, approve kedua harus ditolak sebagai konflik, bukan
-    // diproses dua kali.
-    chk('approve ulang ditolak 409',
-      await status('PUT', `/approval/inbox/${areqId}/approve`, {}, master), 409);
+      // 2. Permission modul benar tapi bukan giliran orang ini.
+      const takDitugaskan = await call('PUT', `/approval/inbox/${af.requestId}/approve`, {}, tokBenarTakDitugaskan);
+      chk('permission benar tapi tidak ditugaskan ditolak', takDitugaskan.status, 403);
+      chk('alasannya penugasan step', takDitugaskan.json?.code, 'NOT_ASSIGNED_TO_STEP');
 
-    // Tes sebelumnya meninggalkan approval_request + action-nya di database —
-    // dilaporkan tim reviewer. Fixture harus hilang seperti tidak pernah ada.
-    const sisaApproval = await cleanupApprovalFixture(areqId);
-    chk('fixture approval dibersihkan tuntas', sisaApproval, 0);
+      // 3. can_reject = 0 → boleh menyetujui, tidak boleh menolak.
+      chk('step tanpa hak tolak menolak reject',
+        (await call('PUT', `/approval/inbox/${af.requestId}/reject`, {}, tokDitugaskan)).json?.code,
+        'REJECT_NOT_ALLOWED');
+
+      // 4. Delegasi aktif mewarisi penugasan pemberi delegasi.
+      const lewatDelegasi = await call('PUT', `/approval/inbox/${af.requestId2}/approve`, {}, tokDelegasi);
+      chk('delegasi aktif boleh bertindak', lewatDelegasi.status, 200);
+
+      // 5. Dua approve paralel — hanya satu yang boleh menang.
+      const [pa, pb] = await Promise.all([
+        call('PUT', `/approval/inbox/${af.requestId}/approve`, {}, tokDitugaskan),
+        call('PUT', `/approval/inbox/${af.requestId}/approve`, {}, tokDitugaskan),
+      ]);
+      chk('dua approve paralel: tepat satu menang',
+        [pa.status, pb.status].filter(x => x === 200).length, 1);
+      chk('hanya satu action tercatat', await countActions(af.requestId), 1);
+
+      // 6. Tanpa token tetap 401.
+      chk('tanpa token', await status('PUT', `/approval/inbox/${af.requestId}/approve`, {}), 401);
+    } finally {
+      const sisa = await cleanupApprovalFixture(af);
+      chk('fixture approval dibersihkan tuntas', sisa, 0);
+    }
   }
 
   console.log('\n8. HR: PIN & data gaji tidak terbuka untuk semua (DR-P0-03)');
