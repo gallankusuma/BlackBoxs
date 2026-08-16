@@ -347,6 +347,44 @@ mengubah rule approval agar dirinya menjadi approver.
 4. Lindungi konfigurasi dengan permission katalog yang sudah ada:
    `admin.approval-config.*` / `approval.approval-rules.*`.
 
+> **[DEV] DITERAPKAN untuk aksi (kriteria 1–3). Kriteria 4 masih terbuka.**
+>
+> Terkonfirmasi persis: `approve` dan `reject` tidak memeriksa apa pun. Filter
+> permission memang hanya ada di inbox, dan menyembunyikan item dari daftar
+> tidak melindungi aksinya.
+>
+> Sebelum menggembok, kondisi produksi diperiksa dulu sesuai aturan project:
+> **0 approval rule dan 0 approval request** — modul ini belum dipakai, jadi
+> tidak ada user aktif yang bisa terkunci.
+>
+> - `resolveApprovalAuthority()` menghitung wewenang dari **database** tiap aksi:
+>   user aktif, `user_level` ≥ 10 lolos, selain itu wajib punya permission
+>   `approve`/`approve_1`/`approve_2` **dan** cocok dengan step berjalan.
+>   Level sengaja dibaca dari DB, bukan dari payload token — token menyimpan
+>   `userLevel` dan itu basi sampai 7 hari setelah hak dicabut.
+> - `approver_role_id` ikut dihormati. Inbox lama hanya melihat
+>   `approver_user_id`, sehingga step yang ditugaskan ke ROLE jatuh ke cabang
+>   "siapa saja yang punya permission approve".
+> - `can_reject` ditegakkan: berwenang menyetujui tidak otomatis berwenang menolak.
+> - Lock `SELECT ... FOR UPDATE` + recheck status + tulis action + pindah step
+>   dalam SATU transaction. Approve kedua yang berlomba dapat 409, bukan action
+>   kedua.
+> - Fallback "modul tanpa rule → pemegang permission approve boleh bertindak"
+>   dipertahankan supaya modul yang belum dikonfigurasi tidak mati diam-diam —
+>   tapi sekarang permission-nya benar-benar diperiksa, dulu tidak sama sekali.
+>
+> **Belum:** kriteria 4, penggembokan CRUD rules/delegation/escalation. Digarap
+> di iterasi berikutnya.
+>
+> **Catatan keterbatasan:** `approval_requests` tidak menyimpan `rule_id`, jadi
+> step berikutnya tetap dicari lewat `module`. Sudah dibuat deterministik
+> (`ORDER BY arl.id, ars.id`), tapi perbaikan sebenarnya adalah menyimpan
+> `rule_id` di request — itu perubahan model data tersendiri.
+>
+> Tes: `test:rbac` #7 — user tanpa hak 403 untuk approve dan reject, tanpa token
+> 401, master tetap 200, approve ulang 409. Kode lama meloloskan yang pertama
+> dengan 200.
+
 ### DR-P0-03 — User desktop biasa dapat mengambil alih akun mobile karyawan
 
 **Bukti:** daftar employee di [hr.routes.ts:76](backend/src/routes/hr.routes.ts)

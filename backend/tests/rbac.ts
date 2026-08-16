@@ -145,7 +145,36 @@ async function main() {
   chk('master → kategori aset', await status('GET', '/assets/categories', undefined, master), 200);
   chk('master → KPI summary', await status('GET', '/assets/summary', undefined, master), 200);
 
-  console.log('\n7. Bersih-bersih');
+  console.log('\n7. Aksi approval tidak bisa dipakai non-approver (DR-P0-02)');
+  // Inbox memang sudah difilter permission, tapi AKSInya dulu tidak memeriksa
+  // apa pun: siapa pun yang tahu/menebak ID request bisa menyetujuinya. Filter
+  // di daftar tidak melindungi aksi.
+  //
+  // Modul approval belum dipakai di produksi (0 rule, 0 request), jadi request
+  // uji dibuat sendiri lewat master lalu dihapus lagi.
+  const areq = await call('POST', '/approval/submit', {
+    module: 'finance', entity_type: 'fund_request', entity_id: 999999, notes: 'uji DR-P0-02',
+  }, master);
+  const areqId = areq.json?.data?.id ?? areq.json?.id;
+
+  chk('request approval uji terbuat', !!areqId, true);
+  if (areqId) {
+    // `plainToken` = user tanpa satu pun permission approve.
+    chk('approve oleh user tanpa hak', await status('PUT', `/approval/inbox/${areqId}/approve`, {}, plainToken), 403);
+    chk('reject oleh user tanpa hak', await status('PUT', `/approval/inbox/${areqId}/reject`, {}, plainToken), 403);
+    chk('tanpa token sama sekali', await status('PUT', `/approval/inbox/${areqId}/approve`, {}), 401);
+
+    // Yang berwenang tetap harus bisa — proteksi tidak boleh mengunci semuanya.
+    const olehMaster = await call('PUT', `/approval/inbox/${areqId}/approve`, {}, master);
+    chk('master tetap bisa approve', olehMaster.status, 200);
+
+    // Setelah selesai, approve kedua harus ditolak sebagai konflik, bukan
+    // diproses dua kali.
+    chk('approve ulang ditolak 409',
+      await status('PUT', `/approval/inbox/${areqId}/approve`, {}, master), 409);
+  }
+
+  console.log('\n8. Bersih-bersih');
   for (const id of cleanup) await call('DELETE', `/users/${id}`, undefined, master);
   for (const id of [roleId, editorRoleId]) if (id) await call('DELETE', `/roles/${id}`, undefined, master);
   console.log(`  ok   ${cleanup.length} user uji & 2 role uji dihapus`);

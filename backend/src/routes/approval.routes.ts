@@ -1,8 +1,74 @@
 import { Router, Request, Response } from 'express';
-import { dbAll, dbGet, dbRun } from '../config/database';
+import { dbAll, dbGet, dbRun, withTransaction, TxRunner } from '../config/database';
 import { authMiddleware } from '../middleware/auth';
 
 const router = Router();
+
+/**
+ * Otorisasi aksi approval (DR-P0-02).
+ *
+ * Sebelumnya `approve` dan `reject` sama sekali tidak memeriksa apa pun: siapa
+ * pun yang punya token desktop dan tahu/menebak ID request bisa menyetujui atau
+ * menolaknya. Filter permission hanya ada di INBOX — menyembunyikan item dari
+ * daftar tidak melindungi aksinya.
+ *
+ * Dihitung ulang dari DATABASE setiap aksi: bukan dari payload token (level di
+ * token basi sampai 7 hari setelah hak dicabut), bukan dari hasil filter inbox.
+ */
+const resolveApprovalAuthority = async (
+  userId: number, request: any, run: TxRunner,
+): Promise<{ allowed: boolean; canReject: boolean; reason?: string }> => {
+  const user: any = await run.get(
+    'SELECT role_id, user_level, is_active FROM users WHERE id = ?', [userId]
+  );
+  if (!user) return { allowed: false, canReject: false, reason: 'USER_NOT_FOUND' };
+  if (!user.is_active) return { allowed: false, canReject: false, reason: 'USER_INACTIVE' };
+
+  // Master melewati seluruh pemeriksaan, sama seperti requirePermission().
+  if (Number(user.user_level || 0) >= 10) return { allowed: true, canReject: true };
+
+  const perm: any = await run.get(
+    `SELECT 1 AS ok FROM permissions p
+     JOIN role_permissions rp ON p.id = rp.permission_id
+     WHERE rp.role_id = ? AND p.action IN ('approve', 'approve_1', 'approve_2') LIMIT 1`,
+    [user.role_id || 0]
+  );
+  if (!perm) return { allowed: false, canReject: false, reason: 'NO_APPROVE_PERMISSION' };
+
+  const steps: any[] = await run.all(
+    `SELECT ars.approver_user_id, ars.approver_role_id, ars.can_reject
+     FROM approval_rule_steps ars
+     JOIN approval_rules arl ON arl.id = ars.rule_id
+     WHERE arl.module = ? AND ars.step_order = ?`,
+    [request.module, request.current_step]
+  );
+
+  if (steps.length === 0) {
+    // Modul tanpa rule sama sekali: pemegang permission approve boleh bertindak.
+    // Ini fallback yang sama dengan inbox — dipertahankan supaya modul yang
+    // belum dikonfigurasi tetap bisa jalan, bukan mati diam-diam.
+    const anyRule: any = await run.get(
+      `SELECT 1 AS ok FROM approval_rule_steps ars
+       JOIN approval_rules arl ON arl.id = ars.rule_id
+       WHERE arl.module = ? LIMIT 1`,
+      [request.module]
+    );
+    if (!anyRule) return { allowed: true, canReject: true };
+    // Rule ADA tapi tidak untuk step ini — berarti bukan giliran orang ini.
+    return { allowed: false, canReject: false, reason: 'NOT_ASSIGNED_TO_STEP' };
+  }
+
+  // `approver_role_id` ikut dihormati; inbox lama hanya melihat approver_user_id
+  // sehingga step yang ditugaskan ke ROLE jatuh ke cabang "siapa saja".
+  const match = steps.find(st =>
+    (st.approver_user_id != null && Number(st.approver_user_id) === Number(userId))
+    || (st.approver_role_id != null && Number(st.approver_role_id) === Number(user.role_id))
+    || (st.approver_user_id == null && st.approver_role_id == null)
+  );
+  if (!match) return { allowed: false, canReject: false, reason: 'NOT_ASSIGNED_TO_STEP' };
+
+  return { allowed: true, canReject: match.can_reject == null ? true : !!match.can_reject };
+};
 
 const generateCode = (prefix: string) => {
   const now = new Date();
@@ -162,70 +228,108 @@ router.get('/inbox', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // PUT /inbox/:id/approve — approve a request
-router.put('/inbox/:id/approve', authMiddleware, async (req: Request, res: Response) => {
-  try {
-    const userId = (req as any).user?.userId;
-    const { id } = req.params;
-    const { comments } = req.body;
+//
+// DR-P0-02: otorisasi, pencatatan aksi, dan perpindahan step adalah SATU unit
+// yang dimulai dari lock baris requestnya. Versi lama membaca request, menulis
+// action, lalu meng-UPDATE status sebagai tiga langkah autocommit tanpa lock —
+// dua approve paralel sama-sama lolos cek `status === 'pending'` dan menghasilkan
+// dua action serta dua kali perpindahan step.
+const actOnRequest = async (
+  req: Request, res: Response, action: 'approved' | 'rejected',
+) => {
+  const userId = (req as any).userId;
+  const { id } = req.params;
+  const { comments } = req.body;
 
-    const request = await dbGet('SELECT * FROM approval_requests WHERE id = ?', [id]);
-    if (!request) return res.status(404).json({ error: 'Request not found' });
-    if (request.status !== 'pending') return res.status(400).json({ error: 'Request is not pending' });
+  const outcome = await withTransaction(async tx => {
+    const request: any = await tx.get(
+      'SELECT * FROM approval_requests WHERE id = ? FOR UPDATE', [id]
+    );
+    if (!request) return { error: 404, body: { error: 'Request not found' } };
+    if (request.status !== 'pending') {
+      return {
+        error: 409,
+        body: {
+          error: `Request sudah berstatus "${request.status}" — kemungkinan sudah diproses permintaan lain.`,
+          code: 'REQUEST_NOT_PENDING',
+        },
+      };
+    }
 
-    // Record the action
-    await dbRun(
+    const authority = await resolveApprovalAuthority(userId, request, tx);
+    if (!authority.allowed) {
+      return {
+        error: 403,
+        body: { error: 'Anda tidak berwenang memproses approval ini.', code: authority.reason },
+      };
+    }
+    if (action === 'rejected' && !authority.canReject) {
+      return {
+        error: 403,
+        body: { error: 'Anda berwenang menyetujui, tetapi tidak menolak, pada tahap ini.', code: 'REJECT_NOT_ALLOWED' },
+      };
+    }
+
+    await tx.run(
       'INSERT INTO approval_actions (request_id, step_order, approver_id, action, comments) VALUES (?, ?, ?, ?, ?)',
-      [id, request.current_step, userId, 'approved', comments || null]
+      [id, request.current_step, userId, action, comments || null]
     );
 
-    // Check if there are more steps
-    const nextStep = await dbGet(
-      `SELECT ars.* FROM approval_rule_steps ars
+    if (action === 'rejected') {
+      await tx.run(
+        'UPDATE approval_requests SET status = ?, completed_at = NOW() WHERE id = ?',
+        ['rejected', id]
+      );
+      return { ok: true as const, status: 'rejected', step: request.current_step };
+    }
+
+    // `approval_requests` tidak menyimpan rule_id, jadi step berikutnya hanya
+    // bisa dicari lewat module. ORDER BY membuatnya deterministik kalau satu
+    // module punya lebih dari satu rule — pilihan yang sama setiap kali, bukan
+    // bergantung urutan baris. Menyimpan rule_id di request adalah perbaikan
+    // yang benar, tapi itu perubahan model data tersendiri.
+    const nextStep: any = await tx.get(
+      `SELECT ars.step_order FROM approval_rule_steps ars
        JOIN approval_rules arl ON ars.rule_id = arl.id
-       WHERE arl.module = ? AND ars.step_order = ?`,
+       WHERE arl.module = ? AND ars.step_order = ?
+       ORDER BY arl.id, ars.id LIMIT 1`,
       [request.module, request.current_step + 1]
     );
 
     if (nextStep) {
-      // Move to next step
-      await dbRun('UPDATE approval_requests SET current_step = ? WHERE id = ?', [request.current_step + 1, id]);
-    } else {
-      // Final approval
-      await dbRun(
-        'UPDATE approval_requests SET status = ?, completed_at = NOW() WHERE id = ?',
-        ['approved', id]
-      );
+      await tx.run('UPDATE approval_requests SET current_step = ? WHERE id = ?',
+        [request.current_step + 1, id]);
+      return { ok: true as const, status: 'pending', step: request.current_step + 1 };
     }
 
-    res.json({ success: true, message: 'Approved successfully' });
+    await tx.run(
+      'UPDATE approval_requests SET status = ?, completed_at = NOW() WHERE id = ?',
+      ['approved', id]
+    );
+    return { ok: true as const, status: 'approved', step: request.current_step };
+  });
+
+  if ('error' in outcome) return res.status(outcome.error).json(outcome.body);
+  return res.json({
+    success: true,
+    message: action === 'approved' ? 'Approved successfully' : 'Rejected successfully',
+    status: outcome.status,
+    current_step: outcome.step,
+  });
+};
+
+router.put('/inbox/:id/approve', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    await actOnRequest(req, res, 'approved');
   } catch (error) {
     console.error('Error approving request:', error);
     res.status(500).json({ error: 'Failed to approve request' });
   }
 });
 
-// PUT /inbox/:id/reject — reject a request
 router.put('/inbox/:id/reject', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).user?.userId;
-    const { id } = req.params;
-    const { comments } = req.body;
-
-    const request = await dbGet('SELECT * FROM approval_requests WHERE id = ?', [id]);
-    if (!request) return res.status(404).json({ error: 'Request not found' });
-    if (request.status !== 'pending') return res.status(400).json({ error: 'Request is not pending' });
-
-    await dbRun(
-      'INSERT INTO approval_actions (request_id, step_order, approver_id, action, comments) VALUES (?, ?, ?, ?, ?)',
-      [id, request.current_step, userId, 'rejected', comments || null]
-    );
-
-    await dbRun(
-      'UPDATE approval_requests SET status = ?, completed_at = NOW() WHERE id = ?',
-      ['rejected', id]
-    );
-
-    res.json({ success: true, message: 'Rejected successfully' });
+    await actOnRequest(req, res, 'rejected');
   } catch (error) {
     console.error('Error rejecting request:', error);
     res.status(500).json({ error: 'Failed to reject request' });
