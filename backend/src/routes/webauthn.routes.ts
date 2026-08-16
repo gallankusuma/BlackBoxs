@@ -124,6 +124,21 @@ router.post('/register/verify', mobileAuthMiddleware, async (req: MobileAuthRequ
     );
     if (!challengeRow) return res.status(400).json({ error: 'Challenge expired, coba daftarkan ulang' });
 
+    // Lokasi kerja diambil dari daftar kantor yang dikelola admin, bukan dari
+    // koordinat yang dikirim karyawan.
+    //
+    // Diperiksa SEBELUM verifikasi biometrik: kalau ditolak sesudahnya,
+    // authenticator sudah terlanjur membuat credential di perangkat sementara
+    // server tidak menyimpannya — karyawan melihat "sidik jari terdaftar" di HP
+    // padahal tidak.
+    const office = await resolveOfficeLocation(office_location_id);
+    if (!office) {
+      return res.status(400).json({
+        error: 'Pilih lokasi kerja yang terdaftar terlebih dahulu.',
+        code: 'OFFICE_LOCATION_REQUIRED',
+      });
+    }
+
     const verification = await verifyRegistrationResponse({
       response: registration_response,
       expectedChallenge: challengeRow.challenge,
@@ -139,16 +154,6 @@ router.post('/register/verify', mobileAuthMiddleware, async (req: MobileAuthRequ
     const { credential } = verification.registrationInfo;
     const credentialId = Buffer.from(credential.id).toString('base64url');
     const publicKey    = Buffer.from(credential.publicKey).toString('base64');
-
-    // Lokasi kerja diambil dari daftar kantor yang dikelola admin, bukan dari
-    // koordinat yang dikirim karyawan.
-    const office = await resolveOfficeLocation(office_location_id);
-    if (!office) {
-      return res.status(400).json({
-        error: 'Pilih lokasi kerja yang terdaftar terlebih dahulu.',
-        code: 'OFFICE_LOCATION_REQUIRED',
-      });
-    }
 
     // Save credential WITH registered GPS location
     await dbRun(
@@ -272,8 +277,14 @@ router.post('/auth/verify', async (req: Request, res: Response) => {
     if (!currentLat || !currentLng) {
       gpsResult = { valid: false, distance: -1, location: credRow.location_name, error: 'GPS tidak tersedia' };
     } else if (!credRow.registered_lat || !credRow.registered_lng) {
-      // No GPS registered — allow but mark unverified
-      gpsResult = { valid: true, distance: 0, location: 'Lokasi tidak dikonfigurasi', registered: false };
+      // DR-P0-06: kredensial tanpa lokasi terdaftar dulu DILOLOSKAN dengan
+      // `valid: true` — artinya siapa pun yang punya kredensial semacam itu bisa
+      // absen dari mana saja, dan pemeriksaan GPS-nya hanya formalitas.
+      // Sekarang ditolak dan diarahkan mendaftar ulang.
+      return res.status(403).json({
+        error: 'Perangkat ini belum terikat lokasi kerja. Daftarkan ulang sidik jari lewat Pengaturan.',
+        code: 'CREDENTIAL_WITHOUT_LOCATION',
+      });
     } else {
       const check = validateGPSAgainstCredential(
         currentLat, currentLng,

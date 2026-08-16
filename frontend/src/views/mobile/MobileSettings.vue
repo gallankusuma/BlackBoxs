@@ -54,22 +54,24 @@
           <input v-model="regForm.device_name" type="text" :placeholder="`HP ${emp?.name?.split(' ')[0] || ''}`" class="form-input" />
         </div>
 
+        <!-- DR-P0-06: lokasi kerja dipilih dari daftar yang dikelola admin.
+             Dulu nama, koordinat, dan radius diketik/diambil sendiri karyawan —
+             artinya "lokasi kerja" bisa diarahkan ke mana saja. -->
         <div class="form-row">
-          <label>Nama Lokasi Kerja</label>
-          <input v-model="regForm.location_name" type="text" placeholder="Proyek A / Kantor Pusat / Workshop" class="form-input" />
-        </div>
-
-        <div class="form-row">
-          <label>Radius Toleransi</label>
-          <select v-model="regForm.radius" class="form-input">
-            <option :value="100">100m — Dalam gedung</option>
-            <option :value="200">200m — Area kantor</option>
-            <option :value="500">500m — Area proyek besar</option>
-            <option :value="1000">1 km — Proyek lapangan</option>
+          <label>Lokasi Kerja</label>
+          <select v-model="regForm.office_location_id" class="form-input">
+            <option :value="null" disabled>— Pilih lokasi —</option>
+            <option v-for="o in offices" :key="o.id" :value="o.id">
+              {{ o.name }} (radius {{ o.radius_m }}m)
+            </option>
           </select>
+          <div v-if="!offices.length" style="font-size:11px;color:#b45309;margin-top:4px">
+            Belum ada lokasi kerja terdaftar. Hubungi admin.
+          </div>
         </div>
 
-        <!-- GPS Capture -->
+        <!-- GPS di sini hanya untuk memastikan izin lokasi HP sudah aktif;
+             koordinat terdaftar diambil server dari lokasi yang dipilih. -->
         <div class="gps-capture-box" :class="gpsReady ? 'gps-captured' : ''">
           <div v-if="!gpsReady">
             <div style="font-size:28px;margin-bottom:6px">📍</div>
@@ -90,7 +92,7 @@
           {{ detectingGPS ? '⏳ Mendeteksi GPS...' : (gpsReady ? '🔄 Ambil Ulang GPS' : '📍 Ambil GPS Sekarang') }}
         </button>
 
-        <button @click="startRegistration" :disabled="registering || !gpsReady" class="btn-register">
+        <button @click="startRegistration" :disabled="registering || !regForm.office_location_id" class="btn-register">
           <span v-if="registering">⏳ Scan sidik jari...</span>
           <span v-else>👆 Daftarkan Sidik Jari</span>
         </button>
@@ -113,7 +115,7 @@
         </div>
         <div class="info-step">
           <div class="step-num">3</div>
-          <div class="step-text"><strong>Sistem cek dua kondisi:</strong> sidik jari cocok ✓ DAN berada dalam {{ regForm.radius }}m dari lokasi terdaftar ✓</div>
+          <div class="step-text"><strong>Sistem cek dua kondisi:</strong> sidik jari cocok ✓ DAN berada dalam radius lokasi terdaftar ✓</div>
         </div>
         <div class="info-step">
           <div class="step-num">4</div>
@@ -154,7 +156,15 @@ const gpsReady = ref(false);
 const gpsAccuracy = ref(0);
 const regMsg = ref('');
 const regSuccess = ref(false);
-const regForm = ref({ device_name: '', location_name: '', radius: 200, latitude: null as number|null, longitude: null as number|null });
+const regForm = ref({ device_name: '', office_location_id: null as number|null, latitude: null as number|null, longitude: null as number|null });
+const offices = ref<any[]>([]);
+
+async function loadOffices() {
+  try {
+    const res = await mobileApi.get('/api/webauthn/offices');
+    offices.value = res.data?.data || res.data || [];
+  } catch { offices.value = []; }
+}
 
 function formatDate(d: string) {
   if (!d) return '';
@@ -228,20 +238,20 @@ async function startRegistration() {
     if (!credential) throw new Error('Dibatalkan');
 
     // 3. Send credential + GPS to server
+    // Hanya ID lokasi yang dikirim; koordinat dan radius diambil server dari
+    // `office_locations`.
     await mobileApi.post('/api/webauthn/register/verify', {
       employee_id: emp.value.id,
       registration_response: attResponseToJSON(credential),
-      device_name:   regForm.value.device_name || `HP ${emp.value.name?.split(' ')[0]}`,
-      location_name: regForm.value.location_name || 'Lokasi Kerja',
-      latitude:  regForm.value.latitude,
-      longitude: regForm.value.longitude,
-      radius:    regForm.value.radius,
+      device_name: regForm.value.device_name || `HP ${emp.value.name?.split(' ')[0]}`,
+      office_location_id: regForm.value.office_location_id,
     });
 
-    regMsg.value = `✅ Berhasil!\nSidik jari + lokasi "${regForm.value.location_name || 'Lokasi Kerja'}" terdaftar.\nRadius ${regForm.value.radius}m.`;
+    const dipilih = offices.value.find(o => o.id === regForm.value.office_location_id);
+    regMsg.value = `✅ Berhasil!\nSidik jari terdaftar untuk "${dipilih?.name || 'lokasi terpilih'}".\nRadius ${dipilih?.radius_m ?? '-'}m.`;
     regSuccess.value = true;
     gpsReady.value = false;
-    regForm.value = { device_name: '', location_name: '', radius: 200, latitude: null, longitude: null };
+    regForm.value = { device_name: '', office_location_id: null, latitude: null, longitude: null };
     await loadCredentials();
   } catch (e: any) {
     if (e?.name === 'NotAllowedError') regMsg.value = 'Pendaftaran dibatalkan oleh pengguna';
@@ -256,26 +266,36 @@ async function deleteCred(id: number) {
   await loadCredentials();
 }
 
+// DR-P0-06: memindahkan lokasi terdaftar berarti MEMILIH lokasi kerja lain yang
+// sah, bukan menyalin koordinat HP saat ini. Versi lama mengirim posisi GPS
+// karyawan apa adanya — jadi ia tinggal berdiri di rumah, menekan tombol ini,
+// dan seterusnya bisa absen dari rumah.
 async function updateLocation(cred: any) {
-  if (!confirm('Update koordinat GPS untuk perangkat ini ke lokasi Anda saat ini?')) return;
-  detectingGPS.value = true;
+  if (!offices.value.length) { alert('Belum ada lokasi kerja terdaftar. Hubungi admin.'); return; }
+
+  const daftar = offices.value.map((o, i) => `${i + 1}. ${o.name} (radius ${o.radius_m}m)`).join('\n');
+  const jawab = prompt(`Pindahkan "${cred.device_name || 'perangkat ini'}" ke lokasi kerja mana?\n\n${daftar}\n\nKetik nomornya:`);
+  if (!jawab) return;
+
+  const pilih = offices.value[Number(jawab) - 1];
+  if (!pilih) { alert('Nomor tidak dikenal.'); return; }
+
   try {
-    const pos: any = await new Promise((res, rej) => navigator.geolocation.getCurrentPosition(res, rej, { timeout: 10000, enableHighAccuracy: true }));
     await mobileApi.put(`/api/webauthn/credentials/${cred.id}/location`, {
-      latitude: pos.coords.latitude, longitude: pos.coords.longitude,
-      radius: cred.registered_radius, location_name: cred.location_name,
+      office_location_id: pilih.id,
     });
     await loadCredentials();
-    alert('✅ Koordinat GPS berhasil diperbarui!');
-  } catch { alert('Gagal update GPS'); }
-  finally { detectingGPS.value = false; }
+    alert(`✅ Lokasi perangkat dipindah ke "${pilih.name}".`);
+  } catch (e: any) {
+    alert(e?.response?.data?.error || 'Gagal memperbarui lokasi');
+  }
 }
 
 onMounted(async () => {
   const stored = localStorage.getItem('mobile_employee');
   if (!stored) { router.push('/mobile'); return; }
   emp.value = JSON.parse(stored);
-  await loadCredentials();
+  await Promise.all([loadCredentials(), loadOffices()]);
 });
 </script>
 

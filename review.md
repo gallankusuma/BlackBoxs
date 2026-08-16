@@ -1615,3 +1615,75 @@ setelah deaktivasi.
 email nonaktif + password salah mempunyai status/body generik yang sama; hanya
 email nonaktif + password benar boleh mendapat `ACCOUNT_INACTIVE`; akun aktif
 tetap login; token yang diterbitkan sebelum deaktivasi tetap ditolak 401.
+
+---
+
+## [DEV] Tanggapan atas Live Auto Review 16 Agustus 2026 — 14:48 & 14:56 WIB
+
+Empat temuan, **tiga di antaranya kesalahan kami sendiri di ronde ini**. Semua
+diterima tanpa bantahan; tidak ada yang disanggah.
+
+### P1 — `npm test` tidak bisa dimulai (top-level await, CJS)
+
+**DITERAPKAN, dan reviewer sudah memverifikasinya pada run yang sama.** Kami
+temukan bersamaan lalu dibungkus `async function main()` + `.catch()` terminal,
+mengikuti pola berkas tes lain. Catatan Anda bahwa `npx tsc --noEmit` tidak
+membuktikan entrypoint bisa ditransformasi itu tepat, dan itu memang yang
+membuat kami sempat mengira aman.
+
+Satu hal tambahan yang ikut ketahuan: `await run(...).status` mengurai sebagai
+`await (run(...).status)` — hasilnya `undefined`, jadi perbandingannya selalu
+palsu. Sudah dibetulkan jadi `(await run(...)).status`.
+
+### P2/SECURITY — `is_active` diperiksa sebelum password membuka oracle
+
+**DITERAPKAN.** Analisis Anda benar sepenuhnya: 403 + pesan khusus untuk email
+nonaktif versus 401 untuk sisanya membuat siapa pun bisa memetakan akun hanya
+dengan menembak password sembarang. Pemeriksaan status dipindah ke **setelah**
+`verifyPassword()`, jadi pesan spesifik hanya sampai ke orang yang sudah
+membuktikan dirinya pemilik akun.
+
+Tes: `test:http` #10 — email tak dikenal dan email dikenal berpassword salah
+harus menghasilkan status **dan pesan** yang identik.
+
+### P2 — Tes koordinat palsu lulus tanpa mengeksekusi validasinya
+
+**DITERAPKAN, dan ini kesalahan tes yang paling layak disorot.** Betul: handler
+memeriksa kepemilikan lebih dulu, jadi `/credentials/1/location` berhenti di 404
+dan cabang `office_location_id` tidak pernah dijalankan. Assertion `>=400 &&
+<500` membuatnya hijau tanpa membuktikan apa pun — persis jenis tes yang tidak
+bisa gagal.
+
+Kredensial WebAuthn tidak bisa dibuat lewat HTTP tanpa authenticator sungguhan,
+jadi barisnya kini disemai langsung ke database untuk karyawan uji, lalu:
+status **tepat 400**, `code` **OFFICE_LOCATION_REQUIRED**, koordinat baris
+dipastikan **tidak berubah**, ID kantor karangan ditolak, dan kasus positif
+memakai kantor aktif harus 200. Lokasi uji ikut disemai kalau dev DB belum punya,
+supaya kasus positifnya tidak terlewat diam-diam.
+
+### DR-P0-06 sisa — sebagian ditutup ronde ini
+
+- **`MobileSettings` masih kontrak lama — DITERAPKAN.** Ini regresi hidup yang
+  kami buat: setelah backend mewajibkan `office_location_id`, registrasi dan
+  update lokasi lewat Settings pasti gagal 400. Sekarang layar itu memuat daftar
+  kantor, mengirim `office_location_id`, dan "update lokasi" berubah artinya dari
+  *menyalin GPS HP saat ini* menjadi *memilih lokasi kerja lain yang sah* —
+  perilaku lamanya justru jalan pintas yang sedang kita tutup.
+- **Resolve office sebelum `verifyRegistrationResponse` — DITERAPKAN.** Alasan
+  Anda tepat: kalau ditolak sesudahnya, authenticator sudah membuat credential di
+  perangkat sementara server tidak menyimpannya.
+- **Credential tanpa `registered_lat/lng` diloloskan — DITERAPKAN.** Dulu
+  `gpsResult.valid = true`, artinya pemeriksaan GPS-nya hanya formalitas.
+  Sekarang 403 `CREDENTIAL_WITHOUT_LOCATION` dan diarahkan mendaftar ulang.
+  Produksi diperiksa dulu: satu-satunya kredensial di sana punya koordinat, jadi
+  tidak ada yang terkunci.
+
+**MASIH TERBUKA dan kami akui:**
+
+1. FK `office_location_id` pada tabel credential — sekarang masih menyalin
+   nilainya, jadi perubahan/penonaktifan office tidak terpropagasi.
+2. Challenge consumption + counter + attendance write dalam satu transaction,
+   serta penjagaan agar check-in tidak menimpa yang sudah final.
+3. Uji replay/concurrency dan boundary tengah malam WIB.
+
+test:all 831 lulus / 0 gagal.

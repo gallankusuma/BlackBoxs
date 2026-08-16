@@ -36,6 +36,45 @@ async function call(method: string, path: string, body?: unknown, token?: string
 }
 const status = async (...args: Parameters<typeof call>) => (await call(...args)).status;
 
+// Kredensial WebAuthn tidak bisa dibuat lewat HTTP tanpa authenticator sungguhan,
+// jadi barisnya disemai langsung untuk menguji jalur otorisasi lokasinya.
+async function seedCredential(employeeId: number): Promise<number | null> {
+  try {
+    const { dbRun } = await import('../src/config/database');
+    const r: any = await dbRun(
+      `INSERT INTO employee_webauthn_credentials
+        (employee_id, credential_id, public_key, counter, device_name,
+         registered_lat, registered_lng, registered_radius, location_name)
+       VALUES (?, ?, ?, 0, 'UJI-OTOMATIS', -6.0280380, 106.0674439, 100, 'Uji')`,
+      [employeeId, `uji-${Date.now()}`, 'uji']
+    );
+    return r?.insertId || null;
+  } catch { return null; }
+}
+
+async function credentialRow(id: number): Promise<any> {
+  const { dbGet } = await import('../src/config/database');
+  return dbGet('SELECT registered_lat, registered_lng, registered_radius FROM employee_webauthn_credentials WHERE id = ?', [id]);
+}
+
+async function firstActiveOffice(): Promise<any> {
+  const { dbGet, dbRun } = await import('../src/config/database');
+  const ada: any = await dbGet('SELECT id, name FROM office_locations WHERE is_active = 1 ORDER BY id LIMIT 1');
+  if (ada) return ada;
+  // Dev DB bisa saja belum punya lokasi. Disemai supaya kasus POSITIF tidak
+  // terlewat diam-diam — tes yang melompat tanpa suara sama saja tidak ada.
+  const r: any = await dbRun(
+    `INSERT INTO office_locations (name, latitude, longitude, radius_m, is_active)
+     VALUES ('Kantor Uji Otomatis', -6.0280380, 106.0674439, 100, 1)`
+  );
+  return { id: r?.insertId, name: 'Kantor Uji Otomatis', _seeded: true };
+}
+
+async function cleanupCredential(id: number): Promise<void> {
+  const { dbRun } = await import('../src/config/database');
+  await dbRun('DELETE FROM employee_webauthn_credentials WHERE id = ?', [id]);
+}
+
 async function main() {
   console.log('0. Persiapan');
   const adm = await call('POST', '/auth/login', { email: ADMIN_EMAIL, password: ADMIN_PASS });
@@ -150,12 +189,54 @@ async function main() {
     (await call('POST', '/hr/mobile/checkin', { type: 'in' }, tokA)).status, 404);
 
   // Koordinat kerja tidak boleh datang dari karyawan.
-  const lokasiKarangan = await call('PUT', '/webauthn/credentials/1/location',
-    { latitude: -6.2, longitude: 106.8, radius: 99999, location_name: 'Rumah Saya' }, tokA);
-  chk('mengirim koordinat sendiri ditolak', lokasiKarangan.status >= 400, true);
-  chk('bukan 500 — ditolak dengan sadar', lokasiKarangan.status < 500, true);
+  //
+  // Versi pertama tes ini menembak `/credentials/1/location` dan menerima status
+  // apa pun 4xx sebagai bukti. Itu FALSE POSITIVE: handler memeriksa kepemilikan
+  // lebih dulu, jadi ID yang tidak ada menghasilkan 404 dan validasi
+  // `office_location_id` tidak pernah dieksekusi sama sekali. Ditemukan tim
+  // reviewer. Sekarang kredensialnya disemai dulu supaya cabang itu benar-benar
+  // dijalankan.
+  const credId = await seedCredential(Number(a.id));
+  if (!credId) {
+    chk('kredensial uji tersemai', false, true);
+  } else {
+    const koordinatSendiri = await call('PUT', `/webauthn/credentials/${credId}/location`,
+      { latitude: -6.2, longitude: 106.8, radius: 99999, location_name: 'Rumah Saya' }, tokA);
+    chk('koordinat sendiri ditolak tepat 400', koordinatSendiri.status, 400);
+    chk('kodenya OFFICE_LOCATION_REQUIRED', koordinatSendiri.json?.code, 'OFFICE_LOCATION_REQUIRED');
 
-  console.log('\n10. Registrasi publik & JWT di query string');
+    // Baris kredensialnya tidak boleh ikut berubah.
+    const sesudah = await credentialRow(credId);
+    chk('koordinat tersimpan tidak berubah', Number(sesudah?.registered_lat), -6.028038);
+
+    // ID kantor yang tidak ada juga ditolak.
+    chk('office_location_id karangan ditolak',
+      (await call('PUT', `/webauthn/credentials/${credId}/location`, { office_location_id: 999999 }, tokA)).status, 400);
+
+    // Kantor yang sah diterima — proteksi tidak boleh mengunci semuanya.
+    const kantor = await firstActiveOffice();
+    chk('ada kantor terdaftar untuk kasus positif', !!kantor?.id, true);
+    const sah = await call('PUT', `/webauthn/credentials/${credId}/location`,
+      { office_location_id: kantor.id }, tokA);
+    chk('memilih kantor terdaftar diterima', sah.status, 200);
+
+    await cleanupCredential(credId);
+  }
+
+  console.log('\n10. Login tidak membocorkan akun mana yang nonaktif (DR-P1-01)');
+  // Perbaikan pertama kami memeriksa `is_active` SEBELUM password. Itu membuka
+  // oracle: kirim password sembarang, lalu 403 vs 401 memberitahu penyerang email
+  // mana yang benar-benar ada sebagai akun nonaktif. Ditemukan tim reviewer.
+  // Pemeriksaan status sekarang terjadi setelah password terbukti benar.
+  const emailAcak = `tidak-ada-${Date.now()}@uji.local`;
+  const tidakAda = await call('POST', '/auth/login', { email: emailAcak, password: 'salahsemua' });
+  const adaTapiSalah = await call('POST', '/auth/login', { email: ADMIN_EMAIL, password: 'pasti-salah-sekali' });
+  chk('email tak dikenal → 401', tidakAda.status, 401);
+  chk('email dikenal + password salah → 401', adaTapiSalah.status, 401);
+  chk('keduanya tidak bisa dibedakan', tidakAda.status === adaTapiSalah.status, true);
+  chk('pesannya pun sama', tidakAda.json?.error === adaTapiSalah.json?.error, true);
+
+  console.log('\n11. Registrasi publik & JWT di query string');
   chk('register tanpa token', await status('POST', '/auth/register', { email: 'x@y.com', password: 'secret123', name: 'X' }), 401);
   // AST-007: JWT tidak lagi diterima dari URL di endpoint mana pun, termasuk
   // route unduhan — frontend memakai axios responseType 'blob'.
