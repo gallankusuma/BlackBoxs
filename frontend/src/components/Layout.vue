@@ -107,7 +107,7 @@
                 :class="{'text-slate-700 dark:text-slate-300': true, 'px-2 justify-center': sidebarCollapsed}"
               >
                 <div class="flex items-center gap-2">
-                  <span class="text-lg" :title="sidebarCollapsed ? menu.label : ''">{{ menu.icon }}</span>
+                  <Icon :name="menu.icon" :size="18" :title="sidebarCollapsed ? menu.label : ''" />
                   <span v-if="!sidebarCollapsed">{{ menu.label }}</span>
                 </div>
                 <svg v-if="!sidebarCollapsed" class="w-4 h-4 transition-transform" :class="{ 'rotate-180': expandedMenus.includes(menu.id) }" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
@@ -155,6 +155,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch, computed, reactive } from 'vue';
+import Icon from './ui/Icon.vue';
 import { useRouter, useRoute } from 'vue-router';
 import { useAuthStore } from '../stores/auth';
 import { useTheme } from '../composables/useTheme';
@@ -327,7 +328,7 @@ const mainMenus: MenuItem[] = [
   {
     id: 'assets',
     label: 'Asset Management',
-    icon: '🏭',
+    icon: 'factory',
     submenus: [
       { id: 'assets-all', label: 'Semua Aset', route: '/assets', permKey: 'assets' },
       { id: 'assets-land', label: 'Tanah', route: '/assets?category=LAND', permKey: 'assets' },
@@ -339,7 +340,7 @@ const mainMenus: MenuItem[] = [
   {
     id: 'estimator',
     label: 'Estimator',
-    icon: '🧮',
+    icon: 'calculator',
     submenus: [
       { id: 'estimator-proposals', label: 'Proposal', route: '/estimator', permKey: 'estimator.estimator-proposals' },
       { id: 'estimator-ahsp', label: 'AHSP', route: '/estimator/ahsp', permKey: 'estimator.estimator-ahsp' },
@@ -349,7 +350,7 @@ const mainMenus: MenuItem[] = [
   {
     id: 'projects',
     label: 'Project',
-    icon: '📌',
+    icon: 'pin',
     submenus: [
       { id: 'dashboard', label: 'Dashboard', route: '/dashboard', permKey: 'projects.dashboard' },
       { id: 'clients', label: 'Clients', route: '/customers', permKey: 'projects.clients' },
@@ -364,7 +365,7 @@ const mainMenus: MenuItem[] = [
   {
     id: 'procurement',
     label: 'Procurement',
-    icon: '🛒',
+    icon: 'cart',
     submenus: [
       { id: 'procurement-dashboard', label: 'Overview', route: '/procurement', name: 'Procurement', permKey: 'procurement.procurement-dashboard' },
       { id: 'purchase-requests', label: 'Purchase Requests', route: '/procurement/pr', name: 'ProcurementPR', permKey: 'procurement.purchase-requests' },
@@ -378,7 +379,7 @@ const mainMenus: MenuItem[] = [
   {
     id: 'hr',
     label: 'HR & Payroll',
-    icon: '👷',
+    icon: 'hardhat',
     submenus: [
       { id: 'hr-employees', label: 'Data Karyawan', route: '/employees', name: 'Employees', permKey: 'hr.employees' },
       { id: 'hr-attendance', label: 'Absensi & Timesheet', route: '/attendance', name: 'AttendanceTracking', permKey: 'hr.attendance' },
@@ -389,7 +390,7 @@ const mainMenus: MenuItem[] = [
   {
     id: 'master_data',
     label: 'Master Data',
-    icon: '📦',
+    icon: 'box',
     submenus: [
       { id: 'units', label: 'Units of Measure', route: '/units', name: 'UnitOfMeasure', permKey: 'master-data.units' },
       { id: 'items', label: 'Items', route: '/items', name: 'Items', permKey: 'master-data.items' },
@@ -406,7 +407,7 @@ const mainMenus: MenuItem[] = [
   {
     id: 'finance',
     label: 'Finance',
-    icon: '💳',
+    icon: 'card',
     submenus: [
       { id: 'finance-ap', label: 'Accounts Payable', route: '/finance/ap', name: 'FinanceAPPage', permKey: 'finance.accounts-payable' },
       { id: 'finance-ar', label: 'Accounts Receivable', route: '/finance/ar', name: 'FinanceARPage', permKey: 'finance.accounts-receivable' },
@@ -419,7 +420,7 @@ const mainMenus: MenuItem[] = [
   {
     id: 'admin',
     label: 'Admin',
-    icon: '⚙️',
+    icon: 'settings',
     submenus: [
       { id: 'users', label: 'Users', route: '/users', permKey: 'admin.users' },
       { id: 'roles', label: 'Roles & Permissions', route: '/roles', permKey: 'admin.roles' },

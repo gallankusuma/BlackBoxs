@@ -5,6 +5,15 @@ import router from './router';
 import { useAuthStore } from './stores/auth';
 import { api } from './lib/api';
 import { vPermission } from './directives/permission';
+// Font di-host sendiri, bukan dari Google Fonts: tidak ada request ke domain
+// pihak ketiga, tetap bekerja offline sebagai PWA, dan tidak ada FOUT dari
+// jaringan yang lambat di lapangan.
+//
+// Sebelumnya `Inter` ditulis di tailwind.config dan style.css tapi TIDAK PERNAH
+// dimuat — jadi diam-diam jatuh ke system-ui, dan itulah tampilan generik yang
+// terasa "default".
+import '@fontsource-variable/inter';
+import '@fontsource-variable/source-serif-4';
 import './style.css';
 
 const app = createApp(App);

@@ -51,11 +51,14 @@ const dotSizeClass = computed(() =>
 );
 
 const variantColorMap: Record<BadgeVariant, string> = {
-  success: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400',
-  warning: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400',
-  danger: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
-  info: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
-  neutral: 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300',
+  // Badge ditulis lebih tenang: latar sangat tipis + garis tepi, bukan blok
+  // warna pekat. Di layar penuh tabel, blok pekat membuat mata lelah dan
+  // membuat semuanya terasa seperti peringatan.
+  success: 'bg-[#eef6f1] text-success ring-1 ring-inset ring-[#cfe4d8] dark:bg-green-900/30 dark:text-green-400 dark:ring-0',
+  warning: 'bg-[#fbf4e6] text-warning ring-1 ring-inset ring-[#eddfbe] dark:bg-amber-900/30 dark:text-amber-400 dark:ring-0',
+  danger: 'bg-[#fbeeee] text-danger ring-1 ring-inset ring-[#eecfcf] dark:bg-red-900/30 dark:text-red-400 dark:ring-0',
+  info: 'bg-accent-soft text-accent ring-1 ring-inset ring-[#cfdcef] dark:bg-blue-900/30 dark:text-blue-400 dark:ring-0',
+  neutral: 'bg-surface-muted text-ink-muted ring-1 ring-inset ring-line dark:bg-gray-700 dark:text-gray-300 dark:ring-0',
 };
 
 const dotColorMap: Record<BadgeVariant, string> = {

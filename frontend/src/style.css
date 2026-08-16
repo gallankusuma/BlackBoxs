@@ -2,21 +2,77 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ============================================================================
+   IDENTITAS VISUAL — korporat bersih
+   ============================================================================
+   Tiga hal yang membuat tampilan lama terasa generik, dan apa yang menggantikan:
+
+   1. `Inter` ditulis di config tapi tidak pernah dimuat, jadi jatuh ke
+      system-ui. Sekarang benar-benar dimuat (self-hosted, lihat main.ts), dan
+      judul memakai serif supaya punya suara sendiri.
+   2. Latar memakai gradasi ungu + cyan — cuci muka template SaaS yang paling
+      khas. Diganti netral rata.
+   3. Warna diambil langsung dari palet default Tailwind di mana-mana. Sekarang
+      ada token semantik supaya seluruh layar konsisten dan bisa diubah dari
+      satu tempat.
+   ========================================================================== */
+
 :root {
-  font-family: "Inter", "Manrope", "Segoe UI", system-ui, -apple-system, sans-serif;
-  line-height: 1.5;
+  /* Netral kebiruan yang tenang — bukan abu murni, bukan biru mencolok. */
+  --w-bg:            #f7f8fa;
+  --w-surface:       #ffffff;
+  --w-surface-muted: #f1f3f7;
+  --w-border:        #e3e7ee;
+  --w-border-strong: #cfd6e2;
+
+  --w-text:          #1c2534;
+  --w-text-muted:    #5b6779;
+  --w-text-subtle:   #8b95a6;
+
+  /* Satu aksen saja. Biru tinta — mapan, tidak mencolok, aman di dokumen
+     yang dilihat klien. */
+  --w-accent:        #1e4b8f;
+  --w-accent-hover:  #173c73;
+  --w-accent-soft:   #eaf0f9;
+
+  --w-success:       #1d7a4c;
+  --w-warning:       #9a6b12;
+  --w-danger:        #a32b2b;
+
+  --w-radius:        6px;
+  --w-radius-lg:     10px;
+
+  font-family: "Inter Variable", "Inter", system-ui, -apple-system, sans-serif;
+  font-feature-settings: "cv05" 1, "cv08" 1, "tnum" 0;
+  line-height: 1.55;
   font-weight: 400;
-  background-color: #f4f6fb;
+  color: var(--w-text);
+  background-color: var(--w-bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
-  background: radial-gradient(circle at 10% 20%, rgba(79, 70, 229, 0.08), transparent 25%),
-    radial-gradient(circle at 80% 0%, rgba(56, 189, 248, 0.08), transparent 25%),
-    #f8fafc;
-  color: #0f172a;
+  /* Rata, tanpa gradasi. */
+  background: var(--w-bg);
+  color: var(--w-text);
+}
+
+/* Judul memakai serif — ini yang paling cepat menghapus kesan "dashboard
+   generik", karena hampir semua template memakai sans untuk segalanya. */
+h1, h2, h3, .font-display {
+  font-family: "Source Serif 4 Variable", "Source Serif 4", Georgia, serif;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--w-text);
+}
+
+/* Angka dalam tabel harus sejajar kolomnya. */
+table, .tabular, [class*="text-right"] {
+  font-variant-numeric: tabular-nums;
 }
 
 /* ===== DARK MODE - Global Overrides ===== */

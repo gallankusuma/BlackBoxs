@@ -4699,3 +4699,340 @@ penghapusan manual. Itu perubahan model tersendiri (event immutable + reversal
 entry), dan dicatat sebagai terbuka.
 
 test:all 922 lulus / 0 gagal.
+
+---
+
+## System Design Review — Proposal — 16 Agustus 2026 19:54 WIB
+
+**Irisan kapabilitas:** modul Proposal end-to-end: list/editor, BOQ/RAB,
+master schedule dan payment schedule, lifecycle/revision/approval, CRM Client,
+serta handoff Deal. Tidak ada perubahan source Proposal baru pada checkout ini;
+audit dilakukan terhadap baseline aktif. Temuan RBAC generik pada
+`estimator.routes.ts` tetap mengacu **DR-P1-02** dan tidak diduplikasi di sini.
+
+### [P1 / FEATURE-REGRESSION + API-CONTRACT] Edit metadata dari Proposal List selalu ditolak backend
+
+**File:** [frontend/src/views/EstimatorProposalList.vue:315](frontend/src/views/EstimatorProposalList.vue),
+[frontend/src/views/EstimatorProposalList.vue:438](frontend/src/views/EstimatorProposalList.vue),
+[backend/src/routes/estimator.routes.ts:1411](backend/src/routes/estimator.routes.ts)
+
+**Bukti:** modal edit masih menyediakan pilihan status, lalu `saveEdit()` selalu
+mengirim properti `status` bersama nama proyek, client, lokasi, dan revision
+(baris 441–448). Backend secara benar menolak **setiap** body yang mempunyai key
+`status` dengan `400 USE_STATUS_ENDPOINT` (baris 1425–1429), termasuk ketika
+nilainya tidak berubah. Artinya tombol Simpan pada modal tersebut tidak dapat
+memperbarui metadata apa pun. Test `mto-link.ts` hanya membuktikan bahwa backend
+menolak injeksi status; belum ada contract test consumer Proposal List.
+
+**Dampak:** kemampuan baseline mengedit identitas proposal dari halaman list
+praktis hilang. Pengguna hanya menerima alert generik “Gagal menyimpan
+perubahan”, tanpa tahu field mana yang bermasalah.
+
+**Rekomendasi/acceptance:** keluarkan `status` dari payload metadata dan hapus
+atau pisahkan control status dari modal ini. Semua transisi tetap harus melalui
+`PUT /proposals/:id/status`; jangan mengendurkan guard backend. Contract test
+wajib membuktikan: edit nama/client/lokasi/revision berhasil tanpa mengubah
+status, injeksi status pada endpoint metadata tetap 400, dan transisi status
+hanya berhasil lewat endpoint workflow.
+
+### [P1 / FINANCIAL-CALCULATION] Subtotal dan total per disiplin pada RAB adalah hasil konkatenasi string, bukan penjumlahan uang
+
+**File:** [backend/src/config/database.ts:10](backend/src/config/database.ts),
+[backend/src/routes/estimator.routes.ts:1962](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:2029](backend/src/routes/estimator.routes.ts),
+[frontend/src/views/EstimatorRAB.vue:123](frontend/src/views/EstimatorRAB.vue)
+
+**Bukti terverifikasi:** pool MySQL tidak mengaktifkan `decimalNumbers` atau
+`typeCast`, sehingga `mysql2` mengembalikan kolom `DECIMAL` sebagai string.
+Pemeriksaan read-only lokal terhadap dua nilai `DECIMAL(18,2)` menghasilkan
+tipe `string`; reducer yang identik dengan endpoint menghasilkan
+`"0100.00200.00"` untuk 100 + 200, sedangkan jumlah numeriknya 300. Endpoint RAB
+menjalankan `subtotal += item.total_price` dan `totalAmount += item.total_price`
+tanpa konversi (baris 2029–2030), lalu menjumlahkan `section.totalAmount` lagi
+pada baris 2040. Layar mencetak nilai tersebut sebagai subtotal sub-disiplin,
+total disiplin, dan grand total.
+
+**Dampak:** dokumen RAB dapat menampilkan angka komersial yang sangat besar dan
+salah ketika satu kelompok memiliki lebih dari satu item. Summary header dapat
+tetap terlihat benar karena membaca `proposals.total_project`, sehingga
+ketidakkonsistenan antarbagian dokumen mudah terlewat saat review penawaran.
+
+**Rekomendasi/acceptance:** gunakan satu representasi uang presisi pada layer
+domain (decimal library/minor unit atau aggregate `SUM` di SQL), dan serialisasi
+nilai API secara konsisten. Jangan mengaktifkan `decimalNumbers` global tanpa
+audit precision seluruh ERP. Test RAB wajib mencakup minimal dua item dalam satu
+sub-disiplin dan beberapa disiplin; buktikan subtotal, total disiplin, grand
+total, dan `total_project` semuanya rekonsiliasi tepat, termasuk nilai besar dan
+pembulatan 2 desimal.
+
+### [P1 / API-RUNTIME + FINANCIAL-INTEGRITY] Payment Schedule saat ini 500; setelah nama kolom dibetulkan distribusinya tetap dapat kehilangan nilai kontrak
+
+**File:** [backend/src/routes/estimator.routes.ts:1127](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:1204](backend/src/routes/estimator.routes.ts),
+[frontend/src/views/EstimatorProposalEditor.vue:589](frontend/src/views/EstimatorProposalEditor.vue)
+
+**Bukti terverifikasi:** handler membaca `SELECT id, total_price FROM proposals`
+(baris 1135–1138), sedangkan skema kanonik hanya mempunyai `total_project` pada
+[backend/database/schema-baseline.sql:2252](backend/database/schema-baseline.sql).
+Query read-only lokal mengembalikan `ER_BAD_FIELD_ERROR`/1054, jadi tab Payment
+Schedule selalu berakhir 500 dan UI hanya menulis error ke console.
+
+Ada dua kesalahan lanjutan yang akan tetap membuat angka salah sesudah nama
+kolom diganti:
+
+1. item tanpa durasi/labor dilewati total pada baris 1204–1205, meskipun nilainya
+   sudah masuk total kontrak;
+2. rentang diperlakukan setengah-terbuka (`itemEnd = start + duration`), tetapi
+   batas bulan memakai tengah malam **hari terakhir** (baris 1217–1223), bukan
+   awal bulan berikutnya. Setiap aktivitas yang melintasi pergantian bulan
+   kehilangan satu hari alokasi; aktivitas satu hari tepat pada akhir bulan
+   dapat kehilangan seluruh bobotnya.
+
+Tidak ada invariant bahwa jumlah `planned_amount` sama dengan total kontrak atau
+kumulatif bobot sama dengan 100%. Namun footer frontend selalu mencetak
+`100.00%` dan total kontrak pada baris 706–712, terlepas dari hasil backend.
+
+**Dampak:** cash-flow/S-curve yang dipakai estimating dan rencana billing dapat
+kosong atau under-allocated tetapi terlihat sudah 100%. Ini langsung memengaruhi
+forecast kas, kebutuhan modal kerja, dan milestone invoicing EPC.
+
+**Rekomendasi/acceptance:** gunakan `total_project`; validasi proposal ada;
+definisikan interval tanggal secara konsisten `[start, end)` dengan batas bulan
+`firstDayNextMonth`; dan tentukan aturan eksplisit untuk item tanpa labor
+(milestone/pro-rata/manual), bukan membuangnya. Backend wajib melakukan
+rekonsiliasi dan menaruh selisih pembulatan pada periode terakhir. UI harus
+menampilkan total hasil aktual dan menolak/menandai schedule yang tidak balance.
+Test: satu hari di akhir bulan, lintas bulan, item tanpa labor, override, nilai
+pecahan, dan invariant `sum(monthly.amount) == total_project` serta cumulative
+100%.
+
+### [P1 / OWNERSHIP + CONTRACT-INTEGRITY] Schedule override/progress dapat menulis item proposal lain dan tetap dapat mengubah proposal submitted/deal
+
+**File:** [backend/src/routes/estimator.routes.ts:1096](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:1119](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:1272](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:1286](backend/src/routes/estimator.routes.ts),
+[frontend/src/views/EstimatorProposalEditor.vue:376](frontend/src/views/EstimatorProposalEditor.vue)
+
+**Bukti:** empat route tersebut tidak pernah mengikat `proposal_item_id`/
+`:itemId` ke proposal pada URL. PUT override dan PUT progress menerima child ID
+dari body; DELETE/GET memakai child ID saja dan mengabaikan parent ID. Tidak ada
+`proposalLockTx`, pemeriksaan status, affected-row check, atau transaction dengan
+row proposal. Tabel `schedule_overrides` dan `schedule_progress` bahkan tidak
+mempunyai foreign key ke `proposal_items`
+([schema-baseline.sql:2970](backend/database/schema-baseline.sql)). Frontend hanya
+menerapkan `isEditable` pada RAB; cell schedule, tombol Simpan/Auto, dan badge
+progress tetap interaktif pada status submitted maupun deal (baris 376–405 dan
+497–503).
+
+**Dampak:** user terautentikasi yang mengetahui ID item dapat membaca atau
+menimpa schedule proposal lain. Lebih serius, tanggal/durasi dan progress pada
+proposal yang sudah dikirim atau menjadi kontrak tetap dapat berubah tanpa
+revision, sehingga payment schedule dan bukti baseline tidak lagi konsisten.
+Orphan rows juga dapat tersisa saat proposal item dihapus.
+
+**Rekomendasi/acceptance:** pada semua mutasi, lock proposal dari URL lalu cari
+child dengan `WHERE id=? AND proposal_id=?` dalam transaction yang sama; tolak
+submitted/deal dengan 409 dan tambahkan FK `ON DELETE CASCADE` setelah audit
+orphan. GET child yang bukan milik parent harus 404, bukan membocorkan data.
+Frontend harus read-only mengikuti state server. Uji cross-proposal ID, orphan,
+submitted/deal, dan race `status transition` versus override. Progress eksekusi
+pasca-award sebaiknya berpindah ke Project WBS/work package, bukan mengubah
+proposal komersial.
+
+### [P1 / DATA-INTEGRITY + API-CONTRACT] Tab Proposal pada CRM Client memakai source lain dan menyisipkan proposal demo sebagai data nyata
+
+**File:** [backend/src/routes/clients.routes.ts:255](backend/src/routes/clients.routes.ts),
+[backend/database/schema-baseline.sql:856](backend/database/schema-baseline.sql),
+[frontend/src/views/ClientDetail.vue:858](frontend/src/views/ClientDetail.vue),
+[frontend/src/views/ClientDetail.vue:1986](frontend/src/views/ClientDetail.vue)
+
+**Bukti:** Estimator bekerja pada tabel `proposals`, tetapi detail client membaca
+tabel kedua `client_proposals`, yang tidak mempunyai relasi ke estimator proposal
+atau project. Kontrak field juga berbeda: backend menyediakan `proposal_date`,
+`total_amount`, dan status lowercase; template meminta `date`, `valid_until`,
+`email_seen`, `preview_seen`, `amount`, serta membandingkan status `Accepted`.
+Jika query mengembalikan kosong, `fetchClient()` menyuntikkan dua record hard-code
+`PROPOSAL #6/#15` dengan nominal dan status “Accepted/Sent” (baris 2013–2018).
+Pencarian source hanya menemukan pembacaan `client_proposals`; tombol Add proposal
+memanggil `notImplemented`.
+
+**Dampak:** profil client dapat menampilkan penawaran palsu sebagai transaksi
+riil, sementara proposal EPC yang benar justru tidak terlihat. Sales, estimator,
+dan manajemen mempunyai jawaban berbeda untuk pipeline, nilai penawaran, dan
+status accepted/deal.
+
+**Rekomendasi/acceptance:** tetapkan `proposals`/revision aktif sebagai source of
+truth komersial dan query berdasarkan `client_id`; hapus seluruh mock runtime.
+Audit/migrasikan isi `client_proposals`, mapping status dan nomor secara eksplisit
+serta deduplikasi sebelum compatibility view dihentikan. Zero data harus benar-
+benar menampilkan empty state; proposal estimator nyata harus muncul dengan
+tanggal, nilai, revision, dan status yang sama; tidak boleh ada record hard-code
+pada build production.
+
+### [ARCH-RISK / DESIGN-GAP — prioritas tinggi] Proposal belum mempunyai revision ledger, bukti penerbitan/penerimaan, approval internal, atau audit trail yang dapat dipertahankan
+
+**Kemampuan saat ini.** Baseline minimum yang harus dipertahankan sudah meliputi
+wizard/template, AHSP/HSP/MTO, BOQ/RAB, resume resource, schedule, payment
+schedule, state `draft → review → submitted → deal/no_deal`, dan Deal yang
+membuat project serta handoff procurement.
+
+**Gap/proses putus yang terbukti:**
+
+1. `revision` hanyalah teks mutable pada row `proposals`; seluruh item menunjuk
+   langsung ke `proposal_id`. Tidak ada `proposal_revisions`, parent revision,
+   nomor versi unik, current/accepted revision, atau checksum snapshot
+   ([schema-baseline.sql:2205](backend/database/schema-baseline.sql),
+   [schema-baseline.sql:2240](backend/database/schema-baseline.sql)).
+2. State machine mengizinkan `submitted → review`; perubahan berikutnya menimpa
+   row dan item yang sama, lalu submit berikutnya menimpa `submitted_at`. Versi
+   yang pernah dikirim ke client tidak dapat direkonstruksi
+   ([estimator.routes.ts:2070](backend/src/routes/estimator.routes.ts)).
+3. Tidak ada state approval internal. Actor yang menekan `submitted → deal`
+   langsung ditulis sebagai `approved_by` dan pada transaction yang sama membuat
+   project/commitment, tanpa separation of duties atau bukti award/client
+   acceptance ([estimator.routes.ts:2349](backend/src/routes/estimator.routes.ts)).
+4. Tabel `proposal_audit_logs` memang ada, tetapi pencarian source aktif tidak
+   menemukan INSERT atau pembacaan tabel tersebut. Edit metadata, line, MTO,
+   schedule, status, submit, dan deal tidak membentuk history bisnis yang dapat
+   diverifikasi.
+
+**Dampak bisnis EPC:** perusahaan tidak dapat membuktikan BOQ, harga, schedule,
+terms, dan resource basis versi mana yang disetujui client; dispute change order,
+margin leakage, dan audit approval akan bertumpu pada row terbaru. Deal dapat
+self-approved dan project berjalan tanpa evidence paket penawaran yang diterima.
+
+**Target design:** pertahankan UI/endpoint lama melalui compatibility adapter,
+tetapi bentuk aggregate `proposal` + immutable `proposal_revision`. Revision
+menyimpan snapshot header, BOQ/RAB lines, resource basis yang dibutuhkan,
+schedule/payment assumptions, commercial terms, document/checksum, dan
+`issued_at/issued_by`. Pisahkan state revision `draft → internal_review →
+approved → issued → accepted/rejected/expired/superseded`; `deal/award` hanya
+boleh mengacu satu accepted revision dan evidence client. Approval memakai
+policy/limit/SoD, dan semua transition/mutation mencatat actor, timestamp,
+before/after, correlation/idempotency key.
+
+**Dependensi dan migrasi:** selesaikan mapping permission/role produksi sebelum
+enforcement (DR-P1-02); tautkan opportunity/tender sesuai gap CRM yang sudah
+tercatat; selaraskan contract baseline/change order yang juga sudah menjadi
+temuan terbuka. Backfill setiap proposal lama sebagai revision awal tanpa
+mengubah ID/nomor atau memutus RAB/MTO/project/PR yang ada. Submitted/deal lama
+harus ditandai `legacy evidence unavailable`, bukan diberi bukti palsu.
+
+**Fase/prioritas:** fase 0 perbaiki lima P1 di atas dan hentikan mock production;
+fase 1 revision snapshot + audit + internal approval/issuance; fase 2 client
+acceptance/e-sign/evidence, tender handoff, dan contract/change-order ledger.
+
+**Acceptance criteria:** (a) submit membekukan revision dan checksum; (b) edit
+setelah issue membuat revision baru tanpa mengubah versi lama; (c) dua revision
+dapat dirender ulang byte/angka-equivalent; (d) policy SoD dapat melarang creator
+menyetujui sendiri; (e) Deal tanpa accepted revision/evidence ditolak dan tidak
+membuat project/PR; (f) seluruh history actor/waktu/perubahan dapat ditelusuri;
+(g) proposal legacy tetap dapat dibuka lewat route lama dengan feature parity.
+
+### [ARCH-RISK / DESIGN-GAP — prioritas tinggi] Master Schedule dan cash curve proposal tidak reproducible sebagai baseline kontrak
+
+**Kemampuan saat ini:** Proposal Editor sudah dapat menghasilkan WBS/Gantt dari
+tenaga AHSP, memakai template sequence, override durasi/tanggal, progress per
+unit, serta payment schedule/S-curve.
+
+**Gap/proses putus:** GET schedule membaca ulang `ahsp_items`,
+`ahsp_headers.work_category`, dan `ahsp_wbs_templates` yang **live** setiap kali
+request (baris 883–923). Start date, pekerja/hari, dan jam/hari hanya query
+parameter; frontend menginisialisasi tanggal hari browser dan default 8/8 setiap
+kunjungan ([EstimatorProposalEditor.vue:1147](frontend/src/views/EstimatorProposalEditor.vue)).
+Resume resource juga membaca ulang komposisi/harga AHSP live
+([estimator.routes.ts:2532](backend/src/routes/estimator.routes.ts)). Proposal
+hanya memotret unit price line, bukan resource composition, schedule assumptions,
+atau WBS template version.
+
+**Dampak bisnis EPC:** proposal submitted/deal yang sama dapat menghasilkan
+durasi, kurva kas, kebutuhan material/manpower/equipment, dan tanggal selesai
+berbeda setelah master AHSP/template berubah atau hanya karena dibuka pada hari
+lain. Baseline tender, mobilization plan, procurement plan, dan cash-flow tidak
+dapat direkonsiliasi.
+
+**Target/dependensi/migrasi:** ketika revision di-issue, snapshot resource basis,
+WBS template version, calendar/start date, productivity assumptions, overrides,
+dan hasil schedule/cash curve. Master tetap boleh berkembang untuk revision
+berikutnya; issued revision selalu membaca snapshot. Untuk proposal lama,
+hasilkan satu baseline eksplisit dari stored MTO/price dan tandai komponen yang
+hanya dapat direkonstruksi dari master saat migrasi.
+
+**Acceptance criteria:** ubah AHSP/WBS master setelah submit dan buktikan issued
+schedule/resume/payment tidak berubah; draft/revision baru dapat memilih master
+baru; parameter schedule tersimpan dan kembali identik setelah reload; total
+cash curve tetap balance ke total revision; Deal menyalin revision schedule yang
+sama ke Project baseline tanpa menghitung ulang diam-diam.
+
+---
+
+## System Design Review — Proposal — 16 Agustus 2026 19:57 WIB
+
+**Sub-area tunggal:** formula komersial, validation boundary, dan rekonsiliasi
+nilai Proposal. Tidak ada perubahan source Proposal sejak review 19:54 WIB.
+
+### [P1 / FINANCIAL-CALCULATION + DATA-INTEGRITY] Quantity negatif dapat menjadi Deal, sementara setiap recalculate menghapus overhead dan contingency tersimpan
+
+**File:** [backend/src/routes/estimator.routes.ts:1624](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:1693](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:1909](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:2070](backend/src/routes/estimator.routes.ts),
+[frontend/src/views/EstimatorProposalEditor.vue:226](frontend/src/views/EstimatorProposalEditor.vue)
+
+**Kemampuan saat ini:** proposal menyimpan snapshot harga satuan, quantity,
+`direct_cost`, `overhead`, `risk_contingency`, dan `total_project`; frontend
+menampilkan seluruh komponen tersebut. Perubahan item dan MTO menghitung ulang
+header dalam transaction, lalu nilai Deal disalin sebagai budget project.
+
+**Bukti/proses yang putus:**
+
+1. POST/PUT item menerima `qty` tanpa validasi finite, minimum, atau maximum.
+   Jalur update memakai `parseFloat(qty) || 0`, lalu langsung mengalikan dengan
+   harga snapshot (baris 1755–1767). Input frontend `type=number` juga tidak
+   mempunyai `min`; API tetap dapat dipanggil langsung. Quantity `-1` karena itu
+   menghasilkan line total dan `total_project` negatif.
+2. Transisi status hanya memeriksa pasangan state. Tidak ada pre-submit/deal
+   invariant bahwa proposal memiliki item komersial valid, semua quantity dan
+   harga non-negatif, total positif, atau header sama dengan penjumlahan lines.
+   Deal kemudian menyalin `proposal.total_project` apa adanya ke
+   `client_projects.budget` (baris 2393–2399).
+3. `recalculateProposal()` selalu menetapkan `overhead = 0` dan
+   `riskContingency = 0`, lalu menulis keduanya kembali ke database (baris
+   1919–1928). Pencarian source tidak menemukan endpoint lain untuk menetapkan
+   kedua nilai. Jadi field dan COST SUMMARY memberi kesan commercial adjustment
+   tersedia, tetapi setiap perubahan line akan menghapus nilai non-zero hasil
+   migrasi/import/manual dan total penawaran hanya dapat menjadi direct cost.
+
+Pemeriksaan read-only database lokal saat review belum menemukan quantity/total
+negatif maupun overhead/risk non-zero; temuan ini adalah jalur korupsi yang
+terbukti dapat diterima source, bukan klaim bahwa data lokal sudah rusak.
+
+**Dampak bisnis EPC:** penawaran dapat dikirim dan diubah menjadi project dengan
+budget nol/negatif. Sebaliknya overhead kantor, project indirect, risk allowance,
+atau contingency yang seharusnya melindungi margin dapat hilang saat operator
+mengubah satu quantity. RAB header, project budget, margin, cash-flow, dan
+procurement handoff kemudian memakai basis komersial yang berbeda dari keputusan
+estimating.
+
+**Target design:** bentuk pricing breakdown kanonik per revision dengan decimal
+presisi: direct lines, line/project markup, overhead/indirect, contingency/risk,
+discount, tax treatment, currency/rate policy, dan grand total. Formula server
+harus membaca policy tersimpan dan idempoten; recalculate tidak boleh mengubah
+input komersial menjadi nol. Draft boleh mempunyai item belum lengkap, tetapi
+`submit/issue/deal` wajib melewati validator dan reconciliation gate yang sama.
+
+**Dependensi/migrasi dan prioritas:** fase 0 validasi quantity finite dan
+`>= 0`, tambah submit/deal gate serta hentikan zeroing overhead/risk. Audit nilai
+produksi sebelum migrasi dan backfill policy `0` hanya bila memang tidak ada
+nilai historis; jangan menganggap nol sebagai bukti keputusan komersial. Fase 1
+masukkan breakdown ini ke immutable proposal revision dari temuan 19:54 WIB;
+fase 2 hubungkan tax/currency/payment terms ke contract baseline dan Finance.
+
+**Acceptance criteria:** direct API menolak `-1`, `NaN`, infinity, dan nilai di
+luar batas; zero quantity boleh disimpan sebagai draft hanya jika kebijakan
+memang mengizinkan tetapi submit ditolak dengan daftar line bermasalah; overhead
+dan contingency non-zero bertahan setelah add/update/delete/MTO recalc; formula
+grand total direkonsiliasi exact-decimal; dua recalculate identik tidak mengubah
+hasil; dan budget project saat Deal sama persis dengan grand total revision yang
+disetujui.
