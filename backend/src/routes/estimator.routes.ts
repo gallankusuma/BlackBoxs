@@ -2189,7 +2189,30 @@ const processDealPrJob = async (proposalId: any, userId: any): Promise<any> => {
   );
   if (!proposal) return { status: 'failed', error: 'Proposal tidak ditemukan' };
 
-  await dbRun('UPDATE deal_pr_jobs SET attempts = attempts + 1 WHERE proposal_id = ?', [proposalId]);
+  // P1 CONCURRENCY: job DIKLAIM lebih dulu lewat compare-and-set.
+  //
+  // Versi pertama membaca status di luar lock lalu langsung bekerja. Dua
+  // pemrosesan paralel bisa berurutan begini: A membuat PR dan commit
+  // `success`; B yang gagal di tengah lalu menjalankan catch dan menimpa job
+  // menjadi `failed`. Retry berikutnya tidak lagi melihat `success`, dan
+  // membuat PR KEDUA untuk proposal yang sama.
+  //
+  // `WHERE status IN ('pending','failed')` memastikan hanya satu pemroses yang
+  // mendapat job, dan status terminal `success`/`skipped` tidak bisa direbut.
+  const klaim = await dbRun(
+    `UPDATE deal_pr_jobs SET status = 'processing', attempts = attempts + 1
+     WHERE proposal_id = ? AND status IN ('pending', 'failed')`,
+    [proposalId]
+  );
+  if (!klaim.affectedRows) {
+    const sekarang: any = await dbGet('SELECT status, pr_id, pr_number FROM deal_pr_jobs WHERE proposal_id = ?', [proposalId]);
+    return {
+      status: sekarang?.status || 'unknown',
+      pr_id: sekarang?.pr_id || null,
+      pr_number: sekarang?.pr_number || null,
+      note: 'Handoff sedang diproses permintaan lain atau sudah selesai.',
+    };
+  }
 
   try {
     const proposalItems: any[] = await dbAll(
@@ -2239,8 +2262,10 @@ const processDealPrJob = async (proposalId: any, userId: any): Promise<any> => {
     // Proposal tanpa material bukan kegagalan — tidak ada yang perlu dibeli.
     // Dibedakan dari `failed` supaya tidak terus-menerus diulang percuma.
     if (materialList.length === 0) {
+      // Hanya job yang MASIH kita pegang yang boleh diubah.
       await dbRun(
-        `UPDATE deal_pr_jobs SET status = 'skipped', last_error = NULL WHERE proposal_id = ?`,
+        `UPDATE deal_pr_jobs SET status = 'skipped', last_error = NULL
+         WHERE proposal_id = ? AND status = 'processing'`,
         [proposalId]
       );
       return { status: 'skipped', reason: 'Proposal tidak memuat material yang perlu dibeli' };
@@ -2255,9 +2280,9 @@ const processDealPrJob = async (proposalId: any, userId: any): Promise<any> => {
       const estimatedTotal = materialList.reduce((sum, i) => sum + (i.qty * i.price), 0);
 
       const prResult = await tx.run(
-        `INSERT INTO purchase_requests (pr_number, requestor_id, project_id, status, notes)
-         VALUES (?, ?, ?, 'DRAFT', ?)`,
-        [prNumber, userId || null, proposal.project_id || null,
+        `INSERT INTO purchase_requests (pr_number, requestor_id, project_id, source_proposal_id, status, notes)
+         VALUES (?, ?, ?, ?, 'DRAFT', ?)`,
+        [prNumber, userId || null, proposal.project_id || null, Number(proposalId),
           JSON.stringify({
             noteText: `Auto-generated from proposal ${proposal.proposal_number} - ${proposal.project_name}`,
             itemType: 'non-inventory',
@@ -2268,7 +2293,8 @@ const processDealPrJob = async (proposalId: any, userId: any): Promise<any> => {
       );
 
       await tx.run(
-        `UPDATE deal_pr_jobs SET status = 'success', pr_id = ?, pr_number = ?, last_error = NULL WHERE proposal_id = ?`,
+        `UPDATE deal_pr_jobs SET status = 'success', pr_id = ?, pr_number = ?, last_error = NULL
+         WHERE proposal_id = ?`,
         [prResult.insertId, prNumber, proposalId]
       );
       return { pr_id: prResult.insertId, pr_number: prNumber };
@@ -2277,9 +2303,12 @@ const processDealPrJob = async (proposalId: any, userId: any): Promise<any> => {
     console.log(`✅ Handoff PR ${hasil.pr_number} untuk proposal ${proposalId}`);
     return { status: 'success', ...hasil };
   } catch (err: any) {
-    // Kegagalan DICATAT, bukan hilang ke log.
+    // Kegagalan DICATAT, bukan hilang ke log — TAPI tidak pernah menimpa hasil
+    // yang sudah terminal. Inilah bug yang membuat retry bisa menghasilkan PR
+    // kedua: catch dulu menulis `failed` tanpa syarat.
     await dbRun(
-      `UPDATE deal_pr_jobs SET status = 'failed', last_error = ? WHERE proposal_id = ?`,
+      `UPDATE deal_pr_jobs SET status = 'failed', last_error = ?
+       WHERE proposal_id = ? AND status = 'processing'`,
       [String(err?.message || err).slice(0, 500), proposalId]
     );
     console.error(`⚠️ Handoff PR proposal ${proposalId} gagal:`, err?.message);

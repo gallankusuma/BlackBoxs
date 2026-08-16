@@ -1297,6 +1297,56 @@ const ensureDealPrOutbox = async (connection: any) => {
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uq_deal_pr_proposal (proposal_id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+  // `processing` dipakai untuk MENGKLAIM job sebelum pekerjaannya dimulai.
+  // Tanpa itu, dua pemrosesan paralel sama-sama masuk dan yang kalah bisa
+  // menimpa hasil yang sudah `success`.
+  await execSchemaEnsure(connection,
+    `ALTER TABLE deal_pr_jobs MODIFY COLUMN status
+     ENUM('pending','processing','success','failed','skipped') NOT NULL DEFAULT 'pending'`);
+
+  // Pagar terakhir di level database: satu proposal hanya boleh punya satu PR.
+  // Sebelumnya asal proposal hanya tersimpan di dalam JSON `notes`, jadi kalau
+  // logika aplikasinya keliru, tidak ada yang menahan PR kedua terbuat.
+  await execSchemaEnsure(connection,
+    'ALTER TABLE purchase_requests ADD COLUMN IF NOT EXISTS source_proposal_id INT NULL');
+
+  try {
+    // Backfill dari notes lama supaya index unik di bawah tidak menolak data
+    // yang sudah ada.
+    await connection.execute(
+      `UPDATE purchase_requests
+       SET source_proposal_id = CAST(JSON_UNQUOTE(JSON_EXTRACT(notes, '$.source_proposal_id')) AS UNSIGNED)
+       WHERE source_proposal_id IS NULL
+         AND JSON_VALID(notes)
+         AND JSON_EXTRACT(notes, '$.source_proposal_id') IS NOT NULL`
+    );
+
+    const [kembar]: any = await connection.execute(
+      `SELECT source_proposal_id, COUNT(*) AS n FROM purchase_requests
+       WHERE source_proposal_id IS NOT NULL GROUP BY source_proposal_id HAVING n > 1`
+    );
+    if (kembar.length > 0) {
+      console.error(
+        `⚠️  UNIQUE(source_proposal_id) TIDAK dipasang — ${kembar.length} proposal punya lebih dari satu PR: `
+        + kembar.map((k: any) => `proposal ${k.source_proposal_id}×${k.n}`).join(', ')
+      );
+    } else {
+      const [idx]: any = await connection.execute(
+        `SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'purchase_requests'
+           AND INDEX_NAME = 'uq_pr_source_proposal' LIMIT 1`
+      );
+      if (idx.length === 0) {
+        await connection.execute(
+          'CREATE UNIQUE INDEX uq_pr_source_proposal ON purchase_requests (source_proposal_id)'
+        );
+      }
+    }
+  } catch (err: any) {
+    console.warn('Pagar PR sumber proposal:', String(err.message).slice(0, 140));
+  }
+
   console.log('✅ Outbox handoff PR ensured');
 };
 

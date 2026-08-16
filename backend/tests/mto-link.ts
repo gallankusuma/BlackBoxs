@@ -828,6 +828,33 @@ async function main() {
   chk('proposal tanpa handoff → 404',
     (await call('GET', `/estimator/proposals/999999/pr-handoff`, undefined, master)).status, 404);
 
+  console.log('\n41. Handoff: status terminal tidak bisa ditimpa (P1 CONCURRENCY)');
+  // Versi pertama worker menulis `failed` TANPA SYARAT di catch. Dua pemrosesan
+  // paralel bisa berurutan: A membuat PR dan commit `success`; B yang gagal di
+  // tengah menimpa job jadi `failed`; retry berikutnya tidak melihat `success`
+  // lagi dan membuat PR KEDUA untuk proposal yang sama.
+  const propTerm = await call('POST', '/estimator/proposals',
+    { project_name: `Uji terminal ${stamp}`, client_id: klienId }, master);
+  const termId = propTerm.json?.id;
+  for (const st of ['review', 'submitted', 'deal']) {
+    await call('PUT', `/estimator/proposals/${termId}/status`, { status: st }, master);
+  }
+  const st1 = await call('GET', `/estimator/proposals/${termId}/pr-handoff`, undefined, master);
+  chk('job terbentuk', st1.status, 200);
+  const statusAwal = String(st1.json?.data?.status);
+
+  // Lima retry BERSAMAAN — hanya satu yang boleh memegang job.
+  const retries = await Promise.all(
+    Array.from({ length: 5 }, () =>
+      call('POST', `/estimator/proposals/${termId}/pr-handoff/retry`, {}, master))
+  );
+  chk('semua retry dijawab tanpa error server', retries.every(r => r.status === 200), true);
+
+  const st2 = await call('GET', `/estimator/proposals/${termId}/pr-handoff`, undefined, master);
+  chk('status akhir tetap terminal, bukan failed',
+    ['success', 'skipped'].includes(String(st2.json?.data?.status)), true);
+  chk('status tidak mundur dari semula', String(st2.json?.data?.status), statusAwal);
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }

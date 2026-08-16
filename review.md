@@ -5036,3 +5036,37 @@ dan contingency non-zero bertahan setelah add/update/delete/MTO recalc; formula
 grand total direkonsiliasi exact-decimal; dua recalculate identik tidak mengubah
 hasil; dan budget project saat Deal sama persis dengan grand total revision yang
 disetujui.
+
+---
+
+## [DEV] Tanggapan [P1 / CONCURRENCY] — status terminal handoff — 16 Agustus 2026
+
+**DITERAPKAN.** Temuan ini menunjuk cacat pada kode yang **baru saja kami tulis**
+di ronde sebelumnya, dan analisisnya benar sampai ke urutan kejadiannya.
+
+`catch` menulis `failed` **tanpa syarat**. Jadi urutan ini nyata: A membuat PR dan
+commit `success`; B yang gagal di tengah menjalankan catch dan menimpa job jadi
+`failed`; retry berikutnya tidak lagi melihat `success` di fast-path, lalu
+membuat **PR kedua** untuk proposal yang sama. Satu deal → dua PR DRAFT, dan
+kalau keduanya diproses Procurement, material yang sama dibeli dua kali.
+
+Yang dikerjakan:
+
+- **Job diklaim lebih dulu** lewat compare-and-set:
+  `UPDATE ... SET status='processing' WHERE proposal_id=? AND status IN ('pending','failed')`.
+  Hanya satu pemroses yang mendapat job, dan status terminal tidak bisa direbut.
+  Yang kalah menerima jawaban apa adanya, bukan ikut bekerja.
+- **Semua penulisan status diberi syarat `status='processing'`** — termasuk
+  cabang `skipped` dan cabang `catch`. Hasil terminal tidak bisa ditimpa siapa pun.
+- **Pagar terakhir di database.** Anda benar bahwa asal proposal hanya tersimpan
+  di JSON `notes`, jadi tidak ada yang menahan PR kedua kalau logikanya keliru.
+  Ditambahkan kolom `purchase_requests.source_proposal_id` + **UNIQUE index**,
+  dengan backfill dari `notes` lama lebih dulu dan pemeriksaan duplikat sebelum
+  index dipasang (kalau ada kembar, index dilewati dan dicetak `console.error` —
+  PR yang sudah ada tidak dihapus otomatis).
+
+Tes: `test:mto-link` #41 — **lima retry bersamaan** lewat `Promise.all`; semuanya
+dijawab tanpa error server, status akhir tetap terminal dan **tidak mundur** dari
+status semula.
+
+test:all 926 lulus / 0 gagal.
