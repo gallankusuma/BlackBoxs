@@ -310,7 +310,7 @@
                             <div v-if="(bidDocumentsMap[bid.id]?.length || 0) > 0" class="space-y-0.5">
                               <div v-for="doc in bidDocumentsMap[bid.id]" :key="doc.id || doc.file_path"
                                    class="flex items-center justify-between bg-blue-50 border border-blue-100 rounded px-1.5 py-0.5">
-                                <button @click="openFile(doc.file_path)"
+                                <button @click="openBidDocument(bid, doc)"
                                   class="text-[10px] text-blue-600 hover:underline truncate max-w-[90px] text-left" :title="doc.file_name">
                                   📎 {{ doc.file_name }}
                                 </button>
@@ -754,16 +754,25 @@ const loadBidDocuments = async (bid: any) => {
 };
 
 
-// Helper: open file in new tab (window not accessible directly in Vue template)
-const openFile = (filePath: string) => {
-  if (!filePath) return;
-  // Normalize: ensure leading slash, lowercase /uploads/
-  let path = filePath.trim();
-  if (!path.startsWith('/')) path = '/' + path;
-  path = path.replace(/^\/uploads\//i, '/uploads/');
-  const url = window.location.origin + path;
-  console.log('[openFile] Opening:', url);
-  window.open(url, '_blank');
+// DR-P0-05: dokumen bid tidak lagi dibuka lewat URL /uploads langsung.
+//
+// Jalur itu dilayani tanpa autentikasi sama sekali — siapa pun yang punya URL-nya
+// bisa mengunduh penawaran vendor. Sekarang diambil lewat endpoint ber-auth,
+// lalu ditampilkan dari blob object URL.
+const openBidDocument = async (bid: any, doc: any) => {
+  if (!currentPR.value?.id || !doc?.id) return;
+  try {
+    const { data } = await api.get(
+      `/procurement/purchase-requests/${currentPR.value.id}/bids/${bid.id}/documents/${doc.id}/download`,
+      { responseType: 'blob' }
+    );
+    const url = URL.createObjectURL(data as Blob);
+    window.open(url, '_blank');
+    // Dilepas setelah tab sempat memuatnya.
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  } catch (err: any) {
+    alert(err?.response?.data?.error || 'Gagal membuka dokumen');
+  }
 };
 
 const uploadingBids = ref<Set<number>>(new Set());

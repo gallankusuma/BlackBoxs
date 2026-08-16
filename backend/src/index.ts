@@ -177,7 +177,45 @@ app.use('/api/ppic', ppicRoutes);
 app.use('/api/webauthn', webauthnRoutes);
 app.use('/api/documents', documentsRoutes);
 app.use('/api/material-requests', materialRequestRoutes);
-app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
+// ==================== BERKAS UNGGAHAN (DR-P0-05) ====================
+//
+// Dulu SELURUH folder `uploads` dilayani statis tanpa auth, melewati semua route
+// unduhan ber-auth yang sudah dibuat. Terbukti di produksi: dokumen penawaran
+// vendor terunduh 200 hanya bermodal URL-nya. Terukur 181 dokumen bisnis
+// terbuka — 110 bid, 26 fund request, 44 project file.
+//
+// Yang TIDAK bisa dilakukan: menutup semuanya. 1.885 gambar katalog dirender
+// sebagai <img>/background-image di PWA mobile, dan tag itu tidak bisa membawa
+// header Authorization. Jadi dipisah menurut sifat isinya, bukan digebuk rata.
+const PUBLIC_UPLOAD_DIRS = new Set(['product-images', 'mr-photos']);
+
+// Berkas yang dieksekusi browser sebagai kode. Diunggah lewat modul mana pun,
+// lalu URL-nya dikirim ke korban: script berjalan same-origin dan bisa membaca
+// JWT desktop dari localStorage. Tidak ada fitur sah yang menyajikan tipe ini.
+const ACTIVE_FILE_TYPES = /\.(html?|xhtml|svg|js|mjs|xml|swf|jar|exe|sh|bat|php|phtml)$/i;
+
+app.use('/uploads', (req: Request, res: Response, next: NextFunction) => {
+  const segments = req.path.split('/').filter(Boolean);
+  const topDir = segments[0] || '';
+
+  if (ACTIVE_FILE_TYPES.test(req.path)) {
+    return res.status(403).json({
+      error: 'Tipe berkas ini tidak dilayani.',
+      code: 'ACTIVE_FILE_TYPE_BLOCKED',
+    });
+  }
+
+  if (!PUBLIC_UPLOAD_DIRS.has(topDir)) {
+    return res.status(403).json({
+      error: 'Dokumen ini hanya bisa diakses lewat endpoint ber-autentikasi.',
+      code: 'UPLOADS_NOT_PUBLIC',
+    });
+  }
+
+  // Katalog gambar: publik, tapi jangan biarkan browser menebak tipenya sendiri.
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  next();
+}, express.static(path.join(process.cwd(), 'uploads')));
 
 // Error handling
 app.use((err: Error, req: Request, res: Response, next: NextFunction) => {

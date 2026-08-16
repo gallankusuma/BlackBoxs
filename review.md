@@ -548,6 +548,51 @@ dokumen tanpa auth.
 4. Tes mengetahui nama file valid lalu memastikan akses langsung tanpa token
    tetap `401/404`—bukan hanya menguji route download.
 
+> **[DEV] DITERAPKAN sebagian — kriteria 1 & 4 selesai, kriteria 2 & 3 sebagian.**
+>
+> Terkonfirmasi ke produksi: dokumen penawaran vendor terunduh **HTTP 200 tanpa
+> token apa pun**. Terukur **181 dokumen bisnis** terbuka — 110 bid, 26 fund
+> request, 44 project file.
+>
+> **Kriteria 1 tidak bisa dijalankan apa adanya, dan ini penting.** "Tidak ada
+> static mount global" akan mematikan **1.885 gambar katalog** yang dirender PWA
+> mobile sebagai `<img>`/`background-image` — tag itu tidak bisa membawa header
+> `Authorization`. Jadi dipisah menurut sifat isinya:
+>
+> - **Publik**: `product-images`, `mr-photos` — gambar katalog, dengan `nosniff`.
+> - **Tertutup**: `bids`, `fund-requests`, `project_files`, `asset_documents`,
+>   `documents`, `payment-proofs`, `pr-attachments`, `rnd` → 403
+>   `UPLOADS_NOT_PUBLIC`, hanya lewat endpoint ber-auth.
+>
+> **Kriteria 3 (berkas aktif) selesai**: `.html/.svg/.js/.xml/.php/...` ditolak
+> 403 dari SELURUH jalur `/uploads`, termasuk folder publik. Itu menutup jalur
+> stored-XSS yang bisa membaca JWT desktop dari `localStorage`.
+>
+> Fitur yang bergantung jalur lama sudah dipindah: `GET .../bids/:bidId/documents/:docId/download`
+> ber-permission `procurement.purchase-requests.view`, dan layar Purchase
+> Requests mengambilnya lewat blob, bukan `window.open('/uploads/...')`.
+> `path.basename()` dipakai supaya `../` pada data lama tidak bisa keluar folder.
+>
+> **Kriteria 4 selesai, dan ini memperbaiki kesalahan kami sendiri.** Smoke test
+> lama menembak `/uploads/` (direktori), menerima 403, dan mencatatnya lulus.
+> Sekarang ia menembak BERKAS di empat folder sensitif, plus memastikan `.html`
+> ditolak dan katalog gambar TIDAK ikut tertutup — nama berkasnya sengaja
+> dikarang supaya yang diuji aturannya, bukan keberadaan satu berkas.
+>
+> **BELUM (kriteria 2):** validasi magic-byte, nama server acak, batas ukuran,
+> cleanup orphan, dan handler Multer 413 pada uploader `documents`, `project`,
+> `finance`, `rnd`, `material-request`. Digarap iterasi berikutnya.
+>
+> **PERLU DIKETAHUI — satu konsumen belum dipindah:**
+> `FinancePaymentSchedule.vue:294` merender bukti bayar lewat
+> `apiBase + pf.file_path`. Folder `payment-proofs` **kosong di produksi**, jadi
+> tidak ada yang rusak sekarang — tapi begitu bukti bayar pertama diunggah,
+> gambarnya tidak akan tampil sampai dipindah ke endpoint ber-auth. Sengaja
+> dilaporkan, bukan dibiarkan diam-diam.
+>
+> Tes: `test:http` #8 (5 assertion) dan `scripts/smoke-test.js` bagian 6
+> (6 assertion) yang berjalan tiap deploy.
+
 ### DR-P0-06 — Absensi fingerprint + GPS dapat dilewati dengan token PIN biasa
 
 **Bukti:** UI menyebut “Sidik jari + GPS”, tetapi
@@ -942,3 +987,234 @@ rekonesans status autentikasi yang tidak dibutuhkan dropdown umum.
 **Acceptance:** lindungi endpoint dengan minimal `hr.employees.view` (atau
 `hr.employees.edit` bila ini murni alat administrasi PIN) dan tambahkan negative
 test token tanpa permission.
+
+---
+
+## Live Auto Review — 16 Agustus 2026 14:34 WIB
+
+Baseline: working tree di atas commit `fee07032`, perubahan DR-P0-04 pada
+`hr.routes.ts`, `database.ts`, dan `tests/rbac.ts` belum committed saat ditinjau.
+
+### [P0] Angka payroll masih dapat dimanipulasi lewat `project_id`
+
+[hr.routes.ts:723](backend/src/routes/hr.routes.ts) tetap menerima `project_id`
+dari body, lalu [hr.routes.ts:458](backend/src/routes/hr.routes.ts) memakainya
+untuk menyaring attendance yang menjadi dasar gaji. Penyerang/pemanggil HR dapat
+memilih project tanpa absensi atau hanya satu dari beberapa project karyawan,
+kemudian memfinalisasi gaji harian/jam menjadi nol atau terlalu kecil. Jadi tidak
+ada angka literal dari klien, tetapi klien masih mengendalikan **dataset** yang
+menghasilkan angka.
+
+Unique key yang baru juga hanya `(employee_id, period_month, period_year)`, bukan
+project. Artinya desain penyimpanan mengakui satu payslip gabungan per periode,
+sementara kalkulasinya dapat dibatasi ke satu project—dua aturan ini saling
+bertentangan.
+
+**Acceptance:** untuk satu payslip per periode, hitung seluruh attendance
+karyawan pada periode tersebut dan perlakukan project hanya sebagai metadata
+yang ditentukan server. Jika bisnis memang membutuhkan payslip per project,
+ubah model dokumen, unique key, UI, dan finance handoff secara konsisten; jangan
+mengandalkan filter body yang bebas.
+
+### [P0] Kalkulasi dan pemilihan kasbon masih di luar transaction
+
+`computePayslip()` dipanggil di [hr.routes.ts:728](backend/src/routes/hr.routes.ts),
+sedangkan transaction baru dimulai di baris 736. Employee rate, attendance, dan
+daftar kasbon dibaca melalui pool biasa tanpa lock. Di sela perhitungan dan
+commit, kasbon dapat berubah status/periode/jumlah atau attendance/rate dapat
+berubah.
+
+UPDATE kasbon di [hr.routes.ts:777](backend/src/routes/hr.routes.ts) hanya
+memeriksa `id` dan `employee_id`; tidak memeriksa lagi status, periode,
+`remaining`, atau jumlah yang dipakai perhitungan. Komentar kode menyatakan
+periode/status “diverifikasi lagi”, tetapi SQL-nya tidak melakukan itu.
+
+**Acceptance:** jalankan perhitungan melalui `TxRunner` di dalam transaction;
+lock employee/rate, attendance snapshot yang relevan, dan kasbon dengan
+`FOR UPDATE`. UPDATE wajib memiliki predicate status/periode yang sama dengan
+perhitungan dan jumlah affected row harus cocok; perubahan concurrent harus
+rollback/retry, bukan memfinalisasi snapshot basi.
+
+### [P0] Jangan jalankan tes payslip baru—dapat melunasi kasbon riil
+
+[rbac.ts:214](backend/tests/rbac.ts) memilih karyawan pertama dari database
+nyata dan menyimpan payslip final periode Desember 2099. Periode jauh di depan
+**tidak membuatnya aman**: query kasbon di [hr.routes.ts:649](backend/src/routes/hr.routes.ts)
+memasukkan setiap kasbon `pending` dengan `period_month IS NULL` ke periode apa
+pun. Endpoint save kemudian menandai maksimal dua kasbon tersebut `deducted` dan
+`remaining=0`.
+
+Tes juga tidak menghapus payslip 2099 setelah selesai. Ini dapat merusak kasbon
+karyawan sungguhan dan meninggalkan dokumen gaji palsu; pola ini lebih berbahaya
+dari fixture approval yang sudah dilaporkan pada run sebelumnya.
+
+**Acceptance:** jangan memakai employee produksi/lokal yang sudah ada. Buat
+employee + attendance + kasbon temporer yang dikenali unik, bungkus cleanup
+payslip/kasbon/attendance/employee dalam `finally`, dan buktikan data di luar
+fixture tidak berubah. Alternatif lebih aman: ekstrak kalkulator menjadi fungsi
+murni dan uji tanpa HTTP/database.
+
+### Verifikasi run ini
+
+| Pemeriksaan | Hasil |
+|---|---|
+| `backend: npx tsc --noEmit` | Lulus pada working tree saat ditinjau |
+| HTTP/RBAC suite baru | **Tidak dijalankan** karena dapat memutasi data riil seperti di atas |
+
+---
+
+## System Design Review — 16 Agustus 2026 14:37 WIB
+
+Irisan kapabilitas run ini: **Engineering Document Control**. Baseline source
+tetap commit `dbd2c04b`; tidak ada perubahan source baru sejak review payroll.
+
+### [DESIGN-GAP / ARCH-RISK — prioritas tinggi] Dokumen engineering masih berupa dua file cabinet, belum menjadi controlled deliverable lifecycle EPC
+
+**Kemampuan saat ini:** `Document Centre` sudah menyediakan kategori, metadata,
+status, revisi, upload/download, dan access log
+([documents.routes.ts:71](backend/src/routes/documents.routes.ts)). Tab dokumen
+project juga sudah menyimpan `doc_no`, kategori, revisi, status, dan memiliki AI
+drawing analysis ([project.routes.ts:428](backend/src/routes/project.routes.ts)).
+Kedua kemampuan ini harus dipertahankan sebagai baseline.
+
+**Gap/proses yang putus:**
+
+1. `documents` dan `project_files` adalah dua registry terpisah tanpa logical
+   document/revision ID bersama. Project Files terhubung ke `client_projects`
+   ([add_projects_module.sql:46](backend/database/migrations/add_projects_module.sql)),
+   sedangkan Document Centre masih join ke tabel legacy `projects`
+   ([documents.routes.ts:83](backend/src/routes/documents.routes.ts)); form
+   Document Centre bahkan tidak mengirim `project_id`
+   ([DocumentCentre.vue:238](frontend/src/views/DocumentCentre.vue)). Dokumen
+   project tidak otomatis menjadi bagian register engineering yang sama.
+2. Revisi dan approval hanya metadata yang dapat ditimpa. Create/update menerima
+   `revision`, `status`, `approved_by`, dan `approved_at` dari klien
+   ([documents.routes.ts:137](backend/src/routes/documents.routes.ts)); UI memberi
+   pilihan langsung `Approved` serta kolom nama approver bebas
+   ([DocumentCentre.vue:138](frontend/src/views/DocumentCentre.vue)). Upload baru
+   mengganti satu `file_url` pada row yang sama
+   ([documents.routes.ts:166](backend/src/routes/documents.routes.ts)). Project
+   Files juga mengubah revision/status in-place
+   ([project.routes.ts:510](backend/src/routes/project.routes.ts)). Karena tidak
+   ada snapshot immutable, sistem tidak dapat membuktikan file Rev A yang dahulu
+   disetujui setelah row berubah menjadi Rev B.
+3. Pencarian source aktif tidak menemukan register deliverable, RFI, submittal,
+   transmittal, distribution/acknowledgement, atau as-built handover. Istilah
+   revision history yang ada hanya hasil ekstraksi AI dari isi gambar, bukan
+   history transaksional sistem
+   ([project.routes.ts:691](backend/src/routes/project.routes.ts)). Akibatnya
+   alur Engineering → Client/Vendor → Construction tidak memiliki handoff dan
+   due-date ownership yang dapat diaudit.
+
+**Dampak bisnis EPC:** site dapat memakai revisi superseded; approval dapat
+terlihat sah hanya karena string/status diedit; tim tidak punya bukti dokumen dan
+revisi mana yang ditransmisikan ke pihak mana; keterlambatan RFI/submittal tidak
+terlihat pada schedule; dan bukti untuk variation/claim serta paket as-built
+tidak dapat direkonstruksi dengan andal.
+
+**Target design:** pertahankan Document Centre sebagai standard library dan UI
+Project Files, tetapi satukan keduanya di atas register kanonik:
+
+- logical `engineering_document` terikat ke `client_projects`, contract/WBS/work
+  package, discipline, originator, document number, dan responsible engineer;
+- child `document_revision` immutable untuk setiap file/checksum, purpose of
+  issue (internal/IFA/IFC/as-built), revision code, dan predecessor;
+- transition server-side melalui review/approval engine; approver selalu dari
+  token, bukan teks klien;
+- `transmittal` + item snapshot exact revision, recipient/distribution,
+  issued/received/acknowledged timestamp;
+- workflow RFI/submittal dengan due date, ball-in-court, response code,
+  attachment, dan link ke drawing/WBS/change order;
+- `current_revision_id` menjadi pointer praktis, tetapi revision lama dan audit
+  trail tidak boleh dihapus/ditimpa.
+
+**Dependensi dan migrasi:** inventaris semua `documents`, `project_files`, dan
+attachment domain lain; tetapkan mapping resmi `projects` legacy →
+`client_projects`; buat logical document ID lalu impor setiap row lama sebagai
+baseline revision tanpa mengubah file/URL lama. Sediakan compatibility endpoint
+untuk UI lama sampai feature parity terverifikasi. Penomoran, permission,
+retention policy, checksum/storage, notification, dan approval-rule mapping harus
+ditetapkan sebelum rollout workflow.
+
+**Fase/prioritas:** fase 1 (tinggi) register kanonik + immutable revisions +
+project mapping + permission/audit; fase 2 transmittal/submittal/RFI dan SLA;
+fase 3 handover dossier/as-built, dashboard overdue, dan integrasi
+schedule/change control. Ini gap produk, bukan alasan menghapus fitur file
+management atau AI analysis yang sudah ada.
+
+**Acceptance criteria:**
+
+1. Satu nomor dokumen logis unik dalam scope project/discipline dan dua create
+   paralel tidak menghasilkan duplikat.
+2. Revision yang sudah issued/approved immutable; revisi berikutnya membuat row
+   dan file baru, sementara download historis tetap menghasilkan checksum lama.
+3. Tidak ada body klien yang dapat menetapkan approver atau melompati state;
+   transition tercatat dengan actor token, waktu, komentar, dan rule.
+4. Transmittal menyimpan snapshot revision yang dikirim dan bukti
+   received/acknowledged; perubahan pointer revision terbaru tidak mengubah
+   transmittal lama.
+5. RFI/submittal memiliki nomor atomic, owner/ball-in-court, due date, response,
+   dan link project/WBS/dokumen; overdue dapat dilaporkan.
+6. Document Centre dan Project Files menampilkan registry yang konsisten untuk
+   project yang sama, sementara semua dokumen lama tetap dapat dicari,
+   di-preview, dan di-download setelah migrasi.
+
+---
+
+## Live Auto Review — 16 Agustus 2026 14:37 WIB
+
+Baseline: working tree di atas `dbd2c04b`, patch DR-P0-05 pada `index.ts`,
+`procurement.routes.ts`, dan `PurchaseRequests.vue` masuk ketika run sedang
+berlangsung. Source code tidak diubah reviewer.
+
+### [FEATURE-REGRESSION / P1] Penutupan static uploads memutus dokumen Finance yang belum punya jalur download ber-auth
+
+Bagian yang benar: dokumen bid sekarang memiliki endpoint download dengan auth +
+`procurement.purchase-requests.view`
+([procurement.routes.ts:1478](backend/src/routes/procurement.routes.ts)), dan UI
+mengambil blob melalui `api` ber-token
+([PurchaseRequests.vue:762](frontend/src/views/PurchaseRequests.vue)). Ini
+menutup jalur publik bid tanpa memasukkannya ke allowlist.
+
+Namun [index.ts:190](backend/src/index.ts) hanya membiarkan
+`product-images` dan `mr-photos` melewati `/uploads`; semua direktori lain selalu
+403. Patch belum memberi replacement untuk dua alur Finance yang aktif:
+
+- Fund Request masih membuka `apiBaseUrl + doc.file_path` langsung
+  ([FinanceFundRequests.vue:342](frontend/src/views/FinanceFundRequests.vue)),
+  sedangkan backend hanya punya list/upload/delete dan **tidak punya download**
+  ([finance.routes.ts:1167](backend/src/routes/finance.routes.ts)). Semua
+  `/uploads/fund-requests/*` sekarang 403.
+- Payment Schedule masih memakai direct URL untuk thumbnail dan link bukti bayar
+  ([FinancePaymentSchedule.vue:293](frontend/src/views/FinancePaymentSchedule.vue)),
+  sementara backend juga hanya punya upload/list/delete
+  ([finance.routes.ts:1431](backend/src/routes/finance.routes.ts)). Semua
+  `/uploads/payment-proofs/*` sekarang 403.
+
+**Dampak:** setelah patch ini live, dokumen pendukung fund request tidak dapat
+dibuka dan thumbnail/link bukti pembayaran rusak. Komentar patch sendiri
+menghitung 26 fund-request documents yang akan terkena. Ini memang menutup
+kebocoran, tetapi melanggar baseline fitur minimum karena tidak menyediakan
+jalur pengganti untuk user Finance yang berwenang.
+
+**Rekomendasi konkret:** jangan masukkan direktori Finance ke public allowlist.
+Tambahkan endpoint download ber-auth + permission yang memverifikasi parent
+fund request/payment schedule dan mengurung path ke direktori yang tepat; ubah
+kedua UI menjadi fetch blob via `api` seperti implementasi bid. Sebelum merge,
+inventaris seluruh top-level directory/file path yang tersimpan (termasuk R&D)
+dan pastikan setiap private consumer punya jalur pengganti.
+
+**Acceptance:** direct `/uploads/fund-requests/*` dan
+`/uploads/payment-proofs/*` tetap 403; endpoint tanpa token 401, tanpa permission
+403, parent/ID silang 404; user berwenang menerima bytes dan nama file yang
+benar; thumbnail payment proof dibuat dari authenticated blob URL; build
+frontend lulus; regression test mencakup setiap private upload directory tanpa
+membaca atau mengubah data produksi.
+
+### Verifikasi run ini
+
+| Pemeriksaan | Hasil |
+|---|---|
+| `backend: npx tsc --noEmit` | Lulus pada working tree |
+| `frontend: npm run build` | Lulus; 2.090 modul ditransform |
+| HTTP/smoke baru | Tidak dijalankan; pemeriksaan yang ditambahkan hanya membuktikan direct URL 403/404, belum membuktikan dokumen Finance tetap dapat dibuka |

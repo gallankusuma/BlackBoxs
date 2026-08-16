@@ -121,7 +121,27 @@ async function main() {
   const rndAdmin = await call('GET', '/rnd/projects', undefined, adminToken);
   chk('token desktop tetap diterima R&D', rndAdmin.status < 400, true);
 
-  console.log('\n8. Registrasi publik & JWT di query string');
+  console.log('\n8. Dokumen bisnis tidak terbuka lewat /uploads (DR-P0-05)');
+  // Seluruh folder uploads dulu dilayani statis tanpa auth — melewati semua
+  // route unduhan ber-auth yang sudah dibuat. Terukur 181 dokumen bisnis di
+  // produksi berada dalam kondisi itu.
+  const BASE = API.replace(/\/api$/, '');
+  const ambil = async (path: string) => (await fetch(`${BASE}${path}`)).status;
+
+  for (const [label, path] of [
+    ['dokumen bid', '/uploads/bids/uji-tidak-ada.pdf'],
+    ['fund request', '/uploads/fund-requests/uji-tidak-ada.pdf'],
+    ['berkas project', '/uploads/project_files/uji-tidak-ada.pdf'],
+  ] as [string, string][]) {
+    chk(`${label} tertutup`, await ambil(path), 403);
+  }
+  chk('berkas HTML ditolak di folder publik sekalipun',
+    await ambil('/uploads/product-images/uji-tidak-ada.html'), 403);
+  // Katalog gambar harus TETAP terlayani — PWA mobile merendernya sebagai <img>.
+  chk('katalog gambar tidak ikut tertutup',
+    await ambil('/uploads/product-images/uji-tidak-ada.jpg'), 404);
+
+  console.log('\n9. Registrasi publik & JWT di query string');
   chk('register tanpa token', await status('POST', '/auth/register', { email: 'x@y.com', password: 'secret123', name: 'X' }), 401);
   // AST-007: JWT tidak lagi diterima dari URL di endpoint mana pun, termasuk
   // route unduhan — frontend memakai axios responseType 'blob'.

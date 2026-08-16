@@ -1475,6 +1475,38 @@ router.get('/purchase-requests/:prId/bids/:bidId/documents', authMiddleware, req
   }
 });
 
+// GET /purchase-requests/:prId/bids/:bidId/documents/:docId/download
+//
+// DR-P0-05: dokumen penawaran vendor dulu dibuka lewat `/uploads/bids/<uuid>.jpg`
+// langsung dari browser — terlayani 200 tanpa token apa pun. 110 dokumen bid di
+// produksi berada dalam kondisi itu. Sekarang unduhannya lewat sini, dengan
+// permission yang sama seperti melihat daftarnya.
+router.get('/purchase-requests/:prId/bids/:bidId/documents/:docId/download', authMiddleware, requirePermission('procurement.purchase-requests.view'), async (req: Request, res: Response) => {
+  try {
+    const { bidId, docId } = req.params;
+    const doc = await dbGet(
+      'SELECT file_path, file_name FROM pr_bid_documents WHERE id = ? AND bid_id = ?',
+      [docId, bidId]
+    ) as any;
+    if (!doc) return res.status(404).json({ error: 'Dokumen tidak ditemukan' });
+
+    // `file_path` tersimpan sebagai `/uploads/bids/<berkas>`. Hanya nama
+    // berkasnya yang dipakai supaya `../` pada data lama tidak bisa keluar dari
+    // folder uploads.
+    const namaBerkas = path.basename(String(doc.file_path || ''));
+    if (!namaBerkas) return res.status(404).json({ error: 'Dokumen tidak ditemukan' });
+
+    const berkas = path.join(process.cwd(), 'uploads', 'bids', namaBerkas);
+    if (!fs.existsSync(berkas)) return res.status(404).json({ error: 'Berkas sudah tidak ada di server' });
+
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.download(berkas, doc.file_name || namaBerkas);
+  } catch (error) {
+    console.error('Error downloading bid document:', error);
+    res.status(500).json({ error: 'Gagal mengunduh dokumen' });
+  }
+});
+
 // DELETE /purchase-requests/:prId/bids/:bidId/documents/:docId - delete single document
 router.delete('/purchase-requests/:prId/bids/:bidId/documents/:docId', authMiddleware, requirePermission('procurement.purchase-requests.delete'), async (req: Request, res: Response) => {
   try {

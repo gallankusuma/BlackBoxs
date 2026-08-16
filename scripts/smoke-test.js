@@ -128,15 +128,39 @@ function expect(label, got, oneOf, extra = '') {
     else ok(`${label} terdaftar`, `HTTP ${r.status}`);
   }
 
-  console.log('\n6. Jalur berkas unggahan');
+  console.log('\n6. Dokumen bisnis tidak terbuka lewat /uploads');
   // ⚠️ Versi pertama pemeriksaan ini menembak `/uploads/` — DIREKTORI — dan
-  // menerima 403 sebagai "lulus". Itu rasa aman palsu: direktori memang ditolak,
-  // tapi BERKAS di dalamnya terlayani 200 tanpa token sama sekali (DR-P0-05).
-  // Yang benar diuji adalah berkasnya, bukan direktorinya.
-  const uploads = await req('/uploads/');
-  if ([403, 404, 200, 301].includes(uploads.status)) ok('jalur /uploads menjawab', `HTTP ${uploads.status}`);
-  else bad('jalur /uploads menjawab', `HTTP ${uploads.status}`);
-  console.log('  catatan: akses berkas tanpa token belum diuji di sini — lihat DR-P0-05.');
+  // menerima 403 sebagai "lulus". Rasa aman palsu: direktori memang ditolak,
+  // tapi BERKAS di dalamnya terlayani 200 tanpa token (DR-P0-05, terbukti di
+  // produksi pada dokumen penawaran vendor).
+  //
+  // Nama berkas sengaja dikarang: yang diuji adalah ATURANnya, bukan keberadaan
+  // satu berkas tertentu, jadi pemeriksaan ini tidak ikut basi kalau berkasnya
+  // dihapus.
+  for (const [label, path] of [
+    ['dokumen penawaran vendor', '/uploads/bids/probe-smoke-test.pdf'],
+    ['dokumen fund request', '/uploads/fund-requests/probe-smoke-test.pdf'],
+    ['berkas project', '/uploads/project_files/probe-smoke-test.pdf'],
+    ['dokumen aset', '/uploads/asset_documents/probe-smoke-test.pdf'],
+  ]) {
+    const r = await req(path);
+    if (r.status === 403) ok(`${label} tertutup`, 'HTTP 403');
+    else bad(`${label} tertutup`, `HTTP ${r.status} — DOKUMEN BISNIS TERBUKA TANPA TOKEN`);
+  }
+
+  // Berkas aktif tidak boleh dilayani dari mana pun, termasuk folder publik:
+  // script same-origin bisa membaca JWT desktop dari localStorage.
+  const aktif = await req('/uploads/product-images/probe-smoke-test.html');
+  if (aktif.status === 403) ok('berkas HTML ditolak', 'HTTP 403');
+  else bad('berkas HTML ditolak', `HTTP ${aktif.status} — jalur stored XSS terbuka`);
+
+  // Katalog gambar HARUS tetap terlayani — PWA mobile merendernya sebagai <img>,
+  // dan tag itu tidak bisa membawa header Authorization. 404 = aturan melewatkan
+  // permintaannya, berkas karangan ini yang memang tidak ada.
+  const katalog = await req('/uploads/product-images/probe-smoke-test.jpg');
+  if (katalog.status === 404) ok('katalog gambar tetap dilayani', 'HTTP 404 (berkas uji memang tidak ada)');
+  else if (katalog.status === 403) bad('katalog gambar tetap dilayani', 'HTTP 403 — gambar produk ikut tertutup, PWA mobile akan kosong');
+  else ok('katalog gambar tetap dilayani', `HTTP ${katalog.status}`);
 
   console.log(`\n${'='.repeat(46)}`);
   console.log(`${pass} lulus, ${fail} gagal`);
