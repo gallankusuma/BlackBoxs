@@ -140,7 +140,14 @@ router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
 router.post('/', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Response) => {
   try {
     const empId = req.employeeId;
-    const { project_id, project_name, priority, needed_by, notes, items } = req.body;
+    // P1: `project_name` TIDAK lagi dibaca dari body.
+    //
+    // Sebelumnya `project_id` dan `project_name` dikirim sebagai dua nilai
+    // independen, jadi MR bisa menyimpan nama yang tidak ada hubungannya dengan
+    // id-nya — dan `project_id` yang menunjuk project tidak ada pun diterima.
+    // Nama diambil dari database supaya laporan dan PR turunannya menunjuk
+    // project yang sama dengan yang benar-benar dipilih.
+    const { project_id, priority, needed_by, notes, items } = req.body;
 
     if (!items?.length) return res.status(400).json({ error: 'At least 1 item required' });
 
@@ -149,6 +156,23 @@ router.post('/', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Respo
     const emp = await dbGet('SELECT name FROM employees WHERE id = ? AND status = ?', [empId, 'ACTIVE']) as any;
     if (!emp) return res.status(403).json({ error: 'Karyawan tidak aktif' });
     const employee_name = emp.name;
+
+    // Project divalidasi kalau diisi. MR tanpa project tetap boleh — pekerja
+    // lapangan tidak selalu tahu project mana yang membebani permintaannya, dan
+    // menolaknya akan membuat mereka berhenti memakai fitur ini sama sekali.
+    let projectName: string | null = null;
+    if (project_id) {
+      const proj: any = await dbGet(
+        'SELECT id, project_name FROM client_projects WHERE id = ?', [project_id]
+      );
+      if (!proj) {
+        return res.status(404).json({
+          error: 'Project yang dipilih tidak ditemukan.',
+          code: 'PROJECT_NOT_FOUND',
+        });
+      }
+      projectName = proj.project_name;
+    }
 
     // DR-P1-04: header + seluruh item satu transaction, dan nomornya atomic.
     //
@@ -161,7 +185,7 @@ router.post('/', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Respo
       const result = await tx.run(
         `INSERT INTO material_requests (mr_number, employee_id, employee_name, project_id, project_name, priority, needed_by, notes)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [nomor, empId, employee_name, project_id || null, project_name || null, priority || 'normal', needed_by || null, notes || null]
+        [nomor, empId, employee_name, project_id || null, projectName, priority || 'normal', needed_by || null, notes || null]
       );
       const id = result.insertId;
 

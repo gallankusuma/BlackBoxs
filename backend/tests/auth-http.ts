@@ -245,6 +245,23 @@ async function main() {
     await cleanupCredential(credId);
   }
 
+  console.log('\n9a. MR mobile: daftar project & validasi project (P1)');
+  // Reviewer melaporkan `/material-requests/projects/list` SELALU 401 karena
+  // `/:id` menangkap "projects". Itu tidak benar — `/:id` hanya cocok untuk SATU
+  // segmen, sedangkan jalur ini dua. Diuji langsung dengan token mobile.
+  const daftarProject = await call('GET', '/material-requests/projects/list', undefined, tokA);
+  chk('dropdown project mobile TIDAK 401', daftarProject.status, 200);
+  chk('daftarnya berisi', Array.isArray(daftarProject.json?.data), true);
+
+  // Yang memang benar dari butir itu: project_id dan project_name dulu dikirim
+  // sebagai dua nilai independen dari body.
+  const mrPalsu = await call('POST', '/material-requests', {
+    project_id: 999999, project_name: 'Project Karangan',
+    items: [{ item_name: 'Semen', quantity: 1, uom: 'sak' }],
+  }, tokA);
+  chk('project_id karangan ditolak', mrPalsu.status, 404);
+  chk('kodenya PROJECT_NOT_FOUND', mrPalsu.json?.code, 'PROJECT_NOT_FOUND');
+
   console.log('\n9b. Absensi: challenge sekali pakai & jam tidak bisa ditimpa (DR-P0-06)');
   // Sebelumnya konsumsi challenge, update counter, dan penulisan absensi adalah
   // tiga penulisan autocommit terpisah tanpa lock: dua permintaan paralel

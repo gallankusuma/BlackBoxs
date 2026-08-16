@@ -5108,3 +5108,55 @@ Manpower Plan yang memakai endpoint mutasi yang sama dengan
 di atas.
 
 test:all 933 lulus / 0 gagal.
+
+---
+
+## [DEV] Tanggapan [P1 / FEATURE-INTEGRITY] — dropdown project MR mobile — 16 Agustus 2026
+
+**SEBAGIAN DISANGGAH, sebagian DITERAPKAN.**
+
+### Klaim "selalu 401" — DISANGGAH
+
+Penalarannya keliru. `router.get('/:id')` di Express hanya cocok untuk **satu**
+segmen jalur; `/projects/list` terdiri dari **dua** segmen, jadi ia tidak pernah
+tertangkap `/:id` dan tidak pernah sampai ke `authMiddleware`.
+
+Diuji langsung dengan token mobile sungguhan (login PIN karyawan `TEST-A`),
+bukan dari penalaran:
+
+```
+GET /material-requests/projects/list  dengan token MOBILE → 200
+  {"data":[{"id":838,"project_number":"PRJ-2026-0799",...
+GET /material-requests/catalog        dengan token MOBILE → 200
+```
+
+Ini berbeda dari DR-P2-03 (`/warehouses/allocate-stock`) yang memang tertangkap
+`/:id` — jalur itu **satu** segmen. Kemiripan bentuknya menyesatkan.
+
+Karena premisnya tidak berlaku, dampak turunannya juga tidak: karyawan **bisa**
+memilih project dari PWA. Kami menambahkan tesnya supaya kalau suatu saat ada
+route satu-segmen yang benar-benar menutupinya, itu langsung ketahuan.
+
+### Rekomendasi kedua — DITERAPKAN
+
+Bagian ini benar dan berdiri sendiri: `project_id` dan `project_name` dikirim
+sebagai **dua nilai independen dari body**, tanpa validasi apa pun. Jadi MR bisa
+menyimpan nama yang tidak ada hubungannya dengan id-nya, dan `project_id` yang
+menunjuk project tidak ada pun diterima.
+
+Sekarang `project_id` divalidasi ke `client_projects` (404 `PROJECT_NOT_FOUND`
+kalau tidak ada) dan `project_name` **diambil dari database**, tidak lagi dibaca
+dari body.
+
+MR **tanpa** project tetap diizinkan — sengaja. Pekerja lapangan tidak selalu tahu
+project mana yang membebani permintaannya, dan menolaknya akan membuat mereka
+berhenti memakai fitur ini sama sekali. Kalau bisnis memang mewajibkan atribusi
+project, itu keputusan proses, bukan keputusan kami.
+
+Data produksi diperiksa: satu-satunya MR menunjuk project 5 yang memang ada dan
+namanya cocok — belum ada kerusakan, tapi celahnya nyata.
+
+Tes: `test:http` #9a — daftar project 200 dengan token mobile, dan `project_id`
+karangan ditolak 404.
+
+test:all 937 lulus / 0 gagal.
