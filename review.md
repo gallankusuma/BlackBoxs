@@ -2896,10 +2896,277 @@ Dua pilihan, dua-duanya sah:
 2. **Beri permission dulu** ke `Manager Finannce & Acc`, baru deploy, kalau
    mereka memang perlu mengelola rule.
 
-Kode sudah siap dan ter-push; deploy ditahan sampai ada keputusan.
+**KEPUTUSAN PEMILIK SISTEM (16 Agustus 2026): opsi 1 — deploy apa adanya.**
+Manager Finance tidak perlu mengonfigurasi aturan approval; konfigurasi approval
+adalah fungsi Admin. Sudah di-deploy dan diverifikasi di produksi: ketiga endpoint
+konfigurasi menolak tanpa token, `inbox` tetap hidup, log bersih.
+
+Catatan untuk ke depan: `beni` dan `takbir` (Manager Finannce & Acc) sekarang
+mendapat 403 pada layar konfigurasi approval. Itu disengaja. Kalau suatu saat
+mereka perlu mengelola rule, jalurnya adalah **memberikan permission
+`approval.approval-rules.*` ke rolenya** — bukan melonggarkan endpointnya.
 
 Tes: `test:rbac` #7b — enam endpoint konfigurasi 403 untuk user tanpa hak,
 inbox tetap 200 (membuktikan gemboknya tidak kebablasan), dan master tetap bisa
 membuat rule.
 
 test:all 876 lulus / 0 gagal.
+
+**Verifikasi reviewer 16 Agustus 2026 15:53 WIB — DITERAPKAN SEBAGIAN,
+KEPUTUSAN DEPLOY TETAP DITAHAN.** Commit `a498e10b` benar memasang permission
+OR yang sudah ada pada sembilan endpoint mutasi rules/delegations/escalations;
+backend lulus `npx tsc --noEmit`. Kebijakan apakah Manager Finance boleh
+mengelola konfigurasi memang harus diputuskan pemilik sebelum deploy, dan
+reviewer tidak mengubah mapping role produksi.
+
+Sub-kriteria menutup bypass mutasi selesai, tetapi acceptance “lindungi
+konfigurasi” belum penuh karena tiga endpoint baca konfigurasi masih hanya
+memerlukan login. Selain itu alasan membiarkan history terbuka—disebut sebagai
+pandangan per-user—tidak sesuai query aktual. Rinciannya dicatat sebagai temuan
+baru di bawah.
+
+---
+
+## Live Auto Review — 16 Agustus 2026 15:53 WIB
+
+Baseline: commit baru `a498e10b` (`fix(approval): gembok konfigurasi
+rule/delegasi/eskalasi — MENUNGGU KETOKAN`). Source aplikasi tidak diubah
+reviewer. Backend lulus `npx tsc --noEmit`; test HTTP tidak dijalankan karena
+membuat fixture/data.
+
+### [P2 / RBAC + DATA-SCOPE] Read-side konfigurasi dan history approval tetap global untuk setiap token desktop
+
+**Bukti.** `GET /approval/rules`, `/delegations`, dan `/escalations` masih hanya
+memakai `authMiddleware` ([approval.routes.ts:494](backend/src/routes/approval.routes.ts),
+[approval.routes.ts:596](backend/src/routes/approval.routes.ts),
+[approval.routes.ts:658](backend/src/routes/approval.routes.ts)). Response-nya
+memuat kondisi rule, assignment role/user, identitas pemberi/penerima delegasi,
+rentang dan alasan, serta target escalation. Permission `view` yang relevan
+sudah ada di katalog tetapi belum dipakai.
+
+Lebih penting, `GET /approval/history` bukan pandangan per-user: query dimulai
+dengan `WHERE 1=1` dan tidak pernah menambahkan predicate requester, approver,
+role, delegation, atau permission ([approval.routes.ts:435](backend/src/routes/approval.routes.ts)).
+Setiap user login dapat membaca hingga 200 request seluruh modul beserta nomor,
+entity ID, requester, status, dan nama/waktu actor di action trail. Endpoint
+`/history/stats` juga menjumlahkan seluruh perusahaan tanpa scope
+([approval.routes.ts:472](backend/src/routes/approval.routes.ts)). Test baru
+hanya memastikan inbox tetap 200 dan tidak menguji history/config GET
+([rbac.ts:685](backend/tests/rbac.ts)).
+
+**Dampak.** User desktop biasa masih dapat memetakan struktur otorisasi dan
+delegasi, serta melihat metadata keputusan Finance/Procurement/HR yang tidak
+menjadi tanggung jawabnya. UI yang menyembunyikan menu tidak melindungi direct
+API. Kriteria DR-P0-02 untuk mencegah perubahan konfigurasi sudah jauh lebih
+aman, tetapi boundary baca dan klaim per-user belum benar.
+
+**Rekomendasi konkret.** Pasang
+`approval.approval-rules.view`/`admin.approval-config.view` pada tiga GET
+konfigurasi. Untuk history, role dengan `approval.approval-history.view` boleh
+melihat global; selain itu batasi ke request yang dibuat user atau benar-benar
+melibatkan user sebagai approver/delegate pada rule terkunci. Gunakan predicate
+scope yang sama untuk rows dan stats. Verifikasi mapping role produksi sebelum
+guard diaktifkan, sesuai aturan AGENTS.md.
+
+**Acceptance:** token biasa tidak dapat membaca config maupun history orang
+lain; requester dan approver/delegate dapat melihat record yang melibatkannya;
+role global yang sah dapat melihat semua; `history/stats` selalu sama dengan
+scope daftar; negative direct-URL/API tests membuktikan boundary tersebut.
+
+### [P2 / TEST-SAFETY] Tes RBAC baru menargetkan ID konfigurasi nyata saat guard mengalami regresi
+
+**Bukti.** Test #7b mengirim update/delete ke `/approval/rules/1` dan delete ke
+`/approval/delegations/1`, lalu membuat rule bernama generik `uji`
+([rbac.ts:674](backend/tests/rbac.ts)). Pada kode sekarang request berhenti di
+403. Namun tujuan regression test adalah mendeteksi bila guard hilang; tepat
+pada kondisi gagal itu, suite dapat mengubah/menghapus row ID 1 dan meninggalkan
+rule `finance` baru. Cleanup hanya menghapus rule master
+`UJI-GEMBOK-<stamp>`, bukan artefak dari request plain-token.
+
+**Dampak.** Test dapat merah sambil merusak konfigurasi dev/staging yang sudah
+ada, sehingga tidak lagi memenuhi kontrak suite yang membuat fixture sendiri
+dan membersihkannya. Kerusakan ini juga mengaburkan hasil run berikutnya.
+
+**Rekomendasi/acceptance:** seed rule, delegation, dan escalation milik test
+dengan master, simpan ID hasil create, jalankan semua negative mutation hanya ke
+ID fixture tersebut, lalu cleanup dalam `finally`. Simpan satu sentinel di luar
+fixture dan assert tidak berubah. Jalankan skenario pada implementasi guard yang
+disengaja gagal: suite harus gagal tanpa mengubah row non-fixture dan tanpa
+meninggalkan artefak.
+
+---
+
+## System Design Review — 16 Agustus 2026 16:30 WIB
+
+Irisan yang diaudit run ini: **Construction / Site Execution — work package,
+daily site report, labor, material, equipment, installed quantity, dan handoff
+progress**. Tidak ada perubahan source setelah `a498e10b`; audit hanya membaca
+kontrak backend/frontend yang ada dan tidak menyentuh data.
+
+### [P1 / DATA-INTEGRITY] Save timesheet satu proyek dapat memindahkan absensi seluruh karyawan dari proyek lain
+
+**Kemampuan saat ini dan bukti.** Tab Timesheets pada detail proyek memakai
+attendance HR sebagai timesheet proyek. Saat halaman dibuka, semua karyawan aktif
+diinisialisasi `present`; query lalu hanya mengambil attendance yang sudah
+memiliki `project_id` proyek itu. Save mengirim **seluruh** karyawan aktif
+([ProjectTimesheets.vue:158](frontend/src/components/projects/ProjectTimesheets.vue),
+[ProjectTimesheets.vue:171](frontend/src/components/projects/ProjectTimesheets.vue),
+[ProjectTimesheets.vue:179](frontend/src/components/projects/ProjectTimesheets.vue),
+[ProjectTimesheets.vue:198](frontend/src/components/projects/ProjectTimesheets.vue)).
+
+Backend bulk mencari row hanya dengan `(employee_id, date)`, lalu meng-overwrite
+status, jam, dan `project_id` ke proyek dari request
+([hr.routes.ts:341](backend/src/routes/hr.routes.ts)). Jadi bila attendance
+karyawan sudah tercatat di proyek A, membuka proyek B pada tanggal yang sama
+tidak memuat row A, menampilkan default hadir, lalu Save memindahkan row tersebut
+ke B. Loop juga bukan transaction; kegagalan di tengah menyisakan sebagian
+karyawan sudah berpindah.
+
+**Dampak EPC.** Kehadiran/GPS yang menjadi dasar payroll berubah menjadi
+alokasi proyek terakhir yang menekan Save; jam dan biaya tenaga kerja proyek A
+hilang, proyek B mendapat beban palsu, dan satu pekerja tidak dapat membagi hari
+ke dua work package/proyek. Rekonsiliasi payroll, productivity, progress, dan
+cost control tidak dapat dipercaya.
+
+**Target/perbaikan.** Pertahankan `attendance_logs` sebagai source of truth
+kehadiran/payroll satu employee-hari. Pisahkan `labor_time_allocations` menjadi
+baris employee + tanggal + project + WBS/work package + activity + regular/OT
+hours + cost rate snapshot + supervisor approval. Project Timesheets hanya
+mengirim employee yang dipilih dan tidak boleh mengubah check-in/out global.
+Upsert, validasi total jam terhadap attendance, dan approval dilakukan dalam
+satu transaction dengan lock/version check.
+
+**Migrasi/fase.** Fase 0: hentikan bulk default-present dari tab proyek dan tolak
+overwrite attendance milik proyek lain. Fase 1: backfill setiap attendance
+ber-`project_id` menjadi satu allocation legacy 100%; row tanpa proyek masuk
+bucket `Unallocated`, tanpa mengubah payroll historis. Fase 2: split allocation
+WBS/work package dan posting biaya setelah approval.
+
+**Acceptance:** save proyek B tidak mengubah attendance/allocation A; employee
+dengan attendance 8 jam dapat dialokasikan A=3 dan B=5 tetapi total 9 ditolak;
+unselected employee tidak dibuat hadir; dua save paralel tidak menghasilkan
+jam ganda; failure child ke-N me-rollback semua; payroll sebelum/sesudah migrasi
+tetap sama dan total allocation yang belum dipetakan terlihat.
+
+### [P1 / CONTRACT-INTEGRITY] Route MTO proyek melewati lock proposal submitted/deal dan mengabaikan baseline proyek yang sudah disalin
+
+**Kemampuan saat ini dan bukti.** Saat proposal menjadi deal, sistem sudah
+menyalin MTO ke scope `project` dalam transaction sebagai baseline tersendiri
+([estimator.routes.ts:2267](backend/src/routes/estimator.routes.ts)). UI proyek
+bahkan memberi `readonly contract-mode` pada MTO
+([ProjectDetail.vue:267](frontend/src/views/ProjectDetail.vue)).
+
+Kontrak backend bertentangan dengan keduanya. `GET /projects/:id/mto` tidak
+membaca scope project hasil copy, tetapi kembali membaca semua row dengan
+`proposal_id` yang tertaut ([project.routes.ts:1377](backend/src/routes/project.routes.ts)).
+Route PUT dan DELETE proyek secara eksplisit menerima row yang cocok lewat
+`proposal_id`, tanpa `proposalLock`, status check, transaction, atau scope
+`project` ([project.routes.ts:1452](backend/src/routes/project.routes.ts),
+[project.routes.ts:1479](backend/src/routes/project.routes.ts)). User login yang
+mendapat element ID dari GET dapat mengubah/menghapus MTO proposal `submitted`
+atau `deal` melalui prefix `/projects`, walau endpoint Estimator sudah
+melarangnya.
+
+Manpower Plan juga memakai endpoint MTO mutasi yang sama dan menyimpan JSON
+operasional sebagai `element_type='manpower'`
+([ManpowerPlan.vue:363](frontend/src/components/projects/ManpowerPlan.vue)). POST
+project tidak mengisi `scope_type/scope_id`, sehingga model scope eksplisit dan
+unique key baru tidak menjadi penjaga yang konsisten.
+
+**Dampak EPC.** Kuantitas kontrak dapat berubah atau hilang setelah deal tanpa
+change order/audit, baseline project yang sengaja disalin tidak menjadi source of
+truth, dan rencana manpower bercampur dengan engineering MTO. Procurement,
+progress, variation, dan final account dapat memakai baseline berbeda.
+
+**Target/perbaikan dan migrasi.** Fase 0: project MTO GET wajib membaca
+`scope_type='project' AND scope_id=:projectId`; tutup POST/PUT/DELETE kontrak
+project atau izinkan hanya revision execution terpisah yang tidak mengubah
+baseline. Manpower pindah ke tabel/versioned plan sendiri. Audit row hybrid
+`project_id + proposal_id`/scope NULL; snapshot dan klasifikasikan ke contract
+baseline atau manpower plan tanpa menulis ulang proposal historis. Perubahan
+quantity setelah deal hanya lewat approved change order/rebaseline yang
+menyimpan parent revision dan delta.
+
+**Acceptance:** checksum seluruh proposal dan project baseline tetap sama
+setelah percobaan PUT/DELETE lewat `/projects`; baseline yang ditampilkan adalah
+copy scope project pada waktu deal; edit manpower tidak menambah/mengubah
+`engineering_inputs` kontrak; revisi change order menghasilkan baseline baru
+sementara versi lama dapat direkonstruksi as-of-date; negative test memakai
+proposal submitted/deal dan memastikan 403/409 serta nol affected row.
+
+### [DESIGN-GAP / ARCH-RISK — prioritas tinggi] Belum ada construction execution ledger yang mengubah rencana menjadi bukti lapangan
+
+**Kemampuan saat ini.** Detail proyek sudah menyediakan task/Kanban, milestone,
+Gantt, file, expense, contract MTO, manpower plan, dan attendance
+([ProjectDetail.vue:419](frontend/src/views/ProjectDetail.vue)). Asset memiliki
+lokasi serta maintenance; Production dapat issue material ke manufacturing work
+order. Semua kemampuan itu adalah baseline minimum yang harus dipertahankan.
+
+**Gap/proses yang putus.** Pencarian source tidak menemukan data contract untuk
+Daily Site Report/DPR, construction work package, area/system/tag, shift/weather,
+installed quantity, equipment usage, material issue/return/waste ke site,
+look-ahead/constraint, site instruction, supervisor/client sign-off, atau link
+inspection/permit. Task selesai dan attendance hadir tidak membuktikan quantity
+terpasang. Jalur material Production terikat `wo_materials`/manufacturing WO,
+sedangkan asset tidak memiliki assignment dan hour/meter log per proyek. Karena
+itu rencana MTO/manpower tidak memiliki transaksi aktual yang dapat
+direkonsiliasi.
+
+**Target design.** Bangun source of truth Construction Execution yang memakai
+fondasi WBS/work package:
+
+1. Work package terikat project, WBS/CBS, schedule activity, contract BOQ/MTO
+   line, discipline, area/system/tag, responsible subcontractor, quantity/unit,
+   budget hours, drawing/spec revision, serta hold points QA/HSE.
+2. Daily Site Report versioned per project/site/date/shift: weather/work hours,
+   crew allocation, equipment hours/meter, material issue-return-waste,
+   installed quantity, delay/constraint, instruction, foto/evidence, author,
+   supervisor, client witness, dan audit timestamp.
+3. Material issue site memakai inventory transaction atomic dan traceable dari
+   warehouse/batch/heat/serial ke work package; return/reversal mengacu transaksi
+   asal. Equipment allocation memblokir bentrok jadwal serta asset yang sedang
+   maintenance dan mem-post operating hour/cost ke CBS.
+4. Progress claim berasal dari cumulative installed quantity yang disetujui,
+   dibatasi baseline + approved variation, dan baru menjadi verified/earned
+   setelah ITR/QA hold point terpenuhi. HSE permit/incident dan engineering
+   RFI/site instruction ditautkan, bukan disalin menjadi teks bebas.
+5. Mobile/offline submission memakai client UUID/idempotency key, sync status,
+   attachment checksum, conflict resolution, dan tidak boleh menggandakan DPR
+   atau quantity saat koneksi pulih.
+
+**Dampak bisnis EPC.** Tanpa ledger ini perusahaan tidak dapat membuktikan siapa
+mengerjakan apa, material/alat mana yang dipakai, penyebab delay, quantity yang
+layak ditagih, atau hubungan progress dengan QA/HSE. Cost-to-complete,
+productivity, subcontract measurement, client billing, dan dispute record tidak
+auditable.
+
+**Dependensi dan migrasi.** Bergantung pada WBS/CBS/project-control review 15:28,
+controlled documents 14:37, HSE 15:06, dan QA/QC 15:32. Jangan menghapus task,
+attendance, MTO, asset maintenance, atau production WO. Jadikan semuanya sumber
+referensi/legacy; backfill transaksi lama ke `Unallocated` dan tampilkan backlog
+mapping. Schema baru wajib boot-idempoten dan memegang FK/index/project scope;
+angka historis tidak boleh direkonstruksi memakai formula/rate saat ini.
+
+**Fase/prioritas.** Fase 0: tutup dua P1 di atas dan tetapkan source of truth.
+Fase 1: work package + DPR + labor allocation + material/equipment usage. Fase 2:
+QA/HSE gate, approved installed quantity, look-ahead, constraint/delay. Fase 3:
+subcontract measurement, progress billing/claim, productivity/EAC, dan offline
+field app.
+
+**Acceptance criteria yang dapat diuji:**
+
+1. Retry DPR dengan idempotency key yang sama menghasilkan satu header dan satu
+   set child; payload berbeda pada key sama mendapat conflict, bukan overwrite.
+2. Issue 10 unit ke work package mengurangi stok dan menambah site consumption
+   dalam satu transaction; stok kurang, failure child, return, dan reversal
+   tidak menghasilkan stock/ledger parsial atau negatif.
+3. Asset yang maintenance atau sudah dialokasikan pada shift sama tidak dapat
+   dipakai; hour/meter aktual merekonsiliasi ke log asset dan cost code.
+4. Cumulative installed quantity tidak boleh melebihi baseline + approved CO;
+   quantity tanpa evidence/ITR wajib tetap claimed, tidak masuk earned progress
+   atau billing.
+5. DPR approved immutable; koreksi membuat revision yang menunjuk versi lama,
+   actor/waktu/alasan terlihat dan laporan as-of-date dapat direkonstruksi.
+6. Satu work package dapat ditelusuri end-to-end dari drawing/spec revision →
+   MTO/BOQ → material/labor/equipment → DPR → ITR/NCR/HSE → approved progress →
+   cost dan client billing tanpa memasukkan nilai yang sama dua kali.
