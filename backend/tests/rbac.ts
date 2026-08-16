@@ -43,6 +43,52 @@ const status = async (...a: Parameters<typeof call>) => (await call(...a)).statu
  */
 /** Role yang HANYA punya hr.employees.view — tidak punya hr.payroll.view. */
 /** Dua notifikasi: satu milik user uji, satu milik orang lain. */
+/** MR uji beserta satu item; `notes` sengaja diisi TEKS BEBAS, bukan JSON. */
+async function seedMaterialRequest(catatan: string): Promise<any> {
+  try {
+    const { dbRun, dbGet } = await import('../src/config/database');
+    const tag = `UJI-MR-${Date.now()}`;
+    const emp: any = await dbGet(`SELECT id, name FROM employees WHERE status='ACTIVE' ORDER BY id LIMIT 1`);
+    if (!emp) return null;
+    const mr: any = await dbRun(
+      `INSERT INTO material_requests (mr_number, employee_id, employee_name, priority, status, notes)
+       VALUES (?, ?, ?, 'normal', 'pending', ?)`,
+      [tag, emp.id, emp.name, catatan]
+    );
+    await dbRun(
+      `INSERT INTO material_request_items (mr_id, item_name, quantity, uom) VALUES (?, 'Semen Uji', 5, 'sak')`,
+      [mr.insertId]
+    );
+    return { tag, mrId: mr.insertId };
+  } catch { return null; }
+}
+
+async function materialRequestRow(id: number): Promise<any> {
+  const { dbGet } = await import('../src/config/database');
+  return dbGet('SELECT status, notes, linked_pr_id, linked_pr_number FROM material_requests WHERE id = ?', [id]);
+}
+
+async function countPrForMr(mrId: number): Promise<number> {
+  const { dbGet } = await import('../src/config/database');
+  const r: any = await dbGet(
+    `SELECT COUNT(*) AS n FROM purchase_requests WHERE JSON_EXTRACT(notes, '$.source_mr_id') = ?`, [mrId]
+  );
+  return Number(r?.n ?? -1);
+}
+
+async function cleanupMaterialRequest(fx: any): Promise<number> {
+  const { dbRun, dbGet } = await import('../src/config/database');
+  await dbRun(`DELETE FROM purchase_requests WHERE JSON_EXTRACT(notes, '$.source_mr_id') = ?`, [fx.mrId]);
+  await dbRun('DELETE FROM material_request_items WHERE mr_id = ?', [fx.mrId]);
+  await dbRun('DELETE FROM material_requests WHERE id = ?', [fx.mrId]);
+  const sisa: any = await dbGet(
+    `SELECT (SELECT COUNT(*) FROM material_requests WHERE id = ?)
+          + (SELECT COUNT(*) FROM material_request_items WHERE mr_id = ?) AS n`,
+    [fx.mrId, fx.mrId]
+  );
+  return Number(sisa?.n ?? -1);
+}
+
 async function seedNotifications(): Promise<any> {
   try {
     const { dbRun, dbGet } = await import('../src/config/database');
@@ -593,6 +639,35 @@ async function main() {
       chk('namanya tetap ada', !!baris?.first_name, true);
     } finally {
       chk('role direktori dibersihkan', await cleanupDirectoryRole(dir), 0);
+    }
+  }
+
+  console.log('\n9a. Material Request: approve atomic & catatan teks tidak meledak (DR-P1-04)');
+  // Bug paling tajam di butir ini: `JSON.parse(mr.notes)` dijalankan atas catatan
+  // yang diisi karyawan sebagai TEKS BEBAS dari layar mobile. Catatan seperti
+  // "urgent" membuat approve melempar — SETELAH status berubah dan PR terlanjur
+  // dibuat. Jadi klien melihat gagal, padahal MR sudah approved dan PR sudah ada.
+  const mrFix = await seedMaterialRequest('urgent, butuh besok pagi');
+  chk('MR uji dibuat', !!mrFix?.mrId, true);
+
+  if (mrFix?.mrId) {
+    try {
+      const app = await call('PUT', `/material-requests/${mrFix.mrId}/approve`, {}, master);
+      chk('approve dengan catatan teks biasa berhasil', app.status, 200);
+      chk('nomor PR format resmi', /^PR-\d{8}-\d{4,}$/.test(app.json?.pr_number || ''), true);
+
+      const mrSesudah = await materialRequestRow(mrFix.mrId);
+      chk('status jadi approved', mrSesudah?.status, 'approved');
+      chk('tautan PR di kolom sendiri', !!mrSesudah?.linked_pr_id, true);
+      // Catatan karyawan TIDAK boleh ditimpa JSON.
+      chk('catatan karyawan tetap utuh', mrSesudah?.notes, 'urgent, butuh besok pagi');
+
+      // Approve kedua tidak boleh membuat PR kedua.
+      const app2 = await call('PUT', `/material-requests/${mrFix.mrId}/approve`, {}, master);
+      chk('approve ulang ditolak 409', app2.status, 409);
+      chk('hanya satu PR terbuat', await countPrForMr(mrFix.mrId), 1);
+    } finally {
+      chk('MR uji dibersihkan', await cleanupMaterialRequest(mrFix), 0);
     }
   }
 

@@ -2343,6 +2343,11 @@ Tes: `test:rbac` #9b — role yang HANYA punya `hr.employees.view` tetap bisa
 membuka daftar (200) dan tetap melihat nama, tapi angkanya `null` dan ditandai
 `salary_redacted`. Ini persis batas yang Anda minta diuji.
 
+**Verifikasi reviewer 16 Agustus 2026 15:20 WIB — DITERAPKAN.** Commit
+`ea24ef6b` hanya membuka angka kompensasi untuk level master atau pemegang
+`hr.payroll.view`; pemegang `hr.employees.view` tetap menerima direktori dalam
+keadaan teredaksi. Test baru membentuk role tepat pada batas dua permission itu.
+
 ### DR-P2-02 — Notification ownership
 
 **DITERAPKAN.** Terkonfirmasi: `PUT /:id/read`, `PUT /:id/unread`, `DELETE /:id`,
@@ -2358,6 +2363,15 @@ Tes: `test:rbac` #9c — menandai/menghapus milik orang lain 404, dan bulk yang
 memuat ID campuran hanya menghapus milik sendiri sementara milik orang lain
 dibuktikan **masih ada**.
 
+**Verifikasi reviewer 16 Agustus 2026 15:20 WIB — DITERAPKAN SEBAGIAN.** Sender,
+read, delete, dan bulk sudah benar-benar memakai identitas token. Pre-check
+unread juga scoped sehingga tebakan ID milik orang lain sekarang ditolak 404,
+tetapi mutasi akhirnya masih `UPDATE ... WHERE id = ?` tanpa owner di
+[notifications.routes.ts:158](backend/src/routes/notifications.routes.ts).
+Selain itu test #9c belum menembak unread maupun sender spoofing. Tambahkan
+predicate `recipient_id` ke UPDATE unread dan kedua negative test tersebut
+sebelum acceptance DR-P2-02 dinyatakan lengkap.
+
 ### DR-P2-03 — Route alokasi FIFO/FEFO tidak terjangkau
 
 **DITERAPKAN.** Terkonfirmasi: `/:id` di baris 123, `/allocate-stock` di baris
@@ -2367,8 +2381,87 @@ Route statis dipindah ke sebelum `/:id`.
 
 Tes: `test:rbac` #9d — responsnya bukan lagi "Warehouse not found".
 
+**Verifikasi reviewer 16 Agustus 2026 15:20 WIB — DITERAPKAN SEBAGIAN.** Urutan
+route sudah benar dan shadowing selesai. Namun test #9d mengirim `qty=1`, padahal
+handler mewajibkan `quantity`, kemudian hanya memeriksa bahwa pesan bukan
+"Warehouse not found" ([rbac.ts:624](backend/tests/rbac.ts)). Response 400
+`product_id and quantity are required` tetap membuat test hijau; kontrak
+allocation berstatus 200 belum dibuktikan.
+
 test:all 851 lulus / 0 gagal.
 
 > **Perbaikan proses:** commit ronde lalu sempat ter-push dengan tes merah karena
 > rantai perintah kami tidak menghentikan push. Sejak ronde ini `test:all`
 > dijalankan sebagai gate eksplisit dan commit hanya berjalan kalau gate hijau.
+
+---
+
+## Live Auto Review — 16 Agustus 2026 15:20 WIB
+
+Baseline: commit baru `ea24ef6b` (`fix(security): IDOR notifikasi, route alokasi
+terjangkau, batas permission gaji`). Source code tidak diubah reviewer.
+
+### [P2 / API-CONTRACT] Route allocation yang baru aktif menerima quantity dan method tidak valid sebagai hasil bisnis
+
+[warehouse.routes.ts:132](backend/src/routes/warehouse.routes.ts) hanya mengecek
+presence query, lalu `parseFloat()` dipakai tanpa `Number.isFinite()` dan tanpa
+batas positif di baris 136. Akibatnya `quantity=-1` menghasilkan respons sukses
+dengan `can_fulfill: true` dan alokasi nol. Nilai `method` selain `FEFO` juga
+diam-diam masuk cabang FIFO di baris 167, tetapi respons tetap mengembalikan
+string method yang tidak dikenal. Test baru tidak menangkapnya karena memakai
+nama parameter yang salah dan menerima response 400 sebagai keberhasilan.
+
+**Dampak:** caller dapat menganggap kebutuhan stok invalid sudah terpenuhi, atau
+meminta metode yang salah ketik lalu menerima urutan FIFO tanpa mengetahui
+fallback tersebut. Ini berisiko membuat keputusan picking/availability yang
+keliru begitu endpoint yang sebelumnya mati mulai dipakai.
+
+**Rekomendasi/acceptance:** validasi `quantity` sebagai finite number `> 0` dan
+`method` sebagai enum eksplisit `FIFO | FEFO`; tolak input lain dengan 400 dan
+kode error stabil. Ubah test route memakai `quantity=1`, wajib status 200 dan
+memeriksa shape allocation; tambah negative test untuk `abc`, `0`, `-1`, dan
+method typo.
+
+### Verifikasi run ini
+
+| Pemeriksaan | Hasil |
+|---|---|
+| `backend: npx tsc --noEmit` | Lulus pada commit `ea24ef6b` |
+| `test:all` | Tidak dijalankan reviewer; suite HTTP membuat fixture/data |
+
+---
+
+## [DEV] Tanggapan DR-P1-04 — Material Request — 16 Agustus 2026
+
+**DITERAPKAN.** Seluruh klaim terkonfirmasi, termasuk yang paling tajam.
+
+**Bug crash-nya nyata.** `JSON.parse(mr.notes)` dijalankan atas kolom yang diisi
+karyawan sebagai **teks bebas** dari layar mobile. Catatan seperti `"urgent"`
+membuat approve melempar — dan itu terjadi **setelah** status berubah jadi
+`approved` **dan** PR terlanjur dibuat. Klien melihat 500, padahal MR sudah
+disetujui dan PR sudah ada, cuma tautannya hilang.
+
+Produksi belum meledak semata karena satu-satunya MR di sana ber-`notes` NULL,
+sehingga `mr.notes ? ... : {}` melewati parse. MR pertama yang punya catatan akan
+memicunya.
+
+Yang dikerjakan:
+
+- **Tautan PR pindah ke kolom sendiri** (`linked_pr_id`, `linked_pr_number`).
+  Menimpa `notes` dengan JSON berarti menghancurkan catatan karyawan sekaligus
+  mengundang crash — dua kerugian dari satu keputusan.
+- **Create satu transaction**: header + seluruh item. Sebelumnya autocommit
+  terpisah; gagal di tengah loop meninggalkan MR tanpa item lengkap.
+- **Nomor MR atomic** lewat `document_counters`, menggantikan `COUNT(*)+1`
+  bertanggal UTC — dua permintaan bersamaan membaca hitungan yang sama, dan pada
+  pagi WIB tanggalnya mundur sehari.
+- **Approve satu transaction** yang dimulai dari `SELECT ... FOR UPDATE` +
+  recheck status. Approve kedua kini 409, bukan PR kedua.
+- **Nomor PR memakai generator resmi Procurement**, bukan akhiran acak 4 digit —
+  masalah yang sama yang kami temukan dan perbaiki di jalur deal estimator.
+
+Tes: `test:rbac` #9a — MR dengan catatan teks biasa berhasil di-approve (pada
+kode lama ini 500), catatan karyawan **dibuktikan tetap utuh**, tautan ada di
+kolomnya, approve ulang 409, dan hanya satu PR terbuat.
+
+test:all 860 lulus / 0 gagal.

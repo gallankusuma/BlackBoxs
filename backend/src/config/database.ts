@@ -1230,6 +1230,19 @@ const ensureProjectNumberUnique = async (connection: any) => {
   }
 };
 
+// ==================== TAUTAN PR PADA MATERIAL REQUEST (DR-P1-04) ====================
+// Nomor PR hasil approve dulu disimpan dengan MENIMPA kolom `notes` memakai JSON.
+// `notes` diisi karyawan sebagai teks bebas dari layar mobile, jadi approve
+// menjalankan `JSON.parse` atas teks seperti "urgent" dan melempar — SETELAH
+// status berubah dan PR terlanjur dibuat. Tautannya dipindah ke kolom sendiri.
+const ensureMaterialRequestPrLink = async (connection: any) => {
+  await execSchemaEnsure(connection,
+    'ALTER TABLE material_requests ADD COLUMN IF NOT EXISTS linked_pr_id INT NULL');
+  await execSchemaEnsure(connection,
+    'ALTER TABLE material_requests ADD COLUMN IF NOT EXISTS linked_pr_number VARCHAR(100) NULL');
+  console.log('✅ Tautan PR material request ensured');
+};
+
 // ==================== RULE APPROVAL TERIKAT KE REQUEST (DR-P0-02) ====================
 // `approval_requests` tidak menyimpan rule mana yang berlaku, sehingga otorisasi
 // dan pencarian step berikutnya hanya bisa mencocokkan lewat `module`. Semua
@@ -1668,6 +1681,7 @@ export async function initializeDatabase() {
     await ensureProjectNumberUnique(connection);
     await ensurePayslipPeriodUnique(connection);
     await ensureApprovalRuleLink(connection);
+    await ensureMaterialRequestPrLink(connection);
     await ensureMtoLinesSchema(connection);
     await ensureDisposalSchema(connection);
     await ensureAssetStatusHistorySchema(connection);

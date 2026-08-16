@@ -1,5 +1,7 @@
 import { Router, Request, Response } from 'express';
-import { dbAll, dbGet, dbRun } from '../config/database';
+import { dbAll, dbGet, dbRun, withTransaction } from '../config/database';
+import { nextSequentialCode } from './procurement.routes';
+import { businessDate } from '../utils/date.utils';
 import { authMiddleware, mobileAuthMiddleware, MobileAuthRequest } from '../middleware/auth';
 import multer from 'multer';
 import path from 'path';
@@ -148,30 +150,30 @@ router.post('/', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Respo
     if (!emp) return res.status(403).json({ error: 'Karyawan tidak aktif' });
     const employee_name = emp.name;
 
-    // Generate MR number: MR-YYYYMMDD-XXXX
-    const now = new Date();
-    const datePart = now.toISOString().slice(0, 10).replace(/-/g, '');
-    const countRes = await dbGet(
-      `SELECT COUNT(*) as cnt FROM material_requests WHERE DATE(created_at) = CURDATE()`
-    ) as any;
-    const seq = String((countRes?.cnt || 0) + 1).padStart(4, '0');
-    const mrNumber = `MR-${datePart}-${seq}`;
-
-    const result = await dbRun(
-      `INSERT INTO material_requests (mr_number, employee_id, employee_name, project_id, project_name, priority, needed_by, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [mrNumber, empId, employee_name, project_id || null, project_name || null, priority || 'normal', needed_by || null, notes || null]
-    );
-    const mrId = result.insertId;
-
-    // Insert items
-    for (const item of items) {
-      await dbRun(
-        `INSERT INTO material_request_items (mr_id, product_id, item_name, quantity, uom, notes, image_url, spec)
+    // DR-P1-04: header + seluruh item satu transaction, dan nomornya atomic.
+    //
+    // Sebelumnya keduanya autocommit terpisah — gagal di tengah loop
+    // meninggalkan MR tanpa item lengkap. Nomornya juga `COUNT(*)+1` bertanggal
+    // UTC: dua permintaan bersamaan membaca hitungan yang sama, dan pada pagi WIB
+    // tanggalnya mundur sehari.
+    const { mrId, mrNumber } = await withTransaction(async tx => {
+      const nomor = await nextSequentialCode('MR', 'material_requests', 'mr_number', tx);
+      const result = await tx.run(
+        `INSERT INTO material_requests (mr_number, employee_id, employee_name, project_id, project_name, priority, needed_by, notes)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [mrId, item.product_id || null, item.item_name, item.quantity || 1, item.uom || 'pcs', item.notes || null, item.image_url || null, item.spec || null]
+        [nomor, empId, employee_name, project_id || null, project_name || null, priority || 'normal', needed_by || null, notes || null]
       );
-    }
+      const id = result.insertId;
+
+      for (const item of items) {
+        await tx.run(
+          `INSERT INTO material_request_items (mr_id, product_id, item_name, quantity, uom, notes, image_url, spec)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [id, item.product_id || null, item.item_name, item.quantity || 1, item.uom || 'pcs', item.notes || null, item.image_url || null, item.spec || null]
+        );
+      }
+      return { mrId: id, mrNumber: nomor };
+    });
 
     res.status(201).json({ message: 'Material Request created', data: { id: mrId, mr_number: mrNumber } });
   } catch (err: any) {
@@ -183,64 +185,75 @@ router.post('/', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Respo
 router.put('/:id/approve', authMiddleware, async (req: Request, res: Response) => {
   try {
     const mrId = req.params.id;
-    const mr = await dbGet('SELECT * FROM material_requests WHERE id = ?', [mrId]) as any;
-    if (!mr) return res.status(404).json({ error: 'MR not found' });
-    if (mr.status !== 'pending') return res.status(400).json({ error: `MR already ${mr.status}` });
 
-    // Update MR status
-    await dbRun(
-      'UPDATE material_requests SET status = ?, approved_at = NOW() WHERE id = ?',
-      ['approved', mrId]
-    );
+    // DR-P1-04: seluruh approve satu transaction yang dimulai dari lock barisnya.
+    //
+    // Versi lama: baca `pending`, ubah status, buat PR, lalu tulis tautan —
+    // empat langkah autocommit tanpa lock. Dua approve paralel menghasilkan DUA
+    // PR, dan kegagalan di langkah terakhir meninggalkan MR sudah `approved`
+    // dengan PR yang sudah jadi tapi tautannya hilang.
+    const hasil = await withTransaction(async tx => {
+      const mr: any = await tx.get('SELECT * FROM material_requests WHERE id = ? FOR UPDATE', [mrId]);
+      if (!mr) return { error: 404, body: { error: 'MR not found' } };
+      if (mr.status !== 'pending') {
+        return { error: 409, body: { error: `MR sudah berstatus ${mr.status}`, code: 'MR_NOT_PENDING' } };
+      }
 
-    // Get MR items
-    const items = await dbAll('SELECT * FROM material_request_items WHERE mr_id = ?', [mrId]) as any[];
+      const items: any[] = await tx.all('SELECT * FROM material_request_items WHERE mr_id = ?', [mrId]);
 
-    // Auto-create PR from MR items
-    const now = new Date();
-    const datePart = now.toISOString().slice(0, 10).replace(/-/g, '');
-    const rand = Math.floor(1000 + Math.random() * 9000);
-    const prNumber = `PR-${datePart}-${rand}`;
+      // Nomor PR memakai generator resmi Procurement — bukan akhiran acak 4
+      // digit, yang selain rawan tabrakan juga menyeed counter berurutan
+      // Procurement dan mendorongnya melewati 9999.
+      const prNumber = await nextSequentialCode('PR', 'purchase_requests', 'pr_number', tx);
 
-    const prItems = items.map((item: any) => ({
-      productId: item.product_id || null,
-      productName: '',
-      name: item.item_name,
-      qty: item.quantity,
-      uom: item.uom || 'pcs',
-      specification: item.spec || item.notes || '',
-      price: 0,
-    }));
+      const prItems = items.map((item: any) => ({
+        productId: item.product_id || null,
+        productName: '',
+        name: item.item_name,
+        qty: item.quantity,
+        uom: item.uom || 'pcs',
+        specification: item.spec || item.notes || '',
+        price: 0,
+      }));
 
-    const estimatedTotal = 0; // Will be filled during bidding
-    const prResult = await dbRun(
-      `INSERT INTO purchase_requests (pr_number, requestor_id, project_id, status, notes)
-       VALUES (?, ?, ?, 'DRAFT', ?)`,
-      [
-        prNumber,
-        null, // requestor from MR employee
-        mr.project_id || null,
-        JSON.stringify({
-          noteText: `Auto-created from Material Request ${mr.mr_number} by ${mr.employee_name || 'Field Worker'}`,
-          itemType: 'non-inventory',
-          items: prItems,
-          estimatedTotal,
-          source_mr_id: mrId,
-          source_mr_number: mr.mr_number,
-        }),
-      ]
-    );
+      const prResult = await tx.run(
+        `INSERT INTO purchase_requests (pr_number, requestor_id, project_id, status, notes)
+         VALUES (?, ?, ?, 'DRAFT', ?)`,
+        [
+          prNumber,
+          null,
+          mr.project_id || null,
+          JSON.stringify({
+            noteText: `Auto-created from Material Request ${mr.mr_number} by ${mr.employee_name || 'Field Worker'}`,
+            itemType: 'non-inventory',
+            items: prItems,
+            estimatedTotal: 0,
+            source_mr_id: Number(mrId),
+            source_mr_number: mr.mr_number,
+          }),
+        ]
+      );
 
-    // Update MR with linked PR
-    await dbRun(
-      'UPDATE material_requests SET notes = ? WHERE id = ?',
-      [JSON.stringify({ ...(mr.notes ? JSON.parse(mr.notes) : {}), linked_pr_id: prResult.insertId, linked_pr_number: prNumber }), mrId]
-    );
+      // Tautan disimpan di KOLOM SENDIRI. Versi lama menimpa `notes` dengan JSON
+      // hasil `JSON.parse(mr.notes)` — padahal `notes` diisi karyawan sebagai
+      // teks bebas dari layar mobile, jadi catatan seperti "urgent" membuat
+      // approve melempar SETELAH status berubah dan PR terlanjur dibuat.
+      await tx.run(
+        `UPDATE material_requests
+         SET status = 'approved', approved_at = NOW(), linked_pr_id = ?, linked_pr_number = ?
+         WHERE id = ?`,
+        [prResult.insertId, prNumber, mrId]
+      );
+
+      return { ok: true as const, prId: prResult.insertId, prNumber };
+    });
+
+    if ('error' in hasil) return res.status(hasil.error).json(hasil.body);
 
     res.json({
-      message: `MR approved → PR ${prNumber} created`,
-      pr_id: prResult.insertId,
-      pr_number: prNumber,
+      message: `MR approved → PR ${hasil.prNumber} created`,
+      pr_id: hasil.prId,
+      pr_number: hasil.prNumber,
     });
   } catch (err: any) {
     console.error('Error approving MR:', err);
