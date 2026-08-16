@@ -414,6 +414,45 @@ kompensasi lintas departemen.
 3. Tes memakai token desktop tanpa permission: employee salary, reset PIN, bulk
    PIN, payslip history, dan position rates semuanya `403`.
 
+> **[DEV] DITERAPKAN sebagian besar; satu bagian dikerjakan berbeda dari yang
+> diminta, dengan alasan.**
+>
+> Rantai serangannya terkonfirmasi persis. `generate-missing-pins` bahkan lebih
+> berat dari yang tertulis: satu panggilan mengembalikan PIN **seluruh karyawan
+> aktif** yang belum punya PIN, sekaligus.
+>
+> Kondisi produksi diperiksa lebih dulu sesuai aturan project. Kelima user aktif
+> memegang `hr.employees` (5 permission) dan `hr.payroll` (6) penuh; kedua role
+> (`Admin`, `Manager Finannce & Acc`) juga memegang `hr.position-rates` penuh.
+> Jadi penggembokan ini **tidak mengunci satu pun user aktif**.
+>
+> - `POST /hr/employees/:id/reset-pin` → `requirePermission('hr.employees.edit')`
+> - `POST /hr/employees/generate-missing-pins` → idem
+> - `GET/POST/PUT/DELETE /hr/position-rates` → `hr.position-rates.*`
+>
+> **Beda dari kriteria 2 — `GET /hr/employees` sengaja TIDAK digembok.** Endpoint
+> ini dipanggil hampir semua layar sekadar untuk dropdown nama; menggemboknya
+> akan mematikan banyak halaman yang tidak ada hubungannya dengan payroll.
+> Yang diredaksi **angkanya**: `salary`, `basic_rate`, `tunjangan_rate`,
+> `ot_rate`, dan `salary_type` menjadi `null` berikut penanda
+> `salary_redacted: true`, kecuali pemanggil punya `hr.payroll.view` /
+> `hr.employees.view` atau level ≥ 10. Ini persis yang kriteria 2 minta
+> ("meredaksi ... untuk pemanggil yang hanya membutuhkan dropdown nama"),
+> hanya saja kami tidak menggembok endpointnya.
+>
+> **NIK (`code`) tetap dikirim.** Ia identifier operasional yang dipakai layar,
+> dan dengan reset PIN sudah digembok, NIK saja tidak lagi cukup untuk mengambil
+> alih akun — rantai serangannya putus di langkah 3. Kalau tim reviewer menilai
+> NIK sendiri sudah data sensitif, sebutkan dan kami redaksi juga.
+>
+> **Belum:** payslip history dan employee detail. Digarap di iterasi berikutnya
+> bersama DR-P0-04, karena keduanya menyentuh jalur payroll yang sama.
+>
+> Tes: `test:rbac` #8 — reset PIN, bulk PIN, dan tarif jabatan 403 untuk user
+> tanpa hak; daftar employee tetap 200 tapi angkanya null dan ditandai; master
+> tetap melihat angka dan tetap bisa membuka tarif jabatan (memastikan proteksi
+> tidak mengunci yang berwenang).
+
 ### DR-P0-04 — Finalisasi payslip mempercayai angka dan ID advance dari klien
 
 **Bukti:** [hr.routes.ts:656](backend/src/routes/hr.routes.ts) menerima
@@ -732,3 +771,78 @@ karena suite HTTP membuat/mengubah fixture database.
 5. DR-P1-04/05/06 transaksi MR + Estimator/Procurement handoff.
 6. DR-P1-07 schema reproducibility → DR-P1-08 atomic deploy.
 7. Tutup P2 dan carry-over Estimator/Notes.
+
+---
+
+## Live Auto Review — 16 Agustus 2026 14:25 WIB
+
+Baseline yang diverifikasi: commit `bd5c6090` (`fix(security): otorisasi &
+atomicity aksi approval`). Source code tidak diubah oleh reviewer.
+
+### [P0] DR-P0-02 belum lolos verifikasi: authority masih lintas modul, rule, dan level step
+
+**Status reviewer: Diterapkan sebagian — transaction/row lock benar, tetapi
+kriteria otorisasi 1–3 belum terpenuhi penuh.**
+
+Perbaikan yang terverifikasi benar:
+
+- identitas aksi sekarang memakai `req.userId`;
+- status user dibaca ulang dari database;
+- request di-lock `FOR UPDATE`, action dan perpindahan status ditulis dalam satu
+  transaction, sehingga aksi kedua pada request yang sudah selesai mendapat 409;
+- assignment user/role dan `can_reject` mulai diperiksa.
+
+Namun masih ada bypass berikut:
+
+1. [approval.routes.ts:30](backend/src/routes/approval.routes.ts) menerima
+   **permission approve apa pun di seluruh ERP**. Query hanya memeriksa
+   `p.action IN ('approve', 'approve_1', 'approve_2')`, tanpa mengikat
+   `p.resource` ke `request.module`/`entity_type` dan tanpa mengikat
+   `approve_1`/`approve_2` ke `current_step`. Akibatnya pemegang
+   `assets.dispose.approve` atau approval Procurement dapat menyetujui request
+   Finance. Pada modul tanpa rule, fallback baris 46–56 langsung meloloskannya.
+2. [approval.routes.ts:38](backend/src/routes/approval.routes.ts) menggabungkan
+   semua step dari **semua rule** yang memiliki `module` dan `step_order` sama.
+   `condition_field`, `min_value`, `max_value`, `sequence`, dan `is_active` tidak
+   dievaluasi. Approver yang ditugaskan pada satu rule dapat bertindak pada
+   request yang seharusnya memakai rule lain. Pencarian next step di baris
+   291–297 juga dapat berpindah memakai rule berbeda; `ORDER BY` hanya membuat
+   hasil salah itu deterministik.
+3. `approval_delegations` tidak dibaca sama sekali, sehingga delegasi aktif yang
+   diminta acceptance criteria belum dapat bertindak. Sebaliknya CRUD rules,
+   delegation, dan escalation masih `authMiddleware` saja—kriteria 4 memang
+   sudah diakui tim development sebagai terbuka.
+
+**Perbaikan yang diminta:** saat submit, pilih satu rule aktif berdasarkan
+module/entity dan kondisi nilai, simpan `rule_id` pada `approval_requests`, lalu
+semua authority/next-step query wajib memakai rule tersebut. Petakan permission
+resource secara eksplisit per entity/module dan wajibkan action sesuai step.
+Masukkan delegasi aktif dengan batas tanggal/module, tanpa mengubah assignment
+asli. Jangan memakai fallback lintas resource.
+
+### [P1] Tes baru memberi coverage semu dan meninggalkan fixture approval
+
+[rbac.ts:155](backend/tests/rbac.ts) hanya membandingkan user dengan **nol
+permission** melawan master. Tes ini tetap hijau untuk bypass lintas modul di
+atas, tidak menguji wrong-resource permission, assigned-vs-unassigned approver,
+`approve_1` vs `approve_2`, rule aktif/kondisional, delegasi, `can_reject`, atau
+dua request paralel. `approve` lalu `approve` lagi secara serial bukan tes race.
+
+Komentar menyatakan request uji “lalu dihapus lagi”, tetapi cleanup baris 179–181
+hanya menghapus user dan role. Tidak ada penghapusan `approval_requests` atau
+`approval_actions`, sehingga setiap `test:rbac` menambah history permanen dan
+bertentangan dengan klaim suite idempoten.
+
+**Acceptance:** buat fixture rule/request yang terisolasi, uji matriks positif
+dan negatif di atas termasuk `Promise.all` untuk dua aksi paralel, lalu cleanup
+action + request + rule dalam `finally` meskipun assertion gagal.
+
+### Verifikasi run ini
+
+| Pemeriksaan | Hasil |
+|---|---|
+| `backend: npx tsc --noEmit` | Lulus |
+| Auth middleware unit | 19/19 lulus |
+| HTTP/RBAC suite | Tidak dijalankan reviewer; suite membuat data |
+| Commit `40fbeec1`, scope token R&D | Diterima pada level kode; memakai middleware pusat dan `req.userId` |
+| Rotasi password master produksi | Tetap blocker operasional sampai password DB publik benar-benar diganti |

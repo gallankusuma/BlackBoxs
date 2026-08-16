@@ -174,7 +174,39 @@ async function main() {
       await status('PUT', `/approval/inbox/${areqId}/approve`, {}, master), 409);
   }
 
-  console.log('\n8. Bersih-bersih');
+  console.log('\n8. HR: PIN & data gaji tidak terbuka untuk semua (DR-P0-03)');
+  // Rantai serangan yang ditutup: user desktop level rendah ambil NIK dari
+  // daftar employee → reset PIN korban (respons memuat PIN polos) → login mobile
+  // sebagai korban → daftarkan sidik jari sendiri → baca slip gaji & absensi.
+  chk('reset PIN oleh user tanpa hak',
+    await status('POST', '/hr/employees/1/reset-pin', {}, plainToken), 403);
+  chk('bulk generate PIN oleh user tanpa hak',
+    await status('POST', '/hr/employees/generate-missing-pins', {}, plainToken), 403);
+  chk('tarif jabatan oleh user tanpa hak',
+    await status('GET', '/hr/position-rates', undefined, plainToken), 403);
+
+  // Daftar employee sengaja TIDAK digembok — banyak layar memakainya sekadar
+  // untuk dropdown nama. Yang diredaksi angkanya.
+  const empPlain = await call('GET', '/hr/employees', undefined, plainToken);
+  chk('daftar employee tetap terbaca', empPlain.status, 200);
+  const barisPlain = (empPlain.json?.data || [])[0];
+  if (barisPlain) {
+    chk('gaji diredaksi untuk user tanpa hak', barisPlain.basic_salary, null);
+    chk('tarif diredaksi', barisPlain.basic_rate, null);
+    chk('ditandai sebagai diredaksi', barisPlain.salary_redacted, true);
+    chk('nama tetap ada (dropdown tetap jalan)', !!barisPlain.first_name, true);
+  } else {
+    chk('ada karyawan untuk diuji', false, true);
+  }
+
+  // Yang berwenang tetap melihat angkanya — proteksi tidak boleh mematikan HR.
+  const empMaster = await call('GET', '/hr/employees', undefined, master);
+  const barisMaster = (empMaster.json?.data || [])[0];
+  chk('master tidak diredaksi', barisMaster?.salary_redacted, undefined);
+  chk('master tetap bisa tarif jabatan',
+    await status('GET', '/hr/position-rates', undefined, master), 200);
+
+  console.log('\n9. Bersih-bersih');
   for (const id of cleanup) await call('DELETE', `/users/${id}`, undefined, master);
   for (const id of [roleId, editorRoleId]) if (id) await call('DELETE', `/roles/${id}`, undefined, master);
   console.log(`  ok   ${cleanup.length} user uji & 2 role uji dihapus`);

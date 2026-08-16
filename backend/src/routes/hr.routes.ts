@@ -3,12 +3,16 @@ import bcrypt from 'bcrypt';
 import { randomInt } from 'crypto';
 import { dbAll, dbGet, dbRun } from '../config/database';
 import { authMiddleware, generateMobileToken, mobileAuthMiddleware, assertSelf, MobileAuthRequest } from '../middleware/auth';
+import { requirePermission, loadUserAccess } from '../middleware/permission';
 
 const router = express.Router();
 
 // ===== POSITION RATES (MASTER STANDAR GAJI) =====
 
-router.get('/position-rates', authMiddleware, async (req: Request, res: Response) => {
+// DR-P0-03: tarif per jabatan adalah data kompensasi, bukan data operasional
+// umum. Seluruh 5 user aktif produksi memegang permission hr.position-rates
+// penuh, jadi penggembokan ini tidak mengunci siapa pun (diperiksa 16 Agustus).
+router.get('/position-rates', authMiddleware, requirePermission('hr.position-rates.view'), async (req: Request, res: Response) => {
   try {
     const rows = await dbAll(
       'SELECT * FROM position_rates WHERE is_active = 1 ORDER BY position_name ASC, grade ASC', []
@@ -20,7 +24,7 @@ router.get('/position-rates', authMiddleware, async (req: Request, res: Response
   }
 });
 
-router.get('/position-rates/:id', authMiddleware, async (req: Request, res: Response) => {
+router.get('/position-rates/:id', authMiddleware, requirePermission('hr.position-rates.view'), async (req: Request, res: Response) => {
   try {
     const row = await dbGet('SELECT * FROM position_rates WHERE id = ?', [req.params.id]);
     if (!row) return res.status(404).json({ error: 'Position rate not found' });
@@ -30,7 +34,7 @@ router.get('/position-rates/:id', authMiddleware, async (req: Request, res: Resp
   }
 });
 
-router.post('/position-rates', authMiddleware, async (req: Request, res: Response) => {
+router.post('/position-rates', authMiddleware, requirePermission('hr.position-rates.create'), async (req: Request, res: Response) => {
   try {
     const { position_code, position_name, grade, salary_type, basic_rate, tunjangan_rate, ot_rate, description } = req.body;
     if (!position_code || !position_name) return res.status(400).json({ error: 'position_code and position_name required' });
@@ -47,7 +51,7 @@ router.post('/position-rates', authMiddleware, async (req: Request, res: Respons
   }
 });
 
-router.put('/position-rates/:id', authMiddleware, async (req: Request, res: Response) => {
+router.put('/position-rates/:id', authMiddleware, requirePermission('hr.position-rates.edit'), async (req: Request, res: Response) => {
   try {
     const { position_code, position_name, grade, salary_type, basic_rate, tunjangan_rate, ot_rate, description, is_active } = req.body;
     await dbRun(
@@ -62,7 +66,7 @@ router.put('/position-rates/:id', authMiddleware, async (req: Request, res: Resp
   }
 });
 
-router.delete('/position-rates/:id', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/position-rates/:id', authMiddleware, requirePermission('hr.position-rates.delete'), async (req: Request, res: Response) => {
   try {
     await dbRun('DELETE FROM position_rates WHERE id = ?', [req.params.id]);
     res.json({ message: 'Position rate deleted' });
@@ -73,8 +77,19 @@ router.delete('/position-rates/:id', authMiddleware, async (req: Request, res: R
 
 // ===== EMPLOYEES (HR LITE) =====
 
+// DR-P0-03: daftar ini dipakai banyak layar sekadar untuk dropdown nama, jadi
+// endpointnya TIDAK digembok — yang diredaksi angkanya.
+//
+// Sebelumnya setiap token desktop, level berapa pun, menerima `salary`,
+// `basic_rate`, `tunjangan_rate`, dan `ot_rate` seluruh karyawan. Itu kebocoran
+// data kompensasi lintas departemen lewat endpoint yang dipanggil hampir semua
+// halaman.
 router.get('/employees', authMiddleware, async (req: Request, res: Response) => {
   try {
+    const access = await loadUserAccess((req as any).userId);
+    const bolehLihatGaji = !!access && (access.level >= 10
+      || access.perms.has('hr.payroll.view') || access.perms.has('hr.employees.view'));
+
     const employees = await dbAll(
       `SELECT e.id, e.code as employee_code, e.name as first_name, '' as last_name,
               e.email, e.phone, e.position, e.department_id, e.hire_date,
@@ -86,7 +101,15 @@ router.get('/employees', authMiddleware, async (req: Request, res: Response) => 
        ORDER BY e.code ASC`,
       []
     );
-    res.json({ data: employees });
+
+    const data = bolehLihatGaji ? employees : (employees as any[]).map(e => ({
+      ...e,
+      basic_salary: null, basic_rate: null, tunjangan_rate: null, ot_rate: null,
+      contract_type: null,
+      salary_redacted: true,
+    }));
+
+    res.json({ data });
   } catch (error) {
     console.error('Error fetching employees:', error);
     res.status(500).json({ error: 'Failed to fetch employees' });
@@ -100,7 +123,11 @@ router.get('/employees', authMiddleware, async (req: Request, res: Response) => 
 const generatePin = () => String(randomInt(100000, 1000000)); // 6 digit
 
 // POST /hr/employees/:id/reset-pin — reset PIN satu karyawan
-router.post('/employees/:id/reset-pin', authMiddleware, async (req: Request, res: Response) => {
+// DR-P0-03: penerbitan PIN adalah kunci akun mobile karyawan — respons ini
+// memuat PIN polos. Tanpa gembok, user desktop level berapa pun bisa mengambil
+// NIK dari daftar employee, mereset PIN korban, lalu login sebagai korban,
+// mendaftarkan sidik jarinya sendiri, dan membaca slip gaji serta absensinya.
+router.post('/employees/:id/reset-pin', authMiddleware, requirePermission('hr.employees.edit'), async (req: Request, res: Response) => {
   try {
     const emp: any = await dbGet('SELECT id, code, name FROM employees WHERE id = ?', [req.params.id]);
     if (!emp) return res.status(404).json({ error: 'Karyawan tidak ditemukan' });
@@ -124,7 +151,9 @@ router.post('/employees/:id/reset-pin', authMiddleware, async (req: Request, res
 
 // POST /hr/employees/generate-missing-pins — untuk migrasi awal: buatkan PIN
 // bagi semua karyawan aktif yang belum punya, sekali jalan.
-router.post('/employees/generate-missing-pins', authMiddleware, async (_req: Request, res: Response) => {
+// Lebih berat lagi: satu panggilan mengembalikan PIN SELURUH karyawan aktif
+// yang belum punya PIN, sekaligus.
+router.post('/employees/generate-missing-pins', authMiddleware, requirePermission('hr.employees.edit'), async (_req: Request, res: Response) => {
   try {
     const rows = await dbAll(
       `SELECT id, code, name FROM employees WHERE status = 'ACTIVE' AND (mobile_pin IS NULL OR mobile_pin = '') ORDER BY code`
