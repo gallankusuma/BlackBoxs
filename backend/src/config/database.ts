@@ -1652,6 +1652,98 @@ const ensureAdminRoleHasAllPermissions = async (connection: any) => {
 };
 
 // Initialize database schema
+/**
+ * Baseline skema untuk instalasi baru (DR-P1-07).
+ *
+ * `schema_mysql.sql` membuat 48 tabel dan `ensure*Schema` menambah 72 — total 94
+ * unik, sementara produksi punya 148. Selisihnya **62 tabel** yang tidak pernah
+ * dibuat jalur boot, termasuk `proposals`, `proposal_items`, `clients`,
+ * `ahsp_headers`, `payslip_records`, `material_requests`, `office_locations`,
+ * dan `webauthn_challenges`.
+ *
+ * Akibatnya database kosong boot "sehat" lalu Estimator, HR payroll, absensi
+ * WebAuthn, Material Request, dan Document Centre gagal di request pertama.
+ *
+ * FOREIGN_KEY_CHECKS dimatikan selama pemuatan karena urutan tabel di dump
+ * alfabetis, bukan urut dependensi — dan dinyalakan kembali di `finally` supaya
+ * tidak pernah tertinggal mati.
+ */
+const ensureBaselineSchema = async (connection: any) => {
+  const fs = await import('fs');
+  const path = await import('path');
+  const berkas = path.join(__dirname, '..', '..', 'database', 'schema-baseline.sql');
+
+  if (!fs.existsSync(berkas)) {
+    console.warn('⚠️  schema-baseline.sql tidak ditemukan — instalasi baru mungkin tidak lengkap');
+    return;
+  }
+
+  const isi = fs.readFileSync(berkas, 'utf-8').replace(/^--.*$/gm, '');
+  const statements = isi.split(/;\s*\n/).map(x => x.trim()).filter(Boolean);
+
+  let dibuat = 0;
+  const gagal: string[] = [];
+
+  await connection.query('SET FOREIGN_KEY_CHECKS = 0');
+  try {
+    for (const stmt of statements) {
+      const nama = (stmt.match(/CREATE TABLE IF NOT EXISTS `([^`]+)`/) || [])[1] || '?';
+      try {
+        const [hasil]: any = await connection.query(stmt);
+        if (hasil?.warningStatus === 0) dibuat++;
+      } catch (err: any) {
+        gagal.push(`${nama}: ${String(err.message).slice(0, 90)}`);
+      }
+    }
+  } finally {
+    await connection.query('SET FOREIGN_KEY_CHECKS = 1');
+  }
+
+  if (gagal.length) {
+    // DDL baseline yang gagal berarti instalasi ini TIDAK setara produksi.
+    // Dicetak sebagai error, bukan warning yang tenggelam di antara ratusan
+    // baris log.
+    console.error(`🚨 ${gagal.length} tabel baseline GAGAL dibuat:`);
+    gagal.forEach(g => console.error(`   - ${g}`));
+  }
+  console.log(`✅ Baseline skema: ${dibuat} tabel dibuat, ${statements.length - dibuat - gagal.length} sudah ada`);
+};
+
+/**
+ * Tabel yang WAJIB ada sebelum aplikasi dinyatakan siap (DR-P1-07).
+ *
+ * Boot yang mencetak "initialized successfully" padahal modulnya akan gagal di
+ * request pertama lebih buruk daripada boot yang gagal — kegagalannya muncul di
+ * hadapan pengguna, bukan di log operator.
+ */
+const REQUIRED_TABLES = [
+  'users', 'roles', 'permissions', 'role_permissions',
+  'proposals', 'proposal_items', 'ahsp_headers', 'ahsp_items',
+  'clients', 'client_projects', 'engineering_inputs', 'mto_lines',
+  'employees', 'attendance_logs', 'payslip_records', 'salary_advances',
+  'employee_webauthn_credentials', 'webauthn_challenges', 'office_locations',
+  'purchase_requests', 'purchase_orders', 'goods_receipts',
+  'material_requests', 'material_request_items',
+  'approval_requests', 'approval_rules', 'approval_rule_steps',
+  'notifications', 'documents', 'document_counters',
+];
+
+const verifyRequiredTables = async (connection: any) => {
+  const [rows]: any = await connection.query(
+    `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE()`
+  );
+  const ada = new Set(rows.map((r: any) => String(r.TABLE_NAME)));
+  const hilang = REQUIRED_TABLES.filter(t => !ada.has(t));
+
+  if (hilang.length) {
+    throw new Error(
+      `Skema tidak lengkap — ${hilang.length} tabel wajib tidak ada: ${hilang.join(', ')}. ` +
+      `Aplikasi dihentikan supaya kegagalannya terlihat sekarang, bukan di hadapan pengguna.`
+    );
+  }
+  console.log(`✅ ${REQUIRED_TABLES.length} tabel wajib terverifikasi ada`);
+};
+
 export async function initializeDatabase() {
   try {
     const connection = await pool.getConnection();
@@ -1682,10 +1774,17 @@ export async function initializeDatabase() {
         }
       }
 
-      console.log('✅ Database schema initialized successfully');
+      // Pesan ini dulu terbit tanpa syarat, bahkan ketika sebagian DDL gagal —
+      // "successfully" yang tidak berarti apa-apa. Kelengkapannya sekarang
+      // dibuktikan `verifyRequiredTables()` di akhir boot.
+      console.log('✅ schema_mysql.sql dijalankan');
     } catch (fileErr) {
       console.log('⚠️ Schema file not found, using existing database');
     }
+
+    // Baseline dulu: `ensure*Schema` di bawah menambahkan kolom/index ke tabel
+    // yang harus sudah ada.
+    await ensureBaselineSchema(connection);
 
     await ensureProcurementPaymentSchema(connection);
     await ensureRnDSchema(connection);
@@ -1716,6 +1815,11 @@ export async function initializeDatabase() {
     await ensureMasterUserRow(connection);
     // Harus paling akhir: semua permission dari ensure* di atas sudah ada
     await ensureAdminRoleHasAllPermissions(connection);
+
+    // DR-P1-07: gerbang terakhir. Kalau tabel wajib tidak ada, ini MELEMPAR dan
+    // boot gagal — daripada mencetak "initialized successfully" lalu modulnya
+    // meledak di request pertama, di hadapan pengguna.
+    await verifyRequiredTables(connection);
 
     connection.release();
 

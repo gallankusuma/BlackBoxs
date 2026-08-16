@@ -3207,3 +3207,418 @@ outbox berikut jumlah percobaan, retry berjalan tanpa membuat PR kedua, dan
 proposal tanpa handoff mengembalikan 404.
 
 test:all 884 lulus / 0 gagal.
+
+**Verifikasi reviewer 16 Agustus 2026 16:40 WIB — DITERAPKAN SEBAGIAN.**
+Baris outbox memang dibuat di transaction deal
+([estimator.routes.ts:2462](backend/src/routes/estimator.routes.ts)), pembuatan
+header PR dan penandaan `success` sudah berada dalam satu transaction dengan
+`FOR UPDATE` (baris 2249–2275), nomor memakai counter resmi, dan
+`npx tsc --noEmit` lulus. Namun acceptance criteria belum dapat ditutup:
+
+- status/retry baru tersedia sebagai API. Pencarian seluruh `frontend/src`
+  tidak menemukan konsumsi `pr_handoff` maupun `/pr-handoff`; handler Deal di
+  [EstimatorProposalEditor.vue:1767](frontend/src/views/EstimatorProposalEditor.vue)
+  hanya menampilkan PR bila `pr_number` ada dan tetap menampilkan Deal sukses
+  bila handoff `failed`;
+- tidak ada worker/poller yang mengambil job `pending`/`failed`. Satu-satunya
+  pemrosesan otomatis adalah panggilan sinkron setelah commit pada baris 2491–2495.
+  Proses yang mati setelah commit deal tetapi sebelum panggilan itu meninggalkan
+  job `pending`; retry status Deal berikutnya ditolak state machine, sedangkan UI
+  tidak membaca endpoint status/retry;
+- tes baru hanya menjalankan cabang proposal tanpa material → `skipped`. Belum
+  ada successful PR, forced failure → retry, crash-window recovery, maupun retry
+  paralel yang membuktikan tidak ada duplikat. Snapshot komposisi kontrak juga
+  masih terbuka seperti diakui tim.
+
+Target penutupan: tampilkan badge/status/error dan aksi retry pada proposal Deal,
+jalankan worker recovery idempoten untuk job pending/failed (dengan lease/backoff
+atau mekanisme setara), serta tambah acceptance test failure injection dan dua
+retry paralel pada proposal bermaterial. Temuan race baru pada implementasi
+idempotensi dicatat terpisah di bawah.
+
+---
+
+## Live Auto Review — 16 Agustus 2026 16:40 WIB
+
+### [P1][CONCURRENCY/TRANSACTION] Status terminal `success` dapat ditimpa `failed`/`skipped`, lalu retry membuat PR kedua
+
+**File:**
+[backend/src/routes/estimator.routes.ts:2180](backend/src/routes/estimator.routes.ts),
+[backend/src/config/database.ts:1243](backend/src/config/database.ts)
+
+**Bukti:** `processDealPrJob()` membaca status sebelum lock (baris 2181–2185),
+menaikkan `attempts` dan membangun material di luar transaction (2192–2237), lalu
+cabang tanpa material menulis `skipped` tanpa lock/compare-and-set (2241–2245).
+Lebih kritis, setiap exception menulis `failed` tanpa syarat pada baris 2279–2284.
+Jadi dua pemrosesan paralel dapat berurutan: A membuat PR dan commit
+`status='success'`; B yang sebelumnya gagal saat membaca/membangun material lalu
+mengeksekusi catch dan menimpa job menjadi `failed`. Retry berikutnya tidak lagi
+masuk fast-path `success`, sehingga membuat PR baru. Database tidak menjadi pagar
+terakhir: unique key hanya ada pada `deal_pr_jobs.proposal_id`; sumber proposal
+pada PR hanya disimpan dalam JSON `notes` (baris 2261–2267), tanpa unique
+constraint pada `purchase_requests`.
+
+**Dampak:** satu proposal Deal dapat menghasilkan lebih dari satu PR DRAFT. Jika
+keduanya diproses Procurement, material yang sama dapat dibeli dua kali dan
+commitment/cash-flow project menjadi ganda.
+
+**Rekomendasi konkret:** claim job dengan row lock/CAS sebelum pekerjaan dimulai;
+jangan izinkan update `failed`/`skipped` menimpa `success` (gunakan transition
+bersyarat dan ownership/lease token). Tambahkan `source_proposal_id` sebagai kolom
+relasional pada `purchase_requests` dengan unique index untuk PR auto-handoff,
+bukan hanya JSON. Uji deterministik dua worker: satu sukses sementara satu dipaksa
+gagal sebelum lock; hasil wajib satu PR, status tetap `success`, dan retry
+mengembalikan PR yang sama.
+
+---
+
+## System Design Review — 16 Agustus 2026 16:44 WIB
+
+**Irisan kapabilitas:** Finance, project accounting, billing, AP/AR, dan cash.
+Tidak ada perubahan source baru sejak review 16:40; audit ini dibatasi pada satu
+irisan yang belum pernah diaudit end-to-end.
+
+### [P1][TRANSACTION/FINANCE] Pencatatan pembayaran AP/AR dapat hilang, ganda, atau melebihi tagihan
+
+**File:** [backend/src/routes/finance.routes.ts:563](backend/src/routes/finance.routes.ts),
+[backend/src/routes/finance.routes.ts:961](backend/src/routes/finance.routes.ts),
+[backend/src/routes/finance.routes.ts:1060](backend/src/routes/finance.routes.ts)
+
+**Bukti:** jalur `PUT .../:id/pay` membaca `paid_amount`, menambah nominal dari
+klien, lalu UPDATE tanpa transaction/row lock (AP baris 571–583; AR 601–607).
+Jalur payment-history melakukan INSERT `ap_payments`/`ar_payments`, kemudian
+UPDATE aggregate dan payment schedule lewat autocommit terpisah (baris 966–979
+dan 1065–1075). Tidak ada batas `payment <= outstanding`, idempotency/reference
+unik, affected-row/state check, atau reversal. Dua request paralel dapat sama-sama
+membaca saldo lama dan saling menimpa; kegagalan setelah INSERT meninggalkan
+history tanpa aggregate, sedangkan endpoint `/pay` mengubah aggregate tanpa
+history sama sekali.
+
+**Dampak:** saldo vendor/client, aging, payment schedule, dashboard, dan cash-flow
+dapat berbeda untuk transaksi bank yang sama. Overpayment diterima dan tetap
+ditandai `paid`; rekonsiliasi tidak dapat menentukan angka mana yang sah.
+
+**Rekomendasi konkret:** jadikan payment event immutable sebagai source of truth;
+lock AP/AR + schedule, validasi outstanding/currency/status, INSERT event dan
+update aggregate dalam satu transaction. Wajibkan idempotency key/reference unik;
+koreksi melalui reversal yang mengacu event asal. Hilangkan atau arahkan endpoint
+aggregate-only `/pay` ke service/transaction yang sama. Uji dua pembayaran
+paralel, duplicate retry, overpayment, failure setelah INSERT, dan reversal.
+
+### [ARCH-RISK / DESIGN-GAP — prioritas tinggi] Finance belum mempunyai satu subledger proyek dan accounting kernel
+
+**Kemampuan saat ini.** Baseline yang harus dipertahankan sudah cukup luas: AP/AR
+beserta aging dan payment history; PO payment schedule → fund request; kasbon dan
+payroll request; invoice Sales; quick invoice Client; COGS/product profitability;
+financial summary/dashboard; serta kolom project pada sebagian AP/AR. Layar
+Finance AP, AR, Margin, COGS, Summary, Fund Request, Kasbon, dan Payment Schedule
+sudah tersedia.
+
+**Gap/proses yang putus (terbukti dari kontrak source):**
+
+1. Ada tiga sumber invoice/receivable yang tidak saling mem-posting:
+   `invoices` dibuat Sales
+   ([sales.routes.ts:265](backend/src/routes/sales.routes.ts)), `client_invoices`
+   dibuat Client Detail
+   ([clients.routes.ts:839](backend/src/routes/clients.routes.ts)), dan
+   `accounts_receivable` dibuat lagi oleh Finance
+   ([finance.routes.ts:1009](backend/src/routes/finance.routes.ts)). Membuat atau
+   membayar salah satunya tidak memperbarui dua lainnya.
+2. Project P&L membaca master legacy `projects` dan tabel
+   `estimator_proposals` pada baris 1138–1151, sementara alur Project dan Deal
+   yang aktif memakai `client_projects` dan `proposals`
+   ([project.routes.ts:18](backend/src/routes/project.routes.ts),
+   [estimator.routes.ts:2387](backend/src/routes/estimator.routes.ts)). Pencarian
+   seluruh source tidak menemukan pembuat `estimator_proposals`; endpoint ini
+   juga tidak dikonsumsi frontend. Jadi P&L bukan laporan proyek EPC aktif.
+3. Pencarian source/schema tidak menemukan Chart of Accounts, double-entry
+   journal, posting period/close, accrual, bank/cash ledger dan reconciliation,
+   tax invoice/withholding, retention, credit/debit note, atau FX revaluation.
+   `financial_summary`, COGS, dan profitability dapat diisi sebagai angka manual;
+   misalnya POST profitability menerima `total_revenue`, `total_cogs`, profit,
+   dan margin dari klien (baris 256–293), bukan hasil ledger.
+4. AP/AR dapat diedit langsung setelah pembayaran
+   ([finance.routes.ts:948](backend/src/routes/finance.routes.ts), baris
+   1044–1055), tanpa document state machine, posting lock, revision, atau audit
+   koreksi. PO commitment, GRN/accrual, vendor invoice, payment, project expense,
+   payroll, inventory consumption, client billing, dan collection belum
+   bermuara pada cost code/WBS dan jurnal yang sama.
+
+**Target design.** Tetapkan `client_projects` sebagai master proyek tunggal dan
+bentuk Finance Core dengan:
+
+1. CoA hierarkis, fiscal period + hard close, balanced journal header/line,
+   dimensions `project_id/WBS/CBS/cost_code/vendor/client/tax/currency`, posting
+   batch idempoten, reversal, audit actor/waktu/source, dan laporan as-of-date.
+2. Subledger P2P: approved PO = commitment; accepted GRN/service entry = accrual;
+   vendor invoice three-way match; retention/PPN/PPh; approved payment event =
+   bank/cash posting. Status tidak boleh dimajukan hanya lewat field bebas.
+3. Subledger O2C/project billing: satu invoice canonical dengan baseline/approved
+   CO, milestone atau approved progress quantity, advance, retention, tax,
+   collection allocation, credit note, dan link ke AR/journal. `invoices` dan
+   `client_invoices` lama menjadi adapter/read model, bukan sumber paralel.
+4. Project P&L bersumber dari contract baseline + approved CO, commitment,
+   accrual/actual, revenue recognition, billed/collected, forecast/EAC, dan cash
+   flow pada WBS/CBS yang sama; dashboard turunan tidak boleh menerima angka
+   profit manual sebagai sumber final.
+
+**Dampak bisnis EPC.** Tanpa sumber ini, nilai kontrak, tagihan client, hutang
+vendor, biaya aktual, pajak, retention, dan margin proyek dapat benar sendiri-sendiri
+namun gagal direkonsiliasi. Perusahaan tidak memiliki close bulanan, audit trail
+ke dokumen asal, cash forecast terpercaya, atau project P&L yang dapat dipakai
+untuk klaim, lender, pajak, dan keputusan EAC.
+
+**Dependensi dan migrasi.** Bergantung pada contract/change-order review 14:45,
+WBS/CBS/project controls 15:28, construction ledger 16:30, serta Procurement
+PO/GRN. Jangan menghapus layar atau tiga dataset lama. Inventarisasi dan petakan
+setiap record ke canonical invoice/project; baris ambigu masuk exception queue,
+bukan digabung berdasarkan nomor/nama. Backfill opening balance per cutoff dengan
+control total AP, AR, bank, retention, tax, project, dan vendor/client; simpan
+legacy ID. Schema wajib masuk boot ensure/migration idempoten, bukan SQL historis.
+
+**Fase/prioritas.** Fase 0: tutup P1 payment transaction dan perbaiki P&L ke
+master proyek aktif. Fase 1: canonical invoice/AP/AR + payment/reversal + project
+dimensions. Fase 2: CoA/journal/period close + P2P/O2C posting. Fase 3:
+tax/retention/FX, bank reconciliation, revenue recognition, EAC, dan consolidated
+cash flow.
+
+**Acceptance criteria yang dapat diuji:**
+
+1. Satu approved progress billing menghasilkan tepat satu invoice canonical,
+   satu AR, dan jurnal seimbang; retry identik tidak menggandakan apa pun.
+2. PO 100 → GRN/accrual 100 → invoice 100 → payment 40 menghasilkan commitment,
+   accrual, AP outstanding 60, cash 40, dan project actual yang rekonsiliasi;
+   rejection/reversal memulihkan seluruh ledger secara atomik.
+3. Invoice Sales/Client lama yang dimigrasi muncul sekali di AR dan laporan
+   client; total opening AR sebelum/sesudah migrasi sama, record ambigu dilaporkan.
+4. Project P&L memakai `client_projects` + proposal baseline/approved CO; project
+   baru dari Deal tampil tanpa mapping manual dan setiap angka dapat drill-down ke
+   dokumen/journal asal.
+5. Periode closed menolak backdated edit/payment/posting; reopening memerlukan
+   approval, alasan, audit, dan menghasilkan laporan as-of-date yang dapat diulang.
+6. Duplicate/concurrent payment hanya menghasilkan satu event; overpayment
+   ditolak; reversal meniadakan saldo tanpa menghapus jejak transaksi.
+
+---
+
+## System Design Review — 16 Agustus 2026 16:47 WIB
+
+**Irisan kapabilitas:** CRM, opportunity, tender, dan handoff ke Estimator.
+Tidak ada perubahan source baru sejak review 16:44; audit dibatasi pada irisan
+ini dan tidak mengulang temuan ownership/RBAC CRM yang sudah ada.
+
+### [P2][FUNCTIONAL/CONTRACT] Menu Leads dan Prospects tidak terhubung ke backend; “convert” tidak membuat lead
+
+**File:** [frontend/src/views/Leads.vue:337](frontend/src/views/Leads.vue),
+[frontend/src/views/LeadDetail.vue:335](frontend/src/views/LeadDetail.vue),
+[backend/src/routes/prospects.routes.ts:162](backend/src/routes/prospects.routes.ts),
+[frontend/src/components/Layout.vue:358](frontend/src/components/Layout.vue)
+
+**Bukti:** kedua layar Leads memakai array `leads`/`mockLeads` hardcoded dan tidak
+memanggil API; create/edit/delete hanya memutasi state browser sehingga hilang
+saat reload. Sidebar juga menawarkan `/project/prospects`, tetapi tidak ada route
+tersebut di [router/index.ts](frontend/src/router/index.ts); backend `/api/prospects`
+tidak mempunyai konsumen frontend. Endpoint `convert-to-lead` hanya mengubah
+`prospects.status='converted'` lalu mengembalikan payload (baris 164–173); ia tidak
+membuat baris lead/client, tidak mengisi `converted_to_lead_id`, dan tidak memakai
+transaction.
+
+**Dampak:** tim sales dapat mengira lead tersimpan atau prospect sudah diserahkan,
+padahal setelah reload data hilang dan tidak ada object downstream yang menerima
+ownership. Prospect ditutup sebagai converted tanpa lead, client, tender, atau
+proposal yang dapat ditelusuri.
+
+**Rekomendasi konkret:** pilih satu UI operasional untuk tabel `prospects` dan
+hubungkan list/detail/create/update. Hapus label “convert” sampai transaction
+benar-benar membuat target canonical atau ubah menjadi transition yang eksplisit.
+Conversion wajib lock prospect, idempoten, membuat/link client + contact +
+opportunity dalam satu transaction, mengisi target ID, dan menolak delete setelah
+handoff. Tambah test reload persistence, double-convert paralel, failure rollback,
+dan navigation route.
+
+### [DESIGN-GAP / ARCH-RISK — prioritas tinggi] Belum ada tender/opportunity lifecycle yang mengikat CRM ke estimate, proposal, dan contract win/loss
+
+**Kemampuan saat ini.** Backend Prospect sudah menyimpan company/contact, source,
+temperature, status, interest, estimated value, next follow-up, assignee, dan
+statistik. Client mempunyai contact/event/ticket/estimate/invoice; Estimator sudah
+memiliki AHSP/HSP/MTO/RAB/proposal revision/status sampai Deal dan dapat membuat
+project. Semua ini baseline minimum yang harus dipertahankan.
+
+**Gap/proses yang putus.** `prospects` berhenti pada atribut CRM generik; pencarian
+source/schema tidak menemukan opportunity/tender register, go/no-go approval,
+submission deadline, prequalification, discipline/scope, owner/consultant,
+competitor, bid bond, tender document/addendum, clarification, resource/capacity
+check, commercial/legal/risk review, probability history, atau lost reason.
+`proposals` hanya membawa `client_id` dan tidak memiliki `prospect_id`,
+`opportunity_id`, atau `tender_id`. Karena itu nilai pipeline tidak dapat
+direkonsiliasi ke versi estimate/proposal, conversion/win rate tidak mempunyai
+denominator yang sah, dan Deal tidak membuktikan tender gate mana yang dilalui.
+
+**Target design.** Bentuk source of truth Lead-to-Contract:
+
+1. Party/account + contact canonical dipakai Prospect, Client, Estimator, dan
+   Finance; duplicate detection tidak boleh hanya berdasarkan teks nama.
+2. Opportunity versioned memegang owner/team, project/site, client/consultant,
+   scope/discipline, estimated value/cost/margin, probability, stage, expected
+   award, next action, source, competitor, reason code, dan audit stage history.
+3. Tender register sebagai child opportunity memegang invitation/prequalification,
+   bid/no-bid score dan approval, document/addendum/clarification register,
+   submission checklist/deadline/timezone, bond/guarantee, commercial/legal/HSE/
+   technical review, bidder list, dan submitted revision checksum.
+4. Opportunity/tender menautkan satu atau lebih estimate/proposal revision;
+   submitted value/margin berasal dari frozen proposal snapshot. Approved change
+   memakai revision baru, bukan mengubah history pipeline.
+5. `won` hanya terjadi dari accepted proposal/award evidence dan mengalir ke
+   Contract/Project melalui transaction/idempotent handoff; `lost/no-bid/canceled`
+   wajib reason, competitor/benchmark bila tersedia, dan lessons learned.
+6. Activity/follow-up, notification SLA, approval, attachment, dan ownership
+   memakai RBAC/project/department scope; semua transition memiliki actor, waktu,
+   alasan, serta before/after.
+
+**Dampak bisnis EPC.** Tanpa lifecycle ini, perusahaan tidak dapat mengukur tender
+hit rate, weighted backlog, bid cost, margin leakage antar revisi, capacity clash,
+atau penyebab kalah. Tim Estimator menerima scope tanpa gate/document baseline,
+sedangkan proyek Deal kehilangan jejak dari inquiry dan komitmen tender awal.
+
+**Dependensi dan migrasi.** Pertahankan tabel/endpoint Prospect, halaman Leads,
+Client contacts/events, dan seluruh Estimator. Jadikan Leads sebagai adapter/UI
+baru untuk prospect/opportunity; jangan memasukkan mock rows sebagai data bisnis.
+Deduplicate prospect-client memakai queue review manusia dan simpan legacy ID.
+Tambahkan FK/index dan source IDs ke proposal/project melalui boot ensure yang
+idempoten. Contract/change-order review 14:45 menjadi tujuan handoff win.
+
+**Fase/prioritas.** Fase 0: sambungkan UI ke backend dan perbaiki conversion.
+Fase 1: canonical opportunity + stage/activity/follow-up + link proposal. Fase 2:
+tender register, go/no-go, document/addendum/submission gate. Fase 3: portfolio
+capacity, bid cost, benchmark, win/loss analytics, dan weighted backlog.
+
+**Acceptance criteria yang dapat diuji:**
+
+1. Lead yang dibuat dari UI tetap ada setelah reload dan terlihat di endpoint;
+   edit/delete menghormati ownership/RBAC dan audit.
+2. Dua conversion paralel menghasilkan tepat satu client/contact/opportunity;
+   kegagalan child me-rollback semuanya dan prospect tidak berstatus converted.
+3. Proposal tidak dapat submitted bila tender wajib belum lulus go/no-go,
+   addendum belum acknowledged, atau checklist submission belum lengkap.
+4. Nilai/probability pipeline pada tanggal tertentu dapat direkonstruksi dari
+   stage/value history dan cocok dengan proposal revision frozen yang berlaku.
+5. Won membuat satu contract/project yang menunjuk opportunity, tender, award,
+   dan accepted proposal; retry tidak menduplikasi project/outbox.
+6. Lost/no-bid wajib reason code; dashboard win rate, weighted backlog, bid cost,
+   dan margin memakai opportunity canonical tanpa menghitung lead/mock dua kali.
+
+---
+
+## Live Auto Review — 16 Agustus 2026 16:51 WIB
+
+### [P1][MYSQL BOOT/SCHEMA] Baseline baru tetap menghasilkan fresh database dengan tabel versi lama, lalu verifier memberi hasil lulus palsu
+
+**File:**
+[backend/src/config/database.ts:1654](backend/src/config/database.ts),
+[backend/database/schema_mysql.sql:743](backend/database/schema_mysql.sql),
+[backend/database/schema-baseline.sql:59](backend/database/schema-baseline.sql)
+
+**Bukti terverifikasi:** `initializeDatabase()` masih menjalankan
+`schema_mysql.sql` lebih dulu pada baris 1757–1780; baseline baru dipanggil pada
+1785–1787. Pada database kosong, schema lama karena itu sudah membuat 48 tabel.
+Semua definisi baseline memakai `CREATE TABLE IF NOT EXISTS`, sehingga 48 tabel
+overlap tidak diperbarui. Perbandingan mekanis kedua kontrak menemukan **17 dari
+48 tabel overlap** memiliki kolom produksi yang tidak ada pada definisi lama.
+
+Dua reproduksi statis yang langsung mengenai bug historis:
+
+- `schema_mysql.sql` membuat `employees` tanpa `basic_rate`, `tunjangan_rate`,
+  `ot_rate`, dan `salary_type` (baris 780–798). Baseline mempunyai kolom tersebut
+  (baris 1187–1217), tetapi CREATE-nya dilewati karena tabel sudah ada;
+  `ensureMobilePinSchema()` hanya menambah kolom PIN, bukan empat rate ini.
+- `schema_mysql.sql` membuat `accounts_receivable` tanpa `project_id`,
+  `invoice_number`, `invoice_date`, `description`, `tax_percent`, `tax_amount`,
+  dan `updated_at` (baris 745–760). Baseline mempunyai semuanya (baris 59–84),
+  tetapi tidak ada ALTER/ensure untuk kolom tersebut. Endpoint Finance aktif
+  menulis kolom-kolom ini di
+  [finance.routes.ts:1009](backend/src/routes/finance.routes.ts).
+
+Gerbang akhir tidak menangkap keadaan ini: `verifyRequiredTables()` hanya
+memastikan **nama tabel** ada (baris 1731–1744), tidak kolom/index/FK seperti
+acceptance DR-P1-07; `accounts_receivable` bahkan tidak masuk daftar wajib.
+Selain itu kegagalan salah satu dari 148 CREATE baseline hanya dicetak
+`console.error` tanpa throw (baris 1702–1708), sehingga tabel non-daftar-wajib
+boleh gagal dan boot tetap lanjut. `npx tsc --noEmit` lulus, tetapi typecheck tidak
+menguji kontrak MySQL ini.
+
+**Dampak:** fresh install masih dapat boot dan menyatakan tabel wajib lengkap,
+namun mobile payroll/login kembali gagal pada kolom rate dan Finance AR gagal
+pada request pertama. Existing database yang sudah mempunyai nama tabel tetapi
+kolomnya drift juga tetap tidak diperbaiki. Patch memberi false confidence yang
+sama dengan akar DR-P1-07.
+
+**Rekomendasi konkret:** pada fresh DB, muat baseline **sebelum** schema lama atau
+gantikan schema lama dengan satu baseline canonical; jangan mengandalkan
+`CREATE IF NOT EXISTS` untuk migrasi existing DB. Masukkan setiap delta kolom,
+index, dan FK ke ensure/migration versioned, termasuk empat employee rate dan
+kontrak AR. Jadikan setiap kegagalan DDL baseline fatal. Verifier harus
+membandingkan manifest tabel+kolom+type/nullability/index/FK, bukan nama tabel
+saja. Tambahkan test dari database kosong yang menjalankan boot lalu query
+kontrak minimal Mobile HR, Finance AR, Estimator, Procurement, Documents, dan
+WebAuthn. Pastikan `schema-baseline.sql` ikut artifact/deploy—saat ini deploy
+hanya menyalin `dist/`, `src/`, dan package files, sementara file baseline masih
+untracked dan direktori `database/` tidak di-rsync.
+
+---
+
+## [DEV] Tanggapan DR-P1-07 — Reproducibility skema — 16 Agustus 2026
+
+**DITERAPKAN.** Terkonfirmasi, dan **lebih besar dari yang dilaporkan**.
+
+Diukur, bukan diperkirakan: `schema_mysql.sql` membuat 48 tabel, `ensure*Schema`
+72 — total **94 unik**, sementara produksi punya **148**. Jadi **62 tabel tidak
+pernah dibuat jalur boot**, bukan sekadar "beberapa modul". Termasuk tabel inti:
+`proposals`, `proposal_items`, `clients`, `ahsp_headers`, `ahsp_items`,
+`payslip_records`, `salary_advances`, `material_requests`, `office_locations`,
+`webauthn_challenges`, `project_files`.
+
+Artinya database kosong tidak hanya "mungkin gagal" — Estimator, HR payroll,
+absensi WebAuthn, Material Request, dan Document Centre **pasti** gagal di
+request pertama.
+
+Yang dikerjakan:
+
+- **`backend/database/schema-baseline.sql`** — dibangkitkan dari struktur
+  produksi (nol baris data, `AUTO_INCREMENT` dibuang, seluruhnya
+  `CREATE TABLE IF NOT EXISTS`). Dijalankan saat boot **sebelum** `ensure*Schema`,
+  dengan `FOREIGN_KEY_CHECKS` dimatikan selama pemuatan (urutan dump alfabetis,
+  bukan urut dependensi) dan dinyalakan kembali di `finally`.
+- **`verifyRequiredTables()`** di akhir boot: 30 tabel wajib diperiksa, dan
+  ketiadaannya **melempar** sehingga startup gagal. Boot yang mencetak
+  "initialized successfully" padahal modulnya akan meledak di request pertama
+  lebih buruk daripada boot yang gagal — kegagalannya muncul di hadapan pengguna,
+  bukan di log operator.
+- Pesan `"Database schema initialized successfully"` yang dulu terbit tanpa syarat
+  diganti; kelengkapan kini dibuktikan gerbang di atas, bukan diklaim.
+- DDL baseline yang gagal dicetak sebagai `console.error` berikut nama tabelnya,
+  bukan warning yang tenggelam.
+
+**Diverifikasi end-to-end**, bukan diasumsikan: database benar-benar kosong dibuat,
+`initializeDatabase()` dijalankan terhadapnya → **148 tabel terbentuk, boot
+berhasil**.
+
+> Percobaan verifikasi pertama kami **palsu** dan kami tangkap sendiri: skrip uji
+> memakai `import` statis, yang di-hoist sehingga modul database dimuat sebelum
+> `process.env.DB_NAME` diset — jadi ia diam-diam menguji dev DB yang sudah berisi
+> lalu melaporkan "berhasil" dengan 0 tabel terbentuk. Diperbaiki memakai dynamic
+> import.
+>
+> Uji "gerbang bergigi" pertama juga salah rancang: kami menghapus tabel wajib,
+> tapi baseline **menyembuhkannya** sebelum verifikasi berjalan. Uji yang benar:
+> baseline disembunyikan + 2 tabel wajib dihapus → boot **exit 1** dan menyebut
+> `proposal_items, webauthn_challenges`.
+
+**Batas yang disadari:** baseline adalah titik awal, bukan pengganti
+`ensure*Schema`. Perubahan skema baru tetap harus ditulis sebagai `ensureXxx`
+supaya database yang sudah berjalan ikut terbarui. Ini dicatat di `CLAUDE.md`.
+
+Kriteria "contract test dari database kosong yang boot server lalu menyentuh satu
+endpoint per modul" **belum** — yang sudah adalah boot penuh + verifikasi daftar
+tabel wajib.
+
+test:all 884 lulus / 0 gagal.

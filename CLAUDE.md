@@ -35,11 +35,27 @@ Lalu buat database + user sesuai `.env`:
 mysql -u root -e "CREATE DATABASE blackboxs CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER 'erp_user'@'localhost' IDENTIFIED BY '<password dari .env>'; GRANT ALL ON blackboxs.* TO 'erp_user'@'localhost';"
 ```
 
-⚠️ **Database kosong TIDAK cukup.** `initializeDatabase()` hanya membuat ±78 tabel, sedangkan produksi punya 141. Selisihnya adalah skema yang dulu diterapkan manual lewat file `.sql` di `backend/database/` dan tidak pernah dimasukkan ke `ensure*Schema` — termasuk kolom `employees.salary_type`, `basic_rate`, `tunjangan_rate`, `ot_rate` yang membuat login mobile gagal. Sampai drift ini dibereskan, cara paling andal menyiapkan dev lokal adalah menarik struktur dari produksi (tanpa data):
+✅ **Database kosong sekarang cukup** (DR-P1-07, 16 Agustus 2026). Dulu tidak:
+`schema_mysql.sql` membuat 48 tabel dan `ensure*Schema` 72 — total 94 unik,
+sementara produksi punya 148. **62 tabel tidak pernah dibuat jalur boot**,
+termasuk `proposals`, `proposal_items`, `clients`, `ahsp_headers`,
+`payslip_records`, `material_requests`, `office_locations`, dan
+`webauthn_challenges`. Database kosong boot "sehat" lalu Estimator, HR payroll,
+absensi WebAuthn, Material Request, dan Document Centre gagal di request pertama.
 
-```bash
-ssh root@76.13.22.155 "cd /var/www/blackboxs/backend && set -a && . ./.env && set +a && mysqldump --no-data --skip-add-drop-table --skip-comments -u \"\$DB_USER\" -p\"\$DB_PASSWORD\" \"\$DB_NAME\"" | mysql -u root blackboxs
-```
+Sekarang `backend/database/schema-baseline.sql` (dibangkitkan dari struktur
+produksi, tanpa data) dijalankan saat boot sebelum `ensure*Schema`. Terverifikasi:
+database kosong → **148 tabel**, boot berhasil.
+
+**Aturan yang harus dijaga:** baseline itu titik awal, BUKAN pengganti
+`ensure*Schema`. Perubahan skema baru tetap ditulis sebagai `ensureXxx` di
+`config/database.ts` supaya database yang sudah berjalan ikut terbarui. Baseline
+di-regenerate hanya kalau memang perlu menyamakan instalasi baru dengan produksi.
+
+`verifyRequiredTables()` di akhir boot **menggagalkan startup** kalau salah satu
+dari 30 tabel wajib tidak ada — lebih baik gagal di log operator daripada di
+hadapan pengguna. Terverifikasi bergigi: baseline disembunyikan + 2 tabel wajib
+dihapus → boot exit 1 dan menyebut keduanya.
 
 Deploy: `./deploy-blackbox.sh` (pemeriksaan pra-deploy → build FE → rsync dist, `npx tsc` BE lokal → rsync `dist/`+`src/`, `pm2 restart` → verifikasi health).
 
