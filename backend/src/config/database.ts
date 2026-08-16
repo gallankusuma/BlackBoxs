@@ -1230,6 +1230,47 @@ const ensureProjectNumberUnique = async (connection: any) => {
   }
 };
 
+// ==================== SATU PAYSLIP PER KARYAWAN PER PERIODE (DR-P0-04) ====================
+// `POST /payslip/save` memakai pola upsert dengan kunci
+// (employee_id, period_month, period_year) — pencariannya bahkan
+// `ORDER BY id DESC LIMIT 1`, yang mengakui baris kembar mungkin ada. Tanpa
+// UNIQUE, dua permintaan simpan yang berlomba menghasilkan dua payslip final
+// untuk periode yang sama dan hanya salah satunya yang terlihat.
+//
+// Produksi diperiksa sebelum dipasang: 138 payslip, 0 kembar.
+const ensurePayslipPeriodUnique = async (connection: any) => {
+  try {
+    const [dupes]: any = await connection.execute(
+      `SELECT employee_id, period_month, period_year, COUNT(*) AS n
+       FROM payslip_records
+       GROUP BY employee_id, period_month, period_year HAVING n > 1`
+    );
+    if (dupes.length > 0) {
+      // Payslip yang sudah final adalah dokumen gaji — tidak dihapus otomatis.
+      console.error(
+        `⚠️  UNIQUE payslip TIDAK dipasang — ada ${dupes.length} periode kembar: `
+        + dupes.map((d: any) => `emp${d.employee_id}/${d.period_month}-${d.period_year}×${d.n}`).join(', ')
+        + '. Rapikan manual lalu restart backend.'
+      );
+      return;
+    }
+
+    const [idx]: any = await connection.execute(
+      `SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'payslip_records'
+         AND INDEX_NAME = 'uq_payslip_employee_period' LIMIT 1`
+    );
+    if (idx.length === 0) {
+      await connection.execute(
+        'CREATE UNIQUE INDEX uq_payslip_employee_period ON payslip_records (employee_id, period_month, period_year)'
+      );
+    }
+    console.log('✅ Payslip unik per karyawan per periode ensured');
+  } catch (err: any) {
+    console.warn('Schema ensure warning (payslip unique):', String(err.message).substring(0, 160));
+  }
+};
+
 // ==================== SOFT DELETE PURCHASE REQUEST (PROC-R08) ====================
 // PO sudah memakai logical delete, tapi PR masih dihapus permanen berikut bid,
 // bid item, dan itemnya — sebagian lewat helper yang menelan error, jadi
@@ -1608,6 +1649,7 @@ export async function initializeDatabase() {
     await ensureMtoScopeSchema(connection);
     await ensureOneProjectPerProposal(connection);
     await ensureProjectNumberUnique(connection);
+    await ensurePayslipPeriodUnique(connection);
     await ensureMtoLinesSchema(connection);
     await ensureDisposalSchema(connection);
     await ensureAssetStatusHistorySchema(connection);

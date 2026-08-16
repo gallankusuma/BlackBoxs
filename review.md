@@ -472,6 +472,50 @@ simpan payslip + advance dalam satu transaction; pasang UNIQUE
 `(employee_id, period_month, period_year)`; tambah tes payload angka palsu,
 advance lintas employee, dan rollback failure.
 
+> **[DEV] DITERAPKAN.**
+>
+> Terkonfirmasi seluruhnya. Yang membuat perbaikannya rapi: `GET /payslip` sudah
+> menghitung semuanya di server sejak awal — absensi, tarif karyawan, aturan 40
+> jam mingguan, cut-off 26→25. Yang salah cuma bahwa jalur SIMPAN tidak
+> memakainya.
+>
+> Perhitungan itu diekstrak jadi `computePayslip()`; `GET` sekarang pembungkus
+> tipis di atasnya, dan `POST /payslip/save` memanggil fungsi yang sama.
+> Body klien hanya dipakai untuk `employee_id`, `period_month`, `period_year`,
+> `project_id`, dan `notes`. Seluruh angka — basic, tunjangan, OT, gross,
+> potongan, net — berasal dari server. Tidak ada rumus baru ditulis, jadi tidak
+> ada risiko angka gaji bergeser.
+>
+> - **Kasbon**: yang ditandai lunas hanya kasbon yang dikembalikan
+>   `computePayslip` sendiri (query-nya sudah tersaring `employee_id` + periode),
+>   dan `employee_id` tetap diikutkan di `WHERE` UPDATE sebagai jaring terakhir.
+>   `advances.records[].id` dari klien tidak lagi menyentuh apa pun.
+> - **Transaction**: payslip + seluruh penandaan kasbon satu unit, dimulai dari
+>   `SELECT ... FOR UPDATE` pada baris payslipnya.
+> - **UNIQUE** `(employee_id, period_month, period_year)` dipasang lewat
+>   `ensurePayslipPeriodUnique`. Produksi diperiksa dulu: 138 payslip, 0 kembar.
+>   Kalau nanti ada kembar, index dilewati dan dicetak `console.error` — payslip
+>   final adalah dokumen gaji, tidak dihapus otomatis.
+> - **RBAC**: `requirePermission('hr.payroll.create', 'hr.payroll.edit')`.
+>   Kelima user aktif produksi memegang `hr.payroll` penuh, jadi tidak ada yang
+>   terkunci.
+>
+> Respons simpan kini mengembalikan `net_salary`, `gross_salary`,
+> `total_deductions`, dan `advances_marked` versi server, supaya layar memakai
+> angka server dan bukan angka yang barusan ia kirim sendiri.
+>
+> **Belum:** tes rollback failure (injeksi kegagalan di tengah transaction).
+> Yang lain sudah.
+>
+> Tes: `test:rbac` #9 — dikirim `net_salary` 999.999.999 berikut id kasbon
+> karangan; yang tersimpan angka server (0, karena periode uji tanpa absensi),
+> kasbon karangan tidak tertandai, dan user tanpa hak dapat 403. Pada kode lama
+> assertion pertama gagal karena angka palsu itu memang tersimpan apa adanya.
+>
+> Verifikasi tambahan setelah refactor 250 baris perhitungan gaji: struktur
+> respons `GET /payslip` tetap identik (7 kunci, `calculation` 9 field, cut-off
+> 26→25 utuh).
+
 ### DR-P0-05 — Upload publik + upload tanpa validasi membentuk stored XSS dan kebocoran dokumen
 
 **Bukti utama:** [index.ts:180](backend/src/index.ts) melayani seluruh folder
@@ -846,3 +890,55 @@ action + request + rule dalam `finally` meskipun assertion gagal.
 | HTTP/RBAC suite | Tidak dijalankan reviewer; suite membuat data |
 | Commit `40fbeec1`, scope token R&D | Diterima pada level kode; memakai middleware pusat dan `req.userId` |
 | Rotasi password master produksi | Tetap blocker operasional sampai password DB publik benar-benar diganti |
+
+---
+
+## Live Auto Review — 16 Agustus 2026 14:32 WIB
+
+Baseline: commit `fee07032` (`fix(security): gembok penerbitan PIN & redaksi
+data gaji`). Source code tidak diubah reviewer.
+
+### Verifikasi DR-P0-03 — Diterima sebagian, belum ditutup
+
+Yang sudah terverifikasi benar:
+
+- reset PIN dan bulk generate PIN memakai
+  `requirePermission('hr.employees.edit')`;
+- seluruh CRUD position rate memakai permission action yang sesuai;
+- daftar generik meredaksi seluruh alias angka yang benar-benar dikirim API
+  (`basic_salary`, `basic_rate`, `tunjangan_rate`, `ot_rate`, `contract_type`)
+  untuk user tanpa hak;
+- TypeScript lulus dan auth unit 19/19 lulus.
+
+Employee detail dan payslip history tetap terbuka seperti yang sudah diakui tim
+development, sehingga DR-P0-03 belum boleh berstatus selesai.
+
+### [P1 — Perlu klarifikasi] `hr.employees.view` ikut membuka seluruh angka gaji
+
+[hr.routes.ts:90](backend/src/routes/hr.routes.ts) menganggap
+`hr.employees.view` setara dengan `hr.payroll.view` untuk membuka gaji. Padahal
+permission `hr.employees.view` juga menjadi gate menu “Data Karyawan” di
+[Layout.vue:369](frontend/src/components/Layout.vue), sehingga role yang hanya
+boleh melihat direktori karyawan otomatis memperoleh seluruh salary/rate.
+
+Tim development perlu menetapkan semantik resminya:
+
+- jika “Data Karyawan” memang termasuk kompensasi, dokumentasikan keputusan dan
+  tambahkan tes role dengan `hr.employees.view` tanpa `hr.payroll.view`;
+- jika permission itu hanya untuk biodata/direktori, unredaction wajib hanya
+  memakai `hr.payroll.view` atau permission kompensasi khusus.
+
+Tes sekarang hanya membandingkan role tanpa permission melawan master, sehingga
+tidak menangkap batas kedua permission tersebut.
+
+### [P2] Status keamanan PIN masih dapat dienumerasi semua user desktop
+
+[hr.routes.ts:182](backend/src/routes/hr.routes.ts) masih hanya memakai
+`authMiddleware`. Setiap token desktop dapat mengambil `has_pin`, status wajib
+ganti PIN, waktu PIN dibuat, waktu lockout berakhir, dan daftar seluruh karyawan
+aktif. Ini bukan takeover langsung setelah reset sudah digembok, tetapi memberi
+rekonesans status autentikasi yang tidak dibutuhkan dropdown umum.
+
+**Acceptance:** lindungi endpoint dengan minimal `hr.employees.view` (atau
+`hr.employees.edit` bila ini murni alat administrasi PIN) dan tambahkan negative
+test token tanpa permission.

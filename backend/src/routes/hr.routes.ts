@@ -1,7 +1,7 @@
 import express, { Request, Response } from 'express';
 import bcrypt from 'bcrypt';
 import { randomInt } from 'crypto';
-import { dbAll, dbGet, dbRun } from '../config/database';
+import { dbAll, dbGet, dbRun, withTransaction } from '../config/database';
 import { authMiddleware, generateMobileToken, mobileAuthMiddleware, assertSelf, MobileAuthRequest } from '../middleware/auth';
 import { requirePermission, loadUserAccess } from '../middleware/permission';
 
@@ -428,13 +428,24 @@ router.delete('/advances/:id', authMiddleware, async (req: Request, res: Respons
 
 // ===== PAYSLIP ENGINE =====
 
-router.get('/payslip', authMiddleware, async (req: Request, res: Response) => {
-  try {
-    const { employee_id, month, year, project_id } = req.query;
-    if (!employee_id || !month || !year) return res.status(400).json({ error: 'employee_id, month, year required' });
-
+/**
+ * Hitung slip gaji SEPENUHNYA dari data server (DR-P0-04).
+ *
+ * Diekstrak dari handler GET supaya jalur SIMPAN memakai perhitungan yang sama
+ * persis. Sebelumnya `POST /payslip/save` menerima `calculation`, `advances`,
+ * `deductions`, dan `net_salary` mentah dari body lalu menyimpannya apa adanya —
+ * siapa pun yang bisa memanggil endpoint itu tinggal mengubah angkanya lewat
+ * DevTools dan memfinalisasi gaji sembarang.
+ *
+ * Sumbernya: absensi (`attendance_logs`), tarif di baris karyawan, dan kasbon
+ * (`salary_advances`) milik karyawan itu pada periode itu. Tidak ada satu pun
+ * angka yang berasal dari klien.
+ */
+const computePayslip = async (
+  employee_id: any, month: any, year: any, project_id: any,
+): Promise<any> => {
     const emp: any = await dbGet('SELECT * FROM employees WHERE id=?', [employee_id]);
-    if (!emp) return res.status(404).json({ error: 'Employee not found' });
+    if (!emp) return { error: 'Employee not found' };
 
     // ── Cut-off period: 26th prev month → 25th current month ──
     const m = Number(month);
@@ -652,7 +663,7 @@ router.get('/payslip', authMiddleware, async (req: Request, res: Response) => {
     const totalDeductions = totalAdvances + bpjs_kes + bpjs_tk + pph21;
     const netSalary = grossSalary - totalDeductions;
 
-    res.json({
+    return {
       employee: {
         id: emp.id, code: emp.code, name: emp.name, position: emp.position,
         salary_type: salaryType, basic_rate: basicRatePerDay,
@@ -674,7 +685,17 @@ router.get('/payslip', authMiddleware, async (req: Request, res: Response) => {
       },
       deductions: { bpjs_kes, bpjs_tk, pph21, total_statutory: bpjs_kes+bpjs_tk+pph21, total: totalDeductions },
       net_salary: netSalary,
-    });
+    };
+};
+
+router.get('/payslip', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { employee_id, month, year, project_id } = req.query;
+    if (!employee_id || !month || !year) return res.status(400).json({ error: 'employee_id, month, year required' });
+
+    const result = await computePayslip(employee_id, month, year, project_id);
+    if (result?.error) return res.status(404).json(result);
+    res.json(result);
   } catch (error) {
     console.error('Payslip error:', error);
     res.status(500).json({ error: 'Failed to generate payslip' });
@@ -682,57 +703,102 @@ router.get('/payslip', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // Save finalized payslip & mark advances as deducted
-router.post('/payslip/save', authMiddleware, async (req: Request, res: Response) => {
+//
+// DR-P0-04: SELURUH angka dihitung ulang di server. Versi lama menyimpan
+// `calculation`, `advances`, `deductions`, dan `net_salary` apa adanya dari
+// body — gaji bisa difinalisasi dengan angka sembarang lewat DevTools.
+//
+// Kasbon juga dulu ditandai lunas hanya berdasar `advances.records[].id` dari
+// klien, tanpa memeriksa pemilik, periode, status, atau jumlahnya: id kasbon
+// karyawan LAIN bisa dinolkan lewat payslip siapa pun. Sekarang yang ditandai
+// hanya kasbon yang dikembalikan `computePayslip` sendiri — sudah tersaring
+// employee_id + periode di query-nya — dan tetap diverifikasi lagi di dalam
+// UPDATE-nya.
+//
+// Ketiga penulisan (payslip + kasbon) kini satu transaction. Sebelumnya
+// autocommit: gagal di tengah loop meninggalkan payslip berstatus final
+// sementara hanya sebagian kasbon terpotong.
+router.post('/payslip/save', authMiddleware, requirePermission('hr.payroll.create', 'hr.payroll.edit'), async (req: Request, res: Response) => {
   try {
-    const { employee_id, period_month, period_year, project_id, calculation, advances, deductions, net_salary, notes } = req.body;
-
-    // Check if a payslip already exists for this employee + period — UPSERT
-    const existing = await dbGet(
-      'SELECT id FROM payslip_records WHERE employee_id=? AND period_month=? AND period_year=? ORDER BY id DESC LIMIT 1',
-      [employee_id, period_month, period_year]
-    ) as any;
-
-    let recordId: number;
-    if (existing) {
-      // UPDATE existing record
-      await dbRun(
-        `UPDATE payslip_records SET project_id=?,
-          total_days=?, total_ot_hours=?, basic_salary=?, tunjangan=?, ot_pay=?, gross_salary=?,
-          advance_1=?, advance_2=?, reimbursement=?, bpjs_kes=?, bpjs_tk=?, pph21=?, total_deductions=?, net_salary=?, notes=?, status='final', updated_at=NOW()
-         WHERE id=?`,
-        [project_id||null,
-         calculation.total_days||0, calculation.total_ot_hours||0,
-         calculation.basic_salary||0, calculation.tunjangan||0, calculation.ot_pay||0, calculation.gross_salary||0,
-         advances.advance_1||0, advances.advance_2||0, req.body.reimbursement||0,
-         deductions.bpjs_kes||0, deductions.bpjs_tk||0, deductions.pph21||0, deductions.total||0,
-         net_salary||0, notes||null, existing.id]
-      );
-      recordId = existing.id;
-    } else {
-      // INSERT new record
-      const result = await dbRun(
-        `INSERT INTO payslip_records (employee_id, period_month, period_year, project_id,
-          total_days, total_ot_hours, basic_salary, tunjangan, ot_pay, gross_salary,
-          advance_1, advance_2, reimbursement, bpjs_kes, bpjs_tk, pph21, total_deductions, net_salary, notes, status)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'final')`,
-        [employee_id, period_month, period_year, project_id||null,
-         calculation.total_days||0, calculation.total_ot_hours||0,
-         calculation.basic_salary||0, calculation.tunjangan||0, calculation.ot_pay||0, calculation.gross_salary||0,
-         advances.advance_1||0, advances.advance_2||0, req.body.reimbursement||0,
-         deductions.bpjs_kes||0, deductions.bpjs_tk||0, deductions.pph21||0, deductions.total||0,
-         net_salary||0, notes||null]
-      );
-      recordId = result.insertId;
+    const { employee_id, period_month, period_year, project_id, notes } = req.body;
+    if (!employee_id || !period_month || !period_year) {
+      return res.status(400).json({ error: 'employee_id, period_month, period_year wajib diisi' });
     }
 
-    // Mark advances as deducted
-    if (advances.records?.length) {
-      for (const adv of advances.records) {
-        await dbRun("UPDATE salary_advances SET status='deducted', remaining=0, updated_at=CURRENT_TIMESTAMP WHERE id=?", [adv.id]);
+    const hitung = await computePayslip(employee_id, period_month, period_year, project_id);
+    if (hitung?.error) return res.status(404).json(hitung);
+
+    const calc = hitung.calculation;
+    const att = hitung.attendance;
+    const adv = hitung.advances;
+    const ded = hitung.deductions;
+
+    const outcome = await withTransaction(async tx => {
+      const existing: any = await tx.get(
+        'SELECT id FROM payslip_records WHERE employee_id=? AND period_month=? AND period_year=? ORDER BY id DESC LIMIT 1 FOR UPDATE',
+        [employee_id, period_month, period_year]
+      );
+
+      const nilai = [
+        project_id || null,
+        att.total_days || 0, att.total_ot_hours || 0,
+        calc.basic_salary || 0, calc.tunjangan || 0, calc.ot_pay || 0, calc.gross_salary || 0,
+        adv.advance_1 || 0, adv.advance_2 || 0, 0,
+        ded.bpjs_kes || 0, ded.bpjs_tk || 0, ded.pph21 || 0, ded.total || 0,
+        hitung.net_salary || 0, notes || null,
+      ];
+
+      let recordId: number;
+      if (existing) {
+        await tx.run(
+          `UPDATE payslip_records SET project_id=?,
+            total_days=?, total_ot_hours=?, basic_salary=?, tunjangan=?, ot_pay=?, gross_salary=?,
+            advance_1=?, advance_2=?, reimbursement=?, bpjs_kes=?, bpjs_tk=?, pph21=?, total_deductions=?, net_salary=?, notes=?, status='final', updated_at=NOW()
+           WHERE id=?`,
+          [...nilai, existing.id]
+        );
+        recordId = existing.id;
+      } else {
+        const result = await tx.run(
+          `INSERT INTO payslip_records (employee_id, period_month, period_year, project_id,
+            total_days, total_ot_hours, basic_salary, tunjangan, ot_pay, gross_salary,
+            advance_1, advance_2, reimbursement, bpjs_kes, bpjs_tk, pph21, total_deductions, net_salary, notes, status)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'final')`,
+          [employee_id, period_month, period_year, ...nilai]
+        );
+        recordId = result.insertId;
       }
-    }
-    res.status(201).json({ message: 'Payslip saved', data: { id: recordId } });
-  } catch (error) { res.status(500).json({ error: 'Failed to save payslip' }); }
+
+      // `employee_id` diikutkan di WHERE sebagai jaring terakhir, walau daftarnya
+      // sudah berasal dari server.
+      let ditandai = 0;
+      for (const kasbon of (adv.records || [])) {
+        const r = await tx.run(
+          "UPDATE salary_advances SET status='deducted', remaining=0, updated_at=CURRENT_TIMESTAMP WHERE id=? AND employee_id=?",
+          [kasbon.id, employee_id]
+        );
+        ditandai += r.affectedRows || 0;
+      }
+
+      return { recordId, ditandai };
+    });
+
+    res.status(201).json({
+      message: 'Payslip saved',
+      data: {
+        id: outcome.recordId,
+        // Dikembalikan supaya layar memakai angka server, bukan angka yang
+        // tadi ia kirim sendiri.
+        net_salary: hitung.net_salary,
+        gross_salary: calc.gross_salary,
+        total_deductions: ded.total,
+        advances_marked: outcome.ditandai,
+      },
+    });
+  } catch (error) {
+    console.error('Payslip save error:', error);
+    res.status(500).json({ error: 'Failed to save payslip' });
+  }
 });
 
 // Get saved payslips history

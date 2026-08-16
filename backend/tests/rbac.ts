@@ -206,7 +206,52 @@ async function main() {
   chk('master tetap bisa tarif jabatan',
     await status('GET', '/hr/position-rates', undefined, master), 200);
 
-  console.log('\n9. Bersih-bersih');
+  console.log('\n9. Payslip tidak mempercayai angka dari klien (DR-P0-04)');
+  // Versi lama menyimpan calculation/advances/deductions/net_salary apa adanya
+  // dari body. Siapa pun yang bisa memanggil endpoint ini tinggal mengubah
+  // angkanya lewat DevTools dan memfinalisasi gaji sembarang.
+  const empList = await call('GET', '/hr/employees', undefined, master);
+  const empUji = (empList.json?.data || [])[0];
+  chk('ada karyawan untuk diuji payslip', !!empUji?.id, true);
+
+  if (empUji?.id) {
+    // Periode jauh di depan supaya tidak menyentuh data gaji sungguhan.
+    const periode = { employee_id: empUji.id, period_month: 12, period_year: 2099 };
+    const PALSU = 999999999;
+
+    const simpan = await call('POST', '/hr/payslip/save', {
+      ...periode,
+      calculation: { basic_salary: PALSU, tunjangan: PALSU, ot_pay: PALSU, gross_salary: PALSU, total_days: 99, total_ot_hours: 99 },
+      advances: { advance_1: 0, advance_2: 0, records: [{ id: 999999 }] },
+      deductions: { bpjs_kes: 0, bpjs_tk: 0, pph21: 0, total: 0 },
+      net_salary: PALSU,
+      notes: 'uji DR-P0-04',
+    }, master);
+
+    chk('payslip tersimpan', simpan.status, 201);
+    chk('net_salary palsu TIDAK dipakai', simpan.json?.data?.net_salary === PALSU, false);
+    chk('gross_salary palsu TIDAK dipakai', simpan.json?.data?.gross_salary === PALSU, false);
+
+    // Tanpa absensi di periode itu, hitungan server = 0. Itu yang harus tersimpan.
+    chk('server menghitung sendiri (0, bukan angka klien)', Number(simpan.json?.data?.gross_salary), 0);
+
+    // Kasbon milik id karangan tidak boleh ikut ditandai lunas.
+    chk('kasbon id karangan tidak ditandai', Number(simpan.json?.data?.advances_marked), 0);
+
+    // Yang tersimpan di database juga harus angka server, bukan angka klien.
+    const riwayat = await call('GET', `/hr/payslip/history?employee_id=${empUji.id}&period_year=2099`, undefined, master);
+    const tersimpan = (riwayat.json?.data || []).find((r: any) => Number(r.period_month) === 12);
+    if (tersimpan) {
+      chk('yang tersimpan bukan angka palsu', Number(tersimpan.net_salary) === PALSU, false);
+    } else {
+      chk('payslip uji terbaca kembali', false, true);
+    }
+
+    chk('simpan payslip oleh user tanpa hak',
+      await status('POST', '/hr/payslip/save', periode, plainToken), 403);
+  }
+
+  console.log('\n10. Bersih-bersih');
   for (const id of cleanup) await call('DELETE', `/users/${id}`, undefined, master);
   for (const id of [roleId, editorRoleId]) if (id) await call('DELETE', `/roles/${id}`, undefined, master);
   console.log(`  ok   ${cleanup.length} user uji & 2 role uji dihapus`);
