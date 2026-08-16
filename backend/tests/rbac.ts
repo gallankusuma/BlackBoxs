@@ -44,6 +44,25 @@ const status = async (...a: Parameters<typeof call>) => (await call(...a)).statu
 /** Role yang HANYA punya hr.employees.view — tidak punya hr.payroll.view. */
 /** Dua notifikasi: satu milik user uji, satu milik orang lain. */
 /** MR uji beserta satu item; `notes` sengaja diisi TEKS BEBAS, bukan JSON. */
+/** Semua `permKey` yang dipakai menu sidebar. */
+async function permKeysDariLayout(): Promise<string[]> {
+  const fs = await import('fs');
+  const path = await import('path');
+  const berkas = path.resolve(__dirname, '../../frontend/src/components/Layout.vue');
+  if (!fs.existsSync(berkas)) return [];
+  const isi = fs.readFileSync(berkas, 'utf8');
+  const ketemu = isi.match(/permKey: '[^']+'/g) || [];
+  return Array.from(new Set(ketemu.map(m => m.replace(/permKey: '|'/g, ''))));
+}
+
+/** Resource yang dipakai menu tapi tidak ada di tabel `permissions`. */
+async function resourceTidakDikenal(keys: string[]): Promise<string[]> {
+  const { dbAll } = await import('../src/config/database');
+  const rows: any[] = await dbAll('SELECT DISTINCT resource FROM permissions');
+  const katalog = new Set(rows.map(r => String(r.resource)));
+  return keys.filter(k => !katalog.has(k));
+}
+
 async function seedMaterialRequest(catatan: string): Promise<any> {
   try {
     const { dbRun, dbGet } = await import('../src/config/database');
@@ -641,6 +660,23 @@ async function main() {
       chk('role direktori dibersihkan', await cleanupDirectoryRole(dir), 0);
     }
   }
+
+  console.log('\n8b. Permission key menu cocok dengan katalog backend (DR-P2-01)');
+  // Sepuluh key di Layout.vue pernah berbeda dari katalog, mis.
+  // `estimator.proposals` vs `estimator.estimator-proposals` dan
+  // `master-data.vendors` vs `master_data.suppliers`. Akibatnya role non-master
+  // yang SUDAH punya permissionnya tetap kehilangan menu, sementara router hanya
+  // memeriksa keberadaan token sehingga URL langsung tetap terbuka.
+  //
+  // Dijaga di sini karena mismatch semacam ini tidak terlihat dari tipe maupun
+  // build — cuma dari membandingkan keduanya.
+  const menuKeys = await permKeysDariLayout();
+  chk('permKey terbaca dari Layout.vue', menuKeys.length > 0, true);
+  const tidakDikenal = await resourceTidakDikenal(menuKeys);
+  if (tidakDikenal.length) {
+    console.log(`       tidak ada di katalog: ${tidakDikenal.join(', ')}`);
+  }
+  chk('semua permKey ada di tabel permissions', tidakDikenal.length, 0);
 
   console.log('\n9a. Material Request: approve atomic & catatan teks tidak meledak (DR-P1-04)');
   // Bug paling tajam di butir ini: `JSON.parse(mr.notes)` dijalankan atas catatan

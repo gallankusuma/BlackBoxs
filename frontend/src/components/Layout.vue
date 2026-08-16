@@ -278,7 +278,21 @@ interface Submenu {
   label: string;
   route?: string;
   name?: string;
-  permKey?: string; // maps to permission resource prefix e.g. 'finance.payment-schedule'
+  /**
+   * Resource permission di backend. WAJIB sama persis dengan `PERMISSION_CATALOG`
+   * di `backend/src/config/database.ts` — role produksi dipetakan ke string itu.
+   *
+   * DR-P2-01: sepuluh key di sini pernah berbeda dari katalog (mis.
+   * `estimator.proposals` vs `estimator.estimator-proposals`,
+   * `master-data.vendors` vs `master_data.suppliers`). Akibatnya role non-master
+   * yang SUDAH punya permissionnya tetap kehilangan menu, sementara router hanya
+   * memeriksa keberadaan token sehingga URL langsung tetap terbuka — UI dan API
+   * berbeda pendapat.
+   *
+   * Dijaga oleh `test:rbac`: tiap `permKey` di berkas ini harus ada di tabel
+   * `permissions`.
+   */
+  permKey?: string;
 }
 
 interface MenuItem {
@@ -327,9 +341,9 @@ const mainMenus: MenuItem[] = [
     label: 'Estimator',
     icon: '🧮',
     submenus: [
-      { id: 'estimator-proposals', label: 'Proposal', route: '/estimator', permKey: 'estimator.proposals' },
-      { id: 'estimator-ahsp', label: 'AHSP', route: '/estimator/ahsp', permKey: 'estimator.ahsp' },
-      { id: 'estimator-masters', label: 'Satuan Dasar Harga', route: '/estimator/masters', permKey: 'estimator.masters' },
+      { id: 'estimator-proposals', label: 'Proposal', route: '/estimator', permKey: 'estimator.estimator-proposals' },
+      { id: 'estimator-ahsp', label: 'AHSP', route: '/estimator/ahsp', permKey: 'estimator.estimator-ahsp' },
+      { id: 'estimator-masters', label: 'Satuan Dasar Harga', route: '/estimator/masters', permKey: 'estimator.estimator-masters' },
     ]
   },
   {
@@ -352,13 +366,13 @@ const mainMenus: MenuItem[] = [
     label: 'Procurement',
     icon: '🛒',
     submenus: [
-      { id: 'procurement-dashboard', label: 'Overview', route: '/procurement', name: 'Procurement', permKey: 'procurement.overview' },
+      { id: 'procurement-dashboard', label: 'Overview', route: '/procurement', name: 'Procurement', permKey: 'procurement.procurement-dashboard' },
       { id: 'purchase-requests', label: 'Purchase Requests', route: '/procurement/pr', name: 'ProcurementPR', permKey: 'procurement.purchase-requests' },
       { id: 'purchase-orders', label: 'Purchase Orders', route: '/procurement/po', name: 'ProcurementPO', permKey: 'procurement.purchase-orders' },
       { id: 'grn', label: 'Goods Receipt (GRN)', route: '/procurement/grn', name: 'ProcurementGRN', permKey: 'procurement.grn' },
       { id: 'vendor-price-list', label: 'Vendor Price List', route: '/procurement/price-list', name: 'ProcurementVendorPriceList', permKey: 'procurement.vendor-price-list' },
       { id: 'material-price-comparison', label: 'Material Price Comparison', route: '/procurement/material-prices', name: 'MaterialPriceComparison', permKey: 'procurement.material-price-comparison' },
-      { id: 'procurement-history', label: 'History', route: '/procurement/history', name: 'ProcurementHistory', permKey: 'procurement.history' },
+      { id: 'procurement-history', label: 'History', route: '/procurement/history', name: 'ProcurementHistory', permKey: 'procurement.procurement-history' },
     ]
   },
   {
@@ -379,12 +393,12 @@ const mainMenus: MenuItem[] = [
     submenus: [
       { id: 'units', label: 'Units of Measure', route: '/units', name: 'UnitOfMeasure', permKey: 'master-data.units' },
       { id: 'items', label: 'Items', route: '/items', name: 'Items', permKey: 'master-data.items' },
-      { id: 'item-types', label: 'Item Types', route: '/item-types', name: 'ItemTypes', permKey: 'master-data.item-types' },
+      { id: 'item-types', label: 'Item Types', route: '/item-types', name: 'ItemTypes', permKey: 'master_data.item-types' },
       { id: 'categories', label: 'Item Categories', route: '/categories', name: 'Categories', permKey: 'master-data.categories' },
       { id: 'bom', label: 'Bill of Materials', route: '/bom', name: 'BOM', permKey: 'master-data.bom' },
       { id: 'warehouses', label: 'Warehouses', route: '/warehouses', name: 'Warehouses', permKey: 'master-data.warehouses' },
-      { id: 'warehouse-locations', label: 'Warehouse Locations', route: '/warehouse-locations', name: 'WarehouseLocations', permKey: 'master-data.warehouse-locations' },
-      { id: 'suppliers', label: 'Vendors', route: '/suppliers', name: 'Suppliers', permKey: 'master-data.vendors' },
+      { id: 'warehouse-locations', label: 'Warehouse Locations', route: '/warehouse-locations', name: 'WarehouseLocations', permKey: 'master_data.warehouse-locations' },
+      { id: 'suppliers', label: 'Vendors', route: '/suppliers', name: 'Suppliers', permKey: 'master_data.suppliers' },
       { id: 'customers', label: 'Customers', route: '/customers', name: 'Customers', permKey: 'master-data.customers' },
       { id: 'departments', label: 'Departments', route: '/departments', name: 'Departments', permKey: 'master-data.departments' },
     ]
@@ -412,8 +426,8 @@ const mainMenus: MenuItem[] = [
       { id: 'system-settings', label: 'System Settings', route: '/admin/settings', permKey: 'admin.system-settings' },
       { id: 'approval-config', label: 'Approval Config', route: '/admin/approval-config', permKey: 'admin.approval-config' },
       { id: 'audit-log', label: 'Audit Log', route: '/admin/audit-log', permKey: 'admin.audit-log' },
-      { id: 'notifications', label: 'Notification Settings', route: '/admin/notifications', permKey: 'admin.notification-settings' },
-      { id: 'integration', label: 'Integration Settings', route: '/admin/integration', permKey: 'admin.integration-settings' },
+      { id: 'notifications', label: 'Notification Settings', route: '/admin/notifications', permKey: 'admin.notifications' },
+      { id: 'integration', label: 'Integration Settings', route: '/admin/integration', permKey: 'admin.integration' },
       { id: 'backup', label: 'Backup & Restore', route: '/admin/backup', permKey: 'admin.backup' },
     ]
   },

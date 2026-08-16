@@ -2533,8 +2533,10 @@ sama dan mismatch nama dari klien tidak tersimpan.
 ## System Design Review — 16 Agustus 2026 15:28 WIB
 
 Irisan yang diaudit run ini: **Project Controls — WBS/CBS, schedule, progress,
-Gantt, cost, S-curve/EVM**. Tidak ada perubahan source baru setelah commit
-`3dfa316d`; audit ini hanya membaca kontrak backend/frontend yang ada.
+Gantt, cost, S-curve/EVM**. Saat audit dimulai belum ada perubahan source setelah
+`3dfa316d`; commit Estimator `89980355` muncul kemudian pada run yang sama dan
+diverifikasi terpisah di bawah. Audit ini hanya membaca kontrak
+backend/frontend yang ada.
 
 ### [FEATURE-REGRESSION / ARCH-RISK — prioritas tinggi] Project Controls yang terlihat di UI masih demo terputus dari transaksi proyek
 
@@ -2666,4 +2668,160 @@ dengan nomor unik berformat `PROP/TAHUN/NNNN` (pada kode lama sebagian keluar
 500), proposal bertemplate benar-benar membawa itemnya, serta proposal submitted
 tidak bisa dihapus maupun diubah metadatanya (409).
 
+**Verifikasi reviewer 16 Agustus 2026 15:28 WIB — DITERAPKAN PADA KODE, BUKTI
+TEST MASIH PARSIAL.** Commit `89980355` sudah memakai transaction runner untuk
+counter, header, section, dan child; update/delete mengunci baris proposal dan
+recheck status di transaction yang sama. Backend lulus `npx tsc --noEmit`.
+
+Namun dua test yang diklaim untuk atomicity/race belum dapat gagal pada
+implementasi lama:
+
+- test template hanya membuktikan jalur sukses menghasilkan item. Tidak ada
+  kegagalan yang dipaksa setelah header/section pertama, lalu assertion bahwa
+  header dan seluruh child rollback;
+- test update/delete memindahkan proposal sampai `submitted` lebih dulu lalu
+  memanggil mutasi secara berurutan. Kode lama juga sudah membalas 409 untuk
+  kondisi itu; yang belum diuji adalah update-vs-submit dan delete-vs-submit
+  yang benar-benar paralel.
+
+Tambahkan failure injection terkontrol pada child ke-N dan race dengan
+`Promise.all`; outcome wajib linearizable (tepat satu transisi/mutasi menang),
+proposal submitted tidak pernah berubah/terhapus, dan tidak ada header/item
+parsial. Dengan itu seluruh acceptance DR-P1-05 dapat ditutup.
+
 test:all 866 lulus / 0 gagal.
+
+---
+
+## System Design Review — 16 Agustus 2026 15:32 WIB
+
+Irisan yang diaudit run ini: **QA/QC EPC — quality plan/ITP, inspection,
+material traceability, NCR/CAPA, punch list, test pack, dan handover**. Tidak ada
+perubahan source baru setelah commit `89980355`; audit bersifat read-only.
+
+### [ARCH-RISK / DESIGN-GAP — prioritas tinggi] Quality saat ini adalah QC product/batch, belum menjadi quality-control lifecycle proyek EPC
+
+**Kemampuan saat ini.** Modul telah memiliki master test/specification,
+sampling plan, hasil QC per batch, batch release/hold/reject, NCR, CAPA action,
+rework order, dan ringkasan laporan. Ini baseline manufacturing/warehouse yang
+berguna dan tidak boleh hilang.
+
+**Gap/proses yang putus.** Data contract masih berpusat pada `product_id`,
+`batch_id`, dan production `wo_id`. Schema NCR hanya membawa product, batch,
+kategori, severity, deskripsi, reporter/assignee, dan teks CAPA
+([003_quality_tables.sql:19](backend/database/migrations/003_quality_tables.sql));
+tidak ada project, WBS/work package, site/area/tag, drawing/spec revision, ITP,
+inspection record, vendor/PO/GRN, quantity affected, disposition, evidence, atau
+verification/closure authority. Pencarian kedua route Quality juga tidak
+menemukan `project_id`/WBS/ITP/test pack/punch.
+
+Kontrol release yang ada bahkan belum dapat dijadikan quality gate: endpoint
+`POST /batch-release/:id/release` langsung menulis `batches.status='released'`
+tanpa memeriksa required test, failure, hold, status awal, approver, atau
+affected row ([quality.routes.ts:502](backend/src/routes/quality.routes.ts)).
+Layar menampilkan field `tests_passed/tests_failed`, sedangkan API mengirim
+`passed_tests/failed_tests`, sehingga jumlah uji terlihat nol
+([QualityBatchRelease.vue:54](frontend/src/views/QualityBatchRelease.vue),
+[quality.routes.ts:481](backend/src/routes/quality.routes.ts)). Semua endpoint
+mutasi hanya memakai autentikasi umum; risiko RBAC-nya sudah tercakup DR-P1-02,
+tetapi quality gate dan state machine-nya belum pernah ditegakkan.
+
+Tidak ditemukan model Inspection & Test Plan (ITP), inspection request/WIR,
+hold/witness/review point, inspection record/ITR, material receiving inspection,
+site surveillance, punch item, test package, mechanical completion, atau quality
+dossier. NCR/CAPA berdiri sendiri dari engineering document, procurement,
+construction progress, dan turnover.
+
+**Dampak bisnis EPC.** Material/batch dapat dirilis walaupun pengujian wajib
+belum ada atau gagal; keputusan release tidak dapat diaudit. Di proyek, pekerjaan
+dapat diklaim selesai tanpa hold point atau bukti inspeksi, NCR tidak dapat
+menahan work package/progress/payment, dan tim commissioning tidak dapat
+membuktikan kelengkapan test pack/punch/as-built sebelum handover. Vendor quality
+dan cost of poor quality juga tidak dapat ditelusuri ke PO/GRN/project.
+
+**Target design.** Pertahankan QC product/batch sebagai subtype, lalu tambahkan
+quality source of truth lintas proyek:
+
+1. Versioned Project Quality Plan dan ITP per discipline/work package/material,
+   berisi activity, characteristic, acceptance criteria/spec revision,
+   frequency/sample, responsible party, serta hold/witness/review point untuk
+   contractor, EPC, client, dan third party.
+2. Inspection Request/WIR dan ITR yang terikat project + WBS/work package +
+   location/tag + drawing/spec + ITP step; jadwal, peserta, hasil, checklist,
+   measurement, attachment, signature, rejection/reinspection, dan audit trail
+   immutable setelah approval.
+3. Material receiving inspection menghubungkan PO → GRN → batch/heat/serial →
+   certificate/test result → quarantine/release. Release inventory hanya lewat
+   quality disposition yang sah; tidak ada status paralel yang bertentangan.
+4. NCR umum dengan source type (`product_batch`, `site_work`, `vendor`,
+   `engineering_document`, `client`), containment, disposition
+   (use-as-is/repair/rework/reject), concession/deviation, affected quantity,
+   owner/due date, root cause, CAPA, effectiveness verification, dan closure
+   approval. HSE incident tetap domain terpisah seperti desain HSE sebelumnya.
+5. Punch list dan test package mengikat system/subsystem/tag, ITP/ITR/NCR,
+   turnover boundary, category A/B/C, completion evidence, dossier index,
+   as-built, dan acceptance client sampai mechanical completion/commissioning.
+
+**Dependensi dan migrasi.** Bergantung pada fondasi project/WBS/work package dari
+review 15:28, controlled engineering documents dari review 14:37, serta PO/GRN/
+inventory traceability. Jangan mengganti tabel QC lama: migrasikan `qc_ncr`
+menjadi source type `product_batch`, pertahankan nomor/status historis, dan map
+batch release lama ke audit event awal. Tambah foreign key/index dan boot ensure
+idempoten; tabel Quality historis yang hanya ada di file SQL harus masuk jalur
+schema resmi sebagai bagian DR-P1-07.
+
+**Fase/prioritas.** Fase 0 (segera): perbaiki kontrak count UI/API dan gembok
+batch release dengan transaction, row lock, required-test evaluation, RBAC, dan
+audit event. Fase 1: project quality plan + ITP + WIR/ITR + receiving inspection.
+Fase 2: NCR/disposition/CAPA terintegrasi serta vendor quality. Fase 3: punch,
+test pack, mechanical completion, commissioning, dan turnover dossier.
+
+**Acceptance criteria yang dapat diuji:**
+
+1. Batch dengan satu required test hilang/gagal tidak dapat dirilis; dua release
+   paralel menghasilkan tepat satu transition/audit event, dan UI menampilkan
+   count yang sama dengan query database.
+2. Approved ITP revision immutable. Revisi baru tidak mengubah ITR historis dan
+   setiap inspection menunjuk revision acceptance criteria yang dipakai.
+3. Hold point belum signed-off memblokir completion/progress work package;
+   witness yang diwaive memiliki pemberi, alasan, waktu, dan bukti audit.
+4. GRN material traceable sampai PO/vendor/batch/heat/sertifikat/inspection;
+   failed inspection mengarantina stok sehingga allocation/issue menolaknya.
+5. NCR site wajib membawa project/WBS/location/drawing atau spec/ITP source;
+   closure ditolak sebelum seluruh action selesai dan effectiveness diverifikasi
+   oleh role berbeda dari pelaksana.
+6. Test pack tidak bisa `ready_for_turnover` selama ITR wajib, NCR blocking,
+   punch category A, calibration certificate, atau as-built masih kurang; dossier
+   dapat direkonstruksi as-of-date dan diekspor tanpa kehilangan audit trail.
+
+---
+
+## [DEV] Tanggapan DR-P2-01 — Permission key menu — 16 Agustus 2026
+
+**DITERAPKAN.** Diverifikasi mekanis, bukan dipercaya dari daftar: `permKey` di
+`Layout.vue` (47 buah) dibandingkan dengan `SELECT DISTINCT resource FROM
+permissions`. Hasilnya **tepat 10 yang tidak dikenal**, persis daftar Anda.
+
+Yang diselaraskan adalah **menunya, bukan katalognya** — role produksi dipetakan
+ke string di katalog, jadi mengubah katalog akan menciptakan permission yang
+tidak dipegang siapa pun. Kesepuluh target penggantinya diverifikasi ada lebih
+dulu sebelum diterapkan.
+
+Dampak yang Anda tunjuk juga tepat dan bukan sekadar kosmetik: role non-master
+yang **sudah punya** permissionnya tetap kehilangan menu, sementara router hanya
+memeriksa keberadaan token sehingga URL langsung tetap terbuka. UI dan API
+berbeda pendapat, dan yang lebih longgar justru API-nya.
+
+**Penjaga agar tidak drift lagi:** `test:rbac` #8b membaca `permKey` langsung dari
+`Layout.vue` dan mewajibkan semuanya ada di tabel `permissions`. Mismatch semacam
+ini tidak terlihat dari tipe maupun build — hanya dari membandingkan keduanya.
+
+Penjaganya dibuktikan bergigi: satu key sengaja dirusak jadi
+`admin.integration-settings`, tes langsung jatuh **dan menyebut key yang salah**.
+
+> Catatan: saat menguji itu kami menimpa berkas backup sendiri dengan versi yang
+> sudah dirusak, sehingga pemulihannya sempat gagal dan `test:all` merah satu
+> putaran. Ketahuan dari suite, bukan dari asumsi; sudah dikembalikan dan
+> diverifikasi ulang.
+
+test:all 868 lulus / 0 gagal.
