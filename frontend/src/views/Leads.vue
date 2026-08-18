@@ -31,6 +31,26 @@
         </div>
       </div>
 
+      <!-- Modul belum tersambung ke backend — lihat catatan di <script setup>. -->
+      <div class="mb-6 flex gap-3 rounded-lg border border-amber-300 bg-amber-50 p-4">
+        <span class="mt-0.5 text-amber-600" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 8v5" /><path d="M12 17h.01" />
+            <path d="M10.3 3.9 2.4 18a2 2 0 0 0 1.7 3h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+          </svg>
+        </span>
+        <div class="text-sm">
+          <p class="font-semibold text-amber-900">Modul Leads belum tersambung ke server</p>
+          <p class="mt-1 text-amber-800">
+            Layar ini belum memanggil API mana pun. Lead yang ditambah atau diubah di sini
+            hanya tersimpan di browser dan <strong>hilang saat halaman dimuat ulang</strong>.
+            Untuk prospek yang benar-benar tercatat, pakai modul Prospects
+            (<code class="rounded bg-amber-100 px-1">/api/prospects</code>) sampai modul ini dibangun.
+          </p>
+        </div>
+      </div>
+
       <!-- List View -->
       <div v-if="viewMode === 'list'" class="space-y-4">
         <!-- Filters -->
@@ -333,116 +353,22 @@ const newLead = ref({
   source: 'Website'
 });
 
-// Mock leads data
-const leads = ref<Lead[]>([
-  {
-    id: 1,
-    company: 'Sarah Cole',
-    contact_name: 'Sarah Cole',
-    email: 'sarah@example.com',
-    phone: '555-1234',
-    stage: 'New',
-    value: 25000,
-    probability: 10,
-    source: 'Website',
-    created_at: '2026-02-15'
-  },
-  {
-    id: 2,
-    company: 'Louie Ziemann',
-    contact_name: 'Louie Ziemann',
-    email: 'louie@example.com',
-    phone: '555-5678',
-    stage: 'Qualified',
-    value: 35000,
-    probability: 50,
-    source: 'LinkedIn',
-    created_at: '2026-02-10',
-    notes: '50% Probably'
-  },
-  {
-    id: 3,
-    company: 'Gibson PLC',
-    contact_name: 'Gibson Contact',
-    email: 'gibson@example.com',
-    stage: 'Discussion',
-    value: 45000,
-    probability: 90,
-    source: 'Elsewhere',
-    created_at: '2026-02-08',
-    notes: '90% Probably'
-  },
-  {
-    id: 4,
-    company: 'Hegmann-Muller',
-    contact_name: 'Hegmann Contact',
-    email: 'hegmann@example.com',
-    stage: 'Negotiation',
-    value: 55000,
-    probability: 75,
-    source: 'Twitter',
-    created_at: '2026-02-05',
-    notes: 'Call this week'
-  },
-  {
-    id: 5,
-    company: 'Zachery Beahan',
-    contact_name: 'Zachery Beahan',
-    email: 'zachery@example.com',
-    stage: 'Won',
-    value: 65000,
-    probability: 100,
-    source: 'Google',
-    created_at: '2026-01-25'
-  },
-  {
-    id: 6,
-    company: 'Cleveland Feil',
-    contact_name: 'Cleveland Feil',
-    email: 'cleveland@example.com',
-    stage: 'Lost',
-    value: 20000,
-    probability: 0,
-    source: 'Twitter',
-    created_at: '2026-02-01'
-  },
-  {
-    id: 7,
-    company: 'Geraldine Reichel',
-    contact_name: 'Geraldine Reichel',
-    email: 'geraldine@example.com',
-    stage: 'Qualified',
-    value: 30000,
-    probability: 50,
-    source: 'Facebook',
-    created_at: '2026-02-12',
-    notes: '50% Probably'
-  },
-  {
-    id: 8,
-    company: 'Jada Hierow',
-    contact_name: 'Jada Hierow',
-    email: 'jada@example.com',
-    stage: 'Discussion',
-    value: 40000,
-    probability: 90,
-    source: 'Google',
-    created_at: '2026-02-09',
-    notes: '90% Probably'
-  },
-  {
-    id: 9,
-    company: 'Percival Witting',
-    contact_name: 'Percival Witting',
-    email: 'percival@example.com',
-    stage: 'Discussion',
-    value: 50000,
-    probability: 90,
-    source: 'Google',
-    created_at: '2026-02-07',
-    notes: '90% Probably'
-  }
-]);
+/**
+ * Layar ini BELUM terhubung ke backend.
+ *
+ * Sebelumnya di sini ada sembilan baris data karangan ("Sarah Cole",
+ * "sarah@example.com", nilai 25.000) yang tampil di produksi sebagai kalau-kalau
+ * pipeline sungguhan — lengkap dengan total nilai dan probabilitas di ringkasan
+ * atas. Itu berbahaya: angka itu tidak berasal dari mana pun, tapi tidak ada
+ * satu pun penanda di layar yang membedakannya dari data asli.
+ *
+ * Datanya dikosongkan dan diganti pemberitahuan di atas layar. Tidak diisi dari
+ * API karena memang tidak ada yang bisa dipanggil: tabel `leads` tidak ada di
+ * skema dan `/api/leads` tidak terdaftar di `backend/src/index.ts` — modul ini
+ * belum pernah dibangun, bukan sekadar belum disambungkan.
+ */
+const leads = ref<Lead[]>([]);
+
 
 const filteredLeads = computed(() => {
   let result = leads.value;

@@ -357,8 +357,11 @@ const mainMenus: MenuItem[] = [
       { id: 'projects', label: 'Projects', route: '/projects', permKey: 'projects.projects' },
       { id: 'tasks', label: 'Tasks', route: '/project/tasks', permKey: 'projects.tasks' },
       { id: 'leads', label: 'Leads', route: '/leads', permKey: 'projects.leads' },
-      { id: 'prospects', label: 'Prospects', route: '/project/prospects', permKey: 'projects.prospects' },
-      { id: 'notes', label: 'Notes', route: '/project/notes', permKey: 'projects.notes' },
+      // 'Prospects' (/project/prospects) dan 'Notes' (/project/notes) dicabut dari
+      // menu: keduanya tidak punya route di router/index.ts dan tidak punya file
+      // view sama sekali, jadi mengkliknya hanya memberi area konten kosong.
+      // Backend-nya sudah ada (`/api/prospects`, `/api/notes`) — layarnya yang
+      // belum pernah dibuat. Pasang lagi entri ini begitu view-nya ada.
       { id: 'team', label: 'Team', route: '/users', permKey: 'projects.team' },
     ]
   },

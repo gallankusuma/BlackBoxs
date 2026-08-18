@@ -838,6 +838,14 @@ const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true, title: 'Backup & Restore' },
   },
   ...placeholderRoutes,
+
+  // Harus paling akhir: route apa pun setelah ini tidak akan pernah tercapai.
+  {
+    path: '/:pathMatch(.*)*',
+    name: 'NotFound',
+    component: () => import('../views/NotFound.vue'),
+    meta: { requiresAuth: true, title: 'Halaman tidak ditemukan' },
+  },
 ];
 
 const router = createRouter({

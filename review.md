@@ -3446,6 +3446,70 @@ opportunity dalam satu transaction, mengisi target ID, dan menolak delete setela
 handoff. Tambah test reload persistence, double-convert paralel, failure rollback,
 dan navigation route.
 
+**[DEV] SEBAGIAN DITERAPKAN — sisanya PERLU KLARIFIKASI.** Semua bukti terverifikasi,
+dan satu di antaranya lebih luas dari yang dilaporkan. Ringkasnya: bagian yang
+merupakan **cacat** sudah diperbaiki; bagian yang merupakan **fitur belum dibangun**
+tidak saya bangun diam-diam, karena itu keputusan produk, bukan remediasi review.
+
+*Satu koreksi atas temuan:* tujuan konversi tidak bisa berupa lead. **Tabel `leads`
+tidak ada di skema** — saya periksa INFORMATION_SCHEMA di dev maupun produksi, dan
+`/api/leads` juga tidak terdaftar di `backend/src/index.ts`. Jadi `converted_to_lead_id`
+adalah kolom tanpa tabel tujuan dan tidak mungkin diisi. Yang tersedia dan memang
+disiapkan untuk ini: `clients` + `contacts` + `prospects.converted_to_client_id`.
+
+**Diterapkan:**
+
+1. **Konversi sungguh membuat object hilir** — [prospects.routes.ts](backend/src/routes/prospects.routes.ts).
+   Endpoint kanoniknya sekarang `POST /prospects/:id/convert-to-client`; nama lama
+   `convert-to-lead` dipertahankan sebagai alias supaya pemanggil yang sudah live
+   tidak putus. Satu transaction: kunci prospect `FOR UPDATE` → buat `clients` →
+   pindahkan PIC ke `contacts` (prospect punya email, `clients` tidak punya kolom
+   email — tanpa langkah ini email dan nama PIC hilang saat konversi) → set
+   `clients.primary_contact_id` → isi `converted_to_client_id`. Konversi kedua
+   ditolak 400 `ALREADY_CONVERTED` sambil menunjuk client yang sudah ada.
+2. **Balapan konversi ditutup.** Pemeriksaan status dilakukan **di dalam** kunci
+   baris. Terukur: dengan dua permintaan `Promise.all` pada versi lama, **keduanya
+   berhasil dan membuat dua client untuk satu prospect**.
+3. **Nomor `PSP-`/`BUY-` jadi atomic** lewat `document_counters`. Keduanya kolom
+   UNIQUE dan generatornya baca-lalu-tambah-satu, jadi dua pembuatan bersamaan
+   jatuh sebagai ER_DUP_ENTRY yang sampai ke pengguna sebagai 500 tanpa penjelasan.
+4. **Data karangan dicabut dari layar Leads** — [Leads.vue](frontend/src/views/Leads.vue).
+   Sembilan baris fiktif ("Sarah Cole", `sarah@example.com`, nilai 25.000) tampil di
+   produksi lengkap dengan total nilai dan probabilitas di ringkasan, tanpa satu pun
+   penanda yang membedakannya dari data asli. Diganti keadaan kosong + pemberitahuan
+   tegas bahwa layar ini belum tersambung dan perubahannya tidak tersimpan.
+5. **Dua tautan menu mati dicabut** — [Layout.vue](frontend/src/components/Layout.vue).
+   Reviewer menemukan `/project/prospects`; audit menyeluruh 53 tautan sidebar
+   terhadap 132 route menemukan **`/project/notes` juga mati**. Backend keduanya ada
+   (`/api/prospects`, `/api/notes`), view-nya tidak pernah dibuat.
+6. **Route catch-all 404** — [NotFound.vue](frontend/src/views/NotFound.vue) + router.
+   Inilah sebabnya dua tautan mati itu bisa bertahan lama: tanpa catch-all,
+   `<router-view>` merender kosong dan kegagalannya senyap. Sekarang alamatnya
+   disebutkan supaya bisa dilaporkan.
+7. Merek asing `X-Lerate` yang tertinggal di [PlaceholderPage.vue](frontend/src/views/PlaceholderPage.vue) diganti BlackBox EPC.
+
+**Tes:** [backend/tests/prospects.ts](backend/tests/prospects.ts) — 28 assertion,
+masuk `test:all`. Data ujinya dibuat dan dibersihkan sendiri, termasuk saat ada
+assertion yang gagal di tengah. Dibuktikan bergigi: perilaku lama dikembalikan
+sementara → **13 gagal**, di antaranya "tepat satu berhasil → dapat 2". Suite penuh
+sesudah perbaikan: **1015 lulus, 0 gagal**.
+
+**PERLU KLARIFIKASI — tidak saya kerjakan tanpa keputusan Anda:**
+
+- **UI operasional untuk `prospects` dan `notes`.** Backend-nya lengkap (list,
+  stats, CRUD, convert) tapi layarnya belum pernah ada. Membangunnya adalah fitur
+  baru, bukan perbaikan review. Mau saya bangun?
+- **Nasib modul Leads.** Ia tidak bisa disambungkan — tidak ada tabel maupun API.
+  Pilihannya: (a) bangun modul Leads sungguhan, (b) hapus layar + menunya dan
+  arahkan ke Prospects yang sudah berfungsi, atau (c) biarkan dengan pemberitahuan
+  seperti sekarang.
+- **Rekomendasi "menolak delete setelah handoff"** belum saya pasang. `DELETE /prospects/:id`
+  saat ini menghapus permanen tanpa memeriksa status. Saya tahan karena begitu
+  konversi mengisi `converted_to_client_id`, menolak delete akan mengubah perilaku
+  yang mungkin sedang dipakai. Pasang?
+- **Opportunity/tender** dalam transaction konversi sengaja dilewati — objectnya
+  memang belum ada, dan itu justru pokok temuan DESIGN-GAP tepat di bawah ini.
+
 ### [DESIGN-GAP / ARCH-RISK — prioritas tinggi] Belum ada tender/opportunity lifecycle yang mengikat CRM ke estimate, proposal, dan contract win/loss
 
 **Kemampuan saat ini.** Backend Prospect sudah menyimpan company/contact, source,
