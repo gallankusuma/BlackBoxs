@@ -1,0 +1,213 @@
+import 'dotenv/config';
+/**
+ * Tes integritas komersial proposal.
+ *
+ * Tiga bug yang dibuktikan:
+ *
+ * 1. `qty` diterima tanpa validasi. `qty || 0` dan `parseFloat(qty) || 0`
+ *    meneruskan `-1` apa adanya lalu mengalikannya dengan harga snapshot —
+ *    line total dan `total_project` menjadi negatif. `"abc"` dan `Infinity`
+ *    diam-diam menjadi 0 tanpa ada yang tahu nilainya pernah salah.
+ * 2. Transisi status hanya memeriksa pasangan state. Tidak ada invarian bahwa
+ *    proposal punya isi komersial yang masuk akal, jadi penawaran bernilai nol
+ *    atau negatif bisa di-submit lalu di-deal, dan nilainya disalin apa adanya
+ *    menjadi `client_projects.budget`.
+ * 3. `recalculateProposal()` menetapkan overhead dan contingency ke 0 lalu
+ *    MENULIS ULANG nol itu ke database setiap satu baris berubah — nilai hasil
+ *    migrasi/import/perbaikan manual terhapus begitu operator mengubah satu
+ *    quantity, dan total penawaran hanya bisa sama dengan direct cost.
+ *
+ * Prasyarat: backend jalan. Jalankan: npm run test:proposal-commercial
+ */
+const API = process.env.API || 'http://localhost:3005/api';
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'master@admin.com';
+const ADMIN_PASS = process.env.ADMIN_PASS || process.env.MASTER_PASSWORD || 'master';
+
+let pass = 0, fail = 0;
+const chk = (label: string, actual: unknown, expected: unknown) => {
+  if (actual === expected) { pass++; console.log(`  ok   ${label} → ${JSON.stringify(actual)}`); }
+  else { fail++; console.log(`  FAIL ${label} → dapat ${JSON.stringify(actual)}, harusnya ${JSON.stringify(expected)}`); }
+};
+
+async function call(method: string, path: string, body?: unknown, token?: string) {
+  const res = await fetch(`${API}${path}`, {
+    method,
+    headers: {
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  const text = await res.text();
+  let json: any = null;
+  try { json = JSON.parse(text); } catch { /* bukan JSON */ }
+  return { status: res.status, json, text };
+}
+
+const sen = (v: unknown) => Math.round(Number(v || 0) * 100);
+
+async function main() {
+  const stamp = Date.now().toString().slice(-7);
+  const bersihkan: Array<() => Promise<unknown>> = [];
+
+  console.log('0. Persiapan');
+  const master: string = (await call('POST', '/auth/login', { email: ADMIN_EMAIL, password: ADMIN_PASS })).json?.token;
+  if (!master) { console.log('  FAIL login master'); process.exit(1); }
+  pass++; console.log('  ok   login master');
+
+  const { dbRun, dbGet } = await import('../src/config/database');
+
+  try {
+    const ahsp = await call('POST', '/estimator/ahsp', {
+      kode: `TEST-KOM-${stamp}`, name: `AHSP Komersial ${stamp}`, satuan: 'm3',
+      items: [{ section: 'B', resource_type: 'material', resource_name: 'Beton',
+                resource_satuan: 'm3', koefisien: 1, resource_harga: 1000000 }],
+    }, master);
+    chk('AHSP uji dibuat', ahsp.status, 201);
+    const ahspId = ahsp.json?.id;
+
+    // Deal membuat project, dan project mensyaratkan client — proposal tanpa
+    // client gagal di transisi deal (perilaku lama, sudah diuji di mto-link
+    // bagian 33). Fixture di sini karena itu harus punya client.
+    const klien = await call('POST', '/clients',
+      { name: `PT Uji Komersial ${stamp}`, client_type: 'buyer' }, master);
+    const klienId = klien.json?.id;
+    chk('client uji dibuat', klien.status, 201);
+    bersihkan.push(() => call('DELETE', `/clients/${klienId}`, undefined, master));
+
+    const buatProposal = async (nama: string) => {
+      const r = await call('POST', '/estimator/proposals',
+        { project_name: nama, status: 'draft', client_id: klienId }, master);
+      const id = r.json?.id ?? r.json?.data?.id;
+      bersihkan.push(() => call('DELETE', `/estimator/proposals/${id}`, undefined, master));
+      return id;
+    };
+    const header = async (id: number) => {
+      const r = await call('GET', `/estimator/proposals/${id}`, undefined, master);
+      return (r.json?.data ?? r.json) as any;
+    };
+
+    // ── 1. qty tidak valid ditolak di POST ─────────────────────────────────
+    console.log('\n1. POST item menolak qty tidak valid');
+    const p1 = await buatProposal(`Komersial A ${stamp}`);
+    // Catatan: `1e400` TIDAK bisa dipakai di sini — JSON.stringify mengubah
+    // Infinity menjadi `null`, jadi yang sampai ke server bukan Infinity sama
+    // sekali. Yang menguji jalur itu adalah string "Infinity", yang diurai
+    // Number() menjadi Infinity di sisi server.
+    for (const [label, nilai] of [['negatif', -1], ['NaN', 'abc'], ['Infinity', 'Infinity']] as const) {
+      const r = await call('POST', `/estimator/proposals/${p1}/items`,
+        { ahsp_id: ahspId, qty: nilai }, master);
+      chk(`qty ${label} ditolak`, r.status, 400);
+      chk(`kodenya QTY_TIDAK_VALID (${label})`, r.json?.code, 'QTY_TIDAK_VALID');
+    }
+    chk('qty melebihi batas ditolak',
+      (await call('POST', `/estimator/proposals/${p1}/items`,
+        { ahsp_id: ahspId, qty: 2_000_000_000 }, master)).status, 400);
+
+    console.log('\n2. qty sah tetap diterima, termasuk nol pada draft');
+    chk('qty 0 diterima (draft boleh belum lengkap)',
+      (await call('POST', `/estimator/proposals/${p1}/items`, { ahsp_id: ahspId, qty: 0 }, master)).status, 201);
+    chk('qty pecahan diterima',
+      (await call('POST', `/estimator/proposals/${p1}/items`, { ahsp_id: ahspId, qty: 2.5 }, master)).status, 201);
+    chk('total_project positif', sen((await header(p1)).total_project), sen(2.5 * 1100000));
+
+    // ── 3. qty tidak valid ditolak di PUT ───────────────────────────────────
+    console.log('\n3. PUT item menolak qty negatif dan tidak mengubah apa pun');
+    const items = await call('GET', `/estimator/proposals/${p1}/items`, undefined, master);
+    const daftar: any[] = items.json?.data ?? items.json ?? [];
+    const itemQty25 = daftar.find(i => Number(i.qty) === 2.5);
+    chk('item qty 2,5 ditemukan', !!itemQty25, true);
+
+    const sebelum = await header(p1);
+    const putNeg = await call('PUT', `/estimator/proposals/${p1}/items/${itemQty25.id}`, { qty: -5 }, master);
+    chk('PUT qty negatif ditolak', putNeg.status, 400);
+    chk('kodenya QTY_TIDAK_VALID', putNeg.json?.code, 'QTY_TIDAK_VALID');
+    chk('total tidak berubah', sen((await header(p1)).total_project), sen(sebelum.total_project));
+
+    // ── 4. Gerbang submit: proposal kosong ─────────────────────────────────
+    console.log('\n4. Proposal tanpa item tidak bisa disubmit');
+    const pKosong = await buatProposal(`Komersial kosong ${stamp}`);
+    await call('PUT', `/estimator/proposals/${pKosong}/status`, { status: 'review' }, master);
+    const submitKosong = await call('PUT', `/estimator/proposals/${pKosong}/status`, { status: 'submitted' }, master);
+    chk('submit proposal kosong ditolak', submitKosong.status, 400);
+    chk('kodenya PROPOSAL_BELUM_LAYAK', submitKosong.json?.code, 'PROPOSAL_BELUM_LAYAK');
+    chk('alasannya disebutkan', (submitKosong.json?.pelanggaran || []).length > 0, true);
+    chk('statusnya tetap review', (await header(pKosong)).status, 'review');
+
+    // ── 5. Gerbang submit: nilai nol ───────────────────────────────────────
+    console.log('\n5. Proposal bernilai nol tidak bisa disubmit');
+    const pNol = await buatProposal(`Komersial nol ${stamp}`);
+    await call('POST', `/estimator/proposals/${pNol}/items`, { ahsp_id: ahspId, qty: 0 }, master);
+    chk('nilainya memang nol', sen((await header(pNol)).total_project), 0);
+    await call('PUT', `/estimator/proposals/${pNol}/status`, { status: 'review' }, master);
+    const submitNol = await call('PUT', `/estimator/proposals/${pNol}/status`, { status: 'submitted' }, master);
+    chk('submit bernilai nol ditolak', submitNol.status, 400);
+    chk('alasan menyebut nilai penawaran',
+      (submitNol.json?.pelanggaran || []).some((x: string) => x.toLowerCase().includes('nilai penawaran')), true);
+
+    // ── 6. Proposal sehat tetap bisa lewat ─────────────────────────────────
+    console.log('\n6. Proposal yang sehat tetap bisa submit sampai deal');
+    const pSehat = await buatProposal(`Komersial sehat ${stamp}`);
+    await call('POST', `/estimator/proposals/${pSehat}/items`, { ahsp_id: ahspId, qty: 4 }, master);
+    await call('PUT', `/estimator/proposals/${pSehat}/status`, { status: 'review' }, master);
+    chk('submit berhasil',
+      (await call('PUT', `/estimator/proposals/${pSehat}/status`, { status: 'submitted' }, master)).status, 200);
+    const deal = await call('PUT', `/estimator/proposals/${pSehat}/status`, { status: 'deal' }, master);
+    chk('deal berhasil', deal.status, 200);
+    // Budget project tidak boleh nol/negatif — inilah nilai yang mengalir ke hilir.
+    const proj: any = await dbGet('SELECT budget FROM client_projects WHERE proposal_id = ?', [pSehat]);
+    chk('budget project positif', Number(proj?.budget) > 0, true);
+    chk('budget = total proposal', sen(proj?.budget), sen((await header(pSehat)).total_project));
+
+    // ── 7. Overhead & contingency bertahan setelah recalculate ─────────────
+    console.log('\n7. Overhead dan contingency tidak dihapus oleh perubahan baris');
+    const pOh = await buatProposal(`Komersial overhead ${stamp}`);
+    await call('POST', `/estimator/proposals/${pOh}/items`, { ahsp_id: ahspId, qty: 10 }, master);
+    const directAwal = Number((await header(pOh)).direct_cost);
+    chk('direct cost terisi', directAwal > 0, true);
+
+    // Nilai komersial diisi langsung ke database: sampai hari ini memang belum
+    // ada endpoint untuk menyetelnya — itu bagian yang saya tandai PERLU
+    // KLARIFIKASI. Yang diuji di sini: begitu nilainya ADA, ia harus bertahan.
+    await dbRun('UPDATE proposals SET overhead = ?, risk_contingency = ? WHERE id = ?',
+      [5_000_000, 2_500_000, pOh]);
+
+    // Satu perubahan baris memicu recalculate — di sinilah nilainya dulu hilang.
+    const it = await call('GET', `/estimator/proposals/${pOh}/items`, undefined, master);
+    const itemOh = (it.json?.data ?? it.json ?? [])[0];
+    chk('ubah qty berhasil',
+      (await call('PUT', `/estimator/proposals/${pOh}/items/${itemOh.id}`, { qty: 11 }, master)).status, 200);
+
+    const sesudah = await header(pOh);
+    chk('overhead bertahan', sen(sesudah.overhead), sen(5_000_000));
+    chk('contingency bertahan', sen(sesudah.risk_contingency), sen(2_500_000));
+    chk('total = direct + overhead + contingency',
+      sen(sesudah.total_project),
+      sen(Number(sesudah.direct_cost) + 5_000_000 + 2_500_000));
+    chk('total lebih besar dari direct cost', Number(sesudah.total_project) > Number(sesudah.direct_cost), true);
+
+    // Menambah item baru juga memicu recalculate.
+    await call('POST', `/estimator/proposals/${pOh}/items`, { ahsp_id: ahspId, qty: 1 }, master);
+    const sesudah2 = await header(pOh);
+    chk('overhead masih bertahan setelah tambah item', sen(sesudah2.overhead), sen(5_000_000));
+    chk('contingency masih bertahan setelah tambah item', sen(sesudah2.risk_contingency), sen(2_500_000));
+
+    // Dan proposal dengan overhead tetap lolos gerbang (header rekonsiliasi).
+    await call('PUT', `/estimator/proposals/${pOh}/status`, { status: 'review' }, master);
+    chk('proposal dengan overhead lolos submit',
+      (await call('PUT', `/estimator/proposals/${pOh}/status`, { status: 'submitted' }, master)).status, 200);
+
+  } finally {
+    console.log('\n8. Bersih-bersih');
+    let sisa = 0;
+    for (const hapus of bersihkan.reverse()) {
+      try { await hapus(); } catch { sisa++; }
+    }
+    chk('data uji dibersihkan', sisa >= 0, true);
+  }
+
+  console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
+  process.exit(fail ? 1 : 0);
+}
+
+main().catch(err => { console.error('Tes gagal dijalankan:', err.message); process.exit(1); });

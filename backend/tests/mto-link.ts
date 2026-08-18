@@ -53,8 +53,45 @@ async function main() {
   // Butuh AHSP bersatuan m3 sebagai dasar item RAB
   const ahsp = await call('POST', '/estimator/ahsp', {
     kode: `TST.${stamp}`, name: `Galian Tanah Uji ${stamp}`, satuan: 'm3', status: 'active',
+    // AHSP tanpa item berharga_satuan 0, sehingga proposalnya bernilai nol dan
+    // tidak lagi lolos gerbang submit/deal — penawaran tak bernilai memang
+    // tidak boleh menjadi kontrak. Fixture diberi harga supaya realistis.
+    items: [{ section: 'B', resource_type: 'material', resource_name: 'Bahan',
+              resource_satuan: 'm3', koefisien: 1, resource_harga: 500000 }],
   }, master);
   const ahspId = ahsp.json?.id ?? ahsp.json?.data?.id;
+
+  /**
+   * Beri proposal nilai komersial sebelum di-submit atau di-deal.
+   *
+   * Gerbang komersial menolak penawaran bernilai nol — penawaran tanpa nilai
+   * memang tidak boleh dikirim ke pelanggan apalagi menjadi kontrak. Fixture
+   * yang hanya berisi elemen MTO tanpa item RAB berharga karena itu perlu satu
+   * baris bernilai lebih dulu, dan itu justru membuatnya lebih menyerupai
+   * proposal sungguhan.
+   */
+  const pastikanBernilai = async (pid: any) => {
+    await call('POST', `/estimator/proposals/${pid}/items`, { ahsp_id: ahspId, qty: 1 }, master);
+  };
+
+  /**
+   * Beri nilai TANPA material — untuk fixture yang menguji handoff `skipped`.
+   *
+   * `pastikanBernilai` memakai AHSP bermaterial, sehingga handoff-nya justru
+   * menghasilkan PR dan bukan `skipped`. Yang dibutuhkan di sana adalah proposal
+   * yang bernilai (agar lolos gerbang komersial) tapi tidak memuat satu pun
+   * barang yang perlu dibeli.
+   */
+  const ahspTenaga = await call('POST', '/estimator/ahsp', {
+    kode: `TSTL.${stamp}`, name: `Upah Uji ${stamp}`, satuan: 'ls', status: 'active',
+    items: [{ section: 'A', resource_type: 'labor', resource_name: 'Tukang',
+              resource_satuan: 'OH', koefisien: 1, resource_harga: 400000 }],
+  }, master);
+  const pastikanBernilaiTanpaMaterial = async (pid: any) => {
+    await call('POST', `/estimator/proposals/${pid}/items`,
+      { ahsp_id: ahspTenaga.json?.id ?? ahspTenaga.json?.data?.id, qty: 1 }, master);
+  };
+
   chk('AHSP uji dibuat', !!ahspId, true);
 
   const item = await call('POST', `/estimator/proposals/${propId}/items`, { ahsp_id: ahspId, qty: 1 }, master);
@@ -104,6 +141,7 @@ async function main() {
   console.log('\n5. Proposal terkunci setelah submitted (EST-MTO-016)');
   // Transisi statusnya bertahap: draft → review → submitted
   await call('PUT', `/estimator/proposals/${propId}/status`, { status: 'review' }, master);
+  await pastikanBernilai(propId);
   const toSubmitted = await call('PUT', `/estimator/proposals/${propId}/status`, { status: 'submitted' }, master);
   chk('proposal jadi submitted', toSubmitted.status, 200);
   const blocked = await call('POST', `/estimator/proposals/${propId}/mto`, {
@@ -198,6 +236,11 @@ async function main() {
   }, master);
   const ahspCol = await call('POST', '/estimator/ahsp', {
     kode: `TSTC.${stamp}`, name: `Beton Kolom Uji ${stamp}`, satuan: 'm3', status: 'active',
+    // AHSP tanpa item berharga_satuan 0, sehingga proposalnya bernilai nol dan
+    // tidak lagi lolos gerbang submit/deal — penawaran tak bernilai memang
+    // tidak boleh menjadi kontrak. Fixture diberi harga supaya realistis.
+    items: [{ section: 'B', resource_type: 'material', resource_name: 'Bahan',
+              resource_satuan: 'm3', koefisien: 1, resource_harga: 500000 }],
   }, master);
   const itemCol = await call('POST', `/estimator/proposals/${sid}/items`, { ahsp_id: ahspCol.json?.id, qty: 1 }, master);
   await call('PUT', `/estimator/proposals/${sid}/items/${itemCol.json?.id}/mto-link`,
@@ -220,6 +263,7 @@ async function main() {
 
   console.log('\n12. Proposal terkunci mengunci RAB juga (EST-MTO-R18)');
   await call('PUT', `/estimator/proposals/${pid}/status`, { status: 'review' }, master);
+  await pastikanBernilai(pid);
   await call('PUT', `/estimator/proposals/${pid}/status`, { status: 'submitted' }, master);
   chk('tambah item RAB ditolak',
     (await call('POST', `/estimator/proposals/${pid}/items`, { ahsp_id: ahspNet.json?.id, qty: 1 }, master)).status, 409);
@@ -301,6 +345,7 @@ async function main() {
     items: [{ section: 'B', resource_type: 'material', resource_name: 'Beton', resource_satuan: 'm3', koefisien: 1, resource_harga: 500000 }],
   }, master);
   const itemDeal = await call('POST', `/estimator/proposals/${dealId}/items`, { ahsp_id: ahspDeal.json?.id, qty: 2 }, master);
+  await pastikanBernilai(dealId);
   for (const st of ['review', 'submitted', 'deal']) {
     await call('PUT', `/estimator/proposals/${dealId}/status`, { status: st }, master);
   }
@@ -497,6 +542,7 @@ async function main() {
     parameters: { slab_type: 'concrete', area: 100, thickness: 0.12 },
   }, master);
   await call('PUT', `/estimator/proposals/${lId}/status`, { status: 'review' }, master);
+  await pastikanBernilai(lId);
   await call('PUT', `/estimator/proposals/${lId}/status`, { status: 'submitted' }, master);
 
   chk('POST MTO pada proposal submitted ditolak',
@@ -550,6 +596,7 @@ async function main() {
   chk('item template masuk', (Array.isArray(rowsT.json) ? rowsT.json : []).length > 0, true);
 
   await call('PUT', `/estimator/proposals/${tId}/status`, { status: 'review' }, master);
+  await pastikanBernilai(tId);
   await call('PUT', `/estimator/proposals/${tId}/status`, { status: 'submitted' }, master);
   chk('template pada proposal submitted ditolak',
     (await call('POST', `/estimator/proposals/${tId}/apply-template`, {
@@ -573,6 +620,7 @@ async function main() {
   const barisProposal = (sebelumDeal.json?.elements?.[0]?.stored_lines || []).length;
   chk('proposal punya baris tersimpan', barisProposal > 0, true);
 
+  await pastikanBernilai(d2);
   for (const st of ['review', 'submitted', 'deal']) {
     await call('PUT', `/estimator/proposals/${d2}/status`, { status: st }, master);
   }
@@ -590,6 +638,7 @@ async function main() {
   const propNoClient = await call('POST', '/estimator/proposals',
     { project_name: `Uji rollback deal ${stamp}` }, master);
   const ncId = propNoClient.json?.id;
+  await pastikanBernilai(ncId);
   for (const st of ['review', 'submitted']) {
     await call('PUT', `/estimator/proposals/${ncId}/status`, { status: st }, master);
   }
@@ -614,6 +663,7 @@ async function main() {
     const propDealRace = await call('POST', '/estimator/proposals',
       { project_name: `Uji race deal ${stamp}-${i}`, client_id: klienId }, master);
     const rcId = propDealRace.json?.id;
+    await pastikanBernilai(rcId);
     for (const st of ['review', 'submitted']) {
       await call('PUT', `/estimator/proposals/${rcId}/status`, { status: st }, master);
     }
@@ -649,6 +699,7 @@ async function main() {
       { project_name: `Uji nomor ${stamp}-${i}`, client_id: klienId }, master);
     const id = pr.json?.id;
     raceIds.push(id);
+    await pastikanBernilai(id);
     for (const st of ['review', 'submitted']) {
       await call('PUT', `/estimator/proposals/${id}/status`, { status: st }, master);
     }
@@ -682,6 +733,7 @@ async function main() {
   await call('PUT', `/estimator/proposals/${unlId}/items/${itUnlId}/mto-link`, {
     element_id: elUnl.json?.id, line_code: 'FND-EXCV', unit: 'm3',
   }, master);
+  await pastikanBernilai(unlId);
   for (const st of ['review', 'submitted']) {
     await call('PUT', `/estimator/proposals/${unlId}/status`, { status: st }, master);
   }
@@ -734,6 +786,7 @@ async function main() {
     element_type: 'foundation', element_name: 'P1',
     parameters: { L: 1, W: 1, H: 0.3, depth: 1.2, qty: 12, waste_pct: 5 },
   }, master);
+  await pastikanBernilai(ktrId);
   for (const st of ['review', 'submitted']) {
     await call('PUT', `/estimator/proposals/${ktrId}/status`, { status: st }, master);
   }
@@ -791,6 +844,7 @@ async function main() {
   // sekarang di dalam transaction dengan row lock.
   const propUjiHapus = await call('POST', '/estimator/proposals', { project_name: `Uji hapus ${stamp}` }, master);
   const hapusId = propUjiHapus.json?.id;
+  await pastikanBernilai(hapusId);
   for (const st of ['review', 'submitted']) {
     await call('PUT', `/estimator/proposals/${hapusId}/status`, { status: st }, master);
   }
@@ -806,6 +860,7 @@ async function main() {
   const propHo = await call('POST', '/estimator/proposals',
     { project_name: `Uji handoff ${stamp}`, client_id: klienId }, master);
   const hoId = propHo.json?.id;
+  await pastikanBernilaiTanpaMaterial(hoId);
   for (const st of ['review', 'submitted']) {
     await call('PUT', `/estimator/proposals/${hoId}/status`, { status: st }, master);
   }
@@ -836,6 +891,7 @@ async function main() {
   const propTerm = await call('POST', '/estimator/proposals',
     { project_name: `Uji terminal ${stamp}`, client_id: klienId }, master);
   const termId = propTerm.json?.id;
+  await pastikanBernilai(termId);
   for (const st of ['review', 'submitted', 'deal']) {
     await call('PUT', `/estimator/proposals/${termId}/status`, { status: st }, master);
   }
@@ -869,6 +925,7 @@ async function main() {
     parameters: { L: 1, W: 1, H: 0.3, depth: 1.2, qty: 12, waste_pct: 5 },
   }, master);
   const elId = elKontrak.json?.id;
+  await pastikanBernilai(kId);
   for (const st of ['review', 'submitted', 'deal']) {
     await call('PUT', `/estimator/proposals/${kId}/status`, { status: st }, master);
   }
@@ -904,6 +961,7 @@ async function main() {
   const propBase = await call('POST', '/estimator/proposals',
     { project_name: `Uji baseline link ${stamp}`, client_id: klienId }, master);
   const baseId = propBase.json?.id;
+  await pastikanBernilai(baseId);
   for (const st of ['review', 'submitted', 'deal']) {
     await call('PUT', `/estimator/proposals/${baseId}/status`, { status: st }, master);
   }
@@ -939,6 +997,7 @@ async function main() {
     element_type: 'foundation', element_name: 'P1',
     parameters: { L: 1, W: 1, H: 0.3, depth: 1.2, qty: 12, waste_pct: 5 },
   }, master);
+  await pastikanBernilai(srcId);
   for (const st of ['review', 'submitted', 'deal']) {
     await call('PUT', `/estimator/proposals/${srcId}/status`, { status: st }, master);
   }

@@ -5330,6 +5330,78 @@ harus membaca policy tersimpan dan idempoten; recalculate tidak boleh mengubah
 input komersial menjadi nol. Draft boleh mempunyai item belum lengkap, tetapi
 `submit/issue/deal` wajib melewati validator dan reconciliation gate yang sama.
 
+**[DEV] DITERAPKAN untuk ketiga jalur korupsi; "Target design" ditandai PERLU
+KLARIFIKASI.** Ketiga bukti terverifikasi, termasuk bahwa memang **tidak ada satu
+pun endpoint** yang bisa menyetel overhead/contingency.
+
+1. **Validasi qty** ([estimator.routes.ts](backend/src/routes/estimator.routes.ts)):
+   POST dan PUT kini menolak nilai tidak berhingga, negatif, dan di atas batas
+   wajar dengan 400 `QTY_TIDAK_VALID`. **Nol tetap diterima** — baris
+   berkuantitas nol adalah keadaan sah pada draft yang belum lengkap; yang
+   dijaga di gerbang adalah totalnya, bukan tiap baris, sesuai pembagian yang
+   Anda usulkan sendiri. Line total juga dibulatkan lewat `bulatUang`.
+2. **Gerbang komersial** sebelum `submitted` dan `deal`: proposal wajib punya
+   item, tanpa qty/harga/total negatif, bernilai lebih dari nol, dan headernya
+   harus rekonsiliasi dengan penjumlahan baris **dan** dengan
+   direct + overhead + contingency. Ditolak 400 `PROPOSAL_BELUM_LAYAK` yang
+   menyebut **semua** pelanggaran sekaligus, supaya estimator tidak menemukannya
+   satu per satu lewat percobaan berulang. Draft dan review sengaja dibiarkan
+   longgar.
+3. **`recalculateProposal` berhenti menghapus input komersial**: overhead dan
+   contingency dibaca kembali dari baris proposal dan dipertahankan;
+   `total_project = direct + overhead + contingency`.
+
+**Dampak pada data produksi — diperiksa sebelum memasang gerbang.** Ketiga
+proposal produksi berstatus `draft`, jadi tidak ada yang terhalang hari ini.
+Yang perlu Anda tahu: **`PROP/2026/0004` punya 61 item tetapi `total_project`
+0,00**. Begitu seseorang mencoba mengirimnya, ia sekarang akan ditolak dengan
+penjelasan bahwa nilainya nol. Itu memang perilaku yang diminta, tapi saya
+sebutkan supaya tidak muncul sebagai kejutan. Tidak ada qty negatif di produksi
+(`MIN(qty) = 0` pada ketiganya), dan overhead/contingency semuanya masih 0 —
+artinya perbaikan (3) tidak mengubah angka apa pun hari ini, ia hanya berhenti
+menghancurkan nilai yang kelak diisi.
+
+**Tes:** [backend/tests/proposal-commercial.ts](backend/tests/proposal-commercial.ts)
+— 38 assertion, masuk `test:all`. Dibuktikan bergigi: ketiga perilaku lama
+dikembalikan sementara → **20 gagal**, dan buktinya gamblang, bukan sekadar kode
+status: `total tidak berubah → dapat -660000000` (total negatif benar-benar
+terwujud), `statusnya tetap review → dapat "submitted"` (proposal kosong
+berhasil dikirim), dan `overhead bertahan → dapat 0` (nilai tersimpan terhapus).
+
+**Efek samping pada suite yang justru memperbaiki tesnya sendiri:** gerbang baru
+membuat **44 assertion di `mto-link.ts` gagal**. Penyebabnya bukan gerbangnya —
+fixture di sana membuat AHSP tanpa komponen harga, sehingga proposalnya bernilai
+nol, lalu men-submit dan men-deal-nya. Dengan kata lain suite itu selama ini
+membuktikan bahwa penawaran tak bernilai bisa menjadi kontrak. Fixture-nya
+diberi harga (dan satu fixture khusus diberi nilai **tanpa material**, supaya
+pengujian handoff `skipped` tetap sah). Sekarang 190/190 lagi, dan lebih
+menyerupai keadaan sebenarnya.
+
+Frontend: input qty diberi `min="0"`, dan `updateItemQty` tidak lagi menelan
+kegagalan ke console — nilai yang ditolak server dulu tetap terpampang seolah
+tersimpan, dan estimator melanjutkan pekerjaan di atas angka yang tidak pernah
+ada di database.
+
+Suite penuh: **1187 lulus, 0 gagal**.
+
+**PERLU KLARIFIKASI:**
+
+- **Belum ada cara menyetel overhead/contingency.** Perbaikan (3) membuat nilai
+  itu bertahan, tapi selama tidak ada endpoint maupun kolom input di layar,
+  ia hanya bisa diisi lewat database. Membangun jalurnya berarti menentukan
+  modelnya lebih dulu — markup per baris atau per proyek, urutan penerapan
+  terhadap contingency, perlakuan diskon dan pajak. Mau saya bangun bentuk
+  sederhananya (dua angka di header proposal, terkunci mengikuti status), atau
+  menunggu model pricing yang penuh?
+- **"Target design" pricing breakdown kanonik per revision** (markup, discount,
+  tax treatment, currency/rate policy) saya perlakukan sebagai pekerjaan desain,
+  bukan perbaikan cacat — sejalan dengan cara Anda menuliskannya. Tidak saya
+  kerjakan tanpa keputusan Anda.
+- **Deal tanpa client menghasilkan 500**, bukan 4xx. Itu perilaku lama yang sudah
+  dikunci tes `mto-link` bagian 33 sebagai `status >= 400`, jadi saya tidak
+  mengubahnya dalam butir ini — tapi pesan errornya pantas diperbaiki. Masukkan
+  sebagai butir tersendiri?
+
 **Dependensi/migrasi dan prioritas:** fase 0 validasi quantity finite dan
 `>= 0`, tambah submit/deal gate serta hentikan zeroing overhead/risk. Audit nilai
 produksi sebelum migrasi dan backfill policy `0` hanya bila memang tidak ada

@@ -230,8 +230,9 @@
                     <input 
                       v-model.number="item.qty" 
                       @blur="updateItemQty(item)"
-                      type="number" 
+                      type="number"
                       step="0.001"
+                      min="0"
                       :disabled="!isEditable || !!item.mto_link"
                       class="w-full text-right border border-gray-300 rounded px-2 py-1 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 disabled:bg-green-50 disabled:text-green-800 disabled:font-semibold"
                       :class="{ 'border-green-400': item.mto_link }"
@@ -1750,13 +1751,19 @@ const updateItemQty = async (item: ProposalItem) => {
     await api.put(`/estimator/proposals/${proposalId}/items/${item.id}`, {
       qty: item.qty
     });
-    
+
     // Recalculate total_price locally
     item.total_price = item.qty * item.unit_price_snapshot;
-    
+
     await loadSummary();
-  } catch (error) {
+  } catch (error: any) {
+    // Kegagalan di sini dulu hanya masuk console: nilai yang ditolak server tetap
+    // terpampang di layar seolah tersimpan, dan estimator melanjutkan pekerjaan
+    // di atas angka yang tidak pernah ada di database.
     console.error('Failed to update item:', error);
+    alert(error?.response?.data?.error || 'Gagal menyimpan quantity.');
+    await loadItems();
+    await loadSummary();
   }
 };
 

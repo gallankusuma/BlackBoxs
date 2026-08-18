@@ -1107,6 +1107,102 @@ router.get('/proposals/:id/schedule', authMiddleware, async (req: Request, res: 
  * jaring pengaman di lapisan database sama sekali.
  * ─────────────────────────────────────────────────────────────────────────────
  */
+/**
+ * Batas atas quantity satu baris RAB.
+ *
+ * Bukan aturan bisnis, melainkan jaring pengaman terhadap angka yang jelas bukan
+ * kuantitas konstruksi — mis. hasil salah ketik atau nilai yang lolos dari
+ * konversi. Cukup longgar untuk pekerjaan sebesar apa pun di sistem ini.
+ */
+const MAX_QTY = 1_000_000_000;
+
+/**
+ * Quantity harus berupa bilangan berhingga dan tidak negatif.
+ *
+ * `qty || 0` dan `parseFloat(qty) || 0` menerima apa saja: `-1` diteruskan apa
+ * adanya lalu dikalikan harga snapshot sehingga line total dan `total_project`
+ * menjadi negatif, sementara `"abc"`, `NaN`, dan `Infinity` diam-diam berubah
+ * menjadi 0 tanpa ada yang tahu nilainya pernah salah.
+ *
+ * Nol tetap diizinkan: baris berkuantitas nol adalah keadaan sah pada draft yang
+ * belum lengkap. Yang dijaga di gerbang submit adalah totalnya, bukan tiap baris.
+ */
+// `strictNullChecks` mati di project ini, jadi union berdiskriminan tidak
+// dipersempit oleh `if (!hasil.ok)`. Bentuknya dibuat satu objek saja.
+const validasiQty = (raw: unknown): { ok: boolean; qty: number; pesan: string } => {
+  if (raw === null || raw === undefined || raw === '') return { ok: true, qty: 0, pesan: '' };
+  const n = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isFinite(n)) return { ok: false, qty: 0, pesan: 'qty harus berupa angka' };
+  if (n < 0) return { ok: false, qty: 0, pesan: 'qty tidak boleh negatif' };
+  if (n > MAX_QTY) return { ok: false, qty: 0, pesan: `qty melebihi batas wajar (${MAX_QTY.toLocaleString('id-ID')})` };
+  return { ok: true, qty: n, pesan: '' };
+};
+
+/**
+ * Syarat minimum sebuah proposal boleh dikirim atau dijadikan kontrak.
+ *
+ * Mengembalikan `null` kalau lolos, atau body error 400 yang menyebutkan
+ * **semua** pelanggaran sekaligus — supaya estimator tidak menemukannya satu per
+ * satu lewat percobaan berulang.
+ */
+const gerbangKomersial = async (
+  proposalId: any, proposal: any, tx: TxRunner
+): Promise<{ error: string; code: string; pelanggaran: string[] } | null> => {
+  const pelanggaran: string[] = [];
+
+  const ringkas: any = await tx.get(
+    `SELECT COUNT(*) AS jml,
+            COALESCE(SUM(total_price), 0) AS jumlah_baris,
+            SUM(qty < 0) AS qty_negatif,
+            SUM(unit_price_snapshot < 0) AS harga_negatif,
+            SUM(total_price < 0) AS total_negatif
+     FROM proposal_items
+     WHERE proposal_id = ? AND is_section = 0`,
+    [proposalId]
+  );
+
+  if (Number(ringkas?.jml || 0) === 0) {
+    pelanggaran.push('Proposal belum memiliki satu pun item pekerjaan.');
+  }
+  if (Number(ringkas?.qty_negatif || 0) > 0) {
+    pelanggaran.push(`${ringkas.qty_negatif} item berkuantitas negatif.`);
+  }
+  if (Number(ringkas?.harga_negatif || 0) > 0) {
+    pelanggaran.push(`${ringkas.harga_negatif} item berharga satuan negatif.`);
+  }
+  if (Number(ringkas?.total_negatif || 0) > 0) {
+    pelanggaran.push(`${ringkas.total_negatif} item bernilai total negatif.`);
+  }
+
+  const total = uang(proposal.total_project);
+  if (!(total > 0)) {
+    pelanggaran.push(`Nilai penawaran ${total} — harus lebih besar dari nol sebelum dikirim.`);
+  }
+
+  // Header wajib sama dengan penjumlahan barisnya. Kalau tidak, ada dua
+  // kebenaran dalam satu dokumen dan salah satunya akan dipakai hilir.
+  const jumlahBaris = uang(ringkas?.jumlah_baris);
+  const direct = uang(proposal.direct_cost);
+  if (Math.abs(jumlahBaris - direct) >= 0.005) {
+    pelanggaran.push(
+      `Direct cost di header (${direct}) tidak sama dengan jumlah baris (${jumlahBaris}).`
+    );
+  }
+  const semestinya = bulatUang(direct + uang(proposal.overhead) + uang(proposal.risk_contingency));
+  if (Math.abs(semestinya - total) >= 0.005) {
+    pelanggaran.push(
+      `Total penawaran (${total}) tidak sama dengan direct cost + overhead + contingency (${semestinya}).`
+    );
+  }
+
+  if (pelanggaran.length === 0) return null;
+  return {
+    error: 'Proposal belum memenuhi syarat untuk dikirim atau dijadikan kontrak.',
+    code: 'PROPOSAL_BELUM_LAYAK',
+    pelanggaran,
+  };
+};
+
 const itemMilikProposal = async (proposalId: any, itemId: any, tx: TxRunner) => {
   const row: any = await tx.get(
     'SELECT id FROM proposal_items WHERE id = ? AND proposal_id = ?', [itemId, proposalId]
@@ -1828,9 +1924,12 @@ router.post('/proposals/:proposalId/items', authMiddleware, async (req: Request,
     );
     const orderNo = ((lastOrder as any)?.max_order || 0) + 1;
     
-    const qtyValue = qty || 0;
+    const qtyCek = validasiQty(qty);
+    if (!qtyCek.ok) return res.status(400).json({ error: qtyCek.pesan, code: 'QTY_TIDAK_VALID' });
+
+    const qtyValue = qtyCek.qty;
     const unitPrice = parseFloat(ahsp.harga_satuan as any) || 0;
-    const totalPrice = qtyValue * unitPrice;
+    const totalPrice = bulatUang(qtyValue * unitPrice);
     
     // EST-MTO-R29: mutasi item dan penghitungan ulang ringkasan adalah SATU unit.
     //
@@ -1927,7 +2026,13 @@ router.put('/proposals/:proposalId/items/:itemId', authMiddleware, async (req: R
     }
     
     if (qty !== undefined) {
-      const qtyValue = parseFloat(qty) || 0;
+      // `parseFloat(qty) || 0` menerima apa saja: "-1" menjadi -1 dan langsung
+      // dikalikan harga snapshot, menghasilkan line total serta `total_project`
+      // negatif; "abc" dan Infinity diam-diam menjadi 0.
+      const qtyCek = validasiQty(qty);
+      if (!qtyCek.ok) return res.status(400).json({ error: qtyCek.pesan, code: 'QTY_TIDAK_VALID' });
+      const qtyValue = qtyCek.qty;
+
       // Use new unit price if ahsp was also assigned, otherwise use existing
       let unitPrice: number;
       if (ahsp_id !== undefined) {
@@ -1936,7 +2041,7 @@ router.put('/proposals/:proposalId/items/:itemId', authMiddleware, async (req: R
       } else {
         unitPrice = parseFloat((item as any).unit_price_snapshot) || 0;
       }
-      const totalPrice = qtyValue * unitPrice;
+      const totalPrice = bulatUang(qtyValue * unitPrice);
       updates.push('qty = ?', 'total_price = ?');
       values.push(qtyValue, totalPrice);
     }
@@ -2090,13 +2195,27 @@ async function recalculateProposal(proposalId: string | number, tx?: TxRunner) {
       [proposalId]
     );
     
-    const directCost = parseFloat((result as any)?.direct_cost || 0);
-    const overhead = 0; // Can be set manually or calculated
-    const riskContingency = 0; // Can be set manually or calculated
-    const totalProject = directCost + overhead + riskContingency;
-    
+    const directCost = bulatUang((result as any)?.direct_cost);
+
+    // Overhead dan contingency adalah INPUT komersial, bukan hasil hitungan —
+    // keduanya dibaca kembali dari baris proposal dan dipertahankan.
+    //
+    // Versi lama menetapkan keduanya `0` lalu MENULIS ULANG nol itu ke database
+    // setiap kali ada satu baris yang berubah. Artinya nilai apa pun yang masuk
+    // lewat migrasi, import, atau perbaikan manual akan terhapus begitu operator
+    // mengubah satu quantity, dan total penawaran hanya bisa sama dengan direct
+    // cost — padahal kolom serta COST SUMMARY di layar menjanjikan sebaliknya.
+    // Overhead kantor, indirect, dan risk allowance yang melindungi margin
+    // hilang tanpa jejak.
+    const header: any = await get(
+      'SELECT overhead, risk_contingency FROM proposals WHERE id = ?', [proposalId]
+    );
+    const overhead = uang(header?.overhead);
+    const riskContingency = uang(header?.risk_contingency);
+    const totalProject = bulatUang(directCost + overhead + riskContingency);
+
     await run(
-      `UPDATE proposals 
+      `UPDATE proposals
        SET direct_cost = ?, overhead = ?, risk_contingency = ?, total_project = ?
        WHERE id = ?`,
       [directCost, overhead, riskContingency, totalProject, proposalId]
@@ -2565,6 +2684,19 @@ router.put('/proposals/:id/status', authMiddleware, async (req: Request, res: Re
             allowed_transitions: allowed,
           },
         };
+      }
+
+      // Gerbang komersial sebelum penawaran keluar atau menjadi kontrak.
+      //
+      // Sebelumnya transisi hanya memeriksa pasangan status. Tidak ada satu pun
+      // invarian bahwa proposalnya punya isi komersial yang masuk akal, jadi
+      // penawaran bernilai nol — atau negatif, lewat qty negatif — bisa
+      // di-submit lalu di-deal, dan nilainya disalin apa adanya menjadi
+      // `client_projects.budget`. Draft dan review sengaja dibiarkan longgar:
+      // di sanalah pekerjaan yang belum lengkap memang berlangsung.
+      if (newStatus === 'submitted' || newStatus === 'deal') {
+        const gagal = await gerbangKomersial(proposalId, proposal, tx);
+        if (gagal) return { error: 400, body: gagal };
       }
 
       const updates: string[] = ['status = ?'];
