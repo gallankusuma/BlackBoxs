@@ -5110,6 +5110,74 @@ benar menampilkan empty state; proposal estimator nyata harus muncul dengan
 tanggal, nilai, revision, dan status yang sama; tidak boleh ada record hard-code
 pada build production.
 
+**[DEV] DITERAPKAN — dan cakupannya jauh lebih luas dari yang dilaporkan.**
+
+Temuan Anda terverifikasi seluruhnya. Yang perlu Anda tahu: **proposal bukan
+satu-satunya yang dikarang.** Blok `--- MOCK DATA FOR UI DEMO ---` di
+`fetchClient()` panjangnya **97 baris** dan mengisi sembilan koleksi sekaligus —
+projects, subscriptions, payments, proposals, contracts, files, expenses, orders,
+estimates. Sebagian di antaranya **tanpa syarat `if`**, jadi client yang punya
+data asli pun tetap menampilkan pembayaran dan kontrak palsu berdampingan dengan
+data sungguhannya.
+
+**Audit `client_proposals` yang Anda minta:** produksi berisi **0 baris**,
+sementara `proposals` berisi 3 penawaran yang **semuanya sudah ber-`client_id``.
+Jadi tidak ada apa pun yang perlu dimigrasikan atau dideduplikasi — tabel itu
+kosong sejak awal, dan justru itulah sebabnya tab ini selalu kosong dan mock-nya
+selalu tampil.
+
+Diterapkan:
+
+- **Sumber komersial dipindah ke `proposals`** ([clients.routes.ts](backend/src/routes/clients.routes.ts)),
+  di-query `WHERE client_id = ?`, dengan nama field diselaraskan di backend
+  (`date`, `amount`, `revision`, `status`) supaya layar tidak perlu tahu dua
+  bentuk. Nilai uang lewat `bulatUang` — kolomnya DECIMAL, tanpa itu sampai ke
+  klien sebagai string.
+- **Hitungan proposal di dashboard** juga membaca `proposals` sekarang; ketiganya
+  dulu menghitung tabel kosong sehingga selalu 0.
+- **Seluruh 97 baris data karangan dicabut.** Tab yang belum punya sumber data
+  menampilkan keadaan kosong apa adanya — jawaban yang benar adalah "tidak ada
+  datanya", bukan "ada tapi palsu".
+
+**Tiga jalur tulis palsu yang ikut ditemukan** (tidak ada di laporan, dan menurut
+saya lebih berbahaya daripada tampilan bacanya):
+
+1. `savePayment()` memasukkan pembayaran ke array lokal lalu mengumumkan
+   *"Payment recorded successfully!"*. Tidak ada permintaan yang dikirim ke mana
+   pun. Pengguna mencatat penerimaan uang, diberi tahu berhasil, dan catatannya
+   lenyap saat halaman dimuat ulang.
+2. `deleteTransaction()` hanya menyaring array di browser lalu berkata *"deleted
+   successfully"* — barisnya hilang dari layar, tetap ada di server, dan muncul
+   lagi setelah reload.
+3. Jalur `type === 'quote'` mengarang `Math.random()` sebagai id, menyisipkan
+   estimate palsu, lalu **menavigasi ke editor proposal dengan id karangan itu**
+   — halaman tujuan memuat proposal yang tidak pernah ada.
+
+Ketiganya diperbaiki: (1) dan (2) berhenti berpura-pura berhasil dan menyatakan
+terus terang bahwa fiturnya belum tersambung (pembayaran sungguhan diarahkan ke
+modul Finance AP/AR); (3) sekarang benar-benar membuat proposal lewat
+`POST /estimator/proposals` dan membuka proposal yang nyata.
+
+**Tes:** [backend/tests/client-proposals.ts](backend/tests/client-proposals.ts) —
+26 assertion, masuk `test:all`. Membuktikan keempat kriteria Anda: client tanpa
+proposal benar-benar kosong; proposal Estimator nyata muncul dengan nomor,
+tanggal, revision, status, dan **nilai yang sama persis dengan yang dilihat
+Estimator**; proposal client lain tidak bocor; status ikut berpindah saat diubah
+di Estimator. Bagian 6 memindai **seluruh pohon `frontend/dist`** dan menuntut
+tidak ada `PROPOSAL #6`, `#15`, kontrak, langganan, maupun estimate karangan di
+build produksi.
+
+Catatan tentang tes itu sendiri: versi pertama saya hanya memindai `dist/assets/`
+padahal Vite menaruh js di `dist/js/`, jadi ia "lulus" atas berkas kosong.
+Assertion `ada berkas js di dist` yang menangkapnya — pemeriksaan yang tidak
+membuktikan apa pun lebih buruk daripada tidak ada pemeriksaan.
+
+Dibuktikan bergigi: sumber dikembalikan ke `client_proposals` → **10 gagal**,
+termasuk `id-nya proposal estimator, bukan tabel lain → dapat null` dan
+`nilainya sama dengan Estimator → dapat 0`.
+
+Suite penuh: **1149 lulus, 0 gagal**.
+
 ### [ARCH-RISK / DESIGN-GAP — prioritas tinggi] Proposal belum mempunyai revision ledger, bukti penerbitan/penerimaan, approval internal, atau audit trail yang dapat dipertahankan
 
 **Kemampuan saat ini.** Baseline minimum yang harus dipertahankan sudah meliputi

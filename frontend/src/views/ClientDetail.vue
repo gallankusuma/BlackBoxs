@@ -1988,103 +1988,17 @@ const fetchClient = async () => {
     const response = await api.get(`/clients/${route.params.id}`);
     client.value = response.data.data;
 
-    // --- MOCK DATA FOR UI DEMO ---
-    // Populate missing data if not provided by backend
-    if (!client.value.projects || client.value.projects.length === 0) {
-        client.value.projects = [
-            { id: 25, project_number: 'P-101', name: 'Data Analysis and Insights', priority: 'medium', price: 0, start_date: '2026-01-17', end_date: '2026-02-14', progress: 15, status: 'open' },
-            { id: 12, project_number: 'P-102', name: 'Product Photography and Cataloging', priority: 'low', price: 4000, start_date: '2026-01-25', end_date: '2026-03-15', progress: 45, status: 'open' },
-            { id: 11, project_number: 'P-103', name: 'Event Planning and Management', priority: 'high', price: 0, start_date: '2026-02-04', end_date: '2026-03-04', progress: 70, status: 'open' },
-            { id: 1,  project_number: 'P-104', name: 'Mobile App Development', priority: 'high', price: 15000, start_date: '2026-01-10', end_date: '2026-01-17', progress: 30, status: 'overdue' },
-        ];
-    }
-    
-    // Mock subscriptions
-    client.value.subscriptions = [
-        { id: 1, code: 'SUB #2', title: 'Monthly subscription of 10 GB Hosting', next_billing_date: '2026-02-14', last_billing_date: '2026-01-14', repeat_every: '1 Month(s)', status: 'active', amount: 100 },
-        { id: 2, code: 'SUB #1', title: 'Yearly subscription of example.com domain', next_billing_date: '2026-02-15', last_billing_date: '2025-02-15', repeat_every: '1 Year(s)', status: 'active', amount: 11 }
-    ];
-
-    // Mock payments
-    client.value.payments = [
-        { id: 101, code: 'INV #16', date: '2026-01-19', method: 'Cash', note: 'Dignissimos accusantium sunt enim expedita...', amount: 9000 }
-    ];
-
-    // Mock proposals
-    if (!client.value.proposals || client.value.proposals.length === 0) {
-        client.value.proposals = [
-             { id: 6, proposal_number: 'PROPOSAL #6', date: '2026-01-21', valid_until: '2026-02-24', email_seen: '-', preview_seen: '2026-01-21 03:54:57 pm', amount: 1000.00, status: 'Accepted' },
-             { id: 15, proposal_number: 'PROPOSAL #15', date: '2025-01-15', valid_until: '2026-03-15', email_seen: '-', preview_seen: 'Today at 08:05:13 am', amount: 20.00, status: 'Sent' }
-        ];
-    }
-
-    // Mock contracts
-    client.value.contracts = [
-        { id: 20, title: 'Training and Workshop Services Contract', project: '-', start_date: '2026-01-08', end_date: '2026-03-11', amount: 150.00, status: 'Accepted' }
-    ];
-
-    // Mock files
-    if (!client.value.files || client.value.files.length === 0) {
-        client.value.files = [
-            { id: 1, name: 'Project_Requirements.pdf', size: '2.4 MB', type: 'pdf', user: 'John Doe', date: '2026-02-10 10:00 AM' },
-            { id: 2, name: 'Logo_Assets.zip', size: '15.6 MB', type: 'zip', user: 'Jane Smith', date: '2026-02-11 02:30 PM' },
-            { id: 3, name: 'Contract_Signed.docx', size: '1.1 MB', type: 'doc', user: 'Admin', date: '2026-02-12 09:15 AM' }
-        ];
-    }
-
-    // Mock expenses
-    client.value.expenses = [
-        { 
-            id: 1, 
-            expense_number: '12-02-2026', 
-            date: '2026-02-12', 
-            category: 'Advertising', 
-            title: 'Google Ads Campaign', 
-            description: 'Monthly marketing budget', 
-            files_count: 2, 
-            amount: 25000.00, 
-            tax: 0, 
-            second_tax: 0, 
-            total: 25000.00,
-            tasks: [
-                { id: 10, title: 'Design ad creatives', start_date: '2026-02-12', deadline: '2026-02-14', assigned_to: 'John Doe', status: 'In Progress' },
-                { id: 11, title: 'Setup campaign settings', start_date: '2026-02-13', deadline: '2026-02-15', assigned_to: 'Jane Smith', status: 'Pending' }
-            ]
-        },
-        { 
-            id: 2, 
-            expense_number: '10-02-2026', 
-            date: '2026-02-10', 
-            category: 'Software', 
-            title: 'Adobe CC Subscription', 
-            description: 'Yearly license for design team', 
-            files_count: 1, 
-            amount: 1200.00, 
-            tax: 120.00, 
-            second_tax: 0, 
-            total: 1320.00,
-            tasks: []
-        }
-    ];
-    
-    // Mock orders
-     if (!client.value.orders || client.value.orders.length === 0) {
-        client.value.orders = [
-            { id: 101, order_number: 'ORD-2026-001', date: '2026-02-10', to: 'Acme Corp', status: 'completed', amount: 1500.00 },
-            { id: 102, order_number: 'ORD-2026-002', date: '2026-02-12', to: 'Global Tech', status: 'open', amount: 2350.50 },
-            { id: 103, order_number: 'ORD-2026-003', date: '2026-02-15', to: 'InnoSystems', status: 'in_progress', amount: 4500.00 }
-        ];
-    }
-     // Mock estimates
-     if (!client.value.estimates || client.value.estimates.length === 0) {
-        client.value.estimates = [
-            { id: 201, estimate_number: 'EST-2026-001', date: '2026-02-01', valid_until: '2026-03-01', amount: 1200.00, status: 'sent' },
-            { id: 202, estimate_number: 'EST-2026-002', date: '2026-02-05', valid_until: '2026-03-05', amount: 3500.00, status: 'draft' },
-            { id: 203, estimate_number: 'EST-2026-003', date: '2026-02-10', valid_until: '2026-03-10', amount: 800.00, status: 'accepted' }
-        ];
-    }
-
-    // ----------------------------
+    // Data karangan di sini sudah dicabut.
+    //
+    // Sebelumnya blok ini mengisi projects, subscriptions, payments, proposals,
+    // contracts, files, expenses, orders, dan estimates dengan record buatan —
+    // sebagian TANPA syarat, jadi client yang punya data asli pun tetap
+    // menampilkan pembayaran dan kontrak palsu di sampingnya. Nominal, tanggal,
+    // dan status 'Accepted' itu tampil di produksi tanpa satu pun penanda yang
+    // membedakannya dari transaksi sungguhan.
+    //
+    // Tab yang belum punya sumber data sekarang menampilkan keadaan kosong apa
+    // adanya. Itu jawaban yang benar: tidak ada datanya, bukan ada tapi palsu.
 
   } catch (error) {
     console.error('Error fetching client:', error);
@@ -2326,29 +2240,24 @@ const saveTransaction = async () => {
              fetchClient();
 
         } else if (payload.type === 'quote') {
-            // Mock Estimate Creation and Navigation
-            const mockId = Math.floor(Math.random() * 1000);
-            
-            // In a real app, we'd POST to backend and get the ID back
-            // await axios.post(endpoint, payload, ...);
-            
-             // Create a mock estimate object to add to the list immediately (optimistic update)
-            const newEstimate = {
-                id: mockId,
-                estimate_number: 'EST-' + mockId,
-                date: payload.date,
-                valid_until: payload.due_date,
-                amount: payload.total_amount,
-                status: 'draft'
-            };
-            
-            if (!client.value.estimates) client.value.estimates = [];
-            client.value.estimates.unshift(newEstimate);
+            // Proposal dibuat sungguhan lewat Estimator, lalu dibuka.
+            //
+            // Versi sebelumnya mengarang `Math.random()` sebagai id, menyisipkan
+            // objek estimate palsu ke daftar, lalu MENAVIGASI ke editor proposal
+            // dengan id karangan itu — halaman yang dituju memuat proposal yang
+            // tidak pernah ada. Tidak ada satu pun permintaan yang dikirim ke
+            // server sepanjang alur itu.
+            const { data } = await api.post('/estimator/proposals', {
+                project_name: payload.title || payload.description || `Penawaran ${client.value?.name || ''}`.trim(),
+                client: client.value?.name || null,
+                client_id: client.value?.id || null,
+            });
+            const proposalId = data?.id ?? data?.data?.id;
+            if (!proposalId) throw new Error('Server tidak mengembalikan id proposal');
 
             showTransactionModal.value = false;
-            
-            // Navigate to the Estimate/Proposal Editor
-            router.push({ name: 'EstimatorProposalEditor', params: { id: mockId } });
+            await fetchClient();
+            router.push({ name: 'EstimatorProposalEditor', params: { id: proposalId } });
             return;
 
         } else {
@@ -2363,27 +2272,16 @@ const saveTransaction = async () => {
     }
 };
 
-const deleteTransaction = async (id: number, type: string) => {
-    if (!confirm(`Are you sure you want to delete this ${type}?`)) return;
-
-    try {
-        // const token = localStorage.getItem('token');
-        // await axios.delete(..., { headers: ... });
-        
-        // Mock deletion
-        if (type === 'estimate' && client.value.estimates) {
-            client.value.estimates = client.value.estimates.filter((e: any) => e.id !== id);
-        } else if (type === 'order' && client.value.orders) {
-            client.value.orders = client.value.orders.filter((o: any) => o.id !== id);
-        } else if (type === 'expense' && client.value.expenses) {
-            client.value.expenses = client.value.expenses.filter((e: any) => e.id !== id);
-        }
-
-        alert(`${type.charAt(0).toUpperCase() + type.slice(1)} deleted successfully.`);
-    } catch (error) {
-        console.error(`Error deleting ${type}:`, error);
-        alert(`Failed to delete ${type}`);
-    }
+/**
+ * Penghapusan di layar ini belum punya endpoint.
+ *
+ * Versi sebelumnya hanya menyaring array di browser lalu mengumumkan "deleted
+ * successfully" — barisnya hilang dari layar, tetap ada di server, dan muncul
+ * kembali saat halaman dimuat ulang. Yang paling menyesatkan: pengguna percaya
+ * data sudah terhapus padahal tidak pernah ada permintaan yang dikirim.
+ */
+const deleteTransaction = async (_id: number, type: string) => {
+    alert(`Penghapusan ${type} belum terhubung ke server — tidak ada yang dihapus. Fitur ini belum tersedia.`);
 };
 
 const cloneExpense = () => {
@@ -2459,43 +2357,32 @@ const saveProject = async () => {
     }
 };
 
+/**
+ * Langganan belum punya endpoint sama sekali.
+ *
+ * Versi sebelumnya membuat objek berid acak, menaruhnya di array lokal, lalu
+ * mengumumkan "Subscription created successfully!". Tidak ada apa pun yang
+ * dikirim ke server, jadi datanya lenyap begitu halaman dimuat ulang —
+ * pengguna diberi tahu bahwa sesuatu tersimpan padahal tidak.
+ */
 const saveSubscription = async () => {
-    try {
-        // Mock update
-        const newSub = {
-            id: Math.floor(Math.random() * 1000),
-            code: 'SUB-NEW',
-            ...subscriptionForm.value,
-            last_billing_date: '-'
-        };
-        if (!client.value.subscriptions) client.value.subscriptions = [];
-        client.value.subscriptions.unshift(newSub);
-
-        showAddSubscriptionModal.value = false;
-        alert('Subscription created successfully!');
-    } catch (error) {
-        console.error('Error saving subscription:', error);
-        alert('Failed to save subscription');
-    }
+    alert('Langganan belum terhubung ke server — data yang diisi di sini tidak akan tersimpan. Fitur ini belum tersedia.');
+    showAddSubscriptionModal.value = false;
 };
 
+/**
+ * Pembayaran di layar ini belum punya endpoint.
+ *
+ * Ini yang paling berbahaya dari seluruh jalur palsu di berkas ini: pengguna
+ * mencatat penerimaan uang, menerima "Payment recorded successfully!", lalu
+ * catatannya hilang tanpa jejak saat halaman dimuat ulang — dan tidak ada
+ * apa pun yang memberi tahu bahwa uang itu tidak pernah tercatat di mana pun.
+ *
+ * Pencatatan pembayaran yang sungguhan ada di modul Finance (AP/AR).
+ */
 const savePayment = async () => {
-    try {
-        // Mock update
-        const newPayment = {
-            id: Math.floor(Math.random() * 1000),
-            code: 'PAY-NEW',
-            ...paymentForm.value
-        };
-        if (!client.value.payments) client.value.payments = [];
-        client.value.payments.unshift(newPayment);
-
-        showAddPaymentModal.value = false;
-        alert('Payment recorded successfully!');
-    } catch (error) {
-        console.error('Error saving payment:', error);
-        alert('Failed to save payment');
-    }
+    alert('Pencatatan pembayaran belum terhubung ke server di layar ini — gunakan modul Finance (AP/AR). Data yang diisi di sini tidak akan tersimpan.');
+    showAddPaymentModal.value = false;
 };
 
 const openTransactionModal = (type: string = 'invoice') => {

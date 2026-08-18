@@ -22,7 +22,8 @@
     "test:rab": "tsx tests/rab.ts",
     "test:payment-schedule": "tsx tests/payment-schedule.ts",
     "test:schedule-ownership": "tsx tests/schedule-ownership.ts",
-    "test:all": "npm test && npm run test:mto && npm run test:mto-link && npm run test:http && npm run test:pin && npm run test:rbac && npm run test:asset && npm run test:depreciation && npm run test:procurement && npm run test:prospects && npm run test:rab && npm run test:payment-schedule && npm run test:schedule-ownership",
+    "test:client-proposals": "tsx tests/client-proposals.ts",
+    "test:all": "npm test && npm run test:mto && npm run test:mto-link && npm run test:http && npm run test:pin && npm run test:rbac && npm run test:asset && npm run test:depreciation && npm run test:procurement && npm run test:prospects && npm run test:rab && npm run test:payment-schedule && npm run test:schedule-ownership && npm run test:client-proposals",
     "test:mto": "tsx tests/mto-calculator.ts",
     "test:mto-link": "tsx tests/mto-link.ts",
     "smoke": "node ../scripts/smoke-test.js"

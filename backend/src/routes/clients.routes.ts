@@ -1,6 +1,7 @@
 import express, { Request, Response } from 'express';
 import { dbQuery, dbGet, dbAll, dbRun } from '../config/database';
 import { authMiddleware } from '../middleware/auth';
+import { bulatUang } from '../utils/money';
 
 const router = express.Router();
 
@@ -138,9 +139,14 @@ router.get('/dashboard', authMiddleware, async (req: Request, res: Response) => 
     const newEstimates = await dbGet('SELECT COUNT(*) as count FROM client_estimates WHERE status = "draft"', []);
 
     // Proposal status counts
-    const openProposals = await dbGet('SELECT COUNT(*) as count FROM client_proposals WHERE status = "sent"', []);
-    const acceptedProposals = await dbGet('SELECT COUNT(*) as count FROM client_proposals WHERE status = "accepted"', []);
-    const rejectedProposals = await dbGet('SELECT COUNT(*) as count FROM client_proposals WHERE status = "rejected"', []);
+    //
+    // Sumbernya `proposals` — tabel yang benar-benar dipakai Estimator. Versi
+    // lama menghitung `client_proposals`, tabel kedua tanpa relasi apa pun ke
+    // proposal estimator maupun project; di produksi isinya 0 baris sementara
+    // `proposals` berisi penawaran sungguhan, jadi angka ini selalu nol.
+    const openProposals = await dbGet(`SELECT COUNT(*) as count FROM proposals WHERE status = 'submitted'`, []);
+    const acceptedProposals = await dbGet(`SELECT COUNT(*) as count FROM proposals WHERE status = 'deal'`, []);
+    const rejectedProposals = await dbGet(`SELECT COUNT(*) as count FROM proposals WHERE status = 'no_deal'`, []);
 
     // Ticket and order counts
     const openTickets = await dbGet('SELECT COUNT(*) as count FROM client_tickets WHERE status = "open"', []);
@@ -253,8 +259,28 @@ router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
     client.estimates = estimates;
 
     // Get proposals
-    const proposals = await dbAll('SELECT * FROM client_proposals WHERE client_id = ? ORDER BY proposal_date DESC LIMIT 10', [client.id]);
-    client.proposals = proposals;
+    //
+    // Sumber kebenaran komersial adalah tabel `proposals` milik Estimator, bukan
+    // `client_proposals`. Yang kedua adalah tabel terpisah tanpa relasi ke
+    // proposal estimator maupun project, dengan kontrak field berbeda pula
+    // (`proposal_date`/`total_amount`/status lowercase). Di produksi isinya
+    // **0 baris** sementara `proposals` berisi penawaran sungguhan yang semuanya
+    // sudah ber-`client_id` — jadi tab ini selalu kosong, dan yang menutupi
+    // kekosongan itu adalah dua baris palsu yang disuntikkan di frontend.
+    //
+    // Nama field diselaraskan di sini supaya layar tidak perlu tahu dua bentuk.
+    const proposals = await dbAll(
+      `SELECT id, proposal_number, project_name, revision, status,
+              DATE(created_at) AS date,
+              submitted_at, deal_at,
+              total_project AS amount
+       FROM proposals
+       WHERE client_id = ?
+       ORDER BY created_at DESC
+       LIMIT 10`,
+      [client.id]
+    );
+    client.proposals = (proposals as any[]).map(p => ({ ...p, amount: bulatUang(p.amount) }));
 
     // Get tickets
     const tickets = await dbAll('SELECT * FROM client_tickets WHERE client_id = ? ORDER BY created_at DESC LIMIT 10', [client.id]);
