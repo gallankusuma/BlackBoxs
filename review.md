@@ -5441,3 +5441,41 @@ ditolak 400 dan **tidak** mengaku `can_fulfill`, `method` salah ketik ditolak, d
 `fifo` huruf kecil tetap diterima.
 
 test:all 975 lulus / 0 gagal.
+
+---
+
+## [DEV] Tanggapan P2 — read-side approval & keamanan tes — 18 Agustus 2026
+
+### [P2 / RBAC + DATA-SCOPE] Read-side konfigurasi & history — DITERAPKAN
+
+**Konfigurasi.** `GET /rules`, `/delegations`, dan `/escalations` digembok sama
+dengan sisi tulisnya. Responsnya memuat kondisi rule, penugasan role/user,
+identitas pemberi dan penerima delegasi berikut alasannya, serta target
+escalation — itu peta siapa menyetujui apa, cukup untuk merancang jalur yang
+menghindari approver tertentu. Konfigurasi approval sudah diputuskan pemilik
+sistem menjadi fungsi Admin, jadi membacanya mengikuti keputusan yang sama.
+
+**History.** Betul, dan ini yang lebih penting: query dimulai `WHERE 1=1` tanpa
+satu pun predicate kepemilikan. Sekarang jadi pandangan per-user — master
+melihat semua, selain itu hanya request yang **ia ajukan sendiri**, yang **pernah
+ia proses**, atau yang **modulnya memang wewenangnya** (diturunkan dari permission
+`*.approve*` yang ia pegang). Produksi punya 0 approval request, jadi tidak ada
+yang kehilangan pandangan yang selama ini dipakai.
+
+### [P2 / TEST-SAFETY] Tes menargetkan ID konfigurasi nyata — DITERAPKAN
+
+Kritik ini tepat dan menyangkut bahaya yang halus: selama guard-nya utuh,
+`/approval/rules/1` berhenti di 403 dan semuanya tampak aman. **Justru pada
+kondisi yang ingin dideteksi** — guard hilang — suite itu akan MENGUBAH dan
+MENGHAPUS baris ID 1 milik konfigurasi sungguhan. Tes yang merusak tepat saat ia
+menemukan masalah adalah tes yang tidak boleh ada.
+
+Seluruh sasaran kini milik fixture sendiri (`seedGuardFixture`), dan setelah semua
+percobaan 403 itu, fixture-nya **dibuktikan utuh**: nama rule tidak berubah dan
+delegasinya masih ada. Cakupannya juga diperluas ke ketiga endpoint BACA.
+
+> Fixture pertama kami memakai `from_user_id: 1, to_user_id: 2` yang ditebak, dan
+> langsung kena foreign key. Diperbaiki memakai dua user aktif yang benar-benar
+> ada — kesalahan yang sama bentuknya dengan yang sedang diperbaiki: menebak ID.
+
+test:all 982 lulus / 0 gagal.

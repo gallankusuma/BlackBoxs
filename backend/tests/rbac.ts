@@ -53,6 +53,58 @@ async function hapusRuleUji(nama: string): Promise<void> {
 
 /** Absensi terverifikasi GPS milik proyek A + satu baris tanpa proyek. */
 /** Fund request + satu rule berbatas, untuk menguji condition_field. */
+/** Rule + delegasi milik tes sendiri, supaya guard diuji tanpa menyentuh data nyata. */
+async function seedGuardFixture(): Promise<any> {
+  await cleanupGuardDebris();
+  try {
+    const { dbRun } = await import('../src/config/database');
+    const tag = `UJI-GUARD-${Date.now()}`;
+    const r: any = await dbRun(
+      `INSERT INTO approval_rules (module, name, sequence, is_active) VALUES ('finance', ?, 99, 1)`, [tag]
+    );
+    // FK ke `users` — pakai user yang benar-benar ada, bukan id 1/2 yang ditebak.
+    const { dbAll } = await import('../src/config/database');
+    const dua: any[] = await dbAll('SELECT id FROM users WHERE is_active=1 ORDER BY id LIMIT 2');
+    if (dua.length < 2) throw new Error('butuh minimal 2 user aktif untuk fixture delegasi');
+    const d: any = await dbRun(
+      `INSERT INTO approval_delegations (from_user_id, to_user_id, module, start_date, end_date, is_active, reason)
+       VALUES (?, ?, 'finance', CURDATE(), CURDATE(), 1, ?)`, [dua[0].id, dua[1].id, tag]
+    );
+    return { tag, ruleId: r.insertId, delegationId: d.insertId };
+  } catch (e: any) {
+    console.log(`  (fixture guard gagal: ${e.message} — membersihkan sisa)`);
+    try { await cleanupGuardDebris(); } catch { /* jangan menutupi error asli */ }
+    return null;
+  }
+}
+
+async function ruleName(id: number): Promise<string | null> {
+  const { dbGet } = await import('../src/config/database');
+  const r: any = await dbGet('SELECT name FROM approval_rules WHERE id=?', [id]);
+  return r?.name ?? null;
+}
+
+async function delegationExists(id: number): Promise<boolean> {
+  const { dbGet } = await import('../src/config/database');
+  return !!(await dbGet('SELECT 1 AS ok FROM approval_delegations WHERE id=?', [id]));
+}
+
+async function cleanupGuardDebris(): Promise<void> {
+  const { dbRun } = await import('../src/config/database');
+  await dbRun(`DELETE FROM approval_rules WHERE name LIKE 'UJI-GUARD-%'`);
+  await dbRun(`DELETE FROM approval_delegations WHERE reason LIKE 'UJI-GUARD-%'`);
+}
+
+async function cleanupGuardFixture(gk: any): Promise<number> {
+  const { dbGet } = await import('../src/config/database');
+  await cleanupGuardDebris();
+  const sisa: any = await dbGet(
+    `SELECT (SELECT COUNT(*) FROM approval_rules WHERE name LIKE 'UJI-GUARD-%')
+          + (SELECT COUNT(*) FROM approval_delegations WHERE id=?) AS n`, [gk.delegationId]
+  );
+  return Number(sisa?.n ?? -1);
+}
+
 async function seedRuleFixture(): Promise<any> {
   await cleanupRuleDebris();
   try {
@@ -1088,24 +1140,43 @@ async function main() {
   // Ini melengkapi bypass aksi: kalau CRUD rule cuma butuh login, user biasa
   // tinggal membuat rule yang menjadikan DIRINYA approver, lalu menyetujui
   // sendiri — otorisasi aksi yang sudah diperketat jadi tidak ada artinya.
-  for (const [label, method, path, body] of [
-    ['buat rule', 'POST', '/approval/rules', { module: 'finance', name: 'uji' }],
-    ['ubah rule', 'PUT', '/approval/rules/1', { name: 'uji' }],
-    ['hapus rule', 'DELETE', '/approval/rules/1', undefined],
-    ['buat delegasi', 'POST', '/approval/delegations', { from_user_id: 1, to_user_id: 2, module: 'finance' }],
-    ['hapus delegasi', 'DELETE', '/approval/delegations/1', undefined],
-    ['buat eskalasi', 'POST', '/approval/escalations', { module: 'finance' }],
-  ] as [string, string, string, any][]) {
-    chk(`${label} oleh user tanpa hak`, await status(method, path, body, plainToken), 403);
-  }
+  // ⚠️ Versi pertama tes ini menembak `/approval/rules/1` dan
+  // `/approval/delegations/1` — ID KONFIGURASI NYATA. Selama guard-nya utuh
+  // permintaannya berhenti di 403, tapi justru pada kondisi yang ingin
+  // dideteksi — guard hilang — suite ini akan MENGUBAH dan MENGHAPUS baris
+  // ID 1 milik konfigurasi sungguhan. Ditemukan tim reviewer. Sekarang seluruh
+  // sasarannya milik fixture sendiri.
+  const gk = await seedGuardFixture();
+  chk('fixture guard dibuat', !!gk?.ruleId, true);
 
-  // Inbox & history SENGAJA tidak digembok — pandangan per-user yang sudah
-  // tersaring. Menggemboknya justru menutup inbox milik approver sendiri.
-  chk('inbox tetap terbuka untuk user login',
-    await status('GET', '/approval/inbox', undefined, plainToken), 200);
-  chk('master tetap bisa membuat rule',
-    (await call('POST', '/approval/rules', { module: 'finance', name: `UJI-GEMBOK-${stamp}` }, master)).status < 400, true);
-  await hapusRuleUji(`UJI-GEMBOK-${stamp}`);
+  if (gk?.ruleId) {
+    try {
+      for (const [label, method, path, body] of [
+        ['buat rule', 'POST', '/approval/rules', { module: 'finance', name: gk.tag }],
+        ['ubah rule', 'PUT', `/approval/rules/${gk.ruleId}`, { name: `${gk.tag}-diubah` }],
+        ['hapus rule', 'DELETE', `/approval/rules/${gk.ruleId}`, undefined],
+        ['buat delegasi', 'POST', '/approval/delegations', { from_user_id: 1, to_user_id: 2, module: 'finance' }],
+        ['hapus delegasi', 'DELETE', `/approval/delegations/${gk.delegationId}`, undefined],
+        ['buat eskalasi', 'POST', '/approval/escalations', { module: 'finance' }],
+        ['baca rule', 'GET', '/approval/rules', undefined],
+        ['baca delegasi', 'GET', '/approval/delegations', undefined],
+        ['baca eskalasi', 'GET', '/approval/escalations', undefined],
+      ] as [string, string, string, any][]) {
+        chk(`${label} oleh user tanpa hak`, await status(method, path, body, plainToken), 403);
+      }
+
+      // Fixture harus benar-benar utuh setelah semua percobaan di atas.
+      chk('rule fixture tidak tersentuh', await ruleName(gk.ruleId), gk.tag);
+      chk('delegasi fixture masih ada', await delegationExists(gk.delegationId), true);
+
+      chk('inbox tetap terbuka untuk user login',
+        await status('GET', '/approval/inbox', undefined, plainToken), 200);
+      chk('master tetap bisa membuat rule',
+        (await call('POST', '/approval/rules', { module: 'finance', name: `${gk.tag}-master` }, master)).status < 400, true);
+    } finally {
+      chk('fixture guard dibersihkan', await cleanupGuardFixture(gk), 0);
+    }
+  }
 
   console.log('\n8e. Status PIN tidak bisa dienumerasi sembarang token (P2)');
   // Endpoint ini membocorkan has_pin, status wajib ganti, waktu PIN dibuat, dan

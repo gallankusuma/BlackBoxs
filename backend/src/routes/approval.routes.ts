@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { dbAll, dbGet, dbRun, withTransaction, TxRunner } from '../config/database';
 import { authMiddleware } from '../middleware/auth';
-import { requirePermission } from '../middleware/permission';
+import { requirePermission, loadUserAccess } from '../middleware/permission';
 
 const router = Router();
 
@@ -592,9 +592,19 @@ router.put('/inbox/:id/reject', authMiddleware, async (req: Request, res: Respon
 // ─── HISTORY ────────────────────────────────────────────
 
 // GET /history — all past approval actions for current user or all
+// P2 RBAC/DATA-SCOPE: history adalah pandangan PER-USER, bukan seluruh
+// perusahaan.
+//
+// Query dulu dimulai `WHERE 1=1` tanpa satu pun predicate kepemilikan, jadi
+// setiap user login bisa membaca sampai 200 request seluruh modul berikut nomor,
+// entity ID, requester, status, dan nama serta waktu actor di jejak aksinya.
 router.get('/history', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { module, entity_type, status, from_date, to_date } = req.query;
+    const userId = (req as any).userId;
+
+    const akses = await loadUserAccess(userId);
+    const master = !!akses && akses.level >= 10;
 
     let sql = `
       SELECT ar.*, u.full_name AS requester_name,
@@ -611,6 +621,25 @@ router.get('/history', authMiddleware, async (req: Request, res: Response) => {
       WHERE 1=1
     `;
     const params: any[] = [];
+
+    if (!master) {
+      // Yang boleh dilihat: request yang ia ajukan sendiri, yang pernah ia
+      // proses, atau yang modulnya memang menjadi wewenangnya.
+      const resources: string[] = Array.from(akses?.perms || [])
+        .filter(p => /\.(approve|approve_1|approve_2)$/.test(p))
+        .map(p => String(p).split('.')[0]);
+      const modulWewenang = Array.from(new Set(resources));
+
+      sql += ` AND (ar.requester_id = ?
+                 OR EXISTS (SELECT 1 FROM approval_actions x WHERE x.request_id = ar.id AND x.approver_id = ?)`;
+      params.push(userId, userId);
+
+      if (modulWewenang.length) {
+        sql += ` OR ar.module IN (${modulWewenang.map(() => '?').join(',')})`;
+        params.push(...modulWewenang);
+      }
+      sql += ')';
+    }
 
     if (module) { sql += ' AND ar.module = ?'; params.push(module); }
     if (entity_type) { sql += ' AND ar.entity_type = ?'; params.push(entity_type); }
@@ -650,7 +679,14 @@ router.get('/history/stats', authMiddleware, async (req: Request, res: Response)
 // ─── RULES ──────────────────────────────────────────────
 
 // GET /rules — list all approval rules with their steps
-router.get('/rules', authMiddleware, async (req: Request, res: Response) => {
+// P2 RBAC/DATA-SCOPE: sisi BACA konfigurasi digembok sama dengan sisi tulis.
+//
+// Responsnya memuat kondisi rule, penugasan role/user, identitas pemberi dan
+// penerima delegasi berikut alasannya, serta target escalation. Itu peta siapa
+// menyetujui apa — cukup untuk merancang jalur yang menghindari approver
+// tertentu. Konfigurasi approval sudah diputuskan menjadi fungsi Admin, jadi
+// membacanya mengikuti keputusan yang sama.
+router.get('/rules', authMiddleware, requirePermission('approval.approval-rules.view', 'admin.approval-config.view', 'approval.approval-rules.view'), async (req: Request, res: Response) => {
   try {
     const rules = await dbAll(`
       SELECT ar.*, r.name AS approver_role_name
@@ -752,7 +788,7 @@ router.delete('/rules/:id', authMiddleware, requirePermission('approval.approval
 // ─── DELEGATION ─────────────────────────────────────────
 
 // GET /delegations
-router.get('/delegations', authMiddleware, async (req: Request, res: Response) => {
+router.get('/delegations', authMiddleware, requirePermission('admin.approval-config.view', 'admin.approval-config.view', 'approval.approval-rules.view'), async (req: Request, res: Response) => {
   try {
     const delegations = await dbAll(`
       SELECT d.*, 
@@ -814,7 +850,7 @@ router.delete('/delegations/:id', authMiddleware, requirePermission('admin.appro
 // ─── ESCALATION ─────────────────────────────────────────
 
 // GET /escalations
-router.get('/escalations', authMiddleware, async (req: Request, res: Response) => {
+router.get('/escalations', authMiddleware, requirePermission('admin.approval-config.view', 'admin.approval-config.view', 'approval.approval-rules.view'), async (req: Request, res: Response) => {
   try {
     const escalations = await dbAll(`
       SELECT e.*, u.full_name AS escalate_to_name
