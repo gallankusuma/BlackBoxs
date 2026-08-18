@@ -1372,6 +1372,43 @@ const ensureMaterialRequestPrLink = async (connection: any) => {
 // dievaluasi.
 //
 // Rule dipilih sekali saat submit lalu dikunci ke requestnya.
+/**
+ * Foreign key `schedule_overrides` / `schedule_progress` → `proposal_items`.
+ *
+ * Kedua tabel dibuat tanpa FK sama sekali, jadi menghapus item RAB meninggalkan
+ * baris jadwal yatim yang tidak pernah bisa terlihat lagi dari mana pun — dan
+ * id-nya bisa terpakai ulang oleh item proposal lain di kemudian hari.
+ *
+ * Aman dijalankan: sebelum dipasang, produksi diperiksa dan kedua tabel berisi
+ * 0 baris dengan 0 orphan, jadi tidak ada data yang perlu dibersihkan lebih
+ * dulu. Kalau nanti gagal karena ada orphan, `execSchemaEnsure` hanya mencatat
+ * peringatan dan boot tetap jalan — pembersihannya keputusan operator, bukan
+ * sesuatu yang boleh dilakukan diam-diam saat startup.
+ */
+const ensureScheduleChildFk = async (connection: any) => {
+  const [ada]: any = await connection.execute(
+    `SELECT CONSTRAINT_NAME FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME IN ('schedule_overrides','schedule_progress')
+       AND REFERENCED_TABLE_NAME = 'proposal_items'`
+  );
+  const sudah = new Set((ada || []).map((r: any) => r.CONSTRAINT_NAME));
+
+  if (!sudah.has('fk_schedule_overrides_item')) {
+    await execSchemaEnsure(connection,
+      `ALTER TABLE schedule_overrides
+       ADD CONSTRAINT fk_schedule_overrides_item
+       FOREIGN KEY (proposal_item_id) REFERENCES proposal_items(id) ON DELETE CASCADE`);
+  }
+  if (!sudah.has('fk_schedule_progress_item')) {
+    await execSchemaEnsure(connection,
+      `ALTER TABLE schedule_progress
+       ADD CONSTRAINT fk_schedule_progress_item
+       FOREIGN KEY (proposal_item_id) REFERENCES proposal_items(id) ON DELETE CASCADE`);
+  }
+  console.log('✅ FK jadwal → proposal_items ensured');
+};
+
 const ensureApprovalRuleLink = async (connection: any) => {
   // Kolom prasyarat pada tabel approval LAMA.
   //
@@ -1941,6 +1978,7 @@ export async function initializeDatabase() {
     await ensureDealPrOutbox(connection);
     await ensureCredentialOfficeLink(connection);
     await ensureMtoLinesSchema(connection);
+    await ensureScheduleChildFk(connection);
     await ensureDisposalSchema(connection);
     await ensureAssetStatusHistorySchema(connection);
     await ensurePermissionCatalog(connection);

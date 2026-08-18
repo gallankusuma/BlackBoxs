@@ -1093,25 +1093,72 @@ router.get('/proposals/:id/schedule', authMiddleware, async (req: Request, res: 
   }
 });
 
+/**
+ * Pastikan item benar-benar milik proposal yang disebut di URL.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Route schedule dulu tidak pernah mengikat id anak ke id induknya: `PUT`
+ * menerima `proposal_item_id` dari body dan `DELETE`/`GET` memakai `:itemId`
+ * saja, sementara `:id` di URL tidak dipakai untuk apa pun. Siapa pun yang
+ * terautentikasi dan menebak id item bisa membaca atau menimpa jadwal proposal
+ * milik orang lain — cukup dengan menyebut proposal-nya sendiri di URL.
+ *
+ * Kedua tabel juga tidak punya foreign key ke `proposal_items`, jadi tidak ada
+ * jaring pengaman di lapisan database sama sekali.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+const itemMilikProposal = async (proposalId: any, itemId: any, tx: TxRunner) => {
+  const row: any = await tx.get(
+    'SELECT id FROM proposal_items WHERE id = ? AND proposal_id = ?', [itemId, proposalId]
+  );
+  return !!row;
+};
+
+// Bentuknya harus sama dengan yang dikembalikan `proposalLockTx` lewat
+// `{ error: status, body }` — handler di bawah memilah hasil transaction dengan
+// `'error' in hasil`. Memakai kunci `status` di sini membuat penolakannya lolos
+// sebagai sukses: barisnya memang tidak ditulis, tapi pemanggil menerima 200.
+const BUKAN_MILIK = {
+  error: 404,
+  body: { error: 'Item tidak ditemukan pada proposal ini', code: 'ITEM_BUKAN_MILIK_PROPOSAL' },
+};
+
 // ── Override: save manual start/duration for a schedule item
 router.put('/proposals/:id/schedule/overrides', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { proposal_item_id, start_day_override, duration_days_override, is_pinned, notes } = req.body;
-    await dbRun(
-      `INSERT INTO schedule_overrides (proposal_item_id, start_day_override, duration_days_override, is_pinned, notes)
-       VALUES (?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         start_day_override     = VALUES(start_day_override),
-         duration_days_override = VALUES(duration_days_override),
-         is_pinned              = VALUES(is_pinned),
-         notes                  = VALUES(notes),
-         updated_at             = NOW()`,
-      [proposal_item_id,
-       start_day_override != null ? start_day_override : null,
-       duration_days_override != null ? duration_days_override : null,
-       is_pinned ? 1 : 0,
-       notes || null]
-    );
+    if (proposal_item_id == null) {
+      return res.status(400).json({ error: 'proposal_item_id wajib diisi' });
+    }
+
+    const hasil = await withTransaction(async tx => {
+      // Tanggal dan durasi menggeser kurva kas serta rencana billing, jadi ia
+      // tunduk pada kunci yang sama dengan perubahan komersial lain: proposal
+      // yang sudah dikirim atau menjadi kontrak tidak boleh berubah diam-diam.
+      const terkunci = await proposalLockTx(req.params.id, tx);
+      if (terkunci) return { error: terkunci.status, body: terkunci.body };
+
+      if (!(await itemMilikProposal(req.params.id, proposal_item_id, tx))) return BUKAN_MILIK;
+
+      await tx.run(
+        `INSERT INTO schedule_overrides (proposal_item_id, start_day_override, duration_days_override, is_pinned, notes)
+         VALUES (?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           start_day_override     = VALUES(start_day_override),
+           duration_days_override = VALUES(duration_days_override),
+           is_pinned              = VALUES(is_pinned),
+           notes                  = VALUES(notes),
+           updated_at             = NOW()`,
+        [proposal_item_id,
+         start_day_override != null ? start_day_override : null,
+         duration_days_override != null ? duration_days_override : null,
+         is_pinned ? 1 : 0,
+         notes || null]
+      );
+      return { ok: true as const };
+    });
+
+    if ('error' in hasil) return res.status(hasil.error).json(hasil.body);
     res.json({ message: 'Override saved' });
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });
@@ -1119,7 +1166,17 @@ router.put('/proposals/:id/schedule/overrides', authMiddleware, async (req: Requ
 // ── Override: reset item back to auto (delete override)
 router.delete('/proposals/:id/schedule/overrides/:itemId', authMiddleware, async (req: Request, res: Response) => {
   try {
-    await dbRun('DELETE FROM schedule_overrides WHERE proposal_item_id = ?', [req.params.itemId]);
+    const hasil = await withTransaction(async tx => {
+      const terkunci = await proposalLockTx(req.params.id, tx);
+      if (terkunci) return { error: terkunci.status, body: terkunci.body };
+
+      if (!(await itemMilikProposal(req.params.id, req.params.itemId, tx))) return BUKAN_MILIK;
+
+      await tx.run('DELETE FROM schedule_overrides WHERE proposal_item_id = ?', [req.params.itemId]);
+      return { ok: true as const };
+    });
+
+    if ('error' in hasil) return res.status(hasil.error).json(hasil.body);
     res.json({ message: 'Override reset' });
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });
@@ -1366,6 +1423,14 @@ router.get('/proposals/:id/payment-schedule', authMiddleware, async (req: Reques
 
 router.get('/proposals/:proposalId/schedule-progress/:itemId', authMiddleware, async (req: Request, res: Response) => {
   try {
+    // Membaca pun harus terikat induknya: tanpa ini, `:itemId` milik proposal
+    // lain tetap dilayani dan isinya bocor ke pemanggil yang tidak berhak.
+    const milik = await dbGet(
+      'SELECT id FROM proposal_items WHERE id = ? AND proposal_id = ?',
+      [req.params.itemId, req.params.proposalId]
+    );
+    if (!milik) return res.status(404).json(BUKAN_MILIK.body);
+
     const rows = await dbAll(
       `SELECT unit_number, step_code, step_name, status, updated_at, notes
        FROM schedule_progress WHERE proposal_item_id = ? ORDER BY unit_number, step_code`,
@@ -1385,13 +1450,27 @@ router.put('/proposals/:proposalId/schedule-progress', authMiddleware, async (re
     // menghasilkan undefined, sehingga created_by SELALU jatuh ke 1 — proposal
     // tercatat atas nama orang lain, dan gagal total kalau user id 1 tidak ada.
     const userId = (req as any).user?.userId || (req as any).userId || null;
-    await dbRun(
-      `INSERT INTO schedule_progress (proposal_item_id, unit_number, step_code, step_name, status, updated_by, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE status=VALUES(status), step_name=VALUES(step_name),
-         updated_by=VALUES(updated_by), notes=VALUES(notes), updated_at=NOW()`,
-      [proposal_item_id, unit_number, step_code, step_name, status, userId, notes || null]
-    );
+    if (proposal_item_id == null) {
+      return res.status(400).json({ error: 'proposal_item_id wajib diisi' });
+    }
+
+    const hasil = await withTransaction(async tx => {
+      const terkunci = await proposalLockTx(req.params.proposalId, tx);
+      if (terkunci) return { error: terkunci.status, body: terkunci.body };
+
+      if (!(await itemMilikProposal(req.params.proposalId, proposal_item_id, tx))) return BUKAN_MILIK;
+
+      await tx.run(
+        `INSERT INTO schedule_progress (proposal_item_id, unit_number, step_code, step_name, status, updated_by, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE status=VALUES(status), step_name=VALUES(step_name),
+           updated_by=VALUES(updated_by), notes=VALUES(notes), updated_at=NOW()`,
+        [proposal_item_id, unit_number, step_code, step_name, status, userId, notes || null]
+      );
+      return { ok: true as const };
+    });
+
+    if ('error' in hasil) return res.status(hasil.error).json(hasil.body);
     res.json({ message: 'Progress updated' });
   } catch (e) {
     console.error('Progress update error:', e);

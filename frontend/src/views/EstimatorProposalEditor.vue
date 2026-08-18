@@ -283,6 +283,15 @@
         <!-- ═══ SCHEDULE TAB ═══ -->
         <div v-show="activeProposalTab === 'schedule'" class="space-y-4">
 
+          <!-- Sel tanggal/durasi dan badge progress dulu tetap bisa diklik pada
+               proposal submitted/deal, padahal backend menolaknya. Sekarang
+               keduanya mengikuti `isEditable`, dan alasannya dinyatakan. -->
+          <div v-if="!isEditable" class="mb-3 rounded-lg border border-slate-300 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+            🔒 Proposal berstatus <strong>{{ proposal?.status }}</strong> — jadwal dan progress
+            hanya bisa dibaca. Tanggal, durasi, dan status langkah tidak bisa diubah lagi
+            karena keduanya menjadi dasar kurva kas dan rencana billing yang sudah dikirim.
+          </div>
+
           <!-- Settings Bar -->
           <div class="bg-white rounded-lg shadow p-4 flex flex-wrap gap-4 items-end">
             <div>
@@ -380,7 +389,7 @@
                           <input type="number" v-model.number="row._edit_start" min="0" step="1"
                             style="width:52px;border:1px solid #93c5fd;border-radius:4px;padding:1px 4px;font-size:10px;text-align:right">
                         </div>
-                        <div v-else class="text-right text-gray-600 pr-1" @click.stop="row._editing=true;row._edit_start=row.start_day;row._edit_dur=row.duration_days">
+                        <div v-else class="text-right text-gray-600 pr-1" @click.stop="isEditable && (row._editing=true, row._edit_start=row.start_day, row._edit_dur=row.duration_days)">
                           <span>Hari ke-{{ Math.round(row.start_day) }}</span>
                           <span v-if="row.start_date" style="display:block;font-size:8px;color:#6b7280">{{ row.start_date }}</span>
                         </div>
@@ -393,7 +402,7 @@
                             style="width:48px;border:1px solid #93c5fd;border-radius:4px;padding:1px 4px;font-size:10px;text-align:right">
                           <span style="font-size:9px;color:#6b7280">d</span>
                         </div>
-                        <div v-else class="text-right font-bold pr-1" @click.stop="row._editing=true;row._edit_start=row.start_day;row._edit_dur=row.duration_days">
+                        <div v-else class="text-right font-bold pr-1" @click.stop="isEditable && (row._editing=true, row._edit_start=row.start_day, row._edit_dur=row.duration_days)">
                           {{ row.duration_days > 0 ? row.duration_days + 'd' : '—' }}
                           <span v-if="row.end_date" style="display:block;font-size:8px;color:#6b7280;font-weight:400">s/d {{ row.end_date }}</span>
                         </div>
@@ -499,8 +508,8 @@
                                 :style="step.status === 'done' ? 'background:#dcfce7;color:#166534;border-color:#86efac' :
                                         step.status === 'in_progress' ? 'background:#fef3c7;color:#92400e;border-color:#fbbf24' :
                                         'background:#f1f5f9;color:#64748b;border-color:#cbd5e1'"
-                                :title="`${step.step_name} — klik untuk ganti status`"
-                                @click="cycleProgress(row, unit, step)">
+                                :title="isEditable ? `${step.step_name} — klik untuk ganti status` : `${step.step_name} — proposal terkunci, status tidak bisa diubah`"
+                                @click="isEditable && cycleProgress(row, unit, step)">
                                 <span>{{ step.status === 'done' ? '✓' : step.status === 'in_progress' ? '→' : '○' }}</span>
                                 {{ step.step_name.length > 12 ? step.step_name.slice(0,12)+'…' : step.step_name }}
                               </span>

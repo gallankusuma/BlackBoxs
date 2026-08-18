@@ -5027,6 +5027,59 @@ submitted/deal, dan race `status transition` versus override. Progress eksekusi
 pasca-award sebaiknya berpindah ke Project WBS/work package, bukan mengubah
 proposal komersial.
 
+**[DEV] DITERAPKAN.** Keempat route terverifikasi persis seperti dilaporkan, dan
+tidak adanya FK juga terkonfirmasi di dev maupun produksi.
+
+- **Ikatan anak → induk** dipasang di keempatnya. Mutasi mencari item dengan
+  `WHERE id = ? AND proposal_id = ?` **di dalam transaction yang sama** dengan
+  penulisannya, setelah `proposalLockTx` mengunci baris proposal. Yang bukan
+  milik proposal di URL → 404 `ITEM_BUKAN_MILIK_PROPOSAL`.
+- **GET progress ikut diikat** — sebelumnya ia melayani `:itemId` milik siapa pun
+  dan membocorkan isinya.
+- **Submitted/deal ditolak 409** `PROPOSAL_LOCKED` untuk PUT override, DELETE
+  override, dan PUT progress. Membaca tetap 200: yang dikunci perubahannya,
+  bukan visibilitasnya.
+- `proposal_item_id` yang hilang kini 400, bukan 500.
+- **FK `ON DELETE CASCADE`** ke `proposal_items` untuk kedua tabel, lewat
+  `ensureScheduleChildFk` di `config/database.ts`. Audit orphan dijalankan lebih
+  dulu seperti Anda minta: produksi berisi **0 baris dan 0 orphan** di kedua
+  tabel, jadi tidak ada yang perlu dibersihkan. Kalau nanti gagal karena orphan,
+  boot hanya mencatat peringatan — pembersihan data adalah keputusan operator,
+  bukan sesuatu yang pantas dilakukan diam-diam saat startup.
+- **Frontend mengikuti state server** ([EstimatorProposalEditor.vue](frontend/src/views/EstimatorProposalEditor.vue)):
+  sel tanggal/durasi dan badge progress kini tunduk pada `isEditable`, plus
+  pemberitahuan yang menyebutkan alasannya. Tombol Simpan/Auto hanya muncul saat
+  baris dalam mode edit, yang kini tidak bisa lagi diaktifkan pada proposal
+  terkunci.
+
+**Satu bug di perbaikan saya sendiri, tertangkap tesnya:** konstanta penolakan
+mula-mula saya beri kunci `status`, sementara handler memilah hasil transaction
+dengan `'error' in hasil`. Akibatnya penolakannya *setengah* bekerja — barisnya
+memang tidak ditulis, tapi pemanggil menerima **200 "Override saved"**. Tanpa tes
+yang memeriksa status DAN isi database, ini lolos sebagai "sudah diperbaiki".
+
+**Tes:** [backend/tests/schedule-ownership.ts](backend/tests/schedule-ownership.ts)
+— 32 assertion, masuk `test:all`. Menguji ID lintas proposal (tulis, hapus, baca),
+proposal submitted, `proposal_item_id` hilang, keberadaan FK, dan cascade saat
+item dihapus.
+
+Dibuktikan bergigi: ikatan induk dilepas sementara → **9 gagal**, dan yang
+gagal memperlihatkan kerugian sebenarnya, bukan sekadar kode status — `jadwal B
+tidak ikut tertulis → dapat 1` (jadwal proposal lain **ditimpa**), `override B
+masih utuh → dapat 0` (**terhapus**), `progress B tidak tersentuh → dapat 1`, dan
+`tidak mengembalikan baris → dapat 1` (**bocor** saat dibaca lewat URL lain).
+
+Suite penuh: **1123 lulus, 0 gagal**.
+
+**PERLU KLARIFIKASI — tidak saya kerjakan:** rekomendasi memindahkan progress
+eksekusi pasca-award ke Project WBS/work package. Itu perpindahan model, bukan
+perbaikan cacat, dan menyentuh modul Projects yang punya lifecycle sendiri.
+Untuk sekarang progress pada proposal deal saya **kunci** (409) sesuai kriteria
+Anda — artinya kalau ada yang memang memakainya untuk melacak eksekusi, jalur itu
+tertutup sampai penggantinya ada. Produksi berisi 0 baris `schedule_progress`,
+jadi tidak ada pengguna aktif yang terdampak hari ini. Mau saya lanjutkan
+membangun jalur WBS-nya?
+
 ### [P1 / DATA-INTEGRITY + API-CONTRACT] Tab Proposal pada CRM Client memakai source lain dan menyisipkan proposal demo sebagai data nyata
 
 **File:** [backend/src/routes/clients.routes.ts:255](backend/src/routes/clients.routes.ts),
