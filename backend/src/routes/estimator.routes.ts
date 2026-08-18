@@ -1133,10 +1133,17 @@ router.get('/proposals/:id/payment-schedule', authMiddleware, async (req: Reques
     const hoursPerDay   = parseFloat(req.query.hours_per_day   as string) || 8;
 
     // 1. Get proposal total & items
+    //
+    // Kolom `total_price` TIDAK PERNAH ADA di tabel `proposals` — diperiksa di
+    // INFORMATION_SCHEMA, dev maupun produksi. Query lama karena itu selalu
+    // gagal `ER_BAD_FIELD_ERROR`, dan tab Payment Schedule tidak pernah sekali
+    // pun berhasil dimuat; frontend hanya menulis errornya ke console sehingga
+    // kegagalannya tidak terlihat siapa pun.
     const proposal: any = await dbGet(
-      `SELECT id, total_price FROM proposals WHERE id = ?`, [proposalId]
+      `SELECT id, total_project FROM proposals WHERE id = ?`, [proposalId]
     );
-    const totalContract = parseFloat(proposal?.total_price || 0);
+    if (!proposal) return res.status(404).json({ error: 'Proposal tidak ditemukan' });
+    const totalContract = uang(proposal.total_project);
 
     // 2. Get all items with price & schedule overrides
     const items = await dbAll(
@@ -1159,11 +1166,21 @@ router.get('/proposals/:id/payment-schedule', authMiddleware, async (req: Reques
     }
 
     // 4. Calculate auto start days (serial) for items without override
+    //
+    // Bobot dihitung terhadap JUMLAH harga item, bukan langsung terhadap
+    // `total_project`. Keduanya kebetulan sama sekarang karena
+    // `recalculateProposal` selalu menulis overhead = 0 dan contingency = 0,
+    // tapi begitu keduanya dipulihkan, `total_project` menjadi lebih besar dari
+    // jumlah harga item dan bobot tidak akan pernah mencapai 100%. Dengan
+    // pembagi jumlah-harga-item, distribusinya tetap menghabiskan seluruh nilai
+    // kontrak apa pun isi overhead.
+    const totalHargaItem = jumlahUang(items.map((i: any) => i.total_price));
+
     let cursor = 0;
     const itemSchedules: any[] = [];
     for (const item of items) {
-      const price = parseFloat(item.total_price) || 0;
-      const bobot = totalContract > 0 ? price / totalContract * 100 : 0;
+      const price = uang(item.total_price);
+      const bobot = totalHargaItem > 0 ? price / totalHargaItem * 100 : 0;
       const ov = overrides[item.id];
 
       // Simplified: if no AHSP, duration=0
@@ -1193,7 +1210,16 @@ router.get('/proposals/:id/payment-schedule', authMiddleware, async (req: Reques
     }
 
     // 5. Distribute bobot into calendar months
-    const startDate = new Date(startDateStr);
+    // `new Date("2026-03-01")` diurai sebagai tengah malam UTC, sedangkan batas
+    // bulan di bawah dibentuk dengan `new Date(y, m, 1)` yang memakai waktu
+    // lokal. Selisih zona waktu itu menggeser setiap irisan bulan: pada
+    // pengujian, aktivitas 4 hari yang mestinya terbagi rata 50/50 antara Maret
+    // dan April keluar 42,71/57,29. Tanggalnya karena itu diurai sebagai
+    // tanggal kalender lokal supaya kedua sisi perhitungan memakai acuan sama.
+    const [thn, bln, tgl] = startDateStr.split('-').map(Number);
+    const startDate = Number.isFinite(thn) && Number.isFinite(bln) && Number.isFinite(tgl)
+      ? new Date(thn, (bln || 1) - 1, tgl || 1)
+      : new Date(startDateStr);
     const monthMap: Record<string, { label: string; planned_bobot: number; planned_amount: number; items: string[] }> = {};
 
     const getMonthKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
@@ -1202,54 +1228,116 @@ router.get('/proposals/:id/payment-schedule', authMiddleware, async (req: Reques
       return new Date(+y, +m-1, 1).toLocaleDateString('id-ID', { month:'short', year:'numeric' });
     };
 
+    const HARI = 86400000;
+    const pastikanBulan = (key: string) => {
+      if (!monthMap[key]) monthMap[key] = { label: getMonthLabel(key), planned_bobot: 0, planned_amount: 0, items: [] };
+      return monthMap[key];
+    };
+
     for (const sched of itemSchedules) {
-      if (sched.duration <= 0 || sched.bobot <= 0) continue;
+      if (sched.bobot <= 0) continue;
 
-      const itemStart = new Date(startDate);
-      itemStart.setDate(itemStart.getDate() + Math.round(sched.startDay));
-      const itemEnd = new Date(itemStart);
-      itemEnd.setDate(itemEnd.getDate() + Math.round(sched.duration));
+      // Nilai rupiah item dihitung dari bobotnya terhadap nilai kontrak, bukan
+      // dari `price` mentah — lihat catatan pembagi di langkah 4.
+      const nilaiItem = totalContract * sched.bobot / 100;
 
-      // Walk month by month within item span
+      // Rentang setengah terbuka [start, end). Durasinya dipakai apa adanya
+      // sebagai pecahan hari; versi lama membulatkannya dengan `Math.round`,
+      // sehingga aktivitas 0,4 hari menjadi 0 hari dan nilainya hilang total.
+      const mulaiMs = startDate.getTime() + sched.startDay * HARI;
+      const selesaiMs = mulaiMs + sched.duration * HARI;
+      const itemStart = new Date(mulaiMs);
+
+      // Item tanpa durasi diperlakukan sebagai MILESTONE: seluruh nilainya jatuh
+      // pada bulan tanggal mulainya.
+      //
+      // Versi lama melewatinya dengan `continue`, padahal nilainya sudah ikut
+      // dihitung di total kontrak — jadi uangnya hilang dari kurva tanpa jejak,
+      // sementara footer di layar tetap mencetak 100%. Aturan ini dipilih karena
+      // "kegiatan tanpa rentang waktu terjadi pada satu titik waktu" adalah
+      // pembacaan paling wajar, dan ia mempertahankan invarian jumlah = kontrak.
+      if (sched.duration <= 0) {
+        const m = pastikanBulan(getMonthKey(itemStart));
+        m.planned_bobot += sched.bobot;
+        m.planned_amount += nilaiItem;
+        m.items.push(sched.name);
+        continue;
+      }
+
+      // Jalan bulan demi bulan sepanjang rentang item.
       const cur = new Date(itemStart.getFullYear(), itemStart.getMonth(), 1);
-      while (cur <= itemEnd) {
+      while (cur.getTime() < selesaiMs) {
         const key = getMonthKey(cur);
-        const monthStart = new Date(cur);
-        const monthEnd = new Date(cur.getFullYear(), cur.getMonth()+1, 0); // last day of month
+        const awalBulanMs = cur.getTime();
+        // Batasnya AWAL BULAN BERIKUTNYA, bukan tengah malam hari terakhir.
+        // Dengan batas lama, setiap aktivitas yang melintasi pergantian bulan
+        // kehilangan satu hari alokasi, dan aktivitas satu hari tepat di akhir
+        // bulan kehilangan seluruh bobotnya.
+        const awalBulanBerikutMs = new Date(cur.getFullYear(), cur.getMonth() + 1, 1).getTime();
 
-        // Days of item that fall in this month
-        const overlapStart = new Date(Math.max(itemStart.getTime(), monthStart.getTime()));
-        const overlapEnd   = new Date(Math.min(itemEnd.getTime(),   monthEnd.getTime()));
-        const overlapDays  = Math.max(0, (overlapEnd.getTime() - overlapStart.getTime()) / 86400000);
-        const fraction     = sched.duration > 0 ? overlapDays / sched.duration : 0;
+        const irisMulai = Math.max(mulaiMs, awalBulanMs);
+        const irisSelesai = Math.min(selesaiMs, awalBulanBerikutMs);
+        const hariIris = Math.max(0, (irisSelesai - irisMulai) / HARI);
+        const fraction = hariIris / sched.duration;
 
         if (fraction > 0) {
-          if (!monthMap[key]) monthMap[key] = { label: getMonthLabel(key), planned_bobot: 0, planned_amount: 0, items: [] };
-          monthMap[key].planned_bobot  += sched.bobot * fraction;
-          monthMap[key].planned_amount += sched.price * fraction;
-          monthMap[key].items.push(sched.name);
+          const m = pastikanBulan(key);
+          m.planned_bobot += sched.bobot * fraction;
+          m.planned_amount += nilaiItem * fraction;
+          m.items.push(sched.name);
         }
-        cur.setMonth(cur.getMonth()+1);
+        cur.setMonth(cur.getMonth() + 1);
       }
     }
 
     // 6. Build sorted monthly array with cumulative
+    //
+    // Pembulatan diselesaikan di sini, bukan dibiarkan menguap. Versi lama
+    // memakai `toFixed(0)` per bulan tanpa pernah merekonsiliasi, jadi jumlah
+    // seluruh bulan bisa meleset dari nilai kontrak beberapa rupiah — dan tidak
+    // ada satu pun invarian yang memeriksanya, sementara footer di layar selalu
+    // mencetak 100% apa pun hasilnya.
+    //
+    // Semua dihitung dalam sen bulat, lalu SELURUH sisa pembulatan ditaruh pada
+    // periode terakhir sehingga jumlahnya sama persis dengan nilai kontrak.
     const months = Object.keys(monthMap).sort();
-    let cumBobot = 0;
-    let cumAmount = 0;
-    const monthly = months.map(key => {
-      cumBobot  += monthMap[key].planned_bobot;
-      cumAmount += monthMap[key].planned_amount;
+    const senKontrak = Math.round(totalContract * 100);
+    const senPerBulan = months.map(key => Math.round(monthMap[key].planned_amount * 100));
+
+    // Hanya nilai yang benar-benar teralokasi yang direkonsiliasi. Kalau ada
+    // item yang tidak punya bobot sama sekali (mis. seluruh harga item nol),
+    // selisihnya dilaporkan apa adanya sebagai `unallocated_amount` — bukan
+    // dipaksa masuk ke bulan terakhir seolah-olah sudah terjadwal.
+    const adaAlokasi = senPerBulan.length > 0 && totalHargaItem > 0;
+    if (adaAlokasi) {
+      const selisih = senKontrak - senPerBulan.reduce((a, b) => a + b, 0);
+      senPerBulan[senPerBulan.length - 1] += selisih;
+    }
+
+    const bobotPer100 = months.map(key => Math.round(monthMap[key].planned_bobot * 100));
+    if (adaAlokasi) {
+      const selisihBobot = 10000 - bobotPer100.reduce((a, b) => a + b, 0);
+      bobotPer100[bobotPer100.length - 1] += selisihBobot;
+    }
+
+    let cumSen = 0;
+    let cumBobot100 = 0;
+    const monthly = months.map((key, i) => {
+      cumSen += senPerBulan[i];
+      cumBobot100 += bobotPer100[i];
       return {
         month: key,
         label: monthMap[key].label,
-        planned_bobot:    +monthMap[key].planned_bobot.toFixed(2),
-        planned_amount:   +monthMap[key].planned_amount.toFixed(0),
-        cumulative_bobot: +cumBobot.toFixed(2),
-        cumulative_amount: +cumAmount.toFixed(0),
+        planned_bobot:     bobotPer100[i] / 100,
+        planned_amount:    senPerBulan[i] / 100,
+        cumulative_bobot:  cumBobot100 / 100,
+        cumulative_amount: cumSen / 100,
         items: [...new Set(monthMap[key].items)].slice(0, 5)
       };
     });
+
+    const totalTerjadwal = cumSen / 100;
+    const belumTeralokasi = bulatUang(totalContract - totalTerjadwal);
 
     res.json({
       proposal_id: proposalId,
@@ -1257,7 +1345,13 @@ router.get('/proposals/:id/payment-schedule', authMiddleware, async (req: Reques
       start_date: startDateStr,
       monthly,
       total_months: monthly.length,
-      total_items: itemSchedules.length
+      total_items: itemSchedules.length,
+      // Rekonsiliasi dinyatakan terbuka supaya layar tidak lagi bisa mencetak
+      // 100% tanpa dasar. `reconciled` false berarti ada nilai kontrak yang
+      // tidak masuk kurva sama sekali.
+      scheduled_amount: totalTerjadwal,
+      unallocated_amount: belumTeralokasi,
+      reconciled: Math.abs(belumTeralokasi) < 0.005,
     });
 
   } catch (err: any) {

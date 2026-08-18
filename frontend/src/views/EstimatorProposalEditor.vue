@@ -704,13 +704,26 @@
               </tr>
             </tbody>
             <tfoot>
+              <!-- Angka di baris ini dulu ditulis mati sebagai 100.00% dan nilai
+                   kontrak, terlepas dari apa yang benar-benar dikembalikan
+                   backend — schedule yang kehilangan sebagian nilai tetap
+                   terlihat balance sempurna. Sekarang yang dicetak adalah hasil
+                   sungguhan, dan selisihnya ditandai. -->
               <tr class="bg-emerald-800 text-white font-bold">
                 <td colspan="2" class="px-4 py-3 text-sm">TOTAL</td>
-                <td class="px-4 py-3 text-right text-sm">100.00%</td>
-                <td class="px-4 py-3 text-right text-sm">100.00%</td>
-                <td class="px-4 py-3 text-right text-sm">{{ formatNumber(paymentData.total_contract) }}</td>
-                <td class="px-4 py-3 text-right text-sm">{{ formatNumber(paymentData.total_contract) }}</td>
+                <td class="px-4 py-3 text-right text-sm">{{ totalBobotTerjadwal.toFixed(2) }}%</td>
+                <td class="px-4 py-3 text-right text-sm">{{ bobotKumulatifAkhir.toFixed(2) }}%</td>
+                <td class="px-4 py-3 text-right text-sm">{{ formatNumber(nilaiTerjadwal) }}</td>
+                <td class="px-4 py-3 text-right text-sm">{{ formatNumber(nilaiTerjadwal) }}</td>
                 <td class="px-4 py-3"></td>
+              </tr>
+              <tr v-if="paymentData.reconciled === false" class="bg-amber-100 text-amber-900">
+                <td colspan="7" class="px-4 py-3 text-sm">
+                  ⚠️ Jadwal ini <strong>tidak balance</strong>:
+                  {{ formatNumber(paymentData.unallocated_amount) }} dari nilai kontrak
+                  {{ formatNumber(paymentData.total_contract) }} belum masuk ke bulan mana pun.
+                  Periksa item yang belum punya durasi atau tanggal mulai.
+                </td>
               </tr>
             </tfoot>
           </table>
@@ -1160,6 +1173,16 @@ const maxMonthlyBobot = computed(() => {
   if (!paymentData.value?.monthly?.length) return 1;
   return Math.max(...paymentData.value.monthly.map((m: any) => m.planned_bobot)) || 1;
 });
+
+/** Total baris footer dibaca dari hasil sungguhan, bukan ditulis mati 100%. */
+const bulanan = computed<any[]>(() => paymentData.value?.monthly || []);
+const totalBobotTerjadwal = computed(() =>
+  bulanan.value.reduce((s, m) => s + Number(m.planned_bobot || 0), 0));
+const bobotKumulatifAkhir = computed(() =>
+  Number(bulanan.value[bulanan.value.length - 1]?.cumulative_bobot || 0));
+const nilaiTerjadwal = computed(() =>
+  paymentData.value?.scheduled_amount ??
+  bulanan.value.reduce((s, m) => s + Number(m.planned_amount || 0), 0));
 
 
 interface Proposal {

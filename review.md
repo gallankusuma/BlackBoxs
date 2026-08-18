@@ -4944,6 +4944,55 @@ Test: satu hari di akhir bulan, lintas bulan, item tanpa labor, override, nilai
 pecahan, dan invariant `sum(monthly.amount) == total_project` serta cumulative
 100%.
 
+**[DEV] DITERAPKAN.** Ketiga temuan terverifikasi. `proposals.total_price`
+diperiksa langsung di INFORMATION_SCHEMA: **tidak ada, di dev maupun produksi** —
+jadi tab ini memang tidak pernah sekali pun berhasil dimuat sejak ditulis.
+
+- Kolomnya `total_project`; proposal yang tidak ada sekarang 404, bukan
+  diam-diam menjadi kontrak nol.
+- **Batas bulan** jadi awal bulan berikutnya dan rentang item konsisten
+  `[start, end)`, seperti Anda minta.
+- **Item tanpa durasi** tidak lagi dibuang. Aturannya dinyatakan eksplisit:
+  diperlakukan **milestone** — seluruh nilainya jatuh pada bulan tanggal
+  mulainya. Dipilih karena "kegiatan tanpa rentang waktu terjadi pada satu titik
+  waktu" adalah pembacaan paling wajar dan ia mempertahankan invarian jumlah =
+  kontrak. *Kalau pemilik proses menghendaki pro-rata atau manual, ini titik
+  tunggal yang perlu diubah.*
+- **Rekonsiliasi**: semua dihitung dalam sen bulat dan seluruh sisa pembulatan
+  ditaruh pada periode terakhir, jadi `sum(monthly.planned_amount)` sama persis
+  dengan nilai kontrak dan kumulatif bobot berakhir tepat 100%. Respons kini
+  memuat `scheduled_amount`, `unallocated_amount`, dan `reconciled`.
+- **Pembagi bobot** memakai jumlah harga item, bukan `total_project` langsung.
+  Keduanya kebetulan sama sekarang karena `recalculateProposal` selalu menulis
+  overhead = 0 dan contingency = 0 — yang justru pokok temuan berikutnya. Dengan
+  pembagi ini distribusinya tetap menghabiskan seluruh nilai kontrak begitu
+  overhead dipulihkan.
+- **Footer frontend** ([EstimatorProposalEditor.vue](frontend/src/views/EstimatorProposalEditor.vue))
+  tidak lagi menulis mati `100.00%` dan nilai kontrak dua kali; ia mencetak hasil
+  sungguhan, dan menampilkan baris peringatan bernilai rupiah ketika
+  `reconciled === false`.
+
+**Temuan tambahan yang muncul dari tes, tidak ada di laporan:** `start_date`
+diurai `new Date("2026-03-01")` sebagai tengah malam **UTC**, sementara batas
+bulan dibentuk `new Date(y, m, 1)` dalam waktu **lokal**. Selisih zona menggeser
+setiap irisan bulan — aktivitas 4 hari yang mestinya terbagi 50/50 antara Maret
+dan April keluar **42,71/57,29**. Tanggal kini diurai sebagai tanggal kalender
+lokal supaya kedua sisi perhitungan memakai acuan yang sama. Bug ini hanya
+terlihat karena tesnya memeriksa angka pembagian, bukan sekadar "endpoint 200".
+
+**Tes:** [backend/tests/payment-schedule.ts](backend/tests/payment-schedule.ts) —
+29 assertion, masuk `test:all`, mencakup seluruh kasus yang Anda daftarkan: satu
+hari tepat di akhir bulan, lintas pergantian bulan, item tanpa labor, override
+start/duration, durasi pecahan 0,4 hari, nilai pecahan 333.333,33, dan invarian
+`sum == total_project` + kumulatif 100%.
+
+Dibuktikan bergigi dua kali: mengembalikan nama kolom lama → **14 gagal**;
+mengembalikan hanya `continue` untuk durasi nol + batas bulan hari-terakhir →
+**9 gagal**, termasuk `Maret dapat separuh → dapat 25` (persis satu hari hilang)
+dan `bulan Maret terisi → false` (aktivitas akhir bulan lenyap seluruhnya).
+
+Suite penuh: **1091 lulus, 0 gagal**.
+
 ### [P1 / OWNERSHIP + CONTRACT-INTEGRITY] Schedule override/progress dapat menulis item proposal lain dan tetap dapat mengubah proposal submitted/deal
 
 **File:** [backend/src/routes/estimator.routes.ts:1096](backend/src/routes/estimator.routes.ts),
