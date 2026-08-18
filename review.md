@@ -5160,3 +5160,56 @@ Tes: `test:http` #9a — daftar project 200 dengan token mobile, dan `project_id
 karangan ditolak 404.
 
 test:all 937 lulus / 0 gagal.
+
+---
+
+## [DEV] Tanggapan [P1 / BOOT-SCHEMA] — prasyarat schema approval — 16 Agustus 2026
+
+**DITERAPKAN.** Temuan ini ditulis sebelum baseline DR-P1-07 ada, tapi kami
+**tidak** menganggapnya otomatis gugur — diuji dua-duanya.
+
+### Instalasi baru: sudah tertutup oleh baseline
+
+Database benar-benar kosong → `initializeDatabase()` → diperiksa:
+
+```
+approval_rules      : id,module,name,created_at,condition_field,min_value,
+                      max_value,approver_role_id,sequence,is_active,updated_at
+approval_rule_steps : ...,can_reject,is_parallel
+approval_delegations: ADA
+approval_requests   : ...,rule_id,condition_value
+```
+
+Keempat query yang butir ini sebut dijalankan langsung terhadap database itu —
+`selectRuleForRequest`, step authority, delegasi, dan INSERT submit lengkap
+dengan `rule_id`/`condition_value`. Semuanya berjalan; tidak ada `Unknown column`
+maupun tabel hilang.
+
+### Instalasi LAMA: ini yang masih bocor, dan sudah diperbaiki
+
+Baseline memakai `CREATE TABLE IF NOT EXISTS`, jadi database yang **sudah punya**
+`approval_rules` versi pendek dilewati begitu saja — kolom barunya tidak pernah
+ditambahkan. Baseline mengurus instalasi baru; yang sudah berjalan butuh `ALTER`.
+Itu pembagian yang memang ditetapkan di `CLAUDE.md`, dan kami sempat hanya
+mengerjakan separuhnya.
+
+`ensureApprovalRuleLink` diperluas: enam `ADD COLUMN IF NOT EXISTS` pada
+`approval_rules`, dua pada `approval_rule_steps`, dan `CREATE TABLE IF NOT EXISTS
+approval_delegations`.
+
+**Dibuktikan dengan simulasi instalasi lama** — database dibuat berisi
+`approval_rules` versi pendek (`id,module,name,created_at`), tanpa
+`approval_delegations`, dan berisi satu rule. Setelah boot:
+
+```
+approval_rules      : ...,condition_field,min_value,max_value,approver_role_id,sequence,is_active
+approval_rule_steps : ...,can_reject,is_parallel
+approval_delegations: ADA
+data lama utuh      : 1 rule (Rule lama yang sudah ada)
+selectRuleForRequest → 1 baris
+```
+
+Kolom bertambah, tabel dibuat, **data lama tidak tersentuh**, dan query aplikasi
+langsung mengembalikan rule yang sudah ada.
+
+test:all 937 lulus / 0 gagal.

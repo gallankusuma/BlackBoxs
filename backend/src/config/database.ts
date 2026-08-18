@@ -1373,6 +1373,43 @@ const ensureMaterialRequestPrLink = async (connection: any) => {
 //
 // Rule dipilih sekali saat submit lalu dikunci ke requestnya.
 const ensureApprovalRuleLink = async (connection: any) => {
+  // Kolom prasyarat pada tabel approval LAMA.
+  //
+  // `schema-baseline.sql` memakai `CREATE TABLE IF NOT EXISTS`, jadi instalasi
+  // yang sudah punya `approval_rules` versi pendek (hanya id/module/name/
+  // created_at) TIDAK akan mendapat kolom barunya — baseline melewati tabelnya
+  // begitu saja. Baseline mengurus instalasi BARU; ALTER di sini mengurus yang
+  // SUDAH BERJALAN. Keduanya diperlukan, dan itu memang pembagian yang
+  // ditetapkan di CLAUDE.md.
+  //
+  // Tanpa ini, `selectRuleForRequest()` gagal `Unknown column 'sequence'` dan
+  // otorisasi aksi gagal `Table approval_delegations doesn't exist`.
+  for (const stmt of [
+    "ALTER TABLE approval_rules ADD COLUMN IF NOT EXISTS condition_field VARCHAR(100) NULL",
+    "ALTER TABLE approval_rules ADD COLUMN IF NOT EXISTS min_value DECIMAL(15,2) NULL",
+    "ALTER TABLE approval_rules ADD COLUMN IF NOT EXISTS max_value DECIMAL(15,2) NULL",
+    "ALTER TABLE approval_rules ADD COLUMN IF NOT EXISTS approver_role_id INT NULL",
+    "ALTER TABLE approval_rules ADD COLUMN IF NOT EXISTS sequence INT NULL DEFAULT 1",
+    "ALTER TABLE approval_rules ADD COLUMN IF NOT EXISTS is_active TINYINT(1) NOT NULL DEFAULT 1",
+    "ALTER TABLE approval_rule_steps ADD COLUMN IF NOT EXISTS can_reject TINYINT(1) NOT NULL DEFAULT 1",
+    "ALTER TABLE approval_rule_steps ADD COLUMN IF NOT EXISTS is_parallel TINYINT(1) NOT NULL DEFAULT 0",
+    `CREATE TABLE IF NOT EXISTS approval_delegations (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      from_user_id INT NOT NULL,
+      to_user_id INT NOT NULL,
+      module VARCHAR(100) NOT NULL,
+      start_date DATE NULL,
+      end_date DATE NULL,
+      reason TEXT NULL,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      KEY idx_delegasi_penerima (to_user_id, module, is_active)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+  ]) {
+    await execSchemaEnsure(connection, stmt);
+  }
+
   await execSchemaEnsure(connection,
     'ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS rule_id INT NULL');
   await execSchemaEnsure(connection,
