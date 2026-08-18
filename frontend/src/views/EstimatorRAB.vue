@@ -207,8 +207,20 @@ const summary = ref<any>({
 
 const expandedSections = ref<{ [key: number]: boolean }>({});
 
+const grandTotalApi = ref<number | null>(null);
+
+/**
+ * Grand total diambil dari server kalau tersedia — di sanalah rincian dan
+ * ringkasannya dijamin rekonsiliasi.
+ *
+ * Cadangannya menjumlahkan sendiri, dengan `Number()` yang eksplisit. Kolom uang
+ * datang dari MySQL sebagai string DECIMAL; `0 + "100.00" + "200.00"` bukan 300
+ * melainkan `"0100.00200.00"`. Itu bug yang baru saja diperbaiki di sisi
+ * backend, dan konversi di sini menahan agar tidak lahir kembali di sisi klien.
+ */
 const grandTotal = computed(() => {
-  return sections.value.reduce((sum, section) => sum + section.totalAmount, 0);
+  if (grandTotalApi.value !== null) return grandTotalApi.value;
+  return sections.value.reduce((sum, section) => sum + Number(section.totalAmount || 0), 0);
 });
 
 onMounted(async () => {
@@ -217,6 +229,9 @@ onMounted(async () => {
     proposal.value = response.data.proposal;
     sections.value = response.data.sections;
     summary.value = response.data.summary;
+    grandTotalApi.value = typeof response.data.grandTotal === 'number'
+      ? response.data.grandTotal
+      : null;
 
     // Expand all sections by default
     sections.value.forEach((_, idx) => {

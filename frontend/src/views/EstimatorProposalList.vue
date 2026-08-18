@@ -313,15 +313,25 @@
           </div>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Status</label>
-            <select v-model="editForm.status"
-              class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-indigo-300 focus:border-indigo-400">
-              <option value="draft">Draft</option>
-              <option value="review">In Review</option>
-              <option value="submitted">Submitted</option>
-              <option value="deal">Deal ✅</option>
-              <option value="no_deal">No Deal ❌</option>
+            <!-- Hanya status sekarang + transisi yang sah dari sana. Menawarkan
+                 semua status membuat pengguna memilih sesuatu yang pasti ditolak. -->
+            <select v-model="editForm.status" :disabled="pilihanStatus.length <= 1"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-indigo-300 focus:border-indigo-400 disabled:bg-gray-100 disabled:text-gray-500">
+              <option v-for="s in pilihanStatus" :key="s" :value="s">{{ LABEL_STATUS[s] || s }}</option>
             </select>
+            <p v-if="pilihanStatus.length <= 1" class="mt-1 text-xs text-gray-500">
+              Status <strong>{{ LABEL_STATUS[editAsal.status] || editAsal.status }}</strong> bersifat final —
+              tidak ada transisi lanjutan.
+            </p>
+            <p v-else class="mt-1 text-xs text-gray-500">
+              Transisi berjalan lewat endpoint workflow tersendiri, terpisah dari perubahan metadata.
+            </p>
           </div>
+
+          <p v-if="editError" class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {{ editError }}
+          </p>
+
           <div class="flex justify-end gap-3 pt-2 border-t">
             <button type="button" @click="showEditModal = false"
               class="px-4 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50">Batal</button>
@@ -338,7 +348,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import { useRouter } from 'vue-router';
 import { api } from '@/lib/api';
 import { formatCurrency } from '@/utils/format';
@@ -419,6 +429,38 @@ const selectEditClient = (client: Client) => {
   editShowClientDropdown.value = false;
 };
 
+/**
+ * Cermin dari `VALID_TRANSITIONS` di
+ * [estimator.routes.ts](../../backend/src/routes/estimator.routes.ts).
+ *
+ * Ini hanya untuk menyusun daftar pilihan supaya pengguna tidak ditawari
+ * transisi yang pasti ditolak. **Otoritasnya tetap di backend** — pemeriksaan
+ * sungguhan berjalan di dalam transaction dengan baris proposal terkunci, dan
+ * daftar di sini tidak boleh dianggap menggantikannya.
+ */
+const TRANSISI_SAH: Record<string, string[]> = {
+  draft:     ['review'],
+  review:    ['draft', 'submitted'],
+  submitted: ['review', 'deal', 'no_deal'],
+  no_deal:   ['draft'],
+  deal:      [],
+};
+
+const LABEL_STATUS: Record<string, string> = {
+  draft: 'Draft', review: 'In Review', submitted: 'Submitted',
+  deal: 'Deal', no_deal: 'No Deal',
+};
+
+/** Keadaan proposal saat modal dibuka — pembanding untuk tahu apa yang berubah. */
+const editAsal = ref<Record<string, any>>({});
+const editError = ref('');
+
+/** Status sekarang + status yang sah dituju dari sana. */
+const pilihanStatus = computed(() => {
+  const kini = editAsal.value.status;
+  return [kini, ...(TRANSISI_SAH[kini] || [])].filter(Boolean);
+});
+
 const openEditModal = (p: Proposal) => {
   editForm.value = {
     id: p.id,
@@ -430,26 +472,67 @@ const openEditModal = (p: Proposal) => {
     revision: p.revision || 'Rev-0',
     status: p.status
   };
+  editAsal.value = { ...editForm.value };
+  editError.value = '';
   editClientSearch.value = '';
   editShowClientDropdown.value = false;
   showEditModal.value = true;
 };
 
+const pesanGagal = (e: any): string =>
+  e?.response?.data?.error || e?.message || 'Gagal menyimpan perubahan';
+
+/**
+ * EST-MTO-R22 menutup celah "status ditulis lewat endpoint metadata", tapi layar
+ * ini tidak ikut menyesuaikan: `saveEdit` tetap mengirim key `status`, dan
+ * backend menolak **setiap** body yang memuat key itu — termasuk saat nilainya
+ * tidak berubah. Akibatnya tombol Simpan di modal ini tidak pernah bisa
+ * memperbarui apa pun sejak guard itu dipasang, dan pengguna hanya menerima
+ * "Gagal menyimpan perubahan" tanpa keterangan.
+ *
+ * Sekarang keduanya dipisah sesuai kontrak masing-masing: metadata lewat
+ * `PUT /proposals/:id`, transisi lewat `PUT /proposals/:id/status`. Guard di
+ * backend tidak dikendurkan sedikit pun.
+ *
+ * Transisi dikerjakan lebih dulu ketika keduanya berubah: proposal submitted/deal
+ * terkunci untuk perubahan metadata (`PROPOSAL_LOCKED`), jadi menurunkannya ke
+ * review adalah syarat agar metadata bisa ditulis sama sekali.
+ */
 const saveEdit = async () => {
   editSaving.value = true;
+  editError.value = '';
   try {
-    await api.put(`/estimator/proposals/${editForm.value.id}`, {
-      project_name: editForm.value.project_name,
-      client:       editForm.value.client,
-      client_id:    editForm.value.client_id,
-      lokasi:       editForm.value.lokasi,
-      revision:     editForm.value.revision,
-      status:       editForm.value.status,
-    });
+    const id = editForm.value.id;
+    const asal = editAsal.value;
+    const statusBerubah = editForm.value.status !== asal.status;
+    const metaBerubah = (['project_name', 'client', 'client_id', 'lokasi', 'revision'] as const)
+      .some(k => (editForm.value as any)[k] !== asal[k]);
+
+    if (!statusBerubah && !metaBerubah) {
+      showEditModal.value = false;
+      return;
+    }
+
+    if (statusBerubah) {
+      await api.put(`/estimator/proposals/${id}/status`, { status: editForm.value.status });
+    }
+    if (metaBerubah) {
+      await api.put(`/estimator/proposals/${id}`, {
+        project_name: editForm.value.project_name,
+        client:       editForm.value.client,
+        client_id:    editForm.value.client_id,
+        lokasi:       editForm.value.lokasi,
+        revision:     editForm.value.revision,
+      });
+    }
+
     showEditModal.value = false;
     await loadProposals();
-  } catch {
-    alert('Gagal menyimpan perubahan');
+  } catch (e: any) {
+    // Pesan dari backend disampaikan apa adanya — ia menyebut status apa yang
+    // menghalangi dan transisi apa yang sebenarnya sah.
+    editError.value = pesanGagal(e);
+    await loadProposals();
   } finally {
     editSaving.value = false;
   }

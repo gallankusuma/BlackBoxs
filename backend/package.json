@@ -19,7 +19,8 @@
     "test:depreciation": "tsx tests/depreciation.ts",
     "test:procurement": "tsx tests/procurement.ts",
     "test:prospects": "tsx tests/prospects.ts",
-    "test:all": "npm test && npm run test:mto && npm run test:mto-link && npm run test:http && npm run test:pin && npm run test:rbac && npm run test:asset && npm run test:depreciation && npm run test:procurement && npm run test:prospects",
+    "test:rab": "tsx tests/rab.ts",
+    "test:all": "npm test && npm run test:mto && npm run test:mto-link && npm run test:http && npm run test:pin && npm run test:rbac && npm run test:asset && npm run test:depreciation && npm run test:procurement && npm run test:prospects && npm run test:rab",
     "test:mto": "tsx tests/mto-calculator.ts",
     "test:mto-link": "tsx tests/mto-link.ts",
     "smoke": "node ../scripts/smoke-test.js"

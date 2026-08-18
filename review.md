@@ -4799,6 +4799,36 @@ wajib membuktikan: edit nama/client/lokasi/revision berhasil tanpa mengubah
 status, injeksi status pada endpoint metadata tetap 400, dan transisi status
 hanya berhasil lewat endpoint workflow.
 
+**[DEV] DITERAPKAN.** Terverifikasi persis seperti dilaporkan — dan ini regresi
+yang saya sendiri sebabkan: guard EST-MTO-R22 dipasang di backend tanpa
+menyesuaikan konsumennya, sehingga tombol Simpan di modal itu tidak pernah bisa
+memperbarui apa pun sejak saat itu.
+
+- [EstimatorProposalList.vue](frontend/src/views/EstimatorProposalList.vue):
+  `status` dikeluarkan dari payload metadata. Metadata lewat `PUT /proposals/:id`,
+  transisi lewat `PUT /proposals/:id/status` — **guard backend tidak dikendurkan
+  sedikit pun**.
+- Kontrol status tetap ada tapi hanya menawarkan status sekarang + transisi yang
+  sah dari sana (cermin `VALID_TRANSITIONS`, otoritas tetap di backend). Status
+  final `deal` membuatnya nonaktif berikut keterangannya.
+- Ketika keduanya berubah, transisi dikerjakan lebih dulu: proposal
+  submitted/deal terkunci untuk metadata (`PROPOSAL_LOCKED`), jadi menurunkannya
+  ke review adalah syarat agar metadata bisa ditulis sama sekali.
+- `alert('Gagal menyimpan perubahan')` diganti pesan asli dari backend, yang
+  menyebut status penghalang dan transisi yang sebenarnya sah.
+
+**Tes:** ditambahkan ke [tests/mto-link.ts](backend/tests/mto-link.ts) bagian 9.
+Membuktikan keempat hal yang diminta: edit nama/client/lokasi/revision berhasil
+tanpa menggeser status; injeksi status tetap 400 `USE_STATUS_ENDPOINT` **termasuk
+saat nilainya sama** dengan status sekarang; lompatan draft → deal ditolak;
+transisi hanya berhasil lewat endpoint workflow.
+
+Butir (d) menjawab langsung keluhan "belum ada contract test consumer": **key
+payload dibaca dari berkas `.vue` itu sendiri**, bukan disalin ke dalam tes. Jadi
+kalau nanti ada yang menambahkan `status` kembali, tes ikut mengirimnya dan
+langsung merah. Dibuktikan bergigi dengan mengembalikan baris itu sementara →
+2 gagal, salah satunya `payload nyata layar list diterima backend → dapat 400`.
+
 ### [P1 / FINANCIAL-CALCULATION] Subtotal dan total per disiplin pada RAB adalah hasil konkatenasi string, bukan penjumlahan uang
 
 **File:** [backend/src/config/database.ts:10](backend/src/config/database.ts),
@@ -4828,6 +4858,50 @@ audit precision seluruh ERP. Test RAB wajib mencakup minimal dua item dalam satu
 sub-disiplin dan beberapa disiplin; buktikan subtotal, total disiplin, grand
 total, dan `total_project` semuanya rekonsiliasi tepat, termasuk nilai besar dan
 pembulatan 2 desimal.
+
+**[DEV] DITERAPKAN.** Diverifikasi ulang dengan pembacaan langsung ke database,
+bukan sekadar membaca kode: `typeof row.total_price === 'string'`, dan reducer
+yang identik dengan endpoint menghasilkan `"00.000.00"` untuk dua baris. Persis
+seperti yang Anda laporkan.
+
+**Audit sebaran polanya** (karena bug seperti ini jarang berdiri sendiri): lima
+lokasi memakai `+=` atas field uang. Empat aman dan satu rusak —
+`estimator.routes.ts:1228` dan `2629–2630` sebenarnya menjumlahkan hasil
+perkalian, yang sudah dipaksa jadi number; `finance.routes.ts:1511` menjumlahkan
+nilai yang sudah lewat `Number()`; dan `project.routes.ts:1155` justru sudah
+memakai `parseFloat` — layar RAB project menghitungnya benar sementara layar RAB
+estimator tidak. Jadi cakupan yang Anda sebut memang tepat: hanya baris 2029–2030.
+
+- [utils/money.ts](backend/src/utils/money.ts) baru: `uang()`, `bulatUang()`,
+  `jumlahUang()`. Penjumlahannya dalam satuan sen bulat, jadi hasilnya tidak
+  bergantung urutan dan tidak menyisakan hanyutan float yang muncul sebagai
+  selisih satu rupiah antar bagian dokumen yang sama.
+- `decimalNumbers` **tidak** dinyalakan global, sesuai peringatan Anda — alasannya
+  ditulis di kepala berkas itu supaya tidak dicoba lagi tanpa audit.
+- Ditemukan tambahan saat memperbaiki: `grandTotal` **dihitung tapi tidak pernah
+  dikembalikan** — ia hanya jadi cadangan `summary.totalProject`, sehingga tidak
+  ada cara bagi pemanggil untuk memeriksa rekonsiliasi sama sekali. Sekarang
+  dikembalikan. Seluruh `summary` (`directCost`, `overhead`, `riskContingency`,
+  `totalProject`) juga masih string DECIMAL mentah dan ikut dikonversi.
+- [EstimatorRAB.vue](frontend/src/views/EstimatorRAB.vue) memakai `grandTotal`
+  dari server; cadangan hitung-sendirinya sekarang memaksa `Number()` eksplisit
+  supaya bug yang sama tidak lahir kembali di sisi klien.
+
+**Tes:** [backend/tests/rab.ts](backend/tests/rab.ts) — 32 assertion, masuk
+`test:all`. Susunannya sesuai permintaan: 2 disiplin, salah satunya 2
+sub-disiplin, dan **2 item dalam satu sub-disiplin** (bentuk yang memicu bugnya —
+satu item saja tidak memperlihatkan apa pun). Memakai harga pecahan (1.234,56 dan
+99,99) dan nilai besar (12.345.678,90 × 9). Membuktikan subtotal = jumlah item,
+total disiplin = jumlah sub-disiplin, grand total = jumlah disiplin = jumlah
+seluruh item = `total_project`, semuanya dibandingkan **dalam sen** supaya selisih
+0,001 tidak lolos sebagai "sama", plus pemeriksaan tipe dan pembulatan 2 desimal.
+
+Fixture disiplinnya dibuat dan dihapus sendiri lewat database — tidak ada endpoint
+untuk membuat disiplin, dan tes tidak boleh bergantung pada isi master data mesin
+yang menjalankannya. Dibuktikan bergigi: `+=` lama dikembalikan sementara →
+**12 gagal**, termasuk `grand total bertipe number → dapat "string"`.
+
+Suite penuh sesudah perbaikan: **1062 lulus, 0 gagal**.
 
 ### [P1 / API-RUNTIME + FINANCIAL-INTEGRITY] Payment Schedule saat ini 500; setelah nama kolom dibetulkan distribusinya tetap dapat kehilangan nilai kontrak
 

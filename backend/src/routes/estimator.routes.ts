@@ -5,6 +5,7 @@ import { enrichMtoElement, groupStoredLines } from '../modules/estimator/mto/enr
 import { authMiddleware } from '../middleware/auth';
 import { dbAll, dbGet, dbRun , withTransaction, TxRunner} from '../config/database';
 import { nextSequentialCode } from './procurement.routes';
+import { uang, bulatUang, jumlahUang } from '../utils/money';
 
 const router = Router();
 
@@ -2022,12 +2023,20 @@ router.get('/proposals/:id/rab', authMiddleware, async (req: Request, res: Respo
         ahspName: item.ahsp_name,
         unit: item.unit,
         qty: item.qty,
-        unitPrice: item.unit_price,
-        totalPrice: item.total_price
+        unitPrice: bulatUang(item.unit_price),
+        totalPrice: bulatUang(item.total_price)
       });
-      
-      structuredData[disciplineKey].subDisciplines[subDisciplineKey].subtotal += item.total_price || 0;
-      structuredData[disciplineKey].totalAmount += item.total_price || 0;
+
+      // `total_price` datang dari MySQL sebagai string DECIMAL. `0 + "100.00"`
+      // menghasilkan `"0100.00"`, lalu `+ "200.00"` menjadi `"0100.00200.00"` —
+      // subtotal, total disiplin, dan grand total pada dokumen RAB ikut salah,
+      // sementara ringkasan di header tetap terlihat benar karena membaca
+      // `proposals.total_project`. Lihat utils/money.ts.
+      const nilai = uang(item.total_price);
+      const sub = structuredData[disciplineKey].subDisciplines[subDisciplineKey];
+      sub.subtotal = bulatUang(sub.subtotal + nilai);
+      structuredData[disciplineKey].totalAmount =
+        bulatUang(structuredData[disciplineKey].totalAmount + nilai);
     });
     
     // Convert to array format for easier frontend iteration
@@ -2037,7 +2046,7 @@ router.get('/proposals/:id/rab', authMiddleware, async (req: Request, res: Respo
     })) as any[];
     
     // Calculate grand total
-    const grandTotal = rabSections.reduce((sum, section) => sum + section.totalAmount, 0);
+    const grandTotal = jumlahUang(rabSections.map(section => section.totalAmount));
     
     res.json({
       proposal: {
@@ -2049,11 +2058,21 @@ router.get('/proposals/:id/rab', authMiddleware, async (req: Request, res: Respo
         revision: proposal.revision
       },
       sections: rabSections,
+      // `grandTotal` sebelumnya dihitung tapi tidak pernah dikembalikan — ia
+      // hanya jadi cadangan untuk `totalProject`, sehingga tidak ada satu pun
+      // cara bagi pemanggil untuk memeriksa apakah rincian dan ringkasannya
+      // memang rekonsiliasi.
+      grandTotal,
       summary: {
-        directCost: proposal.direct_cost || 0,
-        overhead: proposal.overhead || 0,
-        riskContingency: proposal.risk_contingency || 0,
-        totalProject: proposal.total_project || grandTotal
+        // Semua nilai di bawah kolom DECIMAL — tanpa konversi ia sampai ke
+        // klien sebagai string dan setiap penjumlahan di sana ikut menggabung
+        // teks, persis seperti bug yang diperbaiki di atas.
+        directCost: bulatUang(proposal.direct_cost),
+        overhead: bulatUang(proposal.overhead),
+        riskContingency: bulatUang(proposal.risk_contingency),
+        totalProject: proposal.total_project === null || proposal.total_project === undefined
+          ? grandTotal
+          : bulatUang(proposal.total_project),
       }
     });
   } catch (error) {

@@ -972,6 +972,80 @@ async function main() {
     chk('ada penjelasannya', !!mtoManual.json?.mto_source_note, true);
   }
 
+  // ───────────────────────────────────────────────────────────────────────────
+  // Kontrak metadata proposal ↔ layar Proposal List.
+  //
+  // EST-MTO-R22 menutup celah "status ditulis lewat endpoint metadata", tapi
+  // layar list tidak ikut menyesuaikan: ia tetap mengirim key `status`, dan
+  // guard menolak SETIAP body yang memuat key itu — termasuk saat nilainya sama.
+  // Tombol Simpan di modal itu karena itu tidak pernah bisa memperbarui apa pun.
+  // Tes lama hanya membuktikan guard-nya menolak injeksi; tidak ada yang
+  // membuktikan konsumennya masih bisa menyimpan.
+  // ───────────────────────────────────────────────────────────────────────────
+  console.log('\n9. Kontrak metadata proposal ↔ Proposal List');
+
+  const propMeta = await call('POST', '/estimator/proposals',
+    { project_name: `Uji metadata ${stamp}`, status: 'draft' }, master);
+  const metaId = propMeta.json?.id ?? propMeta.json?.data?.id;
+  chk('proposal metadata dibuat', !!metaId, true);
+
+  // (a) Edit metadata tanpa key status → berhasil, dan status tidak bergeser.
+  const editOk = await call('PUT', `/estimator/proposals/${metaId}`, {
+    project_name: `Nama Baru ${stamp}`, client: `Klien Baru ${stamp}`,
+    client_id: null, lokasi: 'Cilegon', revision: 'Rev-2',
+  }, master);
+  chk('edit metadata tanpa status berhasil', editOk.status, 200);
+
+  const sesudahEdit = await call('GET', `/estimator/proposals/${metaId}`, undefined, master);
+  const pm = sesudahEdit.json?.data ?? sesudahEdit.json;
+  chk('nama tersimpan', pm?.project_name, `Nama Baru ${stamp}`);
+  chk('lokasi tersimpan', pm?.lokasi, 'Cilegon');
+  chk('revision tersimpan', pm?.revision, 'Rev-2');
+  chk('status tidak ikut bergeser', pm?.status, 'draft');
+
+  // (b) Guard tetap menolak injeksi status — jangan dikendurkan.
+  const injeksi = await call('PUT', `/estimator/proposals/${metaId}`,
+    { project_name: 'X', client: 'Y', lokasi: 'Z', revision: 'Rev-3', status: 'deal' }, master);
+  chk('injeksi status ditolak', injeksi.status, 400);
+  chk('kodenya USE_STATUS_ENDPOINT', injeksi.json?.code, 'USE_STATUS_ENDPOINT');
+  // Nilai yang sama dengan status sekarang pun ditolak — itu memang yang
+  // membuat layar list mati, dan guard-nya sengaja tetap seketat ini.
+  chk('injeksi status bernilai sama juga ditolak',
+    (await call('PUT', `/estimator/proposals/${metaId}`,
+      { project_name: 'X', client: 'Y', lokasi: 'Z', revision: 'Rev-3', status: 'draft' }, master)).status, 400);
+
+  // (c) Transisi hanya lewat endpoint workflow, dan aturannya ditegakkan.
+  chk('lompat draft → deal ditolak',
+    (await call('PUT', `/estimator/proposals/${metaId}/status`, { status: 'deal' }, master)).status, 400);
+  const keReview = await call('PUT', `/estimator/proposals/${metaId}/status`, { status: 'review' }, master);
+  chk('draft → review lewat endpoint workflow berhasil', keReview.status, 200);
+  const cekReview = await call('GET', `/estimator/proposals/${metaId}`, undefined, master);
+  chk('status benar-benar berubah', (cekReview.json?.data ?? cekReview.json)?.status, 'review');
+
+  // (d) Payload yang BENAR-BENAR dikirim layar Proposal List harus diterima.
+  //
+  // Key-nya dibaca dari berkas .vue, bukan disalin ke sini. Kalau nanti ada yang
+  // menambahkan `status` kembali ke payload metadata, tes ini ikut mengirimnya
+  // dan langsung merah — persis regresi yang dilaporkan reviewer.
+  const { readFileSync } = await import('node:fs');
+  const vue = readFileSync(
+    new URL('../../frontend/src/views/EstimatorProposalList.vue', import.meta.url), 'utf8');
+  const blok = vue.match(/api\.put\(`\/estimator\/proposals\/\$\{id\}`,\s*\{([\s\S]*?)\}\)/);
+  if (!blok) {
+    // Jangan diam-diam dilewati: kalau polanya tidak ketemu, tes ini kehilangan
+    // gunanya dan itu harus terlihat.
+    chk('payload metadata Proposal List ditemukan di sumbernya', false, true);
+  } else {
+    const keys = [...blok[1].matchAll(/^\s*([a-z_]+):/gm)].map(m => m[1]);
+    chk('payload layar list punya field metadata', keys.length >= 5, true);
+    chk('payload layar list TIDAK memuat status', keys.includes('status'), false);
+
+    const body: Record<string, any> = {};
+    for (const k of keys) body[k] = k === 'client_id' ? null : `${k}-${stamp}`;
+    const kirimNyata = await call('PUT', `/estimator/proposals/${metaId}`, body, master);
+    chk('payload nyata layar list diterima backend', kirimNyata.status, 200);
+  }
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }
