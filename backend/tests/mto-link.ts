@@ -928,6 +928,50 @@ async function main() {
   chk('proposal deal masih tertaut ke projectnya',
     Number((masihTertaut.json?.data ?? masihTertaut.json)?.project_id), Number(projBase));
 
+  console.log('\n44. Layar project memakai baseline kontrak, bukan MTO proposal (P1)');
+  // Route ini dulu SELALU membaca baris milik proposal, mengabaikan baseline
+  // scope `project` yang disalin saat deal — layar project menampilkan angka
+  // yang masih bisa berubah, bukan yang disepakati.
+  const propSrc = await call('POST', '/estimator/proposals',
+    { project_name: `Uji sumber MTO ${stamp}`, client_id: klienId }, master);
+  const srcId = propSrc.json?.id;
+  await call('POST', `/estimator/proposals/${srcId}/mto`, {
+    element_type: 'foundation', element_name: 'P1',
+    parameters: { L: 1, W: 1, H: 0.3, depth: 1.2, qty: 12, waste_pct: 5 },
+  }, master);
+  for (const st of ['review', 'submitted', 'deal']) {
+    await call('PUT', `/estimator/proposals/${srcId}/status`, { status: st }, master);
+  }
+  const cekSrc = await call('GET', `/estimator/proposals/${srcId}`, undefined, master);
+  const projSrc = (cekSrc.json?.data ?? cekSrc.json)?.project_id;
+
+  const mtoProj = await call('GET', `/projects/${projSrc}/mto`, undefined, master);
+  chk('layar project menjawab', mtoProj.status, 200);
+  chk('sumbernya baseline kontrak', mtoProj.json?.mto_source, 'project_baseline');
+  chk('elemennya terbawa', (mtoProj.json?.elements || []).length > 0, true);
+
+  // Project yang dibuat manual (tanpa deal) belum punya baseline — tidak boleh
+  // kosong, dan sumbernya harus dinyatakan apa adanya.
+  const propManual = await call('POST', '/estimator/proposals',
+    { project_name: `Uji manual ${stamp}` }, master);
+  const manualPropId = propManual.json?.id;
+  await call('POST', `/estimator/proposals/${manualPropId}/mto`, {
+    element_type: 'foundation', element_name: 'P-manual',
+    parameters: { L: 2, W: 2, H: 0.4, depth: 1.5, qty: 6, waste_pct: 5 },
+  }, master);
+  // Endpoint ini memakai `title`, bukan `project_name`.
+  const projManual = await call('POST', '/projects',
+    { title: `Project manual ${stamp}`, client_id: klienId }, master);
+  const manualProjId = projManual.json?.data?.id ?? projManual.json?.id;
+  chk('project manual terbuat', !!manualProjId, true);
+  if (manualProjId) {
+    await call('PUT', `/projects/${manualProjId}/link-proposal`, { proposal_id: manualPropId }, master);
+    const mtoManual = await call('GET', `/projects/${manualProjId}/mto`, undefined, master);
+    chk('project tanpa baseline TIDAK kosong', (mtoManual.json?.elements || []).length > 0, true);
+    chk('sumbernya dinyatakan proposal', mtoManual.json?.mto_source, 'proposal');
+    chk('ada penjelasannya', !!mtoManual.json?.mto_source_note, true);
+  }
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }

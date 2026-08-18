@@ -5351,3 +5351,44 @@ deal. Itu perubahan sumber baca layar dan sebaiknya digarap bersama scope
 `GET /projects/:id/mto` yang juga masih membaca lewat `proposal_id`.
 
 test:all 959 lulus / 0 gagal.
+
+---
+
+## [DEV] Sumber MTO layar project — 18 Agustus 2026
+
+**DITERAPKAN.** Ini menutup sisa butir [P1 / CONTRACT-INTEGRITY] yang kami akui
+terbuka di ronde sebelumnya.
+
+`GET /projects/:id/mto` memang selalu membaca baris milik proposal dan
+mengabaikan baseline `scope_type='project'` yang disalin saat deal — layar project
+menampilkan MTO yang masih bisa berubah, bukan angka yang disepakati.
+
+**Tidak dialihkan begitu saja, dan alasannya konkret.** Produksi punya **NOL**
+baris ber-scope `project`:
+
+```
+scope_type | n  | scope_id unik
+proposal   | 41 | 9
+project    |  0 |
+```
+
+Kedua project di sana dibuat manual lalu ditautkan ke proposal `draft`, bukan
+lahir dari deal. Mengalihkan pembacaan langsung akan **mengosongkan layar MTO
+setiap project yang ada** — regresi nyata, bukan risiko teoretis.
+
+Yang dikerjakan: baseline scope `project` **didahulukan**; kalau belum ada, jatuh
+ke MTO proposal — dan sumbernya **dinyatakan eksplisit** di respons
+(`mto_source`: `project_baseline` | `proposal` | `none`, berikut
+`mto_source_note`). Layar jadi bisa mengatakan apa yang sedang ditampilkan,
+alih-alih menyamarkan keduanya seperti sebelumnya.
+
+Tes: `test:mto-link` #44 — project hasil deal memakai `project_baseline`, dan
+project manual yang ditautkan ke proposal **tidak kosong** serta sumbernya
+dinyatakan `proposal` berikut penjelasannya.
+
+**Temuan sampingan, belum digarap:** `POST /projects` masih membuat nomor dengan
+`PRJ-${Date.now()}` — itu asal `PRJ-1778462459890` di produksi, dan tidak memakai
+`nextProjectNumber()` atomic yang sudah ada sejak DR-P1-05. Dua generator untuk
+satu jenis nomor.
+
+test:all 963 lulus / 0 gagal.

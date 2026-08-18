@@ -1471,11 +1471,35 @@ router.get('/:id/mto', authMiddleware, async (req: Request, res: Response) => {
     const projectId = req.params.id;
     const proposalId = await getLinkedProposalId(projectId);
 
-    if (!proposalId) {
-      return res.json({ elements: [], linked_proposal_id: null });
+    // P1 CONTRACT-INTEGRITY: baseline project didahulukan.
+    //
+    // Saat proposal menjadi deal, MTO disalin ke `scope_type='project'` sebagai
+    // baseline kontrak tersendiri. Route ini dulu mengabaikannya dan selalu
+    // membaca baris milik proposal — jadi layar project menampilkan MTO proposal
+    // yang masih bisa berubah, bukan angka yang disepakati.
+    //
+    // TIDAK dialihkan begitu saja: produksi punya NOL baris scope `project`
+    // (project di sana dibuat manual, bukan dari deal), jadi mengalihkannya
+    // langsung akan mengosongkan layar MTO setiap project yang ada. Baseline
+    // dipakai kalau ada; kalau belum, jatuh ke proposal — dan sumbernya
+    // dinyatakan eksplisit di respons supaya layar bisa mengatakan apa yang
+    // sedang ditampilkan, bukan menyamarkan keduanya.
+    const baseline = await dbAll(
+      `SELECT * FROM engineering_inputs WHERE scope_type = 'project' AND scope_id = ? ORDER BY sort_order, id`,
+      [projectId]
+    );
+
+    const pakaiBaseline = baseline.length > 0;
+
+    if (!pakaiBaseline && !proposalId) {
+      return res.json({
+        elements: [], linked_proposal_id: null,
+        mto_source: 'none',
+        mto_source_note: 'Project ini belum punya baseline MTO maupun proposal tertaut.',
+      });
     }
 
-    const rows = await dbAll(
+    const rows = pakaiBaseline ? baseline : await dbAll(
       'SELECT * FROM engineering_inputs WHERE proposal_id = ? ORDER BY sort_order, id',
       [proposalId]
     );
@@ -1505,6 +1529,13 @@ router.get('/:id/mto', authMiddleware, async (req: Request, res: Response) => {
         };
       }),
       linked_proposal_id: proposalId,
+      // Sumber angka dinyatakan terang-terangan. `project_baseline` = kuantitas
+      // kontrak hasil salinan saat deal; `proposal` = MTO proposal yang masih
+      // bisa berubah.
+      mto_source: pakaiBaseline ? 'project_baseline' : 'proposal',
+      mto_source_note: pakaiBaseline
+        ? 'Kuantitas kontrak project, disalin saat proposal menjadi deal.'
+        : 'Project ini belum punya baseline kontrak; yang ditampilkan MTO proposal tertaut, yang masih bisa berubah.',
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
