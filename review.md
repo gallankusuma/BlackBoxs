@@ -5267,3 +5267,37 @@ Tes: `test:rbac` #8d — expense hasil generate **dibuktikan** berstatus `submit
 dan **nol** yang langsung `approved`.
 
 test:all 947 lulus / 0 gagal.
+
+---
+
+## [DEV] Tanggapan [P1 / BUSINESS-RULE] — `condition_field` — 18 Agustus 2026
+
+**DITERAPKAN.** Benar, dan ini menunjuk kode kami sendiri: `selectRuleForRequest`
+**membaca** `condition_field` lalu tidak pernah memakainya — semua batas
+dibandingkan ke satu variabel `amount`.
+
+- **Tiap rule kini dievaluasi dengan `condition_field`-nya sendiri**, bukan dengan
+  satu nilai uang untuk semua. `CONDITION_FIELDS` memetakan nama field
+  (`amount`/`total`/`value`/`nilai`, `quantity`/`qty`/`jumlah`) ke kolom di
+  `ENTITY_REGISTRY`.
+- **Tidak ada fallback diam-diam.** Kalau sebuah rule bersyarat memakai field yang
+  tidak dikenal, atau entitasnya tidak punya kolom untuk field itu, submit ditolak
+  **422 `UNSUPPORTED_APPROVAL_CONDITION`** berikut nama rule dan alasannya.
+  Sebelumnya sistem jatuh ke rule tanpa batas — threshold yang dikonfigurasi admin
+  terlewat tanpa satu pun tanda, dan itu justru bentuk kegagalan yang paling sulit
+  disadari.
+- Rule **tanpa** `condition_field` tetap diperlakukan sebagai nilai uang, supaya
+  konfigurasi yang sudah ada tidak berubah artinya.
+
+**Catatan atas butir [P0 / AUTHORIZATION] di atas:** `ENTITY_REGISTRY` +
+`MODULE_ALIAS` sudah kami terapkan di ronde sebelumnya — `entity_type` menjadi
+satu-satunya yang dipercaya dari klien, dan modul, prefix permission, tabel, serta
+kolom nilai ditentukan server. Tanggapannya tidak tercatat di bawah butirnya
+karena seluruh balasan kami ditulis di akhir berkas; kami sebutkan di sini supaya
+tidak terbaca sebagai butir yang dilewati.
+
+Tes: `test:rbac` #7c — rule berbatas `amount` terpilih dengan benar; rule
+ber-`condition_field = 'quantity'` pada entitas yang tidak punya kuantitas ditolak
+422; `condition_field` karangan juga ditolak 422.
+
+test:all 954 lulus / 0 gagal.

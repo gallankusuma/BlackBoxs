@@ -25,6 +25,8 @@ const ENTITY_REGISTRY: Record<string, {
   permissionPrefix: string;
   table: string;
   amountColumn?: string;
+  /** Kolom untuk `condition_field = 'quantity'`. Tidak semua entitas punya. */
+  quantityColumn?: string;
   label: string;
 }> = {
   fund_request:     { module: 'finance',     permissionPrefix: 'finance',     table: 'fund_requests',     amountColumn: 'amount',       label: 'Fund Request' },
@@ -75,16 +77,65 @@ const poolRunner: Runner = { all: dbAll as any, get: dbGet as any };
  * klien memilih sendiri rule approval mana yang mengaturnya — kelas kesalahan
  * yang sama dengan `project_id` pada payslip.
  */
+/**
+ * Nama `condition_field` yang didukung, dipetakan ke kolom registry.
+ *
+ * Sengaja eksplisit: rule yang memakai field di luar daftar ini TIDAK boleh
+ * diam-diam jatuh ke rule tanpa batas — threshold approval yang dikonfigurasi
+ * admin akan terlewat tanpa satu pun tanda.
+ */
+const CONDITION_FIELDS: Record<string, 'amountColumn' | 'quantityColumn'> = {
+  amount: 'amountColumn',
+  total: 'amountColumn',
+  total_amount: 'amountColumn',
+  value: 'amountColumn',
+  nilai: 'amountColumn',
+  quantity: 'quantityColumn',
+  qty: 'quantityColumn',
+  jumlah: 'quantityColumn',
+};
+
+/**
+ * Nilai entitas untuk sebuah `condition_field` tertentu.
+ *
+ * Mengembalikan `{ didukung: false }` kalau field-nya tidak dikenal ATAU entitas
+ * itu tidak punya kolomnya — pemanggil wajib memperlakukannya sebagai konfigurasi
+ * yang tidak didukung, bukan sebagai "nilai kosong".
+ */
+const resolveConditionValue = async (
+  entityType: string, entityId: any, conditionField: any, run: Runner = poolRunner,
+): Promise<{ didukung: boolean; nilai: number | null; alasan?: string }> => {
+  const reg = ENTITY_REGISTRY[String(entityType)];
+  if (!reg) return { didukung: false, nilai: null, alasan: `entity_type "${entityType}" tidak terdaftar` };
+
+  // Rule tanpa condition_field diperlakukan sebagai nilai uang — perilaku lama
+  // yang dipertahankan supaya konfigurasi yang sudah ada tetap bekerja.
+  const field = String(conditionField || 'amount').trim().toLowerCase();
+  const kolomRegistry = CONDITION_FIELDS[field];
+  if (!kolomRegistry) {
+    return { didukung: false, nilai: null, alasan: `condition_field "${conditionField}" tidak didukung` };
+  }
+
+  const kolom = reg[kolomRegistry];
+  if (!kolom) {
+    return {
+      didukung: false, nilai: null,
+      alasan: `${reg.label} tidak punya nilai untuk "${field}"`,
+    };
+  }
+  if (!entityId) return { didukung: true, nilai: null };
+
+  const row: any = await run.get(`SELECT ${kolom} AS nilai FROM ${reg.table} WHERE id = ?`, [entityId]);
+  const n = Number(row?.nilai);
+  return { didukung: true, nilai: isFinite(n) ? n : null };
+};
+
+/** Nilai uang entitas — dipakai untuk `condition_value` yang disimpan di request. */
 const resolveEntityAmount = async (
   entityType: string, entityId: any, run: Runner = poolRunner,
 ): Promise<number | null> => {
-  const reg = ENTITY_REGISTRY[String(entityType)];
-  if (!reg?.amountColumn || !entityId) return null;
-  const tabel = reg.table;
-  const kolom = reg.amountColumn;
-  const row: any = await run.get(`SELECT ${kolom} AS nilai FROM ${tabel} WHERE id = ?`, [entityId]);
-  const n = Number(row?.nilai);
-  return isFinite(n) ? n : null;
+  const hasil = await resolveConditionValue(entityType, entityId, 'amount', run);
+  return hasil.nilai;
 };
 
 /**
@@ -96,6 +147,7 @@ const resolveEntityAmount = async (
  */
 const selectRuleForRequest = async (
   moduleName: string, amount: number | null, run: Runner = poolRunner,
+  entityType?: string, entityId?: any,
 ): Promise<any> => {
   // Rule bisa tersimpan dengan kunci lama dari layar konfigurasi (`pr`, `po`,
   // `grn`) maupun kunci kanonik. Keduanya dicocokkan.
@@ -108,17 +160,49 @@ const selectRuleForRequest = async (
   );
   if (!rules.length) return null;
 
-  const cocok = (r: any): boolean => {
-    const punyaBatas = r.min_value != null || r.max_value != null;
-    if (!punyaBatas) return true;
-    if (amount == null) return false; // rule bersyarat butuh nilai
-    if (r.min_value != null && amount < Number(r.min_value)) return false;
-    if (r.max_value != null && amount > Number(r.max_value)) return false;
-    return true;
-  };
+  // P1 BUSINESS-RULE: tiap rule dievaluasi dengan `condition_field`-NYA SENDIRI.
+  //
+  // Versi sebelumnya membaca kolom itu lalu tidak pernah memakainya — semua batas
+  // dibandingkan ke satu variabel `amount`. Rule ber-`condition_field =
+  // 'quantity'` karena itu tidak pernah cocok, dan sistem diam-diam jatuh ke rule
+  // tanpa batas: threshold yang dikonfigurasi admin terlewat tanpa satu pun tanda.
+  const berbatas: any[] = [];
+  const takDidukung: string[] = [];
 
-  const berbatas = rules.filter(r => (r.min_value != null || r.max_value != null) && cocok(r));
+  for (const r of rules) {
+    if (r.min_value == null && r.max_value == null) continue;
+
+    let nilai = amount;
+    if (entityType) {
+      const hasil = await resolveConditionValue(entityType, entityId, r.condition_field, run);
+      if (!hasil.didukung) {
+        // Rule ini TIDAK dilewati diam-diam — dicatat supaya pemanggil bisa
+        // menolak dengan pesan yang jelas.
+        takDidukung.push(`rule #${r.id}: ${hasil.alasan}`);
+        continue;
+      }
+      nilai = hasil.nilai;
+    }
+
+    if (nilai == null) continue; // rule bersyarat butuh nilai
+    if (r.min_value != null && nilai < Number(r.min_value)) continue;
+    if (r.max_value != null && nilai > Number(r.max_value)) continue;
+    berbatas.push(r);
+  }
+
   if (berbatas.length) return berbatas[0];
+
+  // Ada rule bersyarat yang konfigurasinya tidak didukung, dan tidak ada rule
+  // berbatas yang cocok. Jatuh ke rule tanpa batas di sini akan MENYEMBUNYIKAN
+  // konfigurasi yang salah, jadi kesalahannya dimunculkan.
+  if (takDidukung.length) {
+    const err: any = new Error(
+      `Konfigurasi approval tidak didukung: ${takDidukung.join('; ')}. Perbaiki rule-nya.`
+    );
+    err.code = 'UNSUPPORTED_APPROVAL_CONDITION';
+    throw err;
+  }
+
   return rules.find(r => r.min_value == null && r.max_value == null) || null;
 };
 
@@ -831,7 +915,18 @@ router.post('/submit', authMiddleware, async (req: Request, res: Response) => {
     // DR-P0-02: rule dipilih SEKALI di sini lalu dikunci ke requestnya, memakai
     // nilai entitas yang dibaca dari database — bukan dari body.
     const nilai = await resolveEntityAmount(entity_type, entity_id);
-    const rule = await selectRuleForRequest(module, nilai);
+
+    // `entity_type` dan `entity_id` diteruskan supaya tiap rule bisa dievaluasi
+    // dengan `condition_field`-nya sendiri, bukan dengan satu nilai uang saja.
+    let rule: any = null;
+    try {
+      rule = await selectRuleForRequest(module, nilai, poolRunner, entity_type, entity_id);
+    } catch (err: any) {
+      if (err?.code === 'UNSUPPORTED_APPROVAL_CONDITION') {
+        return res.status(422).json({ error: err.message, code: err.code });
+      }
+      throw err;
+    }
 
     const requestNumber = generateCode('APR');
     const result = await dbRun(

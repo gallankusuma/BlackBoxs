@@ -52,6 +52,59 @@ async function hapusRuleUji(nama: string): Promise<void> {
 }
 
 /** Absensi terverifikasi GPS milik proyek A + satu baris tanpa proyek. */
+/** Fund request + satu rule berbatas, untuk menguji condition_field. */
+async function seedRuleFixture(): Promise<any> {
+  await cleanupRuleDebris();
+  try {
+    const { dbRun } = await import('../src/config/database');
+    const tag = `UJI-COND-${Date.now()}`;
+    const fr: any = await dbRun(
+      `INSERT INTO fund_requests (request_number, purpose, amount, status, request_date, needed_date)
+       VALUES (?, ?, 5000000, 'pending', CURDATE(), CURDATE())`,
+      [tag, tag]
+    );
+    const r: any = await dbRun(
+      `INSERT INTO approval_rules (module, name, sequence, is_active, condition_field, min_value, max_value)
+       VALUES ('finance', ?, 1, 1, 'amount', 1000000, 10000000)`,
+      [tag]
+    );
+    return { tag, fundRequestId: fr.insertId, ruleAmountId: r.insertId };
+  } catch (e: any) {
+    console.log(`  (fixture rule gagal: ${e.message} — membersihkan sisa)`);
+    try { await cleanupRuleDebris(); } catch { /* jangan menutupi error asli */ }
+    return null;
+  }
+}
+
+async function setRuleCondition(ruleId: number, field: string): Promise<void> {
+  const { dbRun } = await import('../src/config/database');
+  await dbRun('UPDATE approval_rules SET condition_field=? WHERE id=?', [field, ruleId]);
+}
+
+async function ruleOfRequest(requestId: number): Promise<number | null> {
+  const { dbGet } = await import('../src/config/database');
+  const r: any = await dbGet('SELECT rule_id FROM approval_requests WHERE id=?', [requestId]);
+  return r?.rule_id ?? null;
+}
+
+async function cleanupRuleDebris(): Promise<void> {
+  const { dbRun } = await import('../src/config/database');
+  await dbRun(`DELETE FROM approval_actions WHERE request_id IN (SELECT id FROM approval_requests WHERE notes LIKE 'UJI-COND-%')`);
+  await dbRun(`DELETE FROM approval_requests WHERE notes LIKE 'UJI-COND-%'`);
+  await dbRun(`DELETE FROM approval_rules WHERE name LIKE 'UJI-COND-%'`);
+  await dbRun(`DELETE FROM fund_requests WHERE request_number LIKE 'UJI-COND-%'`);
+}
+
+async function cleanupRuleFixture(rf: any): Promise<number> {
+  const { dbGet } = await import('../src/config/database');
+  await cleanupRuleDebris();
+  const sisa: any = await dbGet(
+    `SELECT (SELECT COUNT(*) FROM approval_rules WHERE id=?) + (SELECT COUNT(*) FROM fund_requests WHERE id=?) AS n`,
+    [rf.ruleAmountId, rf.fundRequestId]
+  );
+  return Number(sisa?.n ?? -1);
+}
+
 async function seedAP(jumlah: number): Promise<any> {
   try {
     const { dbRun } = await import('../src/config/database');
@@ -856,6 +909,41 @@ async function main() {
     } finally {
       const sisa = await cleanupPayrollFixture(fx);
       chk('fixture payroll dibersihkan tuntas', sisa, 0);
+    }
+  }
+
+  console.log('\n7c. condition_field rule approval benar-benar dipakai (P1 BUSINESS-RULE)');
+  // `selectRuleForRequest` dulu MEMBACA `condition_field` lalu tidak pernah
+  // memakainya — semua batas dibandingkan ke satu variabel `amount`. Rule
+  // ber-condition_field 'quantity' karena itu tidak pernah cocok, dan sistem
+  // diam-diam jatuh ke rule tanpa batas: threshold yang dikonfigurasi admin
+  // terlewat tanpa satu pun tanda.
+  const rf = await seedRuleFixture();
+  chk('fixture rule dibuat', !!rf?.fundRequestId, true);
+
+  if (rf?.fundRequestId) {
+    try {
+      // Rule ber-batas dengan condition_field 'amount' → harus terpilih.
+      const s1 = await call('POST', '/approval/submit',
+        { entity_type: 'fund_request', entity_id: rf.fundRequestId, notes: rf.tag }, master);
+      chk('submit dengan rule amount berhasil', s1.status, 201);
+      chk('rule berbatas yang terpilih', await ruleOfRequest(s1.json?.data?.id), rf.ruleAmountId);
+
+      // Rule ber-condition_field yang TIDAK didukung entitas ini → ditolak jelas,
+      // bukan diam-diam jatuh ke rule tanpa batas.
+      await setRuleCondition(rf.ruleAmountId, 'quantity');
+      const s2 = await call('POST', '/approval/submit',
+        { entity_type: 'fund_request', entity_id: rf.fundRequestId, notes: rf.tag }, master);
+      chk('condition_field tak didukung ditolak 422', s2.status, 422);
+      chk('kodenya UNSUPPORTED_APPROVAL_CONDITION', s2.json?.code, 'UNSUPPORTED_APPROVAL_CONDITION');
+
+      // Field karangan juga ditolak.
+      await setRuleCondition(rf.ruleAmountId, 'warna_favorit');
+      chk('condition_field karangan ditolak',
+        (await call('POST', '/approval/submit',
+          { entity_type: 'fund_request', entity_id: rf.fundRequestId, notes: rf.tag }, master)).status, 422);
+    } finally {
+      chk('fixture rule dibersihkan', await cleanupRuleFixture(rf), 0);
     }
   }
 
