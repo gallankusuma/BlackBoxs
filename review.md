@@ -5392,3 +5392,52 @@ dinyatakan `proposal` berikut penjelasannya.
 satu jenis nomor.
 
 test:all 963 lulus / 0 gagal.
+
+---
+
+## [DEV] Tanggapan P2 — status PIN & kontrak route alokasi — 18 Agustus 2026
+
+### [P2] Enumerasi status PIN — DITERAPKAN
+
+Terkonfirmasi. `GET /hr/employees/pin-status` hanya memakai `authMiddleware`
+sementara ia membocorkan `has_pin`, status wajib ganti, waktu PIN dibuat, dan
+waktu lockout berakhir untuk seluruh karyawan aktif — peta status autentikasi
+yang tidak dibutuhkan dropdown umum.
+
+Digembok `hr.employees.edit`, permission yang **sama** dengan penerbitan PIN:
+yang berhak menerbitkan, itu juga yang berhak melihat statusnya. Kedua role aktif
+produksi memegangnya penuh, jadi tidak ada yang terkunci.
+
+Tes: `test:rbac` #8e — 403 tanpa hak, 401 tanpa token, 200 untuk yang berwenang.
+
+### [P2 / API-CONTRACT] Validasi quantity & method — DITERAPKAN, dan ada yang lebih besar
+
+Kritik atas tes kami tepat: versi pertama memakai nama parameter yang **salah**
+(`qty`, bukan `quantity`) dan menerima 400 sebagai keberhasilan — jadi ia tidak
+pernah menyentuh logika alokasinya sama sekali.
+
+Validasi dipasang: `quantity` wajib angka finit `> 0` (`INVALID_QUANTITY`), dan
+`method` wajib enum `FIFO | FEFO` (`INVALID_PICKING_METHOD`). Keduanya 400,
+bukan sukses palsu.
+
+**Begitu tesnya diperbaiki dan memakai parameter yang benar, permintaan yang SAH
+ternyata 500.** Sebabnya query-nya menunjuk kolom yang **tidak ada sama sekali**:
+
+- `inventory_stocks` tidak punya `batch_id`, `location_id`, maupun `uom`
+- `batches` memakai `expiry_date` dan `manufacture_date` — bukan `exp_date`/`mfg_date`
+
+Jadi endpoint ini **tidak pernah bisa bekerja**: mati dua kali — tidak terjangkau
+karena tertutup `/:id`, DAN rusak seandainya terjangkau. Memperbaiki route
+shadowing saja tidak membuatnya berfungsi; itu hanya memindahkan kegagalannya dari
+404 ke 500.
+
+Query ditulis ulang terhadap skema sebenarnya: stok per batch dibaca dari
+`batches.quantity` (bukan `inventory_stocks`, yang menyimpan saldo per gudang
+tanpa rincian batch), FEFO mengurutkan `expiry_date` dengan batch tanpa
+kedaluwarsa ditaruh paling belakang, FIFO memakai `manufacture_date`.
+
+Tes: `test:rbac` #9d — permintaan sah 200, `quantity` negatif/nol/bukan-angka
+ditolak 400 dan **tidak** mengaku `can_fulfill`, `method` salah ketik ditolak, dan
+`fifo` huruf kecil tetap diterima.
+
+test:all 975 lulus / 0 gagal.

@@ -192,7 +192,14 @@ router.post('/employees/generate-missing-pins', authMiddleware, requirePermissio
 });
 
 // GET /hr/employees/pin-status — siapa yang belum punya PIN / belum ganti
-router.get('/employees/pin-status', authMiddleware, async (_req: Request, res: Response) => {
+//
+// P2: digembok dengan permission yang SAMA dengan penerbitan PIN. Endpoint ini
+// membocorkan `has_pin`, status wajib ganti, waktu PIN dibuat, dan waktu lockout
+// berakhir untuk seluruh karyawan aktif. Itu peta status autentikasi — bukan
+// pengambilalihan langsung setelah reset digembok, tapi tidak ada alasan
+// dropdown umum membutuhkannya. Yang berhak menerbitkan PIN, itu juga yang
+// berhak melihat statusnya.
+router.get('/employees/pin-status', authMiddleware, requirePermission('hr.employees.edit'), async (_req: Request, res: Response) => {
   try {
     const rows = await dbAll(
       `SELECT id, code, name, position,

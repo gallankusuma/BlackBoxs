@@ -1107,6 +1107,16 @@ async function main() {
     (await call('POST', '/approval/rules', { module: 'finance', name: `UJI-GEMBOK-${stamp}` }, master)).status < 400, true);
   await hapusRuleUji(`UJI-GEMBOK-${stamp}`);
 
+  console.log('\n8e. Status PIN tidak bisa dienumerasi sembarang token (P2)');
+  // Endpoint ini membocorkan has_pin, status wajib ganti, waktu PIN dibuat, dan
+  // waktu lockout berakhir untuk SELURUH karyawan aktif — peta status
+  // autentikasi yang tidak dibutuhkan dropdown umum.
+  chk('pin-status oleh user tanpa hak',
+    await status('GET', '/hr/employees/pin-status', undefined, plainToken), 403);
+  chk('pin-status tanpa token', await status('GET', '/hr/employees/pin-status'), 401);
+  chk('yang berwenang tetap bisa',
+    await status('GET', '/hr/employees/pin-status', undefined, master), 200);
+
   console.log('\n8b. Permission key menu cocok dengan katalog backend (DR-P2-01)');
   // Sepuluh key di Layout.vue pernah berbeda dari katalog, mis.
   // `estimator.proposals` vs `estimator.estimator-proposals` dan
@@ -1178,9 +1188,30 @@ async function main() {
   console.log('\n9d. Route alokasi FIFO/FEFO terjangkau (DR-P2-03)');
   // `/:id` didaftarkan lebih dulu, jadi Express menangkap string "allocate-stock"
   // sebagai id dan endpoint alokasi tidak pernah terjangkau sejak dibuat.
-  const alok = await call('GET', '/warehouses/allocate-stock?product_id=1&qty=1', undefined, master);
+  // Catatan: versi pertama tes ini memakai nama parameter yang SALAH (`qty`,
+  // bukan `quantity`) dan menerima 400 sebagai keberhasilan — jadi ia tidak
+  // pernah menyentuh logika alokasinya sama sekali. Ditemukan tim reviewer.
+  const alok = await call('GET', '/warehouses/allocate-stock?product_id=1&quantity=1', undefined, master);
   chk('bukan lagi "Warehouse not found"',
     String(alok.json?.error || '').includes('Warehouse not found'), false);
+  chk('permintaan sah dijawab 200', alok.status, 200);
+
+  // P2 API-CONTRACT: input tidak masuk akal harus DITOLAK, bukan dijawab sukses.
+  const qtyMinus = await call('GET', '/warehouses/allocate-stock?product_id=1&quantity=-1', undefined, master);
+  chk('quantity negatif ditolak', qtyMinus.status, 400);
+  chk('kodenya INVALID_QUANTITY', qtyMinus.json?.code, 'INVALID_QUANTITY');
+  chk('TIDAK mengaku bisa dipenuhi', qtyMinus.json?.can_fulfill, undefined);
+
+  chk('quantity bukan angka ditolak',
+    (await call('GET', '/warehouses/allocate-stock?product_id=1&quantity=abc', undefined, master)).status, 400);
+  chk('quantity nol ditolak',
+    (await call('GET', '/warehouses/allocate-stock?product_id=1&quantity=0', undefined, master)).status, 400);
+
+  const metodeSalah = await call('GET', '/warehouses/allocate-stock?product_id=1&quantity=1&method=FIFOO', undefined, master);
+  chk('method salah ketik ditolak', metodeSalah.status, 400);
+  chk('kodenya INVALID_PICKING_METHOD', metodeSalah.json?.code, 'INVALID_PICKING_METHOD');
+  chk('FIFO tetap diterima',
+    (await call('GET', '/warehouses/allocate-stock?product_id=1&quantity=1&method=fifo', undefined, master)).status, 200);
 
   console.log('\n10. Akun nonaktif tidak bisa dipakai (DR-P1-01)');
   // Login dulu tidak memeriksa is_active sama sekali, dan middleware hanya

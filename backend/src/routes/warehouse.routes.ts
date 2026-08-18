@@ -133,21 +133,54 @@ router.get('/allocate-stock', authMiddleware, async (req: Request, res: Response
       return res.status(400).json({ error: 'product_id and quantity are required' });
     }
 
+    // P2 API-CONTRACT: input divalidasi sebagai kontrak, bukan diterjemahkan
+    // diam-diam.
+    //
+    // Sebelumnya `parseFloat()` dipakai tanpa pemeriksaan, jadi `quantity=-1`
+    // menghasilkan respons SUKSES dengan `can_fulfill: true` dan alokasi nol —
+    // pemanggil menyimpulkan kebutuhan stoknya terpenuhi. `method` selain FEFO
+    // juga jatuh diam-diam ke FIFO sementara respons tetap memantulkan string
+    // yang salah ketik itu, jadi pemanggil tidak pernah tahu urutan pickingnya
+    // bukan yang ia minta.
     const qtyNeeded = parseFloat(quantity as string);
-    const pickMethod = (method as string).toUpperCase();
+    if (!Number.isFinite(qtyNeeded) || qtyNeeded <= 0) {
+      return res.status(400).json({
+        error: 'quantity harus angka lebih besar dari nol.',
+        code: 'INVALID_QUANTITY',
+        diterima: quantity,
+      });
+    }
 
-    // Build query based on picking method
+    const METODE_SAH = ['FIFO', 'FEFO'] as const;
+    const pickMethod = String(method || 'FEFO').toUpperCase();
+    if (!METODE_SAH.includes(pickMethod as any)) {
+      return res.status(400).json({
+        error: `method harus salah satu dari ${METODE_SAH.join(' atau ')}.`,
+        code: 'INVALID_PICKING_METHOD',
+        diterima: method,
+      });
+    }
+
+    // Query ditulis ulang terhadap SKEMA YANG SEBENARNYA.
+    //
+    // Versi lama menunjuk kolom yang tidak ada sama sekali: `inventory_stocks`
+    // tidak punya `batch_id`, `location_id`, maupun `uom`, dan `batches` memakai
+    // `expiry_date`/`manufacture_date` — bukan `exp_date`/`mfg_date`. Endpoint
+    // ini karena itu tidak pernah bisa bekerja: mati dua kali, tidak terjangkau
+    // karena tertutup `/:id` DAN rusak seandainya terjangkau. Ketahuan hanya
+    // setelah route-nya dibuka dan inputnya divalidasi.
+    //
+    // Stok per batch ada di `batches.quantity`; `inventory_stocks` menyimpan
+    // saldo per gudang tanpa rincian batch, jadi alokasi FIFO/FEFO memang harus
+    // dibaca dari `batches`.
     let query = `
-      SELECT i.id, i.batch_id, i.location_id, i.quantity, i.uom,
-             b.batch_number, b.exp_date, b.mfg_date,
-             wl.code as location_code, wl.rack, wl.row, wl.bin,
-             w.id as warehouse_id, w.name as warehouse_name
-      FROM inventory_stocks i
-      JOIN batches b ON i.batch_id = b.id
-      JOIN warehouse_locations wl ON i.location_id = wl.id
-      JOIN warehouses w ON wl.warehouse_id = w.id
-      WHERE i.product_id = ? 
-        AND i.quantity > 0
+      SELECT b.id AS batch_id, b.batch_number, b.quantity,
+             b.expiry_date, b.manufacture_date,
+             w.id AS warehouse_id, w.name AS warehouse_name, w.code AS warehouse_code
+      FROM batches b
+      JOIN warehouses w ON w.id = b.warehouse_id
+      WHERE b.product_id = ?
+        AND b.quantity > 0
         AND b.status IN ('released', 'open')
     `;
 
@@ -158,15 +191,15 @@ router.get('/allocate-stock', authMiddleware, async (req: Request, res: Response
       params.push(warehouse_id);
     }
 
-    // Order by expiry date (FEFO) or manufacturing date (FIFO)
     if (pickMethod === 'FEFO') {
-      query += ` ORDER BY 
-        CASE WHEN b.exp_date IS NULL THEN 1 ELSE 0 END,
-        b.exp_date ASC,
-        b.mfg_date ASC`;
+      // Kedaluwarsa paling dekat lebih dulu; batch tanpa tanggal kedaluwarsa
+      // ditaruh paling belakang supaya tidak mendahului yang benar-benar mendesak.
+      query += ` ORDER BY
+        CASE WHEN b.expiry_date IS NULL THEN 1 ELSE 0 END,
+        b.expiry_date ASC,
+        b.manufacture_date ASC`;
     } else {
-      // FIFO
-      query += ` ORDER BY b.mfg_date ASC, b.batch_number ASC`;
+      query += ` ORDER BY b.manufacture_date ASC, b.batch_number ASC`;
     }
 
     const batches = await dbAll(query, params) as any[];
@@ -178,22 +211,17 @@ router.get('/allocate-stock', authMiddleware, async (req: Request, res: Response
     for (const batch of batches) {
       if (remainingQty <= 0) break;
 
-      const allocQty = Math.min(remainingQty, batch.quantity);
+      const allocQty = Math.min(remainingQty, Number(batch.quantity) || 0);
       allocation.push({
         batch_id: batch.batch_id,
         batch_number: batch.batch_number,
-        location_id: batch.location_id,
-        location_code: batch.location_code,
-        rack: batch.rack,
-        row: batch.row,
-        bin: batch.bin,
         warehouse_id: batch.warehouse_id,
         warehouse: batch.warehouse_name,
+        warehouse_code: batch.warehouse_code,
         allocated_qty: allocQty,
-        available_qty: batch.quantity,
-        uom: batch.uom,
-        exp_date: batch.exp_date,
-        mfg_date: batch.mfg_date,
+        available_qty: Number(batch.quantity),
+        expiry_date: batch.expiry_date,
+        manufacture_date: batch.manufacture_date,
       });
 
       remainingQty -= allocQty;
