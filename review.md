@@ -5301,3 +5301,53 @@ ber-`condition_field = 'quantity'` pada entitas yang tidak punya kuantitas ditol
 422; `condition_field` karangan juga ditolak 422.
 
 test:all 954 lulus / 0 gagal.
+
+---
+
+## [DEV] Tanggapan [P1 / ARCH-RISK] — baseline RAB & relasi ganda — 18 Agustus 2026
+
+**DITERAPKAN untuk integritas tautannya.** Terkonfirmasi, dan divergensinya
+**sudah ada di produksi**:
+
+```
+project 5  → cp.proposal_id = 1     | proposal 1 → project_id = 5    (konsisten)
+project 14 → cp.proposal_id = NULL  | proposal 3 → project_id = 14   (DIVERGEN)
+```
+
+Alur deal menyetel **dua** relasi; `link-proposal` dulu hanya menyentuh
+`proposals.project_id`, jadi project 14 tertaut dari satu arah saja.
+
+Yang dikerjakan:
+
+- **Kedua relasi dijaga sinkron.** `link`/`unlink` kini juga menulis
+  `client_projects.proposal_id`.
+- **Baseline kontrak dilindungi.** Kalau proposal yang sedang tertaut berstatus
+  tidak-editable (`submitted`/`deal`), penggantian dan pelepasan ditolak
+  **409 `CONTRACT_BASELINE_LOCKED`**. Sebelumnya proposal `deal` bisa dilepas
+  atau ditukar tanpa satu pun pemeriksaan — kontraknya hilang diam-diam.
+- **Proposal yang sudah tertaut ke project lain ditolak** (`PROPOSAL_LINKED_ELSEWHERE`),
+  dan **proposal milik client lain ditolak** (`CLIENT_MISMATCH`).
+- `available-proposals` dibatasi ke client yang sama; sebelumnya seluruh proposal
+  yang belum tertaut ditawarkan tanpa memandang client.
+- Semuanya dalam satu transaction dengan `FOR UPDATE`, dan hasil UPDATE-nya
+  diperiksa (`affectedRows`).
+
+**Sengaja TIDAK dibatasi ke status `deal` saja.** Data produksi menunjukkan
+kedua project tertaut ke proposal ber-status `draft` — fitur ini memang dipakai
+untuk project yang dibuat manual, bukan hanya hasil deal. Membatasinya akan
+mematikan cara kerja yang sedang berjalan.
+
+**PERLU TINDAKAN PEMILIK SISTEM:** divergensi pada project 14 adalah data yang
+sudah terlanjur, dan kami **tidak** memperbaikinya diam-diam. Kalau memang
+proposal 3 adalah proposal project 14, perbaikannya satu baris:
+
+```sql
+UPDATE client_projects SET proposal_id = 3 WHERE id = 14;
+```
+
+**Belum:** layar RAB masih mencari proposal lewat relasi terbalik
+`proposals.project_id`, bukan `client_projects.proposal_id` yang ditetapkan saat
+deal. Itu perubahan sumber baca layar dan sebaiknya digarap bersama scope
+`GET /projects/:id/mto` yang juga masih membaca lewat `proposal_id`.
+
+test:all 959 lulus / 0 gagal.

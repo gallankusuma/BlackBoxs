@@ -1217,12 +1217,27 @@ router.get('/:id/rab', authMiddleware, async (req: Request, res: Response) => {
 
 router.get('/:id/available-proposals', authMiddleware, async (req: Request, res: Response) => {
   try {
+    // P1 ARCH-RISK: daftar dibatasi ke proposal milik CLIENT yang sama.
+    //
+    // Sebelumnya seluruh proposal yang belum tertaut ditawarkan, tanpa memandang
+    // client. Menautkan proposal milik client lain ke sebuah project hampir pasti
+    // keliru, dan tidak ada satu pun yang menahannya.
+    const proyek: any = await dbGet('SELECT client_id FROM client_projects WHERE id = ?', [req.params.id]);
+    if (!proyek) return res.status(404).json({ error: 'Project tidak ditemukan' });
+
+    const params: any[] = [req.params.id];
+    let filterClient = '';
+    if (proyek.client_id) {
+      filterClient = ' AND (client_id = ? OR client_id IS NULL)';
+      params.push(proyek.client_id);
+    }
+
     const proposals = await dbAll(
-      `SELECT id, proposal_number, project_name, status, total_project, created_at
+      `SELECT id, proposal_number, project_name, status, total_project, client_id, created_at
        FROM proposals
-       WHERE project_id IS NULL OR project_id = ?
+       WHERE (project_id IS NULL OR project_id = ?)${filterClient}
        ORDER BY created_at DESC`,
-      [req.params.id]
+      params
     );
     res.json(proposals);
   } catch (error) {
@@ -1241,12 +1256,69 @@ router.put('/:id/link-proposal', authMiddleware, async (req: Request, res: Respo
       return res.status(400).json({ error: 'proposal_id is required' });
     }
 
-    // Unlink any previously linked proposals for this project
-    await dbRun('UPDATE proposals SET project_id = NULL WHERE project_id = ?', [projectId]);
+    // P1 ARCH-RISK: penautan ulang adalah SATU unit, dan tidak boleh menimpa
+    // baseline kontrak.
+    //
+    // Alur deal menyetel DUA relasi — `client_projects.proposal_id` dan
+    // `proposals.project_id`. Endpoint ini dulu hanya menyentuh yang kedua, jadi
+    // keduanya bisa menunjuk arah berbeda; produksi sudah memperlihatkannya
+    // (project 14: cp.proposal_id NULL sementara proposal 3 menunjuk balik).
+    const hasil = await withTransaction(async tx => {
+      const proyek: any = await tx.get(
+        'SELECT id, proposal_id, client_id FROM client_projects WHERE id = ? FOR UPDATE', [projectId]
+      );
+      if (!proyek) return { error: 404, body: { error: 'Project tidak ditemukan' } };
 
-    // Link the new proposal
-    await dbRun('UPDATE proposals SET project_id = ? WHERE id = ?', [projectId, proposal_id]);
+      const target: any = await tx.get(
+        'SELECT id, status, client_id, project_id FROM proposals WHERE id = ? FOR UPDATE', [proposal_id]
+      );
+      if (!target) return { error: 404, body: { error: 'Proposal tidak ditemukan' } };
 
+      if (target.project_id && Number(target.project_id) !== Number(projectId)) {
+        return {
+          error: 409,
+          body: {
+            error: 'Proposal ini sudah tertaut ke project lain.',
+            code: 'PROPOSAL_LINKED_ELSEWHERE',
+            project_id: target.project_id,
+          },
+        };
+      }
+
+      // Proposal yang SEDANG tertaut dan berstatus deal adalah baseline kontrak
+      // project ini. Menggantinya berarti mengganti kontraknya diam-diam.
+      const lama: any = await tx.get(
+        'SELECT id, status, proposal_number FROM proposals WHERE project_id = ? LIMIT 1', [projectId]
+      );
+      if (lama && Number(lama.id) !== Number(proposal_id) && !isProposalEditable(lama.status)) {
+        return {
+          error: 409,
+          body: {
+            error: `Project ini sudah terikat proposal ${lama.proposal_number} berstatus "${lama.status}". Baseline kontraknya tidak bisa diganti dari sini.`,
+            code: 'CONTRACT_BASELINE_LOCKED',
+          },
+        };
+      }
+
+      if (proyek.client_id && target.client_id && Number(proyek.client_id) !== Number(target.client_id)) {
+        return {
+          error: 409,
+          body: { error: 'Proposal ini milik client lain.', code: 'CLIENT_MISMATCH' },
+        };
+      }
+
+      await tx.run('UPDATE proposals SET project_id = NULL WHERE project_id = ?', [projectId]);
+      const r = await tx.run('UPDATE proposals SET project_id = ? WHERE id = ?', [projectId, proposal_id]);
+      if (!r.affectedRows) {
+        return { error: 500, body: { error: 'Penautan gagal — tidak ada baris yang berubah.' } };
+      }
+
+      // Kedua relasi dijaga sinkron. Inilah yang dulu terlewat.
+      await tx.run('UPDATE client_projects SET proposal_id = ? WHERE id = ?', [proposal_id, projectId]);
+      return { ok: true as const };
+    });
+
+    if ('error' in hasil) return res.status(hasil.error).json(hasil.body);
     res.json({ message: 'Proposal linked to project' });
   } catch (error) {
     console.error('Error linking proposal:', error);
@@ -1257,7 +1329,25 @@ router.put('/:id/link-proposal', authMiddleware, async (req: Request, res: Respo
 // Unlink proposal from project
 router.delete('/:id/link-proposal', authMiddleware, async (req: Request, res: Response) => {
   try {
-    await dbRun('UPDATE proposals SET project_id = NULL WHERE project_id = ?', [req.params.id]);
+    const hasil = await withTransaction(async tx => {
+      const lama: any = await tx.get(
+        'SELECT id, status, proposal_number FROM proposals WHERE project_id = ? LIMIT 1 FOR UPDATE', [req.params.id]
+      );
+      if (lama && !isProposalEditable(lama.status)) {
+        return {
+          error: 409,
+          body: {
+            error: `Proposal ${lama.proposal_number} berstatus "${lama.status}" adalah baseline kontrak project ini dan tidak bisa dilepas.`,
+            code: 'CONTRACT_BASELINE_LOCKED',
+          },
+        };
+      }
+      await tx.run('UPDATE proposals SET project_id = NULL WHERE project_id = ?', [req.params.id]);
+      await tx.run('UPDATE client_projects SET proposal_id = NULL WHERE id = ?', [req.params.id]);
+      return { ok: true as const };
+    });
+
+    if ('error' in hasil) return res.status(hasil.error).json(hasil.body);
     res.json({ message: 'Proposal unlinked' });
   } catch (error) {
     console.error('Error unlinking proposal:', error);

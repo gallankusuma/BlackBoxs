@@ -896,6 +896,38 @@ async function main() {
   chk('elemen masih ada', !!elemenAkhir, true);
   chk('parameter aslinya utuh', Number(elemenAkhir?.parameters?.L), 1);
 
+  console.log('\n43. Baseline kontrak project tidak bisa diganti lewat link-proposal (P1 ARCH)');
+  // Alur deal menyetel DUA relasi: client_projects.proposal_id dan
+  // proposals.project_id. `link-proposal` dulu hanya menyentuh yang kedua, jadi
+  // keduanya bisa menunjuk arah berbeda — dan proposal deal bisa dilepas atau
+  // diganti tanpa satu pun pemeriksaan.
+  const propBase = await call('POST', '/estimator/proposals',
+    { project_name: `Uji baseline link ${stamp}`, client_id: klienId }, master);
+  const baseId = propBase.json?.id;
+  for (const st of ['review', 'submitted', 'deal']) {
+    await call('PUT', `/estimator/proposals/${baseId}/status`, { status: st }, master);
+  }
+  const cekBase = await call('GET', `/estimator/proposals/${baseId}`, undefined, master);
+  const projBase = (cekBase.json?.data ?? cekBase.json)?.project_id;
+  chk('project terbentuk dari deal', !!projBase, true);
+
+  // Proposal lain, client sama, masih draft.
+  const propLain = await call('POST', '/estimator/proposals',
+    { project_name: `Uji pengganti ${stamp}`, client_id: klienId }, master);
+
+  const gantiBaseline = await call('PUT', `/projects/${projBase}/link-proposal`,
+    { proposal_id: propLain.json?.id }, master);
+  chk('mengganti baseline kontrak ditolak', gantiBaseline.status, 409);
+  chk('kodenya CONTRACT_BASELINE_LOCKED', gantiBaseline.json?.code, 'CONTRACT_BASELINE_LOCKED');
+
+  const lepasBaseline = await call('DELETE', `/projects/${projBase}/link-proposal`, undefined, master);
+  chk('melepas baseline kontrak ditolak', lepasBaseline.status, 409);
+
+  // Tautannya benar-benar tidak berubah.
+  const masihTertaut = await call('GET', `/estimator/proposals/${baseId}`, undefined, master);
+  chk('proposal deal masih tertaut ke projectnya',
+    Number((masihTertaut.json?.data ?? masihTertaut.json)?.project_id), Number(projBase));
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }
