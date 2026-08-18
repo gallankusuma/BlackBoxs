@@ -5213,3 +5213,57 @@ Kolom bertambah, tabel dibuat, **data lama tidak tersentuh**, dan query aplikasi
 langsung mengembalikan rule yang sudah ada.
 
 test:all 937 lulus / 0 gagal.
+
+---
+
+## [DEV] Snapshot payroll & keputusan auto-approve expense — 18 Agustus 2026
+
+### [P1 / TRANSACTION-INTEGRITY] Snapshot tarif & attendance — DITERAPKAN
+
+Benar, dan ini menunjuk pekerjaan kami sendiri di `a57c1daf`. Kami memindahkan
+perhitungan ke dalam transaction dan mengunci kasbon, **tapi tarif karyawan dan
+baris absensi tetap dibaca tanpa lock**. Snapshot REPEATABLE READ menjaga bacaan
+kita sendiri konsisten, tapi tidak menahan transaksi lain mengubah tarif atau
+absensi lalu commit duluan — payslip tetap final di atas angka basi, tanpa
+konflik yang terlihat.
+
+Sekarang saat finalisasi, seluruh sumber angkanya dikunci dengan **urutan tetap**
+(karyawan → absensi → kasbon) supaya dua finalisasi paralel tidak saling menunggu
+berlawanan arah:
+
+- `SELECT * FROM employees WHERE id=? FOR UPDATE`
+- absensi periode **dan** absensi minggu-batas: `FOR UPDATE OF a` — hanya baris
+  absensi yang dikunci, bukan baris project yang ikut ter-JOIN; mengunci project
+  akan menahan pekerjaan lain yang tidak ada hubungannya dengan payroll
+- kasbon: `FOR UPDATE` (sudah sejak ronde lalu)
+
+Flag internalnya diganti nama dari `lockAdvances` menjadi `kunciUntukFinalisasi`,
+karena nama lamanya sudah tidak jujur menggambarkan apa yang dikunci.
+
+Tes: `test:rbac` #9 — **dua finalisasi paralel** lewat `Promise.all` menghasilkan
+angka **identik**, **satu** baris payslip, dan kasbon **tidak terpotong dua kali**.
+
+### [P3 / TEST-INTEGRITY] Fixture payroll gagal parsial — DITERAPKAN
+
+Sama persis dengan cacat yang kami temukan sendiri pada fixture approval:
+beberapa INSERT autocommit, lalu `return null` membuat cleanup di `finally` tidak
+punya apa pun untuk dihapus. `seedPayrollFixture()` kini menyapu sisa run
+sebelumnya **dan** membersihkan dirinya sendiri saat gagal separuh.
+
+### Auto-approve expense payroll — KEPUTUSAN PEMILIK SISTEM
+
+**Diputuskan 18 Agustus 2026: lewat jalur approve yang sudah ada.**
+
+`generate-expense` dulu menulis `status='approved'` langsung di INSERT — biaya
+tercipta sudah disetujui tanpa pernah melewati kontrol, padahal endpoint
+approve/reject untuk `project_expenses` **memang sudah ada** di
+`project.routes.ts`. Sekarang keduanya (gaji dan kasbon) masuk sebagai
+`submitted`, dan Finance yang menyetujuinya.
+
+Konsekuensi yang disengaja: expense payroll tidak lagi langsung muncul sebagai
+biaya disetujui di cost control — harus di-approve dulu.
+
+Tes: `test:rbac` #8d — expense hasil generate **dibuktikan** berstatus `submitted`
+dan **nol** yang langsung `approved`.
+
+test:all 947 lulus / 0 gagal.

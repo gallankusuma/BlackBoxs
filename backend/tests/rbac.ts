@@ -419,6 +419,11 @@ async function cleanupApprovalFixture(af: any): Promise<number> {
 }
 
 async function seedPayrollFixture(): Promise<any> {
+  // Sapu sisa run sebelumnya yang gagal separuh. Beberapa INSERT di bawah
+  // autocommit, jadi kegagalan di tengah meninggalkan baris menggantung dan
+  // `null` yang dikembalikan membuat cleanup di `finally` tidak punya apa pun
+  // untuk dihapus (P3 TEST-INTEGRITY).
+  await cleanupPayrollDebris();
   try {
     const { dbRun } = await import('../src/config/database');
     const tandaUnik = `UJI-PAYROLL-${Date.now()}`;
@@ -466,9 +471,79 @@ async function seedPayrollFixture(): Promise<any> {
       kasbonSendiriId: k1.insertId, kasbonLuarId: k2.insertId,
     };
   } catch (e: any) {
-    console.log(`  (fixture payroll gagal dibuat: ${e.message})`);
+    console.log(`  (fixture payroll gagal dibuat: ${e.message} — membersihkan sisa)`);
+    try { await cleanupPayrollDebris(); } catch { /* jangan menutupi error asli */ }
     return null;
   }
+}
+
+/** Sapu bersih sisa fixture payroll dari run mana pun yang gagal separuh. */
+/** Project + karyawan + absensi + payslip final untuk menguji generate-expense. */
+async function seedExpenseFixture(): Promise<any> {
+  await cleanupExpenseDebris();
+  try {
+    const { dbRun, dbGet } = await import('../src/config/database');
+    const tag = `UJI-EXP-${Date.now()}`;
+    const klien: any = await dbGet('SELECT id FROM clients ORDER BY id LIMIT 1');
+    const pr: any = await dbRun(
+      `INSERT INTO client_projects (client_id, project_number, project_name, status) VALUES (?, ?, 'Proyek Uji Expense', 'open')`,
+      [klien?.id ?? null, tag]
+    );
+    const emp: any = await dbRun(
+      `INSERT INTO employees (code, name, position, status, salary_type, basic_rate) VALUES (?, 'Karyawan Uji Exp', 'Uji', 'ACTIVE', 'daily', 100000)`,
+      [tag]
+    );
+    await dbRun(
+      `INSERT INTO payslip_records (employee_id, period_month, period_year, total_days, gross_salary, advance_1, advance_2, net_salary, status)
+       VALUES (?, 12, 2098, 1, 100000, 0, 0, 100000, 'final')`,
+      [emp.insertId]
+    );
+    return { tag, projectId: pr.insertId, employeeId: emp.insertId };
+  } catch (e: any) {
+    console.log(`  (fixture expense gagal: ${e.message} — membersihkan sisa)`);
+    try { await cleanupExpenseDebris(); } catch { /* jangan menutupi error asli */ }
+    return null;
+  }
+}
+
+async function expenseRows(projectId: number): Promise<any[]> {
+  const { dbAll } = await import('../src/config/database');
+  return dbAll('SELECT status, category FROM project_expenses WHERE project_id=?', [projectId]) as any;
+}
+
+async function cleanupExpenseDebris(): Promise<void> {
+  const { dbRun } = await import('../src/config/database');
+  await dbRun(`DELETE FROM project_expenses WHERE project_id IN (SELECT id FROM client_projects WHERE project_number LIKE 'UJI-EXP-%')`);
+  await dbRun(`DELETE FROM payslip_records WHERE employee_id IN (SELECT id FROM employees WHERE code LIKE 'UJI-EXP-%')`);
+  await dbRun(`DELETE FROM employees WHERE code LIKE 'UJI-EXP-%'`);
+  await dbRun(`DELETE FROM client_projects WHERE project_number LIKE 'UJI-EXP-%'`);
+}
+
+async function cleanupExpenseFixture(fx: any): Promise<number> {
+  const { dbGet } = await import('../src/config/database');
+  await cleanupExpenseDebris();
+  const sisa: any = await dbGet(
+    `SELECT (SELECT COUNT(*) FROM client_projects WHERE id=?) + (SELECT COUNT(*) FROM employees WHERE id=?) AS n`,
+    [fx.projectId, fx.employeeId]
+  );
+  return Number(sisa?.n ?? -1);
+}
+
+async function countPayslip(employeeId: number, bulan: number, tahun: number): Promise<number> {
+  const { dbGet } = await import('../src/config/database');
+  const r: any = await dbGet(
+    'SELECT COUNT(*) AS n FROM payslip_records WHERE employee_id=? AND period_month=? AND period_year=?',
+    [employeeId, bulan, tahun]
+  );
+  return Number(r?.n ?? -1);
+}
+
+async function cleanupPayrollDebris(): Promise<void> {
+  const { dbRun } = await import('../src/config/database');
+  await dbRun(`DELETE FROM payslip_records WHERE employee_id IN (SELECT id FROM employees WHERE code LIKE 'UJI-PAYROLL-%')`);
+  await dbRun(`DELETE FROM salary_advances WHERE description LIKE 'UJI-PAYROLL-%'`);
+  await dbRun(`DELETE FROM attendance_logs WHERE employee_id IN (SELECT id FROM employees WHERE code LIKE 'UJI-PAYROLL-%')`);
+  await dbRun(`DELETE FROM employees WHERE code LIKE 'UJI-PAYROLL-%'`);
 }
 
 async function advanceRow(id: number): Promise<any> {
@@ -762,6 +837,22 @@ async function main() {
       chk('simpan payslip oleh user tanpa hak',
         await status('POST', '/hr/payslip/save',
           { employee_id: fx.employeeId, period_month: 12, period_year: 2099 }, plainToken), 403);
+
+      // P1 TRANSACTION-INTEGRITY: dua finalisasi paralel harus memberi SATU
+      // hasil. Sebelumnya tarif dan absensi dibaca tanpa lock, jadi payslip bisa
+      // final di atas angka basi tanpa konflik yang terlihat.
+      const periodeFx = { employee_id: fx.employeeId, period_month: 12, period_year: 2099 };
+      const [f1, f2] = await Promise.all([
+        call('POST', '/hr/payslip/save', { ...periodeFx, notes: 'paralel-1' }, master),
+        call('POST', '/hr/payslip/save', { ...periodeFx, notes: 'paralel-2' }, master),
+      ]);
+      chk('dua finalisasi paralel keduanya dijawab',
+        [f1.status, f2.status].filter(x => x === 201).length, 2);
+      chk('angkanya sama persis',
+        Number(f1.json?.data?.gross_salary), Number(f2.json?.data?.gross_salary));
+      chk('hanya satu baris payslip', await countPayslip(fx.employeeId, 12, 2099), 1);
+      chk('kasbon tidak terpotong dua kali',
+        Number((await advanceRow(fx.kasbonSendiriId))?.remaining), 0);
     } finally {
       const sisa = await cleanupPayrollFixture(fx);
       chk('fixture payroll dibersihkan tuntas', sisa, 0);
@@ -863,6 +954,28 @@ async function main() {
     { period_month: 12, period_year: 2098, project_id: 1 }, master);
   chk('periode tanpa payslip ditolak', kosong.status >= 400, true);
   chk('tidak ada expense hantu terbuat', await countExpenseGaji('Desember 2098'), 0);
+
+  console.log('\n8d. Expense payroll masuk lewat jalur approve (keputusan pemilik)');
+  // Sebelumnya status ditulis `approved` langsung di INSERT — biaya tercipta
+  // sudah disetujui tanpa pernah melewati kontrol, padahal endpoint
+  // approve/reject untuk project_expenses memang sudah ada.
+  const fxExp = await seedExpenseFixture();
+  chk('fixture expense dibuat', !!fxExp?.projectId, true);
+  if (fxExp?.projectId) {
+    try {
+      const gen = await call('POST', '/hr/payslip/generate-expense',
+        { period_month: 12, period_year: 2098, project_id: fxExp.projectId }, master);
+      chk('expense ter-generate', gen.status, 201);
+      const baris = await expenseRows(fxExp.projectId);
+      chk('ada expense terbuat', baris.length > 0, true);
+      chk('statusnya submitted, BUKAN approved',
+        baris.every((b: any) => b.status === 'submitted'), true);
+      chk('tidak ada yang langsung approved',
+        baris.filter((b: any) => b.status === 'approved').length, 0);
+    } finally {
+      chk('fixture expense dibersihkan', await cleanupExpenseFixture(fxExp), 0);
+    }
+  }
 
   console.log('\n9b. Batas hr.employees.view vs hr.payroll.view (klarifikasi reviewer)');
   // Keputusan: "Data Karyawan" adalah direktori, bukan kompensasi. Membuka angka

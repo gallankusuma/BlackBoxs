@@ -517,9 +517,23 @@ type SqlRunner = { all: (sql: string, params?: any[]) => Promise<any[]>; get: (s
 const computePayslip = async (
   employee_id: any, month: any, year: any, project_id: any,
   run: SqlRunner = { all: dbAll as any, get: dbGet as any },
-  lockAdvances = false,
+  kunciUntukFinalisasi = false,
 ): Promise<any> => {
-    const emp: any = await run.get('SELECT * FROM employees WHERE id=?', [employee_id]);
+    // P1 TRANSACTION-INTEGRITY: saat payslip DIFINALISASI, seluruh sumber
+    // angkanya dikunci — bukan hanya kasbon.
+    //
+    // Ronde sebelumnya kami memindahkan perhitungan ke dalam transaction dan
+    // mengunci kasbon, tapi tarif karyawan dan baris absensi tetap dibaca tanpa
+    // lock. Snapshot REPEATABLE READ menjaga bacaan kita sendiri konsisten, tapi
+    // TIDAK menahan transaksi lain mengubah tarif atau absensi lalu commit
+    // duluan — payslip tetap final di atas angka basi, tanpa konflik yang
+    // terlihat.
+    //
+    // Urutan lock dijaga tetap: karyawan → absensi → kasbon, supaya dua
+    // finalisasi paralel tidak saling menunggu berlawanan arah (deadlock).
+    const kunci = kunciUntukFinalisasi ? ' FOR UPDATE' : '';
+
+    const emp: any = await run.get(`SELECT * FROM employees WHERE id=?${kunci}`, [employee_id]);
     if (!emp) return { error: 'Employee not found' };
 
     // ── Cut-off period: 26th prev month → 25th current month ──
@@ -533,9 +547,12 @@ const computePayslip = async (
     let where = 'WHERE a.employee_id=? AND a.date >= ? AND a.date <= ?';
     const params: any[] = [employee_id, periodStart, periodEnd];
     if (project_id) { where += ' AND a.project_id=?'; params.push(project_id); }
+    // `FOR UPDATE OF a` — hanya baris absensi yang dikunci, bukan baris project
+    // yang ikut ter-JOIN. Mengunci project akan menahan pekerjaan lain yang
+    // tidak ada hubungannya dengan payroll.
     const logs: any[] = await run.all(
       `SELECT a.*, p.project_name as project_name FROM attendance_logs a
-       LEFT JOIN client_projects p ON a.project_id=p.id ${where} ORDER BY a.date ASC`, params
+       LEFT JOIN client_projects p ON a.project_id=p.id ${where} ORDER BY a.date ASC${kunci ? ' FOR UPDATE OF a' : ''}`, params
     );
 
     // Determine rates
@@ -586,7 +603,7 @@ const computePayslip = async (
          LEFT JOIN client_projects p ON a.project_id=p.id
          WHERE a.employee_id=? AND a.date >= ? AND a.date <= ?
          AND (a.date < ? OR a.date > ?)${projFilter}
-         ORDER BY a.date ASC`, suppParams
+         ORDER BY a.date ASC${kunci ? ' FOR UPDATE OF a' : ''}`, suppParams
       );
     }
 
@@ -724,7 +741,7 @@ const computePayslip = async (
          (status='pending' AND (period_month IS NULL OR (period_month=? AND period_year=?)))
          OR (status='deducted' AND period_month=? AND period_year=?)
        )
-       ORDER BY advance_date ASC LIMIT 2${lockAdvances ? ' FOR UPDATE' : ''}`,
+       ORDER BY advance_date ASC LIMIT 2${kunci}`,
       [employee_id, month, year, month, year]
     );
     const advance1 = pendingAdvances[0] ? parseFloat(pendingAdvances[0].amount) : 0;
@@ -817,7 +834,7 @@ router.post('/payslip/save', authMiddleware, requirePermission('hr.payroll.creat
       const hitung = await computePayslip(
         employee_id, period_month, period_year, null,
         { all: tx.all as any, get: tx.get as any },
-        true, // kunci baris kasbon sampai commit
+        true, // kunci karyawan, absensi, dan kasbon sampai commit
       );
       if (hitung?.error) return { error: 404, body: hitung };
 
@@ -1163,10 +1180,17 @@ router.post('/payslip/generate-expense', authMiddleware, requirePermission('hr.p
       const createdExpenses: any[] = [];
 
       // Nomor memakai counter atomic, bukan akhiran acak 4 digit.
+      // KEPUTUSAN PEMILIK SISTEM (18 Agustus 2026): expense payroll masuk lewat
+      // jalur approve yang sudah ada, bukan langsung `approved`.
+      //
+      // Sebelumnya status ditulis `approved` di INSERT — biaya tercipta sudah
+      // disetujui tanpa pernah melewati kontrol, padahal endpoint approve/reject
+      // untuk `project_expenses` memang sudah ada di `project.routes.ts`.
+      // Sekarang `submitted`, dan Finance yang menyetujuinya.
       const salaryExpNum = await nextSequentialCode('EXP-SAL', 'project_expenses', 'expense_number', tx);
       const salaryResult = await tx.run(
         `INSERT INTO project_expenses (project_id, expense_number, category, description, amount, expense_date, notes, status, created_by)
-         VALUES (?, ?, 'salary', ?, ?, ?, ?, 'approved', ?)`,
+         VALUES (?, ?, 'salary', ?, ?, ?, ?, 'submitted', ?)`,
         [project_id, salaryExpNum,
          `Gaji ${periodLabel} (${payslips.length} karyawan)`,
          totalNet, expenseDate,
@@ -1190,7 +1214,7 @@ router.post('/payslip/generate-expense', authMiddleware, requirePermission('hr.p
         const kasbonExpNum = await nextSequentialCode('EXP-KSB', 'project_expenses', 'expense_number', tx);
         const kasbonResult = await tx.run(
           `INSERT INTO project_expenses (project_id, expense_number, category, description, amount, expense_date, notes, status, created_by)
-           VALUES (?, ?, 'kasbon', ?, ?, ?, ?, 'approved', ?)`,
+           VALUES (?, ?, 'kasbon', ?, ?, ?, ?, 'submitted', ?)`,
           [project_id, kasbonExpNum,
            `Potongan Kasbon ${periodLabel}`,
            totalKasbon, expenseDate,
