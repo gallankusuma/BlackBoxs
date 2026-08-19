@@ -128,6 +128,46 @@ function expect(label, got, oneOf, extra = '') {
     else ok(`${label} terdaftar`, `HTTP ${r.status}`);
   }
 
+  console.log('\n5b. Estimator — seluruh jalur proposal terdaftar & terjaga');
+  // Lima perbaikan beruntun menyentuh jalur ini (metadata, RAB, payment
+  // schedule, kepemilikan jadwal, gerbang komersial), jadi ia layak diperiksa
+  // satu per satu di produksi, bukan lewat satu endpoint daftar saja.
+  //
+  // Yang dibedakan di sini ada tiga, dan ketiganya berarti hal berbeda:
+  //   401 → route ada dan penjagaannya jalan  (yang kita mau)
+  //   404 → route HILANG dari build           (deploy tidak lengkap)
+  //   500 → handler berjalan SEBELUM auth     (bocor, dan bisa jadi query rusak)
+  //
+  // Batasnya jujur: tanpa token, pemeriksaan ini berhenti di gerbang auth. Ia
+  // membuktikan "jalurnya ada dan terkunci", BUKAN "querynya benar". Payment
+  // Schedule pernah 500 berbulan-bulan karena kolom `total_price` tidak ada —
+  // kegagalan seperti itu hanya terlihat oleh `npm run test:all` di dev, yang
+  // memang login dan menyentuh data.
+  for (const [label, path, method] of [
+    ['detail proposal',        '/api/estimator/proposals/1', 'GET'],
+    ['item RAB proposal',      '/api/estimator/proposals/1/items', 'GET'],
+    ['laporan RAB',            '/api/estimator/proposals/1/rab', 'GET'],
+    ['payment schedule',       '/api/estimator/proposals/1/payment-schedule', 'GET'],
+    ['MTO proposal',           '/api/estimator/proposals/1/mto', 'GET'],
+    ['edit metadata proposal', '/api/estimator/proposals/1', 'PUT'],
+    ['transisi status',        '/api/estimator/proposals/1/status', 'PUT'],
+    ['simpan override jadwal', '/api/estimator/proposals/1/schedule/overrides', 'PUT'],
+    ['reset override jadwal',  '/api/estimator/proposals/1/schedule/overrides/1', 'DELETE'],
+    ['baca progress jadwal',   '/api/estimator/proposals/1/schedule-progress/1', 'GET'],
+    ['tulis progress jadwal',  '/api/estimator/proposals/1/schedule-progress', 'PUT'],
+    ['daftar AHSP',            '/api/estimator/ahsp', 'GET'],
+    ['master disiplin',        '/api/estimator/disciplines', 'GET'],
+  ]) {
+    const r = await req(path, {
+      method,
+      ...(method === 'PUT' ? { body: '{}' } : {}),
+    });
+    if (r.status === 401) ok(`${label} terjaga`, 'HTTP 401');
+    else if (r.status === 404) bad(`${label} terjaga`, 'HTTP 404 — route hilang dari build');
+    else if (r.status >= 500) bad(`${label} terjaga`, `HTTP ${r.status} — handler jalan sebelum auth`);
+    else bad(`${label} terjaga`, `HTTP ${r.status} — seharusnya 401`);
+  }
+
   console.log('\n6. Dokumen bisnis tidak terbuka lewat /uploads');
   // ⚠️ Versi pertama pemeriksaan ini menembak `/uploads/` — DIREKTORI — dan
   // menerima 403 sebagai "lulus". Rasa aman palsu: direktori memang ditolak,

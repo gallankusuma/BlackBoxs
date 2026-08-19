@@ -9,6 +9,30 @@
 set -e
 
 VPS="root@76.13.22.155"
+
+# ── SSH tidak boleh menggantung tanpa batas ────────────────────────────────
+#
+# 18 Agustus 2026: `ssh ... pm2 restart` menggantung **1 jam 15 menit** tanpa
+# pernah kembali. Restartnya sendiri sudah berhasil dan rilisnya sudah live —
+# tapi skrip tidak pernah sampai ke health check, smoke test, maupun gerbang
+# rollback. Itu keadaan paling berbahaya yang bisa dihasilkan skrip ini: versi
+# baru melayani pengguna sementara seluruh pemeriksaannya terlewat diam-diam,
+# dan operator mengira deploy masih berjalan.
+#
+# `ServerAliveInterval`/`CountMax` memutus koneksi yang mati diam-diam
+# (mis. NAT/firewall menjatuhkan sesi tanpa RST). `ConnectTimeout` membatasi
+# fase penyambungan. `BatchMode` mencegahnya menunggu input interaktif
+# selamanya kalau kunci ditolak.
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=8)
+ssh() { command ssh "${SSH_OPTS[@]}" "$@"; }
+
+# Batas keras per perintah jarak jauh, untuk kasus di mana koneksinya hidup tapi
+# perintah di seberang yang tidak selesai. macOS tidak punya `timeout`; perl ada
+# di mana-mana dan `alarm` cukup untuk keperluan ini.
+jalankan_berbatas() {
+  local detik="$1"; shift
+  perl -e 'alarm shift; exec @ARGV' "$detik" "$@"
+}
 REMOTE_FRONTEND="/var/www/blackboxs/frontend"
 REMOTE_BACKEND="/var/www/blackboxs/backend"
 LOCAL_FRONTEND="/Users/gallankusuma/Webapps/EPC/frontend"
@@ -75,11 +99,39 @@ fi
 echo "✅ Bundle bersih dari alamat dev"
 
 # ── Titik pulang: salin versi yang sedang berjalan sebelum ditimpa ───────────
+#
+# Dulu kedua `cp` diakhiri `|| true` lalu skrip SELALU mencetak "Titik pulang
+# tersimpan". Snapshot yang gagal karena itu tidak terlihat sama sekali, dan
+# baru ketahuan saat rollback dibutuhkan — persis saat paling tidak boleh gagal.
+#
+# Manifest dan lockfile ikut disimpan: deploy juga mengganti `package.json`,
+# `package-lock.json`, dan `database/`, lalu memutasi `node_modules` lewat
+# `npm install`. Kalau rilis baru membuang dependency yang masih di-import dist
+# lama, memulihkan dist saja menghasilkan MODULE_NOT_FOUND — rollback yang
+# "berhasil" tapi produksinya mati.
 echo "💾 Menyimpan titik pulang di server..."
-ssh "$VPS" "rm -rf /var/www/blackboxs/.rollback && mkdir -p /var/www/blackboxs/.rollback && \
-  cp -a $REMOTE_FRONTEND /var/www/blackboxs/.rollback/frontend 2>/dev/null || true; \
-  cp -a $REMOTE_BACKEND/dist /var/www/blackboxs/.rollback/dist 2>/dev/null || true"
-echo "✅ Titik pulang tersimpan"
+ssh "$VPS" "set -e
+  rm -rf /var/www/blackboxs/.rollback
+  mkdir -p /var/www/blackboxs/.rollback
+  cp -a $REMOTE_FRONTEND /var/www/blackboxs/.rollback/frontend
+  cp -a $REMOTE_BACKEND/dist /var/www/blackboxs/.rollback/dist
+  for f in package.json package-lock.json; do
+    [ -f $REMOTE_BACKEND/\$f ] && cp -a $REMOTE_BACKEND/\$f /var/www/blackboxs/.rollback/\$f
+  done
+  [ -d $REMOTE_BACKEND/database ] && cp -a $REMOTE_BACKEND/database /var/www/blackboxs/.rollback/database
+  true" || {
+    echo "❌ ABORT: titik pulang GAGAL dibuat. Tidak ada yang diunggah."
+    echo "   Deploy tanpa jalan pulang lebih berbahaya daripada tidak deploy."
+    exit 1
+  }
+
+# Diverifikasi, bukan diasumsikan.
+SNAP=$(ssh "$VPS" "[ -d /var/www/blackboxs/.rollback/frontend ] && [ -d /var/www/blackboxs/.rollback/dist ] && echo ok || echo kurang")
+if [ "$SNAP" != "ok" ]; then
+  echo "❌ ABORT: titik pulang tidak lengkap (frontend/dist tidak keduanya ada)."
+  exit 1
+fi
+echo "✅ Titik pulang tersimpan & terverifikasi"
 
 # 2. Upload frontend
 echo "📤 Uploading frontend to $REMOTE_FRONTEND..."
@@ -104,7 +156,15 @@ echo "✅ Backend uploaded"
 
 # 5. Install deps & restart backend on VPS (no build needed)
 echo "🔄 Restarting backend..."
-ssh "$VPS" "cd $REMOTE_BACKEND && npm install --omit=dev 2>/dev/null; pm2 restart $PM2_NAME"
+# Berbatas waktu: langkah inilah yang pernah menggantung 1 jam lebih. Kalau
+# batasnya terlampaui, JANGAN diam — restart mungkin sudah terjadi dan rilisnya
+# sudah live, jadi verifikasinya wajib tetap dijalankan di bawah.
+# SSH_OPTS ditulis lengkap di sini: `jalankan_berbatas` memakai `exec`, yang
+# memanggil biner `ssh` langsung dan melewati fungsi pembungkus di atas.
+if ! jalankan_berbatas 300 ssh "${SSH_OPTS[@]}" "$VPS" "cd $REMOTE_BACKEND && npm install --omit=dev 2>/dev/null; pm2 restart $PM2_NAME"; then
+  echo "⚠️  Perintah restart tidak selesai dalam 5 menit (koneksi putus atau menggantung)."
+  echo "    Rilisnya mungkin SUDAH live — verifikasi di bawah tetap dijalankan."
+fi
 echo "✅ Backend restarted"
 
 # ── Verifikasi setelah restart ───────────────────────────────────────────────
