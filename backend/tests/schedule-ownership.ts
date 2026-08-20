@@ -164,8 +164,70 @@ async function main() {
     chk('override B ikut terhapus',
       (await dbAll('SELECT * FROM schedule_overrides WHERE proposal_item_id = ?', [B.itemId])).length, 0);
 
+    // ── 8. Nilai jadwal dibatasi ────────────────────────────────────────────
+    //
+    // Kolomnya DECIMAL(10,2), jadi sanggup menerima ~99.999.999 hari, dan
+    // route-nya dulu menuliskannya apa adanya. Terukur sebelum perbaikan: satu
+    // override durasi 99.999.999 hari membuat SATU permintaan payment-schedule
+    // berjalan 80,7 detik dan membentuk 3.284.816 objek bulan. Nilainya
+    // tersimpan, jadi setiap pembukaan tab mengulang beban yang sama.
+    console.log('\n8. Nilai jadwal di luar batas ditolak');
+    const propBatas = await buatProposalBeritem(`Jadwal batas ${stamp}`);
+
+    const tolakan: Array<[string, any]> = [
+      ['durasi 99.999.999 hari', { start_day_override: 0, duration_days_override: 99999999 }],
+      ['durasi negatif',         { start_day_override: 0, duration_days_override: -50 }],
+      ['start_day negatif',      { start_day_override: -9999, duration_days_override: 5 }],
+      ['durasi bukan angka',     { start_day_override: 0, duration_days_override: 'abc' }],
+      // JSON tidak bisa membawa Infinity — `JSON.stringify(1e999)` menjadi
+      // `null`, yang justru terbaca sebagai "tidak diisi". Yang benar-benar
+      // sampai ke server adalah bentuk teksnya.
+      ['durasi "Infinity"',      { start_day_override: 0, duration_days_override: 'Infinity' }],
+      ['durasi NaN (teks)',      { start_day_override: 0, duration_days_override: 'NaN' }],
+    ];
+    for (const [label, body] of tolakan) {
+      const r = await call('PUT', `/estimator/proposals/${propBatas.id}/schedule/overrides`,
+        { proposal_item_id: propBatas.itemId, ...body }, master);
+      chk(`${label} ditolak 400`, r.status, 400);
+    }
+    chk('tidak ada override tersimpan dari nilai liar',
+      (await dbAll('SELECT * FROM schedule_overrides WHERE proposal_item_id = ?', [propBatas.itemId])).length, 0);
+
+    const wajar = await call('PUT', `/estimator/proposals/${propBatas.id}/schedule/overrides`,
+      { proposal_item_id: propBatas.itemId, start_day_override: 10, duration_days_override: 45 }, master);
+    chk('nilai wajar tetap diterima', wajar.status, 200);
+
+    // Batasnya persis: 3650 hari lolos, 3651 ditolak.
+    chk('tepat di batas (3650 hari) diterima',
+      (await call('PUT', `/estimator/proposals/${propBatas.id}/schedule/overrides`,
+        { proposal_item_id: propBatas.itemId, start_day_override: 0, duration_days_override: 3650 }, master)).status, 200);
+    chk('sehari di atas batas ditolak',
+      (await call('PUT', `/estimator/proposals/${propBatas.id}/schedule/overrides`,
+        { proposal_item_id: propBatas.itemId, start_day_override: 0, duration_days_override: 3651 }, master)).status, 400);
+
+    console.log('\n9. Payment schedule tetap responsif dan berbatas');
+    const t0 = Date.now();
+    const ps = await call('GET',
+      `/estimator/proposals/${propBatas.id}/payment-schedule?start_date=2026-01-01`, undefined, master);
+    const lamaMs = Date.now() - t0;
+    chk('payment-schedule menjawab 200', ps.status, 200);
+    // 3650 hari ≈ 121 bulan. Dulu bisa jutaan.
+    chk('jumlah bulan wajar (< 200)', (ps.json?.monthly || []).length < 200, true);
+    chk(`selesai cepat (${lamaMs}ms < 5000ms)`, lamaMs < 5000, true);
+
+    chk('start_date ngawur ditolak 400',
+      (await call('GET', `/estimator/proposals/${propBatas.id}/payment-schedule?start_date=bukan-tanggal`,
+        undefined, master)).status, 400);
+    // Pembagi nol/negatif tidak boleh merambat jadi Infinity ke seluruh kurva.
+    const psNol = await call('GET',
+      `/estimator/proposals/${propBatas.id}/payment-schedule?start_date=2026-01-01&workers_per_day=0&hours_per_day=-5`,
+      undefined, master);
+    chk('workers/hours tidak valid → pakai bawaan, bukan Infinity', psNol.status, 200);
+    chk('nilainya tetap berhingga',
+      (psNol.json?.monthly || []).every((m: any) => Number.isFinite(Number(m.planned_amount))), true);
+
   } finally {
-    console.log('\n8. Bersih-bersih');
+    console.log('\n10. Bersih-bersih');
     let sisa = 0;
     for (const hapus of bersihkan.reverse()) {
       try { await hapus(); } catch { sisa++; }

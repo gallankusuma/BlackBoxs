@@ -1094,6 +1094,39 @@ router.get('/proposals/:id/schedule', authMiddleware, async (req: Request, res: 
 });
 
 /**
+ * Batas nilai jadwal yang masuk akal untuk pekerjaan konstruksi.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * `schedule_overrides` menyimpan `DECIMAL(10,2)`, jadi kolomnya sanggup menerima
+ * sekitar 99.999.999 hari — dan route-nya dulu menuliskannya apa adanya. Payment
+ * Schedule kemudian berjalan bulan demi bulan sepanjang rentang itu.
+ *
+ * Terukur di dev, bukan diperkirakan: satu override durasi 99.999.999 hari
+ * membuat satu permintaan payment-schedule berjalan **80,7 detik** dan
+ * membentuk **3.284.816 objek bulan**. Nilainya TERSIMPAN, jadi setiap
+ * pembukaan tab berikutnya mengulang beban yang sama — satu proposal draft
+ * cukup untuk membuat backend monolitik ini tidak responsif.
+ *
+ * Batasnya dipilih longgar tapi nyata: 10 tahun. Pekerjaan konstruksi dengan
+ * satu aktivitas berdurasi lebih dari itu tidak ada, dan 10 tahun tetap hanya
+ * 120 iterasi bulan.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+const MAX_HARI_JADWAL = 3650;
+
+/** Angka jadwal: berhingga, tidak negatif, dan dalam batas wajar. */
+const angkaJadwal = (raw: unknown, nama: string): { ok: boolean; nilai: number | null; pesan: string } => {
+  if (raw === null || raw === undefined || raw === '') return { ok: true, nilai: null, pesan: '' };
+  const n = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isFinite(n)) return { ok: false, nilai: null, pesan: `${nama} harus berupa angka` };
+  if (n < 0) return { ok: false, nilai: null, pesan: `${nama} tidak boleh negatif` };
+  if (n > MAX_HARI_JADWAL) {
+    return { ok: false, nilai: null, pesan: `${nama} melebihi batas wajar (${MAX_HARI_JADWAL} hari ≈ 10 tahun)` };
+  }
+  return { ok: true, nilai: n, pesan: '' };
+};
+
+/**
  * Pastikan item benar-benar milik proposal yang disebut di URL.
  *
  * ─────────────────────────────────────────────────────────────────────────────
@@ -1227,6 +1260,17 @@ router.put('/proposals/:id/schedule/overrides', authMiddleware, async (req: Requ
       return res.status(400).json({ error: 'proposal_item_id wajib diisi' });
     }
 
+    const mulai = angkaJadwal(start_day_override, 'start_day_override');
+    const durasi = angkaJadwal(duration_days_override, 'duration_days_override');
+    const salah = [mulai, durasi].filter(v => !v.ok).map(v => v.pesan);
+    if (salah.length) {
+      return res.status(400).json({
+        error: 'Nilai jadwal tidak valid, override tidak disimpan.',
+        code: 'JADWAL_TIDAK_VALID',
+        problems: salah,
+      });
+    }
+
     const hasil = await withTransaction(async tx => {
       // Tanggal dan durasi menggeser kurva kas serta rencana billing, jadi ia
       // tunduk pada kunci yang sama dengan perubahan komersial lain: proposal
@@ -1245,11 +1289,7 @@ router.put('/proposals/:id/schedule/overrides', authMiddleware, async (req: Requ
            is_pinned              = VALUES(is_pinned),
            notes                  = VALUES(notes),
            updated_at             = NOW()`,
-        [proposal_item_id,
-         start_day_override != null ? start_day_override : null,
-         duration_days_override != null ? duration_days_override : null,
-         is_pinned ? 1 : 0,
-         notes || null]
+        [proposal_item_id, mulai.nilai, durasi.nilai, is_pinned ? 1 : 0, notes || null]
       );
       return { ok: true as const };
     });
@@ -1282,8 +1322,25 @@ router.get('/proposals/:id/payment-schedule', authMiddleware, async (req: Reques
   try {
     const proposalId   = req.params.id;
     const startDateStr = req.query.start_date as string || new Date().toISOString().slice(0, 10);
-    const workersPerDay = parseFloat(req.query.workers_per_day as string) || 8;
-    const hoursPerDay   = parseFloat(req.query.hours_per_day   as string) || 8;
+
+    // Parameter dari query dibatasi: dipakai sebagai PEMBAGI saat menghitung
+    // durasi otomatis, jadi nol atau negatif menghasilkan Infinity/NaN yang
+    // merambat ke seluruh kurva. Nilai raksasa juga tidak berarti apa-apa —
+    // tidak ada pekerjaan dengan 10.000 pekerja per hari di sistem ini.
+    const dalamRentang = (raw: unknown, bawaan: number, min: number, max: number) => {
+      const n = parseFloat(String(raw));
+      if (!Number.isFinite(n) || n < min || n > max) return bawaan;
+      return n;
+    };
+    const workersPerDay = dalamRentang(req.query.workers_per_day, 8, 1, 1000);
+    const hoursPerDay   = dalamRentang(req.query.hours_per_day, 8, 1, 24);
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(startDateStr)) {
+      return res.status(400).json({
+        error: 'start_date harus berformat YYYY-MM-DD.',
+        code: 'TANGGAL_TIDAK_VALID',
+      });
+    }
 
     // 1. Get proposal total & items
     //
@@ -1354,8 +1411,12 @@ router.get('/proposals/:id/payment-schedule', authMiddleware, async (req: Reques
       }
       autoDuration = Math.round(autoDuration * 100) / 100;
 
-      const startDay   = ov?.start_day_override   != null ? parseFloat(ov.start_day_override)   : cursor;
-      const duration   = ov?.duration_days_override != null ? parseFloat(ov.duration_days_override) : autoDuration;
+      // Baris yang sudah terlanjur tersimpan SEBELUM validasi di atas ada tetap
+      // bisa berisi angka liar. Dijepit di sini juga, supaya satu baris lama
+      // tidak bisa menahan permintaan selama puluhan detik.
+      const jepit = (v: number) => Math.min(Math.max(Number.isFinite(v) ? v : 0, 0), MAX_HARI_JADWAL);
+      const startDay   = ov?.start_day_override   != null ? jepit(parseFloat(ov.start_day_override))   : cursor;
+      const duration   = ov?.duration_days_override != null ? jepit(parseFloat(ov.duration_days_override)) : jepit(autoDuration);
 
       cursor = Math.max(cursor, startDay + duration);
 

@@ -6221,6 +6221,46 @@ sampai proses tidak responsif/OOM.
 sementara schedule/cash curve negatif atau bertanggal invalid tetap dapat
 terlihat balance karena nilai direkonsiliasi ke periode terakhir.
 
+**[DEV] DITERAPKAN.** Bukan sekadar terkonfirmasi — dampaknya saya **ukur**, dan
+lebih buruk daripada yang tertulis di laporan:
+
+| | sebelum | sesudah |
+|---|---|---|
+| satu permintaan payment-schedule | **80.716 ms** | **5 ms** |
+| objek bulan yang dibentuk | **3.284.816** | **1** |
+
+Dan seperti Anda tulis, nilainya **tersimpan** — jadi bukan satu permintaan
+mahal, melainkan setiap pembukaan tab berikutnya mengulang beban yang sama. Satu
+proposal draft memang cukup untuk membuat backend ini tidak responsif.
+
+- **Validasi pada PUT override**: `start_day_override` dan
+  `duration_days_override` wajib berhingga, tidak negatif, dan ≤ **3650 hari**
+  (10 tahun). Ditolak 400 `JADWAL_TIDAK_VALID` berikut daftar masalahnya. Nilai
+  bukan angka yang dulu jatuh sebagai **500** kini juga 400.
+- **Batas 10 tahun** dipilih longgar tapi nyata: tidak ada satu aktivitas
+  konstruksi yang lebih panjang dari itu, dan 10 tahun tetap hanya ~120 iterasi
+  bulan.
+- **Jaring pengaman di payment-schedule**: baris yang sudah terlanjur tersimpan
+  sebelum validasi ini ada tetap dijepit saat dibaca — satu baris lama tidak
+  boleh menahan permintaan puluhan detik. (Produksi diperiksa: `schedule_overrides`
+  berisi 0 baris, jadi tidak ada yang perlu dibersihkan.)
+- **Parameter query** ikut dijaga: `workers_per_day` dan `hours_per_day` adalah
+  **pembagi** saat menghitung durasi otomatis, jadi nol atau negatif merambatkan
+  `Infinity`/`NaN` ke seluruh kurva; keduanya kini dijepit ke rentang wajar
+  (1–1000 dan 1–24) dan jatuh ke nilai bawaan kalau di luar itu. `start_date`
+  wajib `YYYY-MM-DD`, kalau tidak 400 `TANGGAL_TIDAK_VALID`.
+
+**Tes:** [tests/schedule-ownership.ts](backend/tests/schedule-ownership.ts)
+bagian 8–9 — enam bentuk nilai liar (termasuk `"Infinity"` dan `"NaN"` sebagai
+teks, karena JSON tidak bisa membawa `Infinity` secara langsung), batas persis
+(3650 lolos / 3651 ditolak), tidak ada baris tersimpan dari nilai liar, plus
+pengukuran waktu dan jumlah bulan pada payment-schedule.
+
+Dibuktikan bergigi: validasi dicabut sementara → **8 gagal**, termasuk tiga yang
+kembali menjadi **500**.
+
+Suite penuh: **1255 lulus, 0 gagal**.
+
 **Rekomendasi konkret:** validasi server-side bilangan finite dengan
 `start_day >= 0`, `duration > 0` atau milestone eksplisit, dan batas horizon
 bisnis terukur; validasi tanggal kalender ketat serta workers/hours positif dan
