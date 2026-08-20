@@ -12,12 +12,12 @@
       </div>
       <div class="flex items-center gap-2">
         <!-- Download Sample -->
-        <button @click="downloadSample"
+        <button data-fitur="import-export" @click="downloadSample"
           class="px-3 py-2 text-sm border border-gray-300 rounded-lg bg-white hover:bg-gray-50 flex items-center gap-1">
           ⬇ Sample CSV
         </button>
         <!-- Import CSV -->
-        <label class="px-3 py-2 text-sm border border-indigo-300 text-indigo-700 rounded-lg bg-indigo-50 hover:bg-indigo-100 cursor-pointer flex items-center gap-1">
+        <label data-fitur="import-export" class="px-3 py-2 text-sm border border-indigo-300 text-indigo-700 rounded-lg bg-indigo-50 hover:bg-indigo-100 cursor-pointer flex items-center gap-1">
           📥 Import CSV
           <input type="file" accept=".csv" class="hidden" @change="onFileSelected" ref="fileInput" />
         </label>
@@ -250,7 +250,7 @@
             <td class="px-6 py-3 text-sm text-right space-x-2">
               <button @click="resetPin(employee)" class="text-amber-600 hover:text-amber-900">Reset PIN</button>
               <button @click="editEmployee(employee)" class="text-blue-600 hover:text-blue-900">Edit</button>
-              <button @click="deleteEmployee(employee.id)" class="text-red-600 hover:text-red-900">Delete</button>
+              <button data-fitur="import-export" @click="deleteEmployee(employee.id)" class="text-red-600 hover:text-red-900">Delete</button>
             </td>
           </tr>
           <tr v-if="filteredEmployees.length === 0">

@@ -15,6 +15,7 @@ import { vPermission } from './directives/permission';
 import '@fontsource-variable/inter';
 import '@fontsource-variable/source-serif-4';
 import './style.css';
+import { pasangSakelarTampilan } from './lib/uiFlags';
 
 const app = createApp(App);
 const pinia = createPinia();
@@ -39,4 +40,5 @@ api.interceptors.response.use(
 	}
 );
 
+pasangSakelarTampilan();
 app.mount('#app');

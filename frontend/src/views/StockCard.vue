@@ -6,7 +6,7 @@
           <h2 class="text-2xl font-bold text-gray-900">Stock Card</h2>
           <div class="flex gap-3">
             <button @click="load" class="px-4 py-2 rounded-md bg-blue-600 text-white hover:bg-blue-700">Refresh</button>
-            <button @click="exportCsv" class="px-4 py-2 rounded-md bg-emerald-600 text-white hover:bg-emerald-700">Export CSV</button>
+            <button data-fitur="import-export" @click="exportCsv" class="px-4 py-2 rounded-md bg-emerald-600 text-white hover:bg-emerald-700">Export CSV</button>
           </div>
         </div>
 

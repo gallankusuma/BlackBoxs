@@ -48,7 +48,7 @@
           <button @click="triggerImport('labor')" class="px-3 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">
             Import
           </button>
-          <button v-if="false" @click="exportCsv('labor')" class="px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700">
+          <button data-fitur="import-export" v-if="false" @click="exportCsv('labor')" class="px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700">
             Export CSV
           </button>
           <button @click="openCreate('labor')" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
@@ -123,7 +123,7 @@
           <button @click="triggerImport('materials')" class="px-3 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">
             Import
           </button>
-          <button v-if="false" @click="exportCsv('materials')" class="px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700">
+          <button data-fitur="import-export" v-if="false" @click="exportCsv('materials')" class="px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700">
             Export CSV
           </button>
           <button 
@@ -210,7 +210,7 @@
           <button @click="triggerImport('equipment')" class="px-3 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">
             Import
           </button>
-          <button v-if="false" @click="exportCsv('equipment')" class="px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700">
+          <button data-fitur="import-export" v-if="false" @click="exportCsv('equipment')" class="px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700">
             Export CSV
           </button>
           <button @click="openCreate('equipment')" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">

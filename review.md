@@ -7699,3 +7699,273 @@ status setiap DELETE dan jangan mengandalkan `process.exit` langsung.
    direkonsiliasi, bukan tetap mencetak jumlah test lulus.
 5. Regression test hard-delete membuktikan scope project/MTO lain tidak ikut
    terhapus dan repeated cleanup aman/idempoten.
+
+---
+
+## Live Auto Review — 20 Agustus 2026 09:52 WIB
+
+**Sub-area tunggal:** source of truth dan version consistency pada tautan
+MTO → item RAB Proposal. Tidak ada perubahan source/staged/commit Proposal
+setelah commit `eaea30ae`; `review.md` diabaikan sebagai artefak reviewer.
+
+### [P1 / CONTRACT-INTEGRITY + VERSION-DRIFT] Tautan RAB memakai formula kalkulator saat ini, sementara baseline Deal menyalin baris MTO tersimpan dari versi lama
+
+**File:** [backend/src/config/database.ts:1074](backend/src/config/database.ts),
+[backend/src/modules/estimator/mto/enrich.ts:26](backend/src/modules/estimator/mto/enrich.ts),
+[backend/src/routes/estimator.routes.ts:1148](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:2768](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:3524](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:3646](backend/src/routes/estimator.routes.ts)
+
+**Bukti:** desain schema menyatakan `mto_lines` adalah proyeksi tersimpan yang
+mencegah perubahan formula mengubah angka historis dan membawa
+`formula_version`. Endpoint baca MTO juga sudah membandingkan kalkulasi sekarang
+dengan `stored_lines`, lalu mengeluarkan `formula_drift=true` ketika net, waste,
+gross, unit, atau jumlah baris berubah
+([enrich.ts:32](backend/src/modules/estimator/mto/enrich.ts)).
+
+Namun sumber tautan RAB tidak memakai proyeksi itu. `GET /mto-quantities`
+membaca hanya `engineering_inputs.parameters`, memanggil `calculateMto()` versi
+yang sedang ter-deploy, dan menawarkan line hasil baru
+([estimator.routes.ts:3524](backend/src/routes/estimator.routes.ts)). `PUT
+/mto-link` mengulang kalkulasi yang sama dari parameter dan menulis
+`line.net_quantity` ke `proposal_items.qty`; ia tidak membaca `mto_lines`, tidak
+membandingkan `formula_version`, dan tidak menolak drift
+([estimator.routes.ts:3646](backend/src/routes/estimator.routes.ts),
+[estimator.routes.ts:3679](backend/src/routes/estimator.routes.ts)). Gerbang
+submit/deal hanya merekonsiliasi total komersial, sehingga kontradiksi MTO↔RAB
+tidak menjadi pelanggaran ([estimator.routes.ts:1148](backend/src/routes/estimator.routes.ts)).
+Saat Deal, backend justru menyalin `mto_lines` tersimpan **apa adanya** ke
+baseline project karena angka itulah yang dinyatakan disepakati
+([estimator.routes.ts:2768](backend/src/routes/estimator.routes.ts)).
+
+**Skenario reproduksi terkontrol:** simpan elemen MTO pada formula V1 dan tautkan
+atau catat baris tersimpannya. Deploy formula V2 yang mengubah net quantity
+untuk parameter yang sama tanpa menyimpan ulang elemen. Pada proposal draft atau
+review, buka picker dan tautkan item RAB: qty/total RAB memakai V2 walaupun
+`mto_lines` dan `formula_version` masih V1. Submit lalu Deal lolos selama total
+positif dan konsisten. Project menerima baseline MTO V1, sementara baseline RAB
+yang direferensikan project tetap membawa qty V2. Reproduksi HTTP tidak
+dijalankan reviewer karena membuat fixture/data.
+
+**Dampak:** satu kontrak dapat memiliki dua quantity resmi untuk scope yang sama:
+BOQ/RAB dan nilai penawaran berdiri pada formula terbaru, tetapi MTO baseline,
+procurement trace, dan bukti versi berdiri pada formula lama. Selisih dapat
+mengubah nilai kontrak, material procurement, budget, dan pembuktian dispute
+tanpa ada tindakan eksplisit estimator atau audit event. P1 karena jalur normal
+submit→Deal menerima baseline internal yang saling bertentangan dan mismatch
+baru terlihat setelah kontrak dibentuk.
+
+**Rekomendasi konkret:** tetapkan satu aturan versioned untuk link. Pilihan aman:
+tautan draft/review membaca `mto_lines` tersimpan berdasarkan
+`element_id + line_code` dan menyimpan `mto_line_id`/formula version pada
+provenance; jika kalkulasi sekarang drift, blokir link dan submit dengan error
+terstruktur sampai user menjalankan tindakan **Recalculate & Save** yang
+transactional, mencatat before/after/version/actor, lalu menyinkronkan seluruh
+link. Alternatif memakai formula terbaru harus lebih dulu menulis ulang
+`engineering_inputs.formula_version` + `mto_lines` dan semua RAB linked dalam
+satu transaction—jangan membiarkan dua versi coexist. Gerbang submit/deal wajib
+membuktikan setiap link menunjuk stored line yang ada, versi sama, unit
+compatible, dan qty RAB sama dengan net tersimpan pada tolerance yang ditetapkan.
+
+**Acceptance test:**
+
+1. Fixture V1 dengan stored net 100 lalu kalkulator V2 net 110 menghasilkan
+   `formula_drift`; picker/link/submit tidak boleh diam-diam menulis atau
+   menerima 110 sementara stored line masih 100.
+2. `Recalculate & Save` yang disetujui memperbarui element version, stored line,
+   link provenance, qty/total RAB, dan summary dalam satu transaction; failure
+   injection pada child mana pun me-roll back semuanya.
+3. Submit dan Deal menolak link yang line-nya hilang, formula version berbeda,
+   unit tidak kompatibel, atau qty RAB berbeda dari stored net lebih dari
+   tolerance; respons menyebut element/item/line yang harus diperbaiki.
+4. Deal yang lolos menghasilkan baseline MTO dan RAB dengan element+line+formula
+   version serta net quantity identik; checksum dan rekonsiliasi tetap sama
+   setelah deploy formula V3.
+5. Proposal submitted/deal tetap immutable: perubahan formula global hanya
+   menampilkan perbandingan drift, tidak mengubah stored MTO, RAB, total,
+   baseline project, atau dokumen yang sudah diterbitkan.
+
+---
+
+## Live Auto Review — 20 Agustus 2026 09:56 WIB
+
+**Sub-area tunggal:** kontrak frontend-backend dan partial state pada operasi
+link/unlink MTO ↔ RAB Proposal. Tidak ada source/staged/commit Proposal baru;
+perubahan lokal hanya append reviewer pada `review.md`.
+
+### [P1 / FINANCIAL-INTEGRITY + API-CONTRACT] UI mengganti hasil link NET server dengan GROSS klien, lalu unlink dapat menyimpan GROSS itu sebagai quantity manual
+
+**File:** [frontend/src/views/EstimatorProposalEditor.vue:230](frontend/src/views/EstimatorProposalEditor.vue),
+[frontend/src/views/EstimatorProposalEditor.vue:1316](frontend/src/views/EstimatorProposalEditor.vue),
+[frontend/src/views/EstimatorProposalEditor.vue:1321](frontend/src/views/EstimatorProposalEditor.vue),
+[frontend/src/views/EstimatorProposalEditor.vue:1345](frontend/src/views/EstimatorProposalEditor.vue),
+[frontend/src/views/EstimatorProposalEditor.vue:1548](frontend/src/views/EstimatorProposalEditor.vue),
+[backend/src/routes/estimator.routes.ts:1966](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:3524](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:3679](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:3722](backend/src/routes/estimator.routes.ts)
+
+**Bukti:** picker mempertahankan compatibility field `value` sebagai
+`gross_quantity`, walaupun response juga membawa `net_quantity` dan komentar
+backend menegaskan angka tersebut bukan basis link
+([estimator.routes.ts:3553](backend/src/routes/estimator.routes.ts)). Saat link,
+backend menghitung ulang dan menyimpan `line.net_quantity` sebagai qty RAB,
+menaruh gross hanya sebagai provenance, lalu mengembalikan `mto_link` dan `line`
+authoritative ([estimator.routes.ts:3679](backend/src/routes/estimator.routes.ts)).
+
+Frontend mengabaikan body response itu. Ia menyimpan kembali payload lama ke
+state, lalu menetapkan `item.qty = q.value` dan total lokal dari angka tersebut
+([EstimatorProposalEditor.vue:1325](frontend/src/views/EstimatorProposalEditor.vue)).
+Artinya line net 100/gross 105 disimpan server sebagai qty 100, tetapi row aktif
+langsung menampilkan qty dan total untuk 105. Fungsi ini juga tidak memanggil
+`loadSummary()`, sehingga kartu summary tetap angka sebelum link—pada satu layar
+ada tiga state berbeda: item lokal gross, database net, dan summary lama.
+
+Jalur unlink memperbesar dampaknya: server membaca `previous_qty`, mengembalikan
+qty manual itu dan menghitung ulang summary, tetapi respons hanya pesan; frontend
+hanya menjalankan `item.mto_link = null`, tanpa memulihkan qty/total atau reload
+items+summary ([EstimatorProposalEditor.vue:1345](frontend/src/views/EstimatorProposalEditor.vue)).
+Input yang semula disabled lalu aktif kembali dengan gross palsu yang masih ada
+di state. Blur berikutnya memanggil `updateItemQty()` dan dapat menyimpan gross
+itu sebagai qty manual. Endpoint generic item menerima perubahan qty tanpa
+memeriksa apakah item masih linked, sehingga direct API juga dapat mengubah qty
+sambil meninggalkan `mto_link.value` yang berbeda
+([estimator.routes.ts:1966](backend/src/routes/estimator.routes.ts)). Setelah
+reload, picker pun tidak menandai pilihan aktif karena UI membandingkan
+`link.field`, sedangkan bentuk canonical server memakai `line_code`
+([EstimatorProposalEditor.vue:1316](frontend/src/views/EstimatorProposalEditor.vue)).
+
+**Skenario reproduksi:** buat item manual qty 1 dan elemen slab net 100/gross
+105. Link `SLB-CONC`: server menyimpan 100 tetapi row menampilkan 105, sedangkan
+summary tetap nilai qty 1. Klik badge unlink: server memulihkan qty 1, namun row
+tetap 105 dan input sekarang editable. Fokus lalu keluar dari input tanpa
+mengoreksi angka; handler blur mengirim 105 dan server mengganti qty/total manual
+menjadi 105. Reproduksi UI/HTTP tidak dijalankan reviewer karena membuat data;
+alur dibuktikan dari assignment state, event `@blur`, dan kontrak kedua endpoint.
+
+**Dampak:** estimator dapat melihat nilai yang bukan data tersimpan, menyetujui
+summary yang tidak cocok dengan row, lalu tanpa sadar mengubah nilai RAB sebesar
+waste hanya lewat link→unlink→blur. Nilai salah dapat lolos gerbang komersial
+karena setelah blur header dan row kembali konsisten secara matematis, meskipun
+provenance quantity-nya keliru. Direct update juga dapat membentuk item linked
+dengan metadata NET 100 tetapi qty arbitrary. P1 karena workflow UI normal dapat
+memersistenkan angka penawaran yang salah dan kontradiksi baru tidak ditolak saat
+submit/Deal.
+
+**Rekomendasi konkret:** jadikan response server authoritative. Link harus
+menggunakan `response.mto_link.value`/row server atau langsung reload items dan
+summary; jangan pernah memakai compatibility `q.value`. Unlink harus
+mengembalikan row final (`qty`, `total_price`, `mto_link`) dan summary, atau UI
+wajib reload keduanya sebelum input diaktifkan. Seragamkan contract ke
+`line_code`, `net_quantity`, `gross_quantity`, dan `basis`, lalu hapus field
+legacy setelah compatibility window. Endpoint generic item harus menolak
+perubahan qty ketika `mto_link IS NOT NULL`; perubahan quantity linked hanya
+boleh melalui sync/relink transactional.
+
+**Acceptance test:**
+
+1. Link line net 100/gross 105 membuat row, database, total, dan summary
+   langsung menampilkan basis net 100 tanpa reload manual; gross tetap terlihat
+   hanya sebagai informasi procurement.
+2. Response link yang sengaja berbeda dari compatibility `q.value` selalu menang
+   di state UI; failure/timeout tidak mengubah row lokal seolah sukses.
+3. Unlink dari previous qty 1 langsung mengembalikan row+total+summary ke 1;
+   focus/blur tanpa edit sesudahnya menghasilkan nol request perubahan dan nol
+   perubahan database.
+4. `PUT /items/:itemId` dengan qty pada item yang `mto_link`-nya aktif ditolak
+   409 dan tidak mengubah row/header; unlink/relink resmi tetap transactional.
+5. Reload dan buka picker menandai tepat satu pilihan berdasarkan
+   `element_id + line_code`; bentuk response link dan GET items identik.
+6. Regression component/API test mencakup link, reload, unlink, blur, network
+   failure, dan net≠gross; frontend build lulus.
+
+---
+
+## Live Auto Review — 20 Agustus 2026 09:59 WIB
+
+**Sub-area tunggal:** handoff Deal untuk Proposal yang sudah ditautkan ke project
+manual sebelum award. Tidak ada source/staged/commit Proposal baru; perubahan
+lokal hanya append reviewer pada `review.md`.
+
+### [P1 / CONTRACT-INTEGRITY + HANDOFF-BYPASS] Proposal pre-linked menjadi Deal tanpa snapshot MTO, tanpa sinkronisasi budget/client, dan tanpa outbox Procurement
+
+**File:** [backend/src/routes/project.routes.ts:1218](backend/src/routes/project.routes.ts),
+[backend/src/routes/project.routes.ts:1250](backend/src/routes/project.routes.ts),
+[backend/src/routes/project.routes.ts:1310](backend/src/routes/project.routes.ts),
+[backend/src/routes/estimator.routes.ts:2721](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:2761](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:2813](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:2841](backend/src/routes/estimator.routes.ts)
+
+**Bukti:** kemampuan existing untuk project manual sengaja mengizinkan Proposal
+draft ditautkan sebelum Deal. `available-proposals` tidak membatasi status, dan
+`PUT /projects/:id/link-proposal` hanya menyelaraskan
+`proposals.project_id` dengan `client_projects.proposal_id`; ia tidak membentuk
+contract baseline, tidak menyalin MTO, tidak menetapkan budget dari Proposal,
+dan tidak membuat job handoff
+([project.routes.ts:1218](backend/src/routes/project.routes.ts),
+[project.routes.ts:1310](backend/src/routes/project.routes.ts)). Kemampuan link
+draft ini sudah dinyatakan tim sebagai baseline minimum untuk project manual dan
+tidak boleh dicabut begitu saja.
+
+Saat Proposal tersebut kemudian masuk `submitted → deal`, handler melihat
+`proposal.project_id` non-null lalu hanya memanggil `writeStatus()` dan return
+`createdProject:false` ([estimator.routes.ts:2721](backend/src/routes/estimator.routes.ts)).
+Return terjadi **sebelum** blok yang menyalin `engineering_inputs` + `mto_lines`
+ke scope project, sebelum `deal_pr_jobs` dibuat, serta sebelum log baseline
+([estimator.routes.ts:2761](backend/src/routes/estimator.routes.ts),
+[estimator.routes.ts:2822](backend/src/routes/estimator.routes.ts)). Sesudah
+commit, `processDealPrJob()` juga hanya dipanggil bila `createdProject` true
+([estimator.routes.ts:2845](backend/src/routes/estimator.routes.ts)). Branch ini
+tidak mengunci/memverifikasi project tujuan masih ada, relasi balik masih
+menunjuk Proposal yang sama, client sama, atau budget project sama dengan nilai
+award.
+
+**Skenario reproduksi:** buat project manual ber-budget Rp50 juta; tautkan
+Proposal draft Rp100 juta yang memiliki MTO/material ke project itu melalui
+fitur link existing. Jalankan review→submitted→Deal. Respons sukses dan status
+menjadi Deal, tetapi budget project tetap Rp50 juta, tidak ada
+`engineering_inputs(scope_type='project', scope_id=<project>)` hasil snapshot,
+dan tidak ada `deal_pr_jobs`. Layar MTO project hanya dapat fallback ke Proposal
+live/legacy source. `GET /pr-handoff` mengembalikan `NO_HANDOFF`; transisi Deal
+tidak dapat diulang untuk memicu jalur normal. Reproduksi HTTP tidak dijalankan
+reviewer karena membuat Proposal/project/PR fixture.
+
+**Dampak:** jalur bisnis yang memang dipakai project manual menghasilkan Deal
+tanpa quantity baseline immutable, budget award, dan procurement handoff yang
+diwajibkan pada Deal normal. Status dan `approved_at` memberi kesan kontrak sudah
+terbentuk lengkap, padahal downstream tetap memakai data manual/fallback dan
+tidak ada job yang dapat diretry. Cost control dapat membandingkan aktual dengan
+Rp50 juta sementara kontrak Rp100 juta; material award tidak pernah masuk
+pipeline PR. P1 karena missing handoff bersifat deterministik pada workflow
+supported dan tidak mempunyai self-healing setelah status terminal Deal.
+
+**Rekomendasi konkret:** pertahankan link Proposal draft untuk project manual,
+tetapi bedakan `prelinked/working_reference` dari `accepted_contract_baseline`.
+Pada Deal, bila project sudah ada, jalankan command **adopt existing project as
+contract** dalam transaction yang sama: lock dan validasi relasi dua arah,
+existence/client/status, rekonsiliasi budget policy, salin snapshot RAB/MTO/WBS
+yang diterima, tulis baseline ID/checksum, dan `INSERT IGNORE deal_pr_jobs` untuk
+project existing. Jika budget/client/actual state membutuhkan keputusan user,
+tolak Deal 409 dengan reconciliation detail—jangan menulis status lebih dulu.
+Pembuatan project baru tetap menjadi cabang lain; kedua cabang harus berakhir
+pada postcondition Deal yang sama.
+
+**Acceptance test:**
+
+1. Project manual tetap dapat menautkan Proposal draft sebagai working reference;
+   tidak ada FEATURE-REGRESSION pada RAB/MTO fallback sebelum Deal.
+2. Deal pada Proposal pre-linked memverifikasi project ada, relasi balik sama,
+   dan client kompatibel dalam lock; mismatch/stale ID membalas 409 dan status
+   tetap submitted.
+3. Deal sukses menghasilkan tepat satu immutable baseline MTO/RAB, accepted
+   revision/checksum, serta satu `deal_pr_jobs` meskipun project sudah ada;
+   `pr-handoff` tidak 404 dan retry idempoten.
+4. Budget manual yang berbeda tidak diterima diam-diam: policy eksplisit
+   meng-update/rebaseline dengan evidence atau meminta reconciliation; RAB,
+   project detail, dan cost summary akhirnya memakai nilai baseline yang sama.
+5. Dua request Deal paralel pada Proposal pre-linked menghasilkan satu adoption,
+   satu baseline, satu outbox, tanpa membuat project kedua atau menggandakan PR.
+6. Failure injection saat copy MTO/outbox/budget me-roll back status Deal dan
+   seluruh baseline; kemampuan project manual sebelum transaksi tetap utuh.

@@ -30,7 +30,7 @@
               Untuk menyalakan kembali: hapus `v-if="false"` di bawah ini.
               Fungsi `exportToExcel` sengaja dibiarkan utuh.
             -->
-            <button
+            <button data-fitur="import-export"
               v-if="false"
               @click="exportToExcel"
               class="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"

@@ -403,20 +403,25 @@ function uraikanGagal(e: any): { message: string; problems: string[] } {
 async function autoSave(mod: string) {
   if (!zones.value[mod]?.length) return;
   try {
+    const gagalAuto: string[] = [];
     for (const z of zones.value[mod]) {
       const activeModInfo = MODULES.find(m => m.id === mod);
-      const payload = {
-        element_type: mod,
-        element_name: z.name || activeModInfo?.label || mod,
-        parameters: { ...z.params, _zone_name: z.name }
-      };
-      if (z.element_id) {
-        await api.put(`${baseUrl.value}/mto/${z.element_id}`, payload);
-      } else {
-        const res = await api.post(`${baseUrl.value}/mto`, payload);
-        z.element_id = res.data.id;
+      const nama = z.name || activeModInfo?.label || mod;
+      const payload = { element_type: mod, element_name: nama, parameters: { ...z.params, _zone_name: z.name } };
+      try {
+        if (z.element_id) {
+          await api.put(`${baseUrl.value}/mto/${z.element_id}`, payload);
+        } else {
+          const res = await api.post(`${baseUrl.value}/mto`, payload);
+          z.element_id = res.data.id;
+        }
+      } catch (e: any) {
+        // Satu zona bermasalah tidak boleh menghentikan penyimpanan zona lain.
+        const u = uraikanGagal(e);
+        for (const pr of (u.problems.length ? u.problems : [u.message])) gagalAuto.push(`${nama}: ${pr}`);
       }
     }
+    if (gagalAuto.length) throw Object.assign(new Error('sebagian zona gagal'), { daftar: gagalAuto });
     isDirty.value = false;
     saveError.value = null;
   } catch (e: any) {
@@ -424,32 +429,67 @@ async function autoSave(mod: string) {
     // sepenuhnya, jadi perubahan yang ditolak server tetap terlihat di layar
     // seolah tersimpan — dan baru ketahuan hilang setelah halaman dimuat ulang.
     // Tanpa alert (ini berjalan di latar), tapi alasannya ditampilkan di bar.
-    saveError.value = uraikanGagal(e);
+    saveError.value = e?.daftar
+      ? { message: 'Sebagian zona belum tersimpan — dimensi teknisnya belum lengkap.', problems: e.daftar }
+      : uraikanGagal(e);
     isDirty.value = true;
   }
 }
 
+/**
+ * Simpan seluruh zona pada tab modul aktif.
+ *
+ * ───────────────────────────────────────────────────────────────────────────
+ * Dua hal yang dulu membuat MTO terasa "tidak bisa diedit sama sekali":
+ *
+ * 1. Loopnya berhenti pada kegagalan pertama. Satu zona yang dimensinya belum
+ *    lengkap membuat SELURUH tab gagal disimpan — termasuk zona lain yang
+ *    sebenarnya sudah benar. Terjadi sungguhan di produksi: tab Kolom memuat
+ *    "Kolom Gudang" bertipe WF yang `wf_profile`-nya belum diisi, sehingga
+ *    mengedit "Kolom 1" pun selalu berakhir gagal.
+ * 2. Pesannya tidak menyebut zona mana yang bermasalah, jadi pengguna mencari
+ *    kesalahan pada zona yang sedang ia buka — padahal penyebabnya zona lain
+ *    yang mungkin tidak sedang terlihat.
+ *
+ * Sekarang tiap zona disimpan sendiri-sendiri: yang benar tetap tersimpan, yang
+ * gagal dilaporkan berikut NAMA ZONA-nya.
+ * ───────────────────────────────────────────────────────────────────────────
+ */
 async function saveModule() {
   saving.value = true;
+  const gagal: { zona: string; problems: string[] }[] = [];
   try {
     const mod = activeTab.value;
-    const zoneList = zones.value[mod];
+    const zoneList = zones.value[mod] || [];
     for (const z of zoneList) {
-      const payload = { element_type: mod, element_name: z.name || `${activeModule.value.label}`, parameters: { ...z.params, _zone_name: z.name } };
-      if (z.element_id) {
-        await api.put(`${baseUrl.value}/mto/${z.element_id}`, payload);
-      } else {
-        const res = await api.post(`${baseUrl.value}/mto`, payload);
-        z.element_id = res.data.id;
+      const nama = z.name || `${activeModule.value?.label || mod}`;
+      const payload = { element_type: mod, element_name: nama, parameters: { ...z.params, _zone_name: z.name } };
+      try {
+        if (z.element_id) {
+          await api.put(`${baseUrl.value}/mto/${z.element_id}`, payload);
+        } else {
+          const res = await api.post(`${baseUrl.value}/mto`, payload);
+          z.element_id = res.data.id;
+        }
+      } catch (e: any) {
+        const u = uraikanGagal(e);
+        gagal.push({ zona: nama, problems: u.problems.length ? u.problems : [u.message] });
       }
     }
-    isDirty.value = false;
-    saveError.value = null;
-  } catch (e: any) {
-    // Pesan server dipakai apa adanya — ia sudah menyebut field mana yang
-    // kurang. "Coba lagi" adalah saran yang keliru: mencoba lagi dengan data
-    // yang sama akan ditolak lagi.
-    saveError.value = uraikanGagal(e);
+
+    if (gagal.length === 0) {
+      isDirty.value = false;
+      saveError.value = null;
+    } else {
+      // Zona yang berhasil sudah tersimpan; yang tersisa hanya yang gagal.
+      isDirty.value = true;
+      saveError.value = {
+        message: gagal.length === zoneList.length
+          ? 'Tidak ada zona yang bisa disimpan — dimensi teknisnya belum lengkap.'
+          : `${gagal.length} dari ${zoneList.length} zona gagal disimpan. Zona lain sudah tersimpan.`,
+        problems: gagal.flatMap(g => g.problems.map(p => `${g.zona}: ${p}`)),
+      };
+    }
   } finally { saving.value = false; }
 }
 

@@ -27,7 +27,7 @@
           </div>
         </div>
       </div>
-      <button @click="exportData" :disabled="exporting" class="bg-green-600 text-white px-6 py-2 rounded text-sm hover:bg-green-700 disabled:opacity-50">
+      <button data-fitur="import-export" @click="exportData" :disabled="exporting" class="bg-green-600 text-white px-6 py-2 rounded text-sm hover:bg-green-700 disabled:opacity-50">
         {{ exporting ? 'Exporting...' : 'Export Data' }}
       </button>
     </div>
@@ -36,7 +36,7 @@
     <div class="bg-white rounded shadow p-5 mb-6">
       <h3 class="font-semibold mb-4">Quick Export</h3>
       <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
-        <button v-for="m in moduleOptions" :key="m.value" @click="quickExport(m.value, m.label)" 
+        <button data-fitur="import-export" v-for="m in moduleOptions" :key="m.value" @click="quickExport(m.value, m.label)" 
           class="border rounded p-4 text-center hover:bg-blue-50 hover:border-blue-300 transition">
           <p class="font-medium text-sm">{{ m.label }}</p>
           <p class="text-xs text-gray-400 mt-1">Export as CSV</p>

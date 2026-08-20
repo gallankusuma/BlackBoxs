@@ -64,8 +64,8 @@
           <p class="text-xs uppercase tracking-wide text-gray-500">Quick Actions</p>
           <div class="grid grid-cols-1 gap-2 text-sm">
             <button class="w-full px-3 py-2 rounded bg-blue-600 text-white hover:bg-blue-700">Add New</button>
-            <button class="w-full px-3 py-2 rounded bg-gray-100 text-gray-800 hover:bg-gray-200">Export</button>
-            <button class="w-full px-3 py-2 rounded bg-gray-100 text-gray-800 hover:bg-gray-200">Import CSV</button>
+            <button data-fitur="import-export" class="w-full px-3 py-2 rounded bg-gray-100 text-gray-800 hover:bg-gray-200">Export</button>
+            <button data-fitur="import-export" class="w-full px-3 py-2 rounded bg-gray-100 text-gray-800 hover:bg-gray-200">Import CSV</button>
             <button class="w-full px-3 py-2 rounded bg-gray-100 text-gray-800 hover:bg-gray-200">Refresh</button>
           </div>
         </div>

@@ -258,3 +258,35 @@ html.dark ::-webkit-scrollbar-thumb:hover { background: #64748b; }
   }
 }
 
+
+/* ── Sakelar tampilan (lihat src/lib/uiFlags.ts) ─────────────────────────── */
+
+/*
+ * Tombol Import/Export disembunyikan saat <html> membawa kelas ini. Kontrolnya
+ * ditandai `data-fitur="import-export"` di masing-masing layar, jadi tidak ada
+ * layar yang perlu tahu soal sakelarnya.
+ */
+.tanpa-import-export [data-fitur="import-export"] {
+  display: none !important;
+}
+
+/*
+ * Cegah penyalinan lewat blok/seleksi.
+ *
+ * Kolom isian dan area yang bisa disunting DIKECUALIKAN — tanpa itu pengguna
+ * tidak bisa menyeleksi untuk memperbaiki ketikannya sendiri, dan itu merusak
+ * pekerjaan sehari-hari demi penghalang yang mudah dilewati.
+ */
+.tanpa-salin-teks body {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.tanpa-salin-teks input,
+.tanpa-salin-teks textarea,
+.tanpa-salin-teks select,
+.tanpa-salin-teks [contenteditable="true"],
+.tanpa-salin-teks [data-boleh-salin] {
+  -webkit-user-select: text;
+  user-select: text;
+}

@@ -55,7 +55,7 @@
               sekali — ditekan pun tidak melakukan apa-apa. Menampilkannya hanya
               membuat orang mengira ekspor penawaran sudah tersedia.
             -->
-            <button v-if="false" class="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50">
+            <button data-fitur="import-export" v-if="false" class="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50">
               📥 Export Excel
             </button>
             
@@ -277,7 +277,6 @@
             :project-id="proposalId"
             api-base="/estimator/proposals"
             :contract-mode="isContractQty"
-            :readonly="isContractQty"
           />
         </div><!-- end MTO tab -->
 
