@@ -1163,6 +1163,98 @@ async function main() {
 
   await call('DELETE', `/estimator/proposals/${mtoId}`, undefined, master);
 
+  // ───────────────────────────────────────────────────────────────────────────
+  // Satu klik yang mengubah metadata DAN status.
+  //
+  // Urutan pertama yang saya pasang selalu mengirim transisi lebih dulu. Untuk
+  // arah NAIK itu memfinalkan status lalu menolak metadata: `review→submitted`
+  // mengunci proposal sehingga permintaan kedua pasti 409, dan `submitted→deal`
+  // bahkan sudah membuat project dari nama/client LAMA sebelum penolakan itu.
+  // Pengguna menekan Simpan sekali dan mendapat kontrak final atas identitas
+  // yang keliru.
+  //
+  // Urutan yang benar: metadata dulu selagi masih boleh, baru transisinya.
+  // ───────────────────────────────────────────────────────────────────────────
+  console.log('\n11. Satu klik: metadata + transisi status');
+
+  // Client sungguhan: tanpa ini `deal` gagal karena `client_projects.client_id`
+  // NOT NULL — keadaan yang sekarang dijawab 400 (diuji terpisah di bawah).
+  const klienSatu = await call('POST', '/clients',
+    { name: `Klien Baru ${stamp}`, client_type: 'buyer' }, master);
+  const klienSatuId = klienSatu.json?.id;
+
+  const propSatu = await call('POST', '/estimator/proposals',
+    { project_name: `Nama Lama ${stamp}`, client: `Klien Lama ${stamp}`, status: 'draft' }, master);
+  const satuId = propSatu.json?.id ?? propSatu.json?.data?.id;
+  await call('POST', `/estimator/proposals/${satuId}/items`, { ahsp_id: ahspId, qty: 2 }, master);
+  await call('PUT', `/estimator/proposals/${satuId}/status`, { status: 'review' }, master);
+
+  // Urutan yang dipakai layar: metadata dulu, lalu transisi.
+  const metaDulu = await call('PUT', `/estimator/proposals/${satuId}`, {
+    project_name: `Nama Baru ${stamp}`, client: `Klien Baru ${stamp}`,
+    client_id: klienSatuId, lokasi: 'Gresik', revision: 'Rev-1',
+  }, master);
+  chk('metadata tersimpan selagi review', metaDulu.status, 200);
+
+  const naik = await call('PUT', `/estimator/proposals/${satuId}/status`, { status: 'submitted' }, master);
+  chk('transisi review → submitted berhasil sesudahnya', naik.status, 200);
+
+  const hasilSatu = await call('GET', `/estimator/proposals/${satuId}`, undefined, master);
+  const hs = hasilSatu.json?.data ?? hasilSatu.json;
+  chk('nama BARU yang tersimpan, bukan lama', hs?.project_name, `Nama Baru ${stamp}`);
+  chk('client BARU yang tersimpan', hs?.client, `Klien Baru ${stamp}`);
+  chk('statusnya submitted', hs?.status, 'submitted');
+
+  // Urutan LAMA pada proposal yang sudah submitted: metadata pasti ditolak.
+  // Inilah yang membuat kombinasi itu tidak boleh dikirim sama sekali.
+  const metaSesudahKunci = await call('PUT', `/estimator/proposals/${satuId}`, {
+    project_name: `Nama Ketiga ${stamp}`, client: hs?.client, client_id: klienSatuId,
+    lokasi: 'Gresik', revision: 'Rev-1',
+  }, master);
+  chk('metadata pada submitted ditolak 409', metaSesudahKunci.status, 409);
+  chk('kodenya PROPOSAL_LOCKED', metaSesudahKunci.json?.code, 'PROPOSAL_LOCKED');
+
+  // submitted → deal: project harus terbentuk dari identitas yang BENAR.
+  const jadiDeal = await call('PUT', `/estimator/proposals/${satuId}/status`, { status: 'deal' }, master);
+  chk('submitted → deal berhasil', jadiDeal.status, 200);
+  const sesudahDeal = await call('GET', `/estimator/proposals/${satuId}`, undefined, master);
+  const sd = sesudahDeal.json?.data ?? sesudahDeal.json;
+  chk('project terbentuk', !!sd?.project_id, true);
+  const proyek = await call('GET', `/projects/${sd?.project_id}`, undefined, master);
+  const pj = proyek.json?.data ?? proyek.json;
+  // Kalau urutannya terbalik, project ini akan memakai "Nama Lama".
+  chk('project memakai nama BARU, bukan nama lama',
+    String(pj?.project_name || pj?.title || '').includes(`Nama Baru ${stamp}`), true);
+
+  // Deal tanpa client yang bisa ditemukan: dulu 500 tanpa penjelasan apa pun,
+  // padahal datanya memang belum lengkap — itu keadaan wajar, bukan kesalahan
+  // server.
+  const propTanpaKlien = await call('POST', '/estimator/proposals',
+    { project_name: `Tanpa Klien ${stamp}`, client: `Klien Entah Siapa ${stamp}`, status: 'draft' }, master);
+  const tkId = propTanpaKlien.json?.id ?? propTanpaKlien.json?.data?.id;
+  await call('POST', `/estimator/proposals/${tkId}/items`, { ahsp_id: ahspId, qty: 1 }, master);
+  await call('PUT', `/estimator/proposals/${tkId}/status`, { status: 'review' }, master);
+  await call('PUT', `/estimator/proposals/${tkId}/status`, { status: 'submitted' }, master);
+  const dealTanpaKlien = await call('PUT', `/estimator/proposals/${tkId}/status`, { status: 'deal' }, master);
+  chk('deal tanpa client → 400, bukan 500', dealTanpaKlien.status, 400);
+  chk('kodenya CLIENT_BELUM_DITENTUKAN', dealTanpaKlien.json?.code, 'CLIENT_BELUM_DITENTUKAN');
+  chk('ada petunjuk yang bisa ditindaklanjuti', typeof dealTanpaKlien.json?.petunjuk === 'string', true);
+  const tetapSubmitted = await call('GET', `/estimator/proposals/${tkId}`, undefined, master);
+  chk('statusnya tidak terlanjur jadi deal',
+    (tetapSubmitted.json?.data ?? tetapSubmitted.json)?.status, 'submitted');
+  await call('DELETE', `/estimator/proposals/${tkId}`, undefined, master);
+
+  // Layar tidak boleh menawarkan kombinasi terlarang: sumbernya diperiksa.
+  const vueList = readFileSync(
+    new URL('../../frontend/src/views/EstimatorProposalList.vue', import.meta.url), 'utf8');
+  chk('layar menolak ubah identitas saat terkunci',
+    vueList.includes('identitasnya tidak bisa diubah'), true);
+  chk('layar menulis metadata sebelum transisi',
+    vueList.indexOf('await api.put(`/estimator/proposals/${id}`,') <
+    vueList.indexOf('await api.put(`/estimator/proposals/${id}/status`'), true);
+
+  await call('DELETE', `/clients/${klienSatuId}`, undefined, master);
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }

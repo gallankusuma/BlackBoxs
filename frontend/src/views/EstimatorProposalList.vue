@@ -247,7 +247,7 @@
         <form @submit.prevent="saveEdit" class="p-6 space-y-4">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Project Name *</label>
-            <input v-model="editForm.project_name" type="text" required
+            <input v-model="editForm.project_name" type="text" required :disabled="!metaBisaDiubah"
               class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-indigo-300 focus:border-indigo-400"
               placeholder="e.g., EPC Warehouse XYZ">
           </div>
@@ -268,7 +268,7 @@
                 class="absolute z-20 w-full mt-1 bg-white border border-gray-300 rounded-lg shadow-lg max-h-60 overflow-hidden">
                 <div class="p-2 border-b border-gray-200">
                   <input
-                    v-model="editClientSearch"
+                    v-model="editClientSearch" :disabled="!metaBisaDiubah"
                     type="text"
                     class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-sm focus:outline-none focus:border-indigo-400"
                     placeholder="Cari client..."
@@ -300,13 +300,13 @@
           <div class="grid grid-cols-2 gap-4">
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">Lokasi</label>
-              <input v-model="editForm.lokasi" type="text"
+              <input v-model="editForm.lokasi" type="text" :disabled="!metaBisaDiubah"
                 class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-indigo-300 focus:border-indigo-400"
                 placeholder="e.g., Cilegon">
             </div>
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">Revision</label>
-              <input v-model="editForm.revision" type="text"
+              <input v-model="editForm.revision" type="text" :disabled="!metaBisaDiubah"
                 class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-indigo-300 focus:border-indigo-400"
                 placeholder="Rev-0">
             </div>
@@ -327,6 +327,11 @@
               Transisi berjalan lewat endpoint workflow tersendiri, terpisah dari perubahan metadata.
             </p>
           </div>
+
+          <p v-if="!metaBisaDiubah" class="rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+            🔒 Proposal berstatus <strong>{{ LABEL_STATUS[editAsal.status] || editAsal.status }}</strong> —
+            identitasnya terkunci dan hanya bisa dibaca. Turunkan dulu ke In Review kalau memang perlu diperbaiki.
+          </p>
 
           <p v-if="editError" class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
             {{ editError }}
@@ -446,6 +451,9 @@ const TRANSISI_SAH: Record<string, string[]> = {
   deal:      [],
 };
 
+/** Cermin `isProposalEditable` di backend: hanya dua status ini yang boleh disunting. */
+const STATUS_BISA_SUNTING = ['draft', 'review'];
+
 const LABEL_STATUS: Record<string, string> = {
   draft: 'Draft', review: 'In Review', submitted: 'Submitted',
   deal: 'Deal', no_deal: 'No Deal',
@@ -456,6 +464,9 @@ const editAsal = ref<Record<string, any>>({});
 const editError = ref('');
 
 /** Status sekarang + status yang sah dituju dari sana. */
+/** Identitas hanya bisa diubah selagi proposal masih draft/review. */
+const metaBisaDiubah = computed(() => STATUS_BISA_SUNTING.includes(String(editAsal.value.status)));
+
 const pilihanStatus = computed(() => {
   const kini = editAsal.value.status;
   return [kini, ...(TRANSISI_SAH[kini] || [])].filter(Boolean);
@@ -495,8 +506,26 @@ const pesanGagal = (e: any): string =>
  * backend tidak dikendurkan sedikit pun.
  *
  * Transisi dikerjakan lebih dulu ketika keduanya berubah: proposal submitted/deal
- * terkunci untuk perubahan metadata (`PROPOSAL_LOCKED`), jadi menurunkannya ke
- * review adalah syarat agar metadata bisa ditulis sama sekali.
+ * terkunci untuk perubahan metadata (`PROPOSAL_LOCKED`).
+ *
+ * **Urutannya sempat salah, dan salahnya berbahaya.** Versi pertama selalu
+ * mengirim transisi lebih dulu. Untuk arah NAIK itu fatal: `review→submitted`
+ * mengunci proposal sehingga permintaan metadata berikutnya pasti 409, dan
+ * `submitted→deal` bahkan sudah membuat project dari nama/client LAMA sebelum
+ * permintaan kedua ditolak. Pengguna menekan Simpan sekali dan mendapat separuh
+ * hasil: kontrak final atas identitas yang keliru, plus pesan error.
+ *
+ * Aturan yang benar bergantung arah:
+ *
+ *   • Proposal masih bisa disunting (draft/review) → tulis METADATA dulu, baru
+ *     transisi. Kalau transisinya gagal, metadata sudah tersimpan dan itu
+ *     keadaan yang wajar serta bisa diulang.
+ *   • Proposal sudah terkunci (submitted/deal) → metadata memang TIDAK BISA
+ *     diubah sama sekali. Kombinasi "ubah identitas + naikkan status" karena itu
+ *     ditolak di depan, sebelum apa pun dikirim — bukan dikerjakan separuh.
+ *     Menurunkan status otomatis lalu menaikkannya lagi tidak dilakukan: itu
+ *     akan menarik kembali penawaran yang sudah dilihat pelanggan demi
+ *     kenyamanan satu klik.
  */
 const saveEdit = async () => {
   editSaving.value = true;
@@ -513,9 +542,16 @@ const saveEdit = async () => {
       return;
     }
 
-    if (statusBerubah) {
-      await api.put(`/estimator/proposals/${id}/status`, { status: editForm.value.status });
+    // Proposal yang sudah terkunci tidak bisa berubah identitasnya. Ditolak di
+    // depan supaya tidak ada transisi yang terlanjur final.
+    if (metaBerubah && !STATUS_BISA_SUNTING.includes(String(asal.status))) {
+      editError.value =
+        `Proposal berstatus "${LABEL_STATUS[asal.status] || asal.status}" — identitasnya tidak bisa diubah. ` +
+        `Turunkan dulu ke In Review kalau memang perlu diperbaiki, lalu kirim ulang.`;
+      return;
     }
+
+    // Metadata dulu selagi masih boleh, baru transisinya.
     if (metaBerubah) {
       await api.put(`/estimator/proposals/${id}`, {
         project_name: editForm.value.project_name,
@@ -524,6 +560,9 @@ const saveEdit = async () => {
         lokasi:       editForm.value.lokasi,
         revision:     editForm.value.revision,
       });
+    }
+    if (statusBerubah) {
+      await api.put(`/estimator/proposals/${id}/status`, { status: editForm.value.status });
     }
 
     showEditModal.value = false;

@@ -2735,6 +2735,24 @@ router.put('/proposals/:id/status', authMiddleware, async (req: Request, res: Re
       );
       const clientId = proposal.client_id || clientRow?.id || null;
 
+      // `client_projects.client_id` NOT NULL, jadi tanpa client yang bisa
+      // ditemukan INSERT-nya melempar dan pengguna menerima 500 tanpa satu pun
+      // petunjuk. Deal yang gagal karena datanya belum lengkap adalah keadaan
+      // yang wajar — ia pantas dijawab 400 yang menyebutkan apa yang kurang,
+      // bukan kesalahan server.
+      if (!clientId) {
+        return {
+          error: 400,
+          body: {
+            error: 'Proposal ini belum tertaut ke client mana pun, jadi project kontraknya tidak bisa dibuat.',
+            code: 'CLIENT_BELUM_DITENTUKAN',
+            petunjuk: proposal.client
+              ? `Nama client "${proposal.client}" tidak cocok dengan satu pun data client. Pilih client dari daftar, atau buat datanya lebih dulu.`
+              : 'Isi client pada proposal ini lebih dulu, lalu ulangi.',
+          },
+        };
+      }
+
       const projectNumber = await nextProjectNumber(tx);
 
       const result = await tx.run(

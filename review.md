@@ -6070,6 +6070,50 @@ nama, dan revision baru atau seluruh operasi ditolak tanpa perubahan; paksa
 kegagalan tahap metadata/status dan pastikan tidak ada state parsial; double-click
 tetap menghasilkan satu project.
 
+
+**[DEV] DITERAPKAN.** Benar seluruhnya, dan penyebabnya urutan yang saya sendiri
+pasang. Saya menaruh transisi lebih dulu dengan alasan `submitted→review`
+membuka kunci metadata — tapi tidak memikirkan arah NAIK, dan di sanalah
+kerusakannya.
+
+**Aturan yang benar bergantung arah, dan itu sekarang dinyatakan eksplisit:**
+
+- Proposal masih bisa disunting (draft/review) → **metadata dulu, baru transisi**.
+  Kalau transisinya gagal, metadata sudah tersimpan — keadaan wajar dan bisa
+  diulang.
+- Proposal sudah terkunci (submitted/deal) → identitasnya memang **tidak bisa
+  diubah sama sekali**. Kombinasi "ubah identitas + naikkan status" ditolak **di
+  depan, sebelum apa pun dikirim**, bukan dikerjakan separuh.
+
+Yang sengaja **tidak** saya lakukan: menurunkan status otomatis → tulis metadata
+→ naikkan lagi. Itu akan menarik kembali penawaran yang sudah dilihat pelanggan
+demi kenyamanan satu klik, dan mengarang alur kerja yang tidak diminta siapa pun.
+
+Kolom identitas di modal juga dibuat read-only saat proposal terkunci, berikut
+keterangan alasannya — supaya pengguna tidak diundang mengetik ke kolom yang
+pasti ditolak.
+
+**Cacat lain yang ditemukan karena tes ini, bukan dari laporan.** `submitted →
+deal` menjawab **500**. Sebabnya `client_projects.client_id` NOT NULL sementara
+proposal boleh punya nama client yang tidak cocok dengan data client mana pun —
+`INSERT` melempar dan pengguna hanya menerima kesalahan server. Padahal itu
+keadaan wajar: datanya belum lengkap. Sekarang **400 `CLIENT_BELUM_DITENTUKAN`**
+berikut petunjuk yang menyebut nama client mana yang tidak ketemu, dan statusnya
+**tidak** terlanjur menjadi deal. Ini menutup butir yang sebelumnya saya catat
+sebagai "masukkan sebagai butir tersendiri?".
+
+**Tes:** [tests/mto-link.ts](backend/tests/mto-link.ts) bagian 11 — persis
+skenario satu klik yang Anda sebut belum diuji: metadata + `review→submitted`,
+lalu `submitted→deal`, dan **project yang terbentuk diperiksa memakai nama BARU**
+(kalau urutannya terbalik ia akan memakai nama lama). Ditambah metadata pada
+submitted → 409, dan deal tanpa client → 400.
+
+Urutan di layar ikut dikunci lewat pembacaan sumbernya, jadi kalau nanti dibalik
+lagi tesnya langsung merah. Dibuktikan bergigi: urutan lama dikembalikan
+sementara → **2 gagal**, termasuk `layar menulis metadata sebelum transisi →
+dapat false`.
+
+Suite penuh: **1245 lulus, 0 gagal**.
 ### [P1 / FINANCIAL-INTEGRITY — DITERAPKAN SEBAGIAN] Overhead kini bertahan, tetapi GRAND TOTAL RAB tetap hanya direct cost
 
 **File:** [backend/src/routes/estimator.routes.ts:2210](backend/src/routes/estimator.routes.ts),
