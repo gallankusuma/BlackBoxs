@@ -1409,6 +1409,39 @@ const ensureScheduleChildFk = async (connection: any) => {
   console.log('✅ FK jadwal → proposal_items ensured');
 };
 
+/**
+ * Klasifikasi scope pada baris RAB proposal.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Gerbang komersial menolak proposal bernilai nol, tapi tidak menolak proposal
+ * CAMPURAN: satu baris bernilai membuat totalnya positif, sementara baris lain
+ * berkuantitas nol ikut lolos sebagai lingkup pekerjaan seharga Rp0.
+ *
+ * Terukur di produksi (20 Agustus 2026): `PROP/2026/0001` memuat 182 baris, dan
+ * **144 di antaranya berkuantitas nol** — semuanya punya AHSP dan harga satuan
+ * sungguhan (mis. "1 m' Saluran U-Ditch" Rp 6.684.737), hanya volumenya yang
+ * tidak pernah diisi. Kalau proposal itu menjadi kontrak, seluruh pekerjaan
+ * tersebut masuk lingkup tanpa anggaran.
+ *
+ * Karena itu nol dari wizard diperlakukan `priced` = **belum lengkap**, bukan
+ * gratis. Kalau memang disengaja, harus dinyatakan: `included` (gratis, sudah
+ * diperhitungkan di tempat lain), `optional` (di luar harga dasar), atau
+ * `excluded` (tidak dikerjakan). Ketiganya menyimpan siapa yang menetapkan dan
+ * alasannya, supaya keputusannya bisa ditelusuri.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+const ensureProposalScopeStatus = async (connection: any) => {
+  const statements = [
+    `ALTER TABLE proposal_items ADD COLUMN IF NOT EXISTS scope_status
+       VARCHAR(16) NOT NULL DEFAULT 'priced'`,
+    `ALTER TABLE proposal_items ADD COLUMN IF NOT EXISTS scope_note TEXT NULL`,
+    `ALTER TABLE proposal_items ADD COLUMN IF NOT EXISTS scope_set_by INT NULL`,
+    `ALTER TABLE proposal_items ADD COLUMN IF NOT EXISTS scope_set_at DATETIME NULL`,
+  ];
+  for (const st of statements) await execSchemaEnsure(connection, st);
+  console.log('✅ Klasifikasi scope proposal ensured');
+};
+
 const ensureApprovalRuleLink = async (connection: any) => {
   // Kolom prasyarat pada tabel approval LAMA.
   //
@@ -1979,6 +2012,7 @@ export async function initializeDatabase() {
     await ensureCredentialOfficeLink(connection);
     await ensureMtoLinesSchema(connection);
     await ensureScheduleChildFk(connection);
+    await ensureProposalScopeStatus(connection);
     await ensureDisposalSchema(connection);
     await ensureAssetStatusHistorySchema(connection);
     await ensurePermissionCatalog(connection);

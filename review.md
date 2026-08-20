@@ -6307,6 +6307,73 @@ ditolak dengan daftar line; setelah line nol ditandai excluded/optional/included
 dengan actor/alasan yang sah, hasil mengikuti policy; Deal dan project baseline
 menyalin klasifikasi scope yang sama.
 
+**[DEV] DITERAPKAN — tetapi MENUNGGU KETOKAN USER sebelum di-deploy.** Kodenya
+selesai dan seluruh acceptance test Anda lulus; yang saya tahan adalah
+memasangnya ke produksi, dan alasannya di bawah.
+
+**Yang dibangun:**
+
+- `proposal_items.scope_status` (`priced` | `included` | `optional` | `excluded`)
+  + `scope_note`, `scope_set_by`, `scope_set_at`. Nol dari wizard tetap `priced`
+  = **belum lengkap**, persis seperti Anda minta — bukan gratis.
+- Gerbang submit/deal menolak setiap baris non-section yang `priced` **dan**
+  berkuantitas nol, berharga satuan nol, bernilai nol, atau belum punya AHSP.
+  Penolakannya **menyebut baris satu per satu** berikut sebabnya
+  (`#123 Saluran U-Ditch — volume masih nol`), 15 pertama plus hitungan sisanya.
+- `PUT /proposals/:id/items/scope` — klasifikasi satu atau **banyak** baris
+  sekaligus. Alasan **wajib** untuk ketiga status non-`priced`; tanpa itu
+  klasifikasinya cuma tombol pelewat gerbang, bukan keputusan yang bisa
+  dipertanggungjawabkan. Penetap dan waktunya tercatat.
+- `GET /proposals/:id/items/incomplete` — daftar barisnya, supaya layar bisa
+  menampilkannya alih-alih menyuruh pengguna menebak.
+- Massal disediakan karena template meninggalkan ratusan baris; menyatakan satu
+  per satu lewat UI bukan pekerjaan yang masuk akal.
+
+**Kenapa belum di-deploy — ini yang perlu Anda putuskan.** Saya hitung dampaknya
+pada data produksi hari ini:
+
+| proposal | status | total baris | belum lengkap |
+|---|---|---|---|
+| PROP/2026/0001 | draft | 182 | **144** |
+| PROP/2026/0003 | draft | 305 | **254** |
+| PROP/2026/0004 | draft | 61 | **52** |
+
+Ketiganya draft, jadi tidak ada kontrak berjalan yang terganggu. Tapi begitu
+gerbang ini aktif, **tidak satu pun dari ketiganya bisa di-submit** sebelum
+volumenya diisi atau baris-barisnya dinyatakan.
+
+Dan baris-baris itu bukan sampah: saya periksa isinya — semuanya **punya AHSP dan
+harga satuan sungguhan** (mis. "1 m' Saluran U-Ditch" Rp 6.684.737), hanya
+volumenya yang tidak pernah diisi. Artinya temuan Anda benar sepenuhnya: kalau
+proposal itu menjadi kontrak hari ini, 144 pekerjaan masuk lingkup tanpa
+anggaran. Tapi menyalakan gerbangnya juga menghentikan pekerjaan yang sedang
+berjalan sampai ada yang menanganinya — dan itu keputusan pemilik proses, bukan
+keputusan saya.
+
+**Efek samping yang justru menegaskan temuan Anda:** gerbang baru ini memutus
+satu tes lama di `mto-link` — fixture yang menerapkan template lalu men-submit.
+Dengan kata lain, suite itu selama ini **membuktikan bahwa proposal campuran
+bisa menjadi kontrak**. Fixture-nya sekarang menyatakan baris templatenya
+`excluded` lebih dulu, yang memang alur sebenarnya.
+
+**Tes:** [tests/proposal-commercial.ts](backend/tests/proposal-commercial.ts)
+bagian 9–10 — persis acceptance Anda: proposal campuran ditolak **dengan daftar
+barisnya**; sesudah ditandai `excluded` beralasan, submit berhasil; status,
+alasan, penetap, dan waktu semuanya terverifikasi tersimpan. Ditambah penolakan
+status ngawur, tanpa alasan, dan id milik proposal lain.
+
+Dibuktikan bergigi: gerbang barunya dicabut sementara → **14 gagal**, termasuk
+`submit proposal campuran ditolak → dapat 200`.
+
+**Kriteria ketiga Anda tidak berlaku:** "Deal dan project baseline menyalin
+klasifikasi scope yang sama" — `proposal_items` tidak pernah disalin ke tabel
+baseline mana pun saat deal; yang disalin hanya MTO (`engineering_inputs`) dan
+nilai kontrak ke `client_projects.budget`. Jadi tidak ada tempat tujuan untuk
+klasifikasi itu. Kalau memang perlu snapshot baris RAB saat deal, itu pekerjaan
+tersendiri — sekalian menutup DESIGN-GAP "contract/change-order ledger".
+
+Suite penuh: **1288 lulus, 0 gagal**.
+
 ### [P2 / API-CONTRACT — DITERAPKAN SEBAGIAN] CRM Client sudah membaca tabel Proposal yang benar, tetapi template masih meminta field kontrak lama
 
 **File:** [backend/src/routes/clients.routes.ts:272](backend/src/routes/clients.routes.ts),

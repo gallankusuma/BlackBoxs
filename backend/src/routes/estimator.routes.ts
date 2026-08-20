@@ -1212,6 +1212,46 @@ const gerbangKomersial = async (
     pelanggaran.push(`Nilai penawaran ${total} — harus lebih besar dari nol sebelum dikirim.`);
   }
 
+  // Baris yang belum lengkap TIDAK boleh ikut menjadi lingkup kontrak diam-diam.
+  //
+  // Gerbang sebelumnya hanya memeriksa total header dan nilai negatif, jadi
+  // proposal CAMPURAN lolos: satu baris bernilai membuat totalnya positif,
+  // sementara baris berkuantitas nol ikut terbawa sebagai pekerjaan seharga Rp0.
+  // Nol dari wizard adalah "belum diisi", bukan "gratis" — kalau memang gratis,
+  // itu keputusan komersial yang harus dinyatakan lewat `scope_status`.
+  const belumLengkap = await tx.all(
+    `SELECT id, order_no,
+            COALESCE(NULLIF(ahsp_name_snapshot, ''), NULLIF(description, ''), CONCAT('Baris #', id)) AS nama,
+            qty, unit_price_snapshot, total_price, ahsp_id
+     FROM proposal_items
+     WHERE proposal_id = ? AND is_section = 0 AND scope_status = 'priced'
+       AND (qty IS NULL OR qty <= 0
+            OR unit_price_snapshot IS NULL OR unit_price_snapshot <= 0
+            OR total_price IS NULL OR total_price <= 0
+            OR ahsp_id IS NULL)
+     ORDER BY order_no, id`,
+    [proposalId]
+  );
+
+  if (belumLengkap.length > 0) {
+    const contoh = belumLengkap.slice(0, 15).map((r: any) => {
+      const sebab: string[] = [];
+      if (r.ahsp_id === null) sebab.push('belum punya AHSP');
+      if (!(Number(r.qty) > 0)) sebab.push('volume masih nol');
+      if (!(Number(r.unit_price_snapshot) > 0)) sebab.push('harga satuan nol');
+      else if (!(Number(r.total_price) > 0)) sebab.push('nilai baris nol');
+      return `#${r.id} ${r.nama} — ${sebab.join(', ')}`;
+    });
+    pelanggaran.push(
+      `${belumLengkap.length} baris pekerjaan belum lengkap dan akan masuk kontrak sebagai lingkup Rp0. ` +
+      `Lengkapi volumenya, atau nyatakan statusnya (included/optional/excluded) kalau memang disengaja.`
+    );
+    for (const c of contoh) pelanggaran.push(`  • ${c}`);
+    if (belumLengkap.length > contoh.length) {
+      pelanggaran.push(`  • …dan ${belumLengkap.length - contoh.length} baris lain`);
+    }
+  }
+
   // Header wajib sama dengan penjumlahan barisnya. Kalau tidak, ada dua
   // kebenaran dalam satu dokumen dan salah satunya akan dipakai hilir.
   const jumlahBaris = uang(ringkas?.jumlah_baris);
@@ -1251,6 +1291,99 @@ const BUKAN_MILIK = {
   error: 404,
   body: { error: 'Item tidak ditemukan pada proposal ini', code: 'ITEM_BUKAN_MILIK_PROPOSAL' },
 };
+
+/**
+ * Nyatakan status lingkup untuk satu atau banyak baris RAB sekaligus.
+ *
+ * `priced` = baris biasa yang harus punya volume dan harga. Tiga lainnya adalah
+ * keputusan komersial yang eksplisit dan tercatat siapa penetapnya:
+ *
+ *   • `included` — dikerjakan, tidak ditagih terpisah (sudah masuk harga lain)
+ *   • `optional` — di luar harga dasar, ditawarkan terpisah
+ *   • `excluded` — tidak termasuk lingkup pekerjaan
+ *
+ * Alasan WAJIB untuk ketiga status non-`priced`. Tanpa itu klasifikasinya jadi
+ * tombol untuk melewati gerbang, bukan keputusan yang bisa dipertanggungjawabkan.
+ *
+ * Massal disediakan karena template wizard bisa meninggalkan ratusan baris
+ * sekaligus — di produksi ada proposal dengan 254 baris belum lengkap, dan
+ * menyatakan satu per satu lewat UI bukan pekerjaan yang masuk akal.
+ */
+const SCOPE_SAH = ['priced', 'included', 'optional', 'excluded'];
+
+router.put('/proposals/:id/items/scope', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { item_ids, scope_status, scope_note } = req.body;
+    const userId = (req as any).userId || null;
+
+    if (!Array.isArray(item_ids) || item_ids.length === 0) {
+      return res.status(400).json({ error: 'item_ids wajib berupa daftar id yang tidak kosong' });
+    }
+    if (!SCOPE_SAH.includes(scope_status)) {
+      return res.status(400).json({
+        error: `scope_status harus salah satu dari: ${SCOPE_SAH.join(', ')}`,
+        code: 'SCOPE_TIDAK_VALID',
+      });
+    }
+    if (scope_status !== 'priced' && !String(scope_note || '').trim()) {
+      return res.status(400).json({
+        error: 'Alasan wajib diisi saat menyatakan baris sebagai included/optional/excluded.',
+        code: 'ALASAN_WAJIB',
+      });
+    }
+
+    const hasil = await withTransaction(async tx => {
+      const terkunci = await proposalLockTx(req.params.id, tx);
+      if (terkunci) return { error: terkunci.status, body: terkunci.body };
+
+      // Semua id harus benar-benar milik proposal ini — sama seperti jalur
+      // jadwal, id anak tidak boleh dipercaya begitu saja dari body.
+      const tanda = item_ids.map(() => '?').join(',');
+      const milik: any[] = await tx.all(
+        `SELECT id FROM proposal_items WHERE proposal_id = ? AND id IN (${tanda})`,
+        [req.params.id, ...item_ids]
+      );
+      if (milik.length !== item_ids.length) {
+        return { error: 404, body: {
+          error: 'Sebagian item tidak ditemukan pada proposal ini.',
+          code: 'ITEM_BUKAN_MILIK_PROPOSAL',
+          ditemukan: milik.length, diminta: item_ids.length,
+        } };
+      }
+
+      await tx.run(
+        `UPDATE proposal_items
+         SET scope_status = ?, scope_note = ?, scope_set_by = ?, scope_set_at = NOW()
+         WHERE proposal_id = ? AND id IN (${tanda})`,
+        [scope_status, scope_status === 'priced' ? null : String(scope_note).trim(),
+         scope_status === 'priced' ? null : userId, req.params.id, ...item_ids]
+      );
+      return { ok: true as const, jumlah: item_ids.length };
+    });
+
+    if ('error' in hasil) return res.status(hasil.error).json(hasil.body);
+    res.json({ message: 'Status lingkup diperbarui', jumlah: hasil.jumlah, scope_status });
+  } catch (err: any) { res.status(500).json({ error: err.message }); }
+});
+
+/** Daftar baris yang belum lengkap — dipakai layar untuk menampilkannya. */
+router.get('/proposals/:id/items/incomplete', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const rows = await dbAll(
+      `SELECT id, order_no, ahsp_name_snapshot, description, qty, unit_price_snapshot,
+              total_price, ahsp_id, scope_status
+       FROM proposal_items
+       WHERE proposal_id = ? AND is_section = 0 AND scope_status = 'priced'
+         AND (qty IS NULL OR qty <= 0
+              OR unit_price_snapshot IS NULL OR unit_price_snapshot <= 0
+              OR total_price IS NULL OR total_price <= 0
+              OR ahsp_id IS NULL)
+       ORDER BY order_no, id`,
+      [req.params.id]
+    );
+    res.json({ items: rows, count: rows.length });
+  } catch (err: any) { res.status(500).json({ error: err.message }); }
+});
 
 // ── Override: save manual start/duration for a schedule item
 router.put('/proposals/:id/schedule/overrides', authMiddleware, async (req: Request, res: Response) => {

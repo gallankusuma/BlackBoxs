@@ -197,6 +197,75 @@ async function main() {
     chk('proposal dengan overhead lolos submit',
       (await call('PUT', `/estimator/proposals/${pOh}/status`, { status: 'submitted' }, master)).status, 200);
 
+    // ── Proposal CAMPURAN: satu baris bernilai + satu baris nol ─────────────
+    //
+    // Inilah celah yang tersisa: gerbang lama hanya memeriksa total header, jadi
+    // satu baris bernilai membuat totalnya positif dan baris nol ikut lolos
+    // sebagai lingkup pekerjaan seharga Rp0 — pekerjaan yang belum diestimasi
+    // berubah menjadi kewajiban kontrak tanpa anggaran.
+    console.log('\n9. Proposal campuran: baris bernilai + baris belum lengkap');
+    const pCampur = await call('POST', '/estimator/proposals',
+      { project_name: `Uji campuran ${stamp}` }, master);
+    const campurId = pCampur.json?.id ?? pCampur.json?.data?.id;
+    bersihkan.push(() => call('DELETE', `/estimator/proposals/${campurId}`, undefined, master));
+
+    await call('POST', `/estimator/proposals/${campurId}/items`, { ahsp_id: ahspId, qty: 5 }, master);
+    await call('POST', `/estimator/proposals/${campurId}/items`, { ahsp_id: ahspId, qty: 0 }, master);
+
+    const daftarCampur = await call('GET', `/estimator/proposals/${campurId}/items`, undefined, master);
+    const barisCampur: any[] = daftarCampur.json?.data ?? daftarCampur.json ?? [];
+    chk('proposal punya 2 baris', barisCampur.length, 2);
+
+    const inc = await call('GET', `/estimator/proposals/${campurId}/items/incomplete`, undefined, master);
+    chk('baris belum lengkap terdaftar', inc.json?.count, 1);
+
+    await call('PUT', `/estimator/proposals/${campurId}/status`, { status: 'review' }, master);
+    const tolakCampur = await call('PUT', `/estimator/proposals/${campurId}/status`, { status: 'submitted' }, master);
+    chk('submit proposal campuran ditolak', tolakCampur.status, 400);
+    chk('kodenya PROPOSAL_BELUM_LAYAK', tolakCampur.json?.code, 'PROPOSAL_BELUM_LAYAK');
+    // Daftar barisnya disebut, bukan sekadar "ada yang salah".
+    const pel: string[] = tolakCampur.json?.pelanggaran || [];
+    chk('menyebut jumlah baris belum lengkap',
+      pel.some(x => x.includes('1 baris pekerjaan belum lengkap')), true);
+    const nol = barisCampur.find((b: any) => Number(b.qty) === 0);
+    chk('menyebut id baris yang bermasalah',
+      pel.some(x => x.includes(`#${nol?.id}`)), true);
+    chk('menyebut sebabnya', pel.some(x => x.includes('volume masih nol')), true);
+
+    const tetapReview = await call('GET', `/estimator/proposals/${campurId}`, undefined, master);
+    chk('statusnya tidak terlanjur submitted',
+      (tetapReview.json?.data ?? tetapReview.json)?.status, 'review');
+
+    // ── Klasifikasi eksplisit membuka jalan, tapi menuntut alasan ───────────
+    console.log('\n10. Klasifikasi scope: eksplisit, wajib beralasan, dan tercatat');
+    chk('status ngawur ditolak',
+      (await call('PUT', `/estimator/proposals/${campurId}/items/scope`,
+        { item_ids: [nol?.id], scope_status: 'gratisan' }, master)).status, 400);
+    chk('tanpa alasan ditolak',
+      (await call('PUT', `/estimator/proposals/${campurId}/items/scope`,
+        { item_ids: [nol?.id], scope_status: 'excluded' }, master)).status, 400);
+    chk('id milik proposal lain ditolak',
+      (await call('PUT', `/estimator/proposals/${campurId}/items/scope`,
+        { item_ids: [999999999], scope_status: 'excluded', scope_note: 'x' }, master)).status, 404);
+
+    const tandai = await call('PUT', `/estimator/proposals/${campurId}/items/scope`,
+      { item_ids: [nol?.id], scope_status: 'excluded',
+        scope_note: 'Di luar lingkup, dikerjakan kontraktor lain' }, master);
+    chk('klasifikasi diterima', tandai.status, 200);
+    chk('tidak ada lagi baris belum lengkap',
+      (await call('GET', `/estimator/proposals/${campurId}/items/incomplete`, undefined, master)).json?.count, 0);
+
+    const lolos = await call('PUT', `/estimator/proposals/${campurId}/status`, { status: 'submitted' }, master);
+    chk('sesudah dinyatakan, submit berhasil', lolos.status, 200);
+
+    // Keputusannya tercatat: siapa dan kenapa.
+    const jejak: any = await dbGet(
+      'SELECT scope_status, scope_note, scope_set_by, scope_set_at FROM proposal_items WHERE id = ?', [nol?.id]);
+    chk('status tersimpan', jejak?.scope_status, 'excluded');
+    chk('alasan tersimpan', String(jejak?.scope_note || '').includes('kontraktor lain'), true);
+    chk('penetapnya tercatat', Number(jejak?.scope_set_by) > 0, true);
+    chk('waktunya tercatat', !!jejak?.scope_set_at, true);
+
   } finally {
     console.log('\n8. Bersih-bersih');
     let sisa = 0;

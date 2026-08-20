@@ -72,6 +72,26 @@ async function main() {
    */
   const pastikanBernilai = async (pid: any) => {
     await call('POST', `/estimator/proposals/${pid}/items`, { ahsp_id: ahspId, qty: 1 }, master);
+    await nyatakanSisaScope(pid);
+  };
+
+  /**
+   * Nyatakan seluruh baris yang belum lengkap sebagai `excluded`.
+   *
+   * Template wizard meninggalkan baris anak tanpa AHSP dan berkuantitas nol.
+   * Sejak gerbang komersial menolak proposal campuran, fixture yang memakai
+   * template TIDAK bisa lagi di-submit tanpa menyatakan baris-baris itu — dan
+   * itu memang perilaku yang diinginkan: nol dari wizard berarti "belum diisi",
+   * bukan "gratis". Sebelum ada gerbang itu, suite ini justru membuktikan bahwa
+   * proposal campuran bisa menjadi kontrak.
+   */
+  const nyatakanSisaScope = async (pid: any) => {
+    const inc = await call('GET', `/estimator/proposals/${pid}/items/incomplete`, undefined, master);
+    const ids = (inc.json?.items || []).map((x: any) => x.id);
+    if (!ids.length) return;
+    await call('PUT', `/estimator/proposals/${pid}/items/scope`,
+      { item_ids: ids, scope_status: 'excluded', scope_note: 'Baris template fixture, di luar lingkup uji' },
+      master);
   };
 
   /**
