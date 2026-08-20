@@ -151,10 +151,37 @@
               </template>
             </template>
 
-            <!-- Grand Total -->
+            <!-- Penutup dokumen.
+                 Dulu di sini hanya ada satu baris berlabel "GRAND TOTAL" yang
+                 isinya biaya langsung saja, sementara beberapa baris di bawah
+                 layar mencetak "TOTAL PROYEK" yang sudah memuat overhead dan
+                 kontinjensi. Untuk overhead bukan nol, satu dokumen memuat dua
+                 total berbeda tanpa satu pun keterangan bahwa yang pertama
+                 belum lengkap. Sekarang penutupnya dieja bertingkat sehingga
+                 dokumennya rekonsiliasi baris demi baris. -->
+            <tr class="bg-blue-100 font-bold">
+              <td colspan="8" class="px-4 py-3 text-right">JUMLAH BIAYA LANGSUNG</td>
+              <td class="px-4 py-3 text-right">{{ formatCurrency(grandTotal) }}</td>
+            </tr>
+            <tr v-if="summary.overhead" class="bg-blue-50">
+              <td colspan="8" class="px-4 py-2 text-right">Overhead &amp; Profit</td>
+              <td class="px-4 py-2 text-right">{{ formatCurrency(summary.overhead) }}</td>
+            </tr>
+            <tr v-if="summary.riskContingency" class="bg-blue-50">
+              <td colspan="8" class="px-4 py-2 text-right">Risiko &amp; Kontinjensi</td>
+              <td class="px-4 py-2 text-right">{{ formatCurrency(summary.riskContingency) }}</td>
+            </tr>
             <tr class="bg-gradient-to-r from-blue-600 to-blue-700 text-white font-bold text-lg">
-              <td colspan="8" class="px-4 py-4 text-right">GRAND TOTAL</td>
-              <td class="px-4 py-4 text-right">{{ formatCurrency(grandTotal) }}</td>
+              <td colspan="8" class="px-4 py-4 text-right">TOTAL PROYEK</td>
+              <td class="px-4 py-4 text-right">{{ formatCurrency(summary.totalProject) }}</td>
+            </tr>
+            <tr v-if="!rekonsiliasi" class="bg-amber-100 text-amber-900">
+              <td colspan="9" class="px-4 py-3 text-sm">
+                ⚠️ Rincian di atas berjumlah {{ formatCurrency(grandTotal) }}, sedangkan biaya
+                langsung pada header proposal tercatat {{ formatCurrency(summary.directCost) }}.
+                Selisih {{ formatCurrency(Math.abs(Number(summary.directCost) - Number(grandTotal))) }}
+                — dokumen ini belum bisa dipakai sebagai dasar penawaran.
+              </td>
             </tr>
           </tbody>
         </table>
@@ -208,6 +235,17 @@ const summary = ref<any>({
 const expandedSections = ref<{ [key: number]: boolean }>({});
 
 const grandTotalApi = ref<number | null>(null);
+
+/**
+ * Rincian RAB harus sama dengan biaya langsung yang tercatat di header proposal.
+ * Kalau tidak, ada dua kebenaran dalam satu dokumen dan salah satunya akan
+ * dipakai orang lain sebagai dasar penawaran.
+ */
+const rekonsiliasi = computed(() => {
+  const rincian = Math.round(Number(grandTotal.value || 0) * 100);
+  const header = Math.round(Number(summary.value?.directCost || 0) * 100);
+  return rincian === header;
+});
 
 /**
  * Grand total diambil dari server kalau tersedia — di sanalah rincian dan
@@ -282,7 +320,10 @@ const exportToExcel = async () => {
       csvContent += `,TOTAL ${section.code} - ${section.name},,,,,,${section.totalAmount}\n\n`;
     });
     
-    csvContent += `,GRAND TOTAL,,,,,,,${grandTotal.value}\n`;
+    csvContent += `,JUMLAH BIAYA LANGSUNG,,,,,,,${grandTotal.value}\n`;
+    if (summary.value.overhead) csvContent += `,Overhead & Profit,,,,,,,${summary.value.overhead}\n`;
+    if (summary.value.riskContingency) csvContent += `,Risiko & Kontinjensi,,,,,,,${summary.value.riskContingency}\n`;
+    csvContent += `,TOTAL PROYEK,,,,,,,${summary.value.totalProject}\n`;
     
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement('a');

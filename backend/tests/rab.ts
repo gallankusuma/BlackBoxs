@@ -177,8 +177,48 @@ async function main() {
         Math.abs(Number(s.subtotal) * 100 - Math.round(Number(s.subtotal) * 100)) < 1e-6, true);
     }
 
+    // ── 6. Overhead & kontinjensi bukan nol ────────────────────────────────
+    //
+    // Fixture di atas semuanya overhead nol, jadi `grandTotal == total_project`
+    // lolos tanpa pernah menguji apa pun. Dengan overhead terisi, keduanya
+    // memang HARUS berbeda — dan dokumen wajib mengeja perbedaannya, bukan
+    // mencetak dua total tanpa keterangan.
+    console.log('\n6. Overhead & kontinjensi bukan nol');
+    await dbRun(
+      'UPDATE proposals SET overhead = ?, risk_contingency = ? WHERE id = ?',
+      [10000000, 5000000, propId]
+    );
+    // Recalculate dipicu lewat perubahan qty pada item pertama.
+    const daftarItem = await call('GET', `/estimator/proposals/${propId}/items`, undefined, master);
+    const item0 = (daftarItem.json?.data ?? daftarItem.json ?? [])[0];
+    chk('item untuk memicu recalculate ada', !!item0?.id, true);
+    await call('PUT', `/estimator/proposals/${propId}/items/${item0.id}`, { qty: 4 }, master);
+
+    const rab2 = await call('GET', `/estimator/proposals/${propId}/rab`, undefined, master);
+    const s2 = rab2.json?.summary;
+    chk('overhead bertahan sesudah recalculate', sen(s2?.overhead), sen(10000000));
+    chk('kontinjensi bertahan', sen(s2?.riskContingency), sen(5000000));
+
+    const rincian2 = (rab2.json?.sections || [])
+      .reduce((a: number, x: any) => a + sen(x.totalAmount), 0);
+    chk('grandTotal = jumlah rincian (biaya langsung)', sen(rab2.json?.grandTotal), rincian2);
+    chk('grandTotal = direct cost di header', sen(rab2.json?.grandTotal), sen(s2?.directCost));
+    // Inilah yang dulu tidak pernah diuji: dengan overhead, keduanya berbeda.
+    chk('total proyek = langsung + overhead + kontinjensi',
+      sen(s2?.totalProject), sen(s2?.directCost) + sen(10000000) + sen(5000000));
+    chk('total proyek memang > grandTotal',
+      Number(s2?.totalProject) > Number(rab2.json?.grandTotal), true);
+
+    // Layar harus mengeja penutupnya, bukan mencetak satu "GRAND TOTAL" ambigu.
+    const { readFileSync } = await import('node:fs');
+    const vueRab = readFileSync(
+      new URL('../../frontend/src/views/EstimatorRAB.vue', import.meta.url), 'utf8');
+    chk('layar mengeja JUMLAH BIAYA LANGSUNG', vueRab.includes('JUMLAH BIAYA LANGSUNG'), true);
+    chk('layar menutup dengan TOTAL PROYEK', vueRab.includes('>TOTAL PROYEK<'), true);
+    chk('tidak ada lagi label GRAND TOTAL yang ambigu', vueRab.includes('>GRAND TOTAL<'), false);
+
   } finally {
-    console.log('\n6. Bersih-bersih');
+    console.log('\n7. Bersih-bersih');
     let sisa = 0;
     for (const hapus of bersihkan.reverse()) {
       try { await hapus(); } catch { sisa++; }

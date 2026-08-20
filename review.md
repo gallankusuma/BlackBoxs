@@ -6140,6 +6140,47 @@ RAB. Jadi kedua suite dapat hijau sementara dokumen aktual tidak rekonsiliasi.
 juta; ubah satu qty agar recalculate berjalan. RAB menampilkan GRAND TOTAL Rp100
 juta dan TOTAL PROYEK Rp115 juta.
 
+**[DEV] DITERAPKAN.** Benar, termasuk diagnosis kenapa dua suite bisa sama-sama
+hijau: `rab.ts` menuntut `grandTotal == total_project` **dengan fixture overhead
+nol**, jadi kesetaraan itu lolos tanpa pernah menguji apa pun.
+
+Angkanya sendiri tidak salah — `grandTotal` memang jumlah biaya langsung dan
+`total_project` memang sudah memuat overhead. Yang salah **dokumennya**: satu
+halaman memuat dua total berbeda, yang satu berlabel "GRAND TOTAL" padahal belum
+lengkap.
+
+Penutup RAB sekarang dieja bertingkat, sehingga dokumennya rekonsiliasi baris
+demi baris dan hanya ada **satu** angka penutup:
+
+```
+JUMLAH BIAYA LANGSUNG      12.223.113.916
+Overhead & Profit              10.000.000
+Risiko & Kontinjensi            5.000.000
+TOTAL PROYEK               13.723.113.916   ← satu-satunya "grand"
+```
+
+Label "GRAND TOTAL" yang ambigu dihapus seluruhnya. Baris overhead dan
+kontinjensi hanya muncul kalau nilainya bukan nol, jadi dokumen tanpa overhead
+tetap ringkas seperti sebelumnya. Ekspor CSV mengeja penutup yang sama.
+
+Ditambahkan juga penanda rekonsiliasi: kalau jumlah rincian tidak sama dengan
+`direct_cost` di header, dokumen mencetak peringatan bernilai rupiah dan
+menyatakan dirinya belum bisa dipakai sebagai dasar penawaran — daripada
+menampilkan dua kebenaran tanpa keterangan.
+
+**Tes:** [tests/rab.ts](backend/tests/rab.ts) bagian 6 — persis skenario Anda:
+overhead 10 juta + kontinjensi 5 juta, lalu qty diubah supaya recalculate
+berjalan. Membuktikan keduanya bertahan, `grandTotal` = jumlah rincian =
+`directCost`, `totalProject` = langsung + overhead + kontinjensi, dan
+`totalProject` memang **lebih besar** dari `grandTotal` — kesetaraan yang dulu
+diuji justru tidak boleh berlaku di sini. Label dokumennya ikut dikunci lewat
+pembacaan sumber layar.
+
+Dibuktikan bergigi: label lama dikembalikan sementara → `tidak ada lagi label
+GRAND TOTAL yang ambigu → dapat true`.
+
+Suite penuh: **1249 lulus, 0 gagal**.
+
 **Dampak:** reviewer/client dapat mengutip total berbeda dari dokumen yang sama;
 margin/indirect/risk allowance dapat tertinggal ketika angka GRAND TOTAL dipakai
 untuk quotation atau contractual baseline.
