@@ -5968,6 +5968,50 @@ berhasil dan menambah campuran ketiga. Detail MTO tetap mengaku
 `project_baseline`. Ini melanggar acceptance lama bahwa POST/PUT/DELETE tidak
 boleh mengubah kontrak project tanpa change order.
 
+**[DEV] DITERAPKAN.** Kedua klaim saya verifikasi sampai ke baris database, dan
+keduanya benar. Sesudah deal, query summary memilih **dua baris untuk satu
+elemen**: `id 2753` (`scope=proposal`) dan `id 2754` (`scope=project`) — pondasi
+yang sama, terhitung dua kali. `POST /projects/:id/mto` juga menjawab **200**
+setelah deal dan menyisipkan `id 2755` berbentuk hibrida: `scope_type` NULL
+dengan `project_id` **dan** `proposal_id` terisi sekaligus — jenis baris ketiga
+yang bukan baseline dan bukan proposal.
+
+**Satu cacat lagi yang belum ada di laporan, ditemukan saat memverifikasi.**
+Ringkasan hanya mengenal kunci generik (`vol_concrete`, `rebar_weight_kg`),
+sedangkan kalkulator Estimator menyimpan kode barisnya sendiri (`fnd_conc`,
+`fnd_excv`, `col_rebar`, …). Artinya **seluruh baseline hasil deal dijumlahkan
+sebagai NOL** — bukan digandakan, melainkan tidak terbaca sama sekali. Terukur:
+elemen pondasi ber-`fnd_conc: 10.08` dilaporkan `total_vol_concrete: 0`. Jadi
+penggandaan yang Anda laporkan baru tampak pada baris hibrida hasil POST; pada
+baseline murni gejalanya justru nol. Keduanya berakar pada query yang sama.
+
+- **Summary memakai pemilihan sumber yang sama dengan detail**: baseline project
+  kalau ada, kalau tidak proposal tertaut. `OR` dicabut. Responsnya kini juga
+  menyebut `mto_source`, jadi layar tahu angka itu kontrak atau proposal yang
+  masih bisa berubah.
+- **Pemetaan kunci** lewat akhiran kode baris (`_conc`, `_excv`, `_backfill`,
+  `_rebar`/`_stirrup`, `_form`, `_plaster`/`_acian`), bukan daftar tetap per
+  tipe elemen — supaya elemen baru ikut terhitung tanpa menyentuh berkas itu
+  lagi. Satuan yang bukan m³/m²/kg (baut, lembar, cat) sengaja **tidak** masuk
+  ember mana pun: menjumlahkannya ke volume menghasilkan angka tak bermakna.
+- **POST digembok dua lapis**: proposal tertaut berstatus terkunci → 409
+  `PROPOSAL_LOCKED`; project yang sudah punya baseline → 409 `BASELINE_TERKUNCI`
+  ("menambah lingkup pada kontrak berjalan adalah change order"). Barisnya juga
+  kini ditulis sebagai milik **project** (`scope_type='project'`), bukan hibrida.
+- Project **tanpa** baseline tetap bisa diisi — jalur manual tidak ikut tertutup.
+
+**Tes:** [backend/tests/qto-summary.ts](backend/tests/qto-summary.ts) — 23
+assertion, masuk `test:all`, mengikuti skenario reproduksi Anda persis (deal →
+bandingkan summary dengan detail → POST elemen baru). Ia juga membuktikan
+sumber penggandaannya langsung di database: query lama memilih 2 baris untuk 1
+elemen.
+
+Dibuktikan bergigi: ketiga perilaku lama dikembalikan sementara → **5 gagal**,
+di antaranya `menghitung 1 elemen, bukan 2 → dapat 2` dan `beton summary = beton
+detail → dapat 4.26, harusnya 12.21`.
+
+Suite penuh: **1238 lulus, 0 gagal**.
+
 **Dampak:** baseline detail dan QTO agregat project dapat mempunyai volume beton,
 galian, rebar, atau formwork berbeda. Procurement/progress yang membaca summary
 dapat memakai kuantitas yang tidak pernah ada pada proposal yang disepakati.

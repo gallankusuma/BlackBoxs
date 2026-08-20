@@ -1554,16 +1554,50 @@ router.post('/:id/mto', authMiddleware, async (req: Request, res: Response) => {
     const paramsJson = JSON.stringify(parameters);
     const qtyJson = JSON.stringify(quantities);
 
-    // Atomic upsert via DB UNIQUE(proposal_id, project_id, element_type, element_name)
+    // PUT dan DELETE sudah tunduk pada kunci proposal, POST belum — jadi jalur
+    // ini masih bisa MENAMBAH elemen ke project yang kontraknya sudah disepakati.
+    // Terbukti di dev: setelah deal, POST menjawab 200 dan menyisipkan baris
+    // baru ke project.
+    //
+    // Barisnya pun ditulis dengan `project_id` DAN `proposal_id` terisi
+    // sekaligus, tanpa `scope_type` — bentuk ketiga yang bukan baseline dan
+    // bukan proposal, dan itulah yang membuat ringkasan QTO menjumlahkan
+    // campuran tiga jenis baris sekaligus.
+    if (proposalId) {
+      const prop: any = await dbGet('SELECT id, status FROM proposals WHERE id = ?', [proposalId]);
+      if (prop && !isProposalEditable(prop.status)) {
+        return res.status(409).json({
+          error: `Project ini tertaut pada proposal berstatus "${prop.status}"; MTO-nya tidak bisa ditambah dari layar project.`,
+          code: 'PROPOSAL_LOCKED',
+          status_proposal: prop.status,
+        });
+      }
+    }
+
+    // Project yang SUDAH punya baseline kontrak tidak boleh ditambahi elemen
+    // lewat jalur ini. Menambah lingkup pekerjaan pada kontrak berjalan adalah
+    // change order, bukan penyuntingan diam-diam.
+    const adaBaseline: any = await dbGet(
+      `SELECT COUNT(*) AS n FROM engineering_inputs WHERE scope_type = 'project' AND scope_id = ?`,
+      [projectId]
+    );
+    if (Number(adaBaseline?.n || 0) > 0) {
+      return res.status(409).json({
+        error: 'Project ini sudah punya baseline MTO kontrak. Menambah elemen baru memerlukan change order, bukan penambahan langsung.',
+        code: 'BASELINE_TERKUNCI',
+      });
+    }
+
+    // Ditulis sebagai baris milik PROJECT, bukan hibrida project+proposal.
     const result: any = await dbRun(
-      `INSERT INTO engineering_inputs (project_id, proposal_id, element_type, element_name, parameters, quantities, sort_order)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO engineering_inputs (scope_type, scope_id, project_id, element_type, element_name, parameters, quantities, sort_order)
+       VALUES ('project', ?, ?, ?, ?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE parameters=VALUES(parameters), quantities=VALUES(quantities), sort_order=VALUES(sort_order)`,
-      [projectId, proposalId, element_type, name, paramsJson, qtyJson, sort_order]
+      [projectId, projectId, element_type, name, paramsJson, qtyJson, sort_order]
     );
     const id = result.insertId || (await dbGet(
-      'SELECT id FROM engineering_inputs WHERE project_id<=>? AND proposal_id<=>? AND element_type=? AND element_name=?',
-      [projectId, proposalId, element_type, name]
+      `SELECT id FROM engineering_inputs WHERE scope_type = 'project' AND scope_id = ? AND element_type = ? AND element_name = ?`,
+      [projectId, element_type, name]
     ) as any)?.id;
     res.json({ id, quantities, updated: !result.insertId });
   } catch (err: any) {
@@ -1662,16 +1696,94 @@ router.delete('/:id/mto/:elementId', authMiddleware, async (req: Request, res: R
   }
 });
 
+/**
+ * Petakan satu kunci `quantities` ke ember ringkasan QTO.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Ada DUA keluarga kunci di kolom yang sama, dan ringkasan lama hanya mengenal
+ * salah satunya:
+ *
+ *   • Kalkulator Estimator menyimpan kode barisnya sendiri — `FND-CONC` menjadi
+ *     `fnd_conc`, `COL-REBAR` menjadi `col_rebar`, dan seterusnya.
+ *   • Kalkulator internal `/projects` memakai nama generik: `vol_concrete`,
+ *     `rebar_weight_kg`, `formwork_area`.
+ *
+ * Ringkasan lama hanya membaca keluarga kedua, jadi seluruh baseline yang
+ * berasal dari Estimator — yaitu SEMUA project hasil deal — dijumlahkan sebagai
+ * nol. Terukur di dev: elemen pondasi dengan `fnd_conc: 10.08` dilaporkan
+ * `total_vol_concrete: 0`.
+ *
+ * Pencocokannya lewat akhiran kode, bukan daftar tetap per tipe elemen, supaya
+ * elemen baru (`TB-CONC`, `SLB-CONC`, `RF-CONC`, …) ikut terhitung tanpa perlu
+ * menyentuh berkas ini lagi.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+const emberRingkasan = (kunci: string): string | null => {
+  const k = kunci.toLowerCase();
+
+  // Keluarga generik milik kalkulator /projects.
+  if (k === 'vol_concrete')    return 'total_vol_concrete';
+  if (k === 'vol_excavation')  return 'total_vol_excavation';
+  if (k === 'vol_backfill')    return 'total_vol_backfill';
+  if (k === 'rebar_weight_kg') return 'total_rebar_weight_kg';
+  if (k === 'formwork_area')   return 'total_formwork_area';
+  if (k === 'wall_area')       return 'total_wall_area';
+  if (k === 'plaster_area')    return 'total_plaster_area';
+  if (k === 'roof_area')       return 'total_roof_area';
+
+  // Keluarga kode baris Estimator. Yang satuannya bukan m3/m2/kg — baut, lembar,
+  // batang, cat — sengaja TIDAK masuk ember mana pun: menjumlahkannya ke volume
+  // atau berat menghasilkan angka yang tidak berarti apa-apa.
+  if (k.endsWith('_conc'))      return 'total_vol_concrete';
+  if (k.endsWith('_lean'))      return 'total_vol_concrete';   // lantai kerja tetap beton
+  if (k.endsWith('_excv'))      return 'total_vol_excavation';
+  if (k.endsWith('_backfill'))  return 'total_vol_backfill';
+  if (k.endsWith('_rebar') || k.endsWith('_stirrup')) return 'total_rebar_weight_kg';
+  if (k.endsWith('_form'))      return 'total_formwork_area';
+  if (k.endsWith('_plaster') || k.endsWith('_acian')) return 'total_plaster_area';
+  if (k === 'wal_area')         return 'total_wall_area';
+  if (k === 'rf_area')          return 'total_roof_area';
+
+  return null;
+};
+
 // GET QTO Summary — aggregated quantities (includes linked proposal MTO)
 router.get('/:id/mto/summary', authMiddleware, async (req: Request, res: Response) => {
   try {
     const projectId = req.params.id;
     const proposalId = await getLinkedProposalId(projectId);
+
+    // Sumbernya dipilih dengan aturan yang SAMA dengan `GET /:id/mto`:
+    // baseline project kalau ada, kalau tidak baru proposal tertaut.
+    //
+    // Versi lama memakai `WHERE project_id = ? OR proposal_id = ?`, dan itu
+    // menggandakan seluruh kuantitas begitu baseline terbentuk: baris proposal
+    // asli cocok lewat `proposal_id`, sedangkan salinan baseline yang dibuat
+    // saat deal cocok lewat `project_id` — elemen yang sama terhitung dua kali.
+    // Terbukti di dev: satu pondasi menghasilkan dua baris terpilih (id 2753
+    // scope=proposal dan id 2754 scope=project) untuk elemen yang sama persis.
+    //
+    // Akibatnya QTO detail dan QTO summary menjawab berbeda untuk project yang
+    // sama, dan yang salah justru yang dipakai sebagai ringkasan.
+    const baseline = await dbAll(
+      `SELECT element_type, quantities FROM engineering_inputs
+       WHERE scope_type = 'project' AND scope_id = ? ORDER BY sort_order, id`,
+      [projectId]
+    );
     let rows: any[];
-    if (proposalId) {
-      rows = await dbAll('SELECT element_type, quantities FROM engineering_inputs WHERE project_id = ? OR proposal_id = ?', [projectId, proposalId]);
+    let sumber: string;
+    if (baseline.length > 0) {
+      rows = baseline;
+      sumber = 'project_baseline';
+    } else if (proposalId) {
+      rows = await dbAll(
+        'SELECT element_type, quantities FROM engineering_inputs WHERE proposal_id = ? ORDER BY sort_order, id',
+        [proposalId]
+      );
+      sumber = 'proposal';
     } else {
-      rows = await dbAll('SELECT element_type, quantities FROM engineering_inputs WHERE project_id = ?', [projectId]);
+      rows = [];
+      sumber = 'none';
     }
     const summary = {
       total_vol_concrete: 0,
@@ -1685,17 +1797,15 @@ router.get('/:id/mto/summary', authMiddleware, async (req: Request, res: Respons
     };
     for (const row of rows) {
       const q = typeof row.quantities === 'string' ? JSON.parse(row.quantities || '{}') : row.quantities;
-      summary.total_vol_concrete     += q.vol_concrete    || 0;
-      summary.total_vol_excavation   += q.vol_excavation  || 0;
-      summary.total_vol_backfill     += q.vol_backfill    || 0;
-      summary.total_rebar_weight_kg  += q.rebar_weight_kg || 0;
-      summary.total_formwork_area    += q.formwork_area   || 0;
-      summary.total_wall_area        += q.wall_area       || 0;
-      summary.total_plaster_area     += q.plaster_area    || 0;
-      summary.total_roof_area        += q.roof_area       || 0;
+      for (const [kunci, nilai] of Object.entries(q || {})) {
+        const ember = emberRingkasan(kunci);
+        if (ember) (summary as any)[ember] += Number(nilai) || 0;
+      }
     }
     Object.keys(summary).forEach(k => { (summary as any)[k] = +((summary as any)[k]).toFixed(2); });
-    res.json({ summary, count: rows.length });
+    // Sumbernya dinyatakan, sama seperti pada `GET /:id/mto`, supaya layar tahu
+    // angka ini kontrak atau proposal yang masih bisa berubah.
+    res.json({ summary, count: rows.length, mto_source: sumber });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
