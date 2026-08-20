@@ -208,20 +208,59 @@ echo "✅ Health check 200"
 # tidak bisa membuat koneksi database baru. Yang membedakan adalah permintaan
 # yang benar-benar menyentuh database dan memeriksa otorisasi.
 echo "🔎 Smoke test..."
-if ! node "$LOCAL_ROOT/scripts/smoke-test.js"; then
+
+# ── Gerbang rollback ────────────────────────────────────────────────────────
+#
+# Versi sebelumnya menjalankan smoke test sampai TIGA kali — sekali sebagai
+# gerbang, dua kali lagi di dalam kondisinya — lalu memutuskan hanya dari
+# JUMLAH baris "  - ". Ia tidak pernah memeriksa bahwa satu kegagalan itu
+# benar-benar kredensial master. Akibatnya, begitu password master diganti,
+# satu kegagalan LAIN apa pun (query DB, otorisasi, proteksi upload) menghasilkan
+# tepat satu bullet, masuk ke cabang "temuan lama", dan **rilis rusak dibiarkan
+# live** dengan pesan yang menenangkan tapi keliru. Kalau smoke test crash
+# sebelum sempat mencetak "Yang gagal:", cabang yang sama juga dilewati tanpa
+# rollback. Menjalankannya berulang juga membuat keputusan diambil dari
+# snapshot waktu yang berbeda dari kegagalan aslinya.
+#
+# Sekarang: DIJALANKAN SEKALI, keluaran dan exit code ditangkap, lalu identitas
+# kegagalannya diperiksa satu per satu. Pengecualian hanya berlaku bila daftar
+# kegagalannya persis satu baris DAN labelnya kredensial master yang dikenal.
+# Apa pun selain itu — termasuk keluaran yang tidak terbaca — memicu rollback.
+PENGECUALIAN_DIKENAL='kredensial master publik ditolak'
+
+set +e
+SMOKE_OUT=$(node "$LOCAL_ROOT/scripts/smoke-test.js" 2>&1)
+SMOKE_RC=$?
+set -e
+echo "$SMOKE_OUT"
+
+if [ "$SMOKE_RC" -ne 0 ]; then
   echo ""
   echo "❌ Smoke test GAGAL setelah deploy. Log terakhir:"
   ssh "$VPS" "pm2 logs $PM2_NAME --lines 20 --nostream --err 2>/dev/null | tail -20"
 
-  # Smoke test yang gagal karena kredensial master publik BUKAN kegagalan rilis
-  # ini — ia temuan lama yang menunggu pemilik server. Rollback hanya dilakukan
-  # kalau ada pemeriksaan LAIN yang jatuh.
-  if node "$LOCAL_ROOT/scripts/smoke-test.js" 2>&1 | grep -q "Yang gagal:" && \
-     [ "$(node "$LOCAL_ROOT/scripts/smoke-test.js" 2>&1 | grep -c '  - ')" -gt 1 ]; then
+  # Daftar kegagalan diambil dari keluaran yang SAMA dengan yang barusan gagal.
+  DAFTAR_GAGAL=$(printf '%s\n' "$SMOKE_OUT" | sed -n '/^Yang gagal:/,$p' | grep '^  - ' || true)
+  JML_GAGAL=$(printf '%s' "$DAFTAR_GAGAL" | grep -c '^  - ' || true)
+
+  if [ -z "$DAFTAR_GAGAL" ]; then
+    # Smoke test jatuh tanpa sempat mencetak daftarnya — crash, timeout, atau
+    # keluaran tak terbaca. Ini TIDAK boleh diperlakukan sebagai pengecualian.
+    echo "🚨 Smoke test gagal tanpa daftar kegagalan yang terbaca (exit $SMOKE_RC)."
+    echo "   Diperlakukan sebagai regresi — rilis dikembalikan."
     kembalikan_versi_lama
-  else
+    exit 1
+  fi
+
+  LAIN=$(printf '%s\n' "$DAFTAR_GAGAL" | grep -v "$PENGECUALIAN_DIKENAL" || true)
+  if [ "$JML_GAGAL" -eq 1 ] && [ -z "$LAIN" ]; then
     echo "⚠️  Satu-satunya kegagalan adalah temuan lama yang menunggu tindakan"
-    echo "   pemilik server. Rilis ini TIDAK dikembalikan."
+    echo "   pemilik server ($PENGECUALIAN_DIKENAL)."
+    echo "   Rilis ini TIDAK dikembalikan."
+  else
+    echo "🚨 Ada kegagalan di luar temuan lama — rilis dikembalikan:"
+    printf '%s\n' "${LAIN:-$DAFTAR_GAGAL}"
+    kembalikan_versi_lama
   fi
   exit 1
 fi

@@ -3822,6 +3822,64 @@ verifikasi entry point/hash sebelum upload. Tambahkan test shell dengan tiga
 kasus: master-only tidak rollback, tepat satu failure non-master rollback, dan
 smoke crash rollback; serta simulasi snapshot gagal harus abort sebelum rsync.
 
+**[DEV] DITERAPKAN untuk gerbang & snapshot; "release immutable + symlink"
+ditandai PERLU KLARIFIKASI.** Semua bukti terverifikasi di sumber.
+
+**Gerbang rollback** ([deploy-blackbox.sh](deploy-blackbox.sh)) — smoke test kini
+dijalankan **sekali**, keluaran dan exit code ditangkap, lalu identitas
+kegagalannya diperiksa. Pengecualian hanya berlaku bila daftar kegagalan persis
+satu baris **dan** labelnya kredensial master yang dikenal. Daftar kosong /
+crash / keluaran tak terbaca → rollback, bukan dilewati.
+
+Kerugian versi lama saya ukur, bukan sekadar dibaca — logika lama direplika dan
+dijalankan atas ketiga skenario Anda:
+
+| skenario | logika lama | seharusnya |
+|---|---|---|
+| tepat satu kegagalan non-master | **BIARKAN** | ROLLBACK |
+| smoke crash tanpa daftar | **BIARKAN** | ROLLBACK |
+| label mirip (`kredensial admin…`) | **BIARKAN** | ROLLBACK |
+
+Ketiganya berarti rilis rusak dibiarkan melayani pengguna, dengan pesan yang
+menenangkan tapi keliru.
+
+**Snapshot** — `|| true` yang menelan kegagalan `cp` dicabut; kini `set -e`,
+keberadaannya diverifikasi, dan deploy **abort sebelum rsync** kalau titik pulang
+gagal dibuat ("deploy tanpa jalan pulang lebih berbahaya daripada tidak deploy").
+`package.json`, `package-lock.json`, dan `database/` ikut disnapshot sesuai
+saran Anda soal drift dependency.
+
+**Temuan tambahan di luar laporan, dari kejadian nyata:** 18 Agustus 2026
+`ssh … pm2 restart` **menggantung 1 jam 15 menit**. Restartnya berhasil dan
+rilisnya sudah live, tapi skrip tak pernah sampai ke health check, smoke, maupun
+gerbang ini — persis keadaan yang paling berbahaya. Ditutup dengan `SSH_OPTS`
+(BatchMode/ConnectTimeout/ServerAlive*) dan batas keras per perintah
+(`jalankan_berbatas`, diuji memutus tepat pada batasnya: 3 detik untuk
+`sleep 30`; macOS tidak punya `timeout`). Batas terlampaui **tidak** didiamkan —
+verifikasi tetap dijalankan karena rilisnya mungkin sudah live.
+
+**Tes:** [scripts/test-deploy-gate.sh](scripts/test-deploy-gate.sh) — 15
+assertion, masuk `test:all`, tidak menyentuh produksi. Memuat ketiga kasus yang
+Anda minta plus label-mirip, master+lainnya, dan keluaran kosong. Bagian 2
+menjaga agar replikanya tidak menyimpang dari skrip aslinya (penanda kunci +
+memastikan smoke test dipanggil **sekali saja**), jadi tes ini tidak bisa
+kehilangan gunanya diam-diam.
+
+Suite penuh: **1215 lulus, 0 gagal**.
+
+**PERLU KLARIFIKASI:**
+
+- **Direktori release immutable + switch symlink `current`.** Ini mengubah tata
+  letak `/var/www/blackboxs` di server yang sedang melayani pengguna, dan nginx
+  menunjuk path itu langsung. Perubahan sebesar itu tidak pantas saya lakukan
+  tanpa ketokan Anda — apalagi mengingat pelajaran `mv /var/www/A /var/www/B`
+  yang sudah tercatat di CLAUDE.md. Mau saya siapkan?
+- **Snapshot `node_modules`.** Belum saya kerjakan: menyalinnya tiap deploy
+  menambah waktu dan ruang cukup besar. Manifest+lockfile sudah disimpan, jadi
+  pemulihan masih mungkin lewat `npm ci` — tapi itu belum otomatis di jalur
+  rollback. Mau ditambahkan, atau menunggu pola release immutable di atas yang
+  memang menyelesaikannya sekaligus?
+
 ---
 
 ## System Design Review — 16 Agustus 2026 17:23 WIB
