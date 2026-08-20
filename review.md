@@ -5859,3 +5859,1843 @@ delegasinya masih ada. Cakupannya juga diperluas ke ketiga endpoint BACA.
 > ada — kesalahan yang sama bentuknya dengan yang sedang diperbaiki: menebak ID.
 
 test:all 982 lulus / 0 gagal.
+
+---
+
+## Live Auto Review — 20 Agustus 2026 08:41 WIB
+
+**Cakupan perubahan.** Working tree dan staged diff bersih sebelum review. Sejak
+baseline review `190d3b4a` terdapat 18 commit lokal; pemeriksaan dipersempit ke
+commit yang menyentuh kontrak Proposal secara langsung: handoff Deal→PR, pintu
+MTO lewat Project, relasi Proposal↔Project/baseline, metadata/RAB, payment
+schedule, schedule ownership, CRM Client, gerbang komersial, dan smoke test
+Proposal. Build/dependency/upload/dump/artefak ignored tidak diperiksa sebagai
+source.
+
+**Verifikasi aman.** `backend: npx tsc --noEmit`, `frontend: npx vue-tsc
+--noEmit`, `bash -n deploy-blackbox.sh`, dan `node --check
+scripts/smoke-test.js` semuanya lulus. Test HTTP/DB baru tidak dijalankan karena
+suite tersebut membuat fixture/data; hasil test yang diklaim tim diperiksa dari
+source dan coverage-nya, bukan dijalankan terhadap database.
+
+### [P1 / CONTRACT-INTEGRITY — DITERAPKAN SEBAGIAN] PUT/DELETE MTO terkunci, tetapi POST Project dan QTO summary masih melewati baseline Deal
+
+**File:** [backend/src/routes/project.routes.ts:1468](backend/src/routes/project.routes.ts),
+[backend/src/routes/project.routes.ts:1546](backend/src/routes/project.routes.ts),
+[backend/src/routes/project.routes.ts:1665](backend/src/routes/project.routes.ts),
+[backend/tests/mto-link.ts:914](backend/tests/mto-link.ts)
+
+**Verifikasi klaim Diterapkan:** guard transaction + `FOR UPDATE` pada PUT dan
+DELETE memang terpasang dan test #42 memeriksa kedua method itu. Namun klaim
+“DITERAPKAN untuk mutasinya” belum utuh. `POST /projects/:id/mto` tetap mengambil
+`proposalId` dari project tertaut lalu melakukan `INSERT ... ON DUPLICATE KEY
+UPDATE` dengan `project_id` **dan** `proposal_id`, tanpa memeriksa status proposal,
+tanpa scope baseline, dan tanpa transaction/lock. Test #42 tidak pernah mencoba
+POST.
+
+Read-side juga masih bercabang: `GET /projects/:id/mto` sudah benar mendahulukan
+`scope_type='project'`, tetapi `GET /projects/:id/mto/summary` masih menjumlahkan
+semua row `WHERE project_id=? OR proposal_id=?`. Jadi QTO detail dapat membaca
+snapshot Deal, sedangkan summary membaca campuran baseline, proposal live, dan
+row hybrid hasil POST. Bahkan tanpa POST baru, query itu langsung memilih **dua
+salinan** setelah Deal: row proposal asli cocok pada `proposal_id`, sedangkan
+snapshot yang disalin saat Deal cocok pada `project_id`. QTO summary karena itu
+dapat menggandakan seluruh quantity segera setelah baseline terbentuk.
+
+**Skenario reproduksi:** jadikan proposal bermuatan MTO sebagai Deal hingga
+project/baseline terbentuk; panggil QTO summary dan bandingkan dengan agregasi
+baseline—row proposal asli dan snapshot sama-sama ikut, sehingga hasil dapat 2×.
+Lalu panggil `POST /projects/:projectId/mto` dengan tipe/nama baru; request tetap
+berhasil dan menambah campuran ketiga. Detail MTO tetap mengaku
+`project_baseline`. Ini melanggar acceptance lama bahwa POST/PUT/DELETE tidak
+boleh mengubah kontrak project tanpa change order.
+
+**Dampak:** baseline detail dan QTO agregat project dapat mempunyai volume beton,
+galian, rebar, atau formwork berbeda. Procurement/progress yang membaca summary
+dapat memakai kuantitas yang tidak pernah ada pada proposal yang disepakati.
+
+**Rekomendasi konkret:** untuk project hasil Deal, larang POST ke aggregate
+contract baseline; pindahkan manpower/execution plan ke aggregate tersendiri.
+Satukan detail dan summary pada resolver sumber yang sama (`project_baseline`,
+fallback legacy yang eksplisit), dan jangan membuat row hybrid
+`project_id+proposal_id` tanpa `scope_type/scope_id`.
+
+**Acceptance test:** POST/PUT/DELETE pada project Deal seluruhnya 409 dan nol row
+berubah/bertambah; checksum detail serta summary sebelum/sesudah percobaan sama;
+summary baseline sama dengan agregasi `mto_lines` baseline; project legacy tanpa
+snapshot memakai fallback yang dinyatakan, tidak mencampur dua scope.
+
+### [P1 / FEATURE-REGRESSION + PARTIAL-SUCCESS — DITERAPKAN SEBAGIAN] Simpan metadata bersamaan dengan submit/Deal memfinalkan status lebih dulu lalu gagal menyimpan identitas
+
+**File:** [frontend/src/views/EstimatorProposalList.vue:501](frontend/src/views/EstimatorProposalList.vue),
+[backend/src/routes/estimator.routes.ts:1708](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:2650](backend/src/routes/estimator.routes.ts),
+[backend/tests/mto-link.ts:1051](backend/tests/mto-link.ts)
+
+**Bukti:** pemisahan payload metadata dari status sudah benar, sehingga edit
+metadata saja kembali bekerja dan guard `USE_STATUS_ENDPOINT` tetap utuh. Tetapi
+ketika dua jenis field berubah, `saveEdit()` selalu mengirim transisi status
+lebih dahulu (baris 516–518), baru metadata (519–526). Transisi ke `submitted`
+atau `deal` langsung mengunci proposal; request metadata berikutnya pasti 409.
+Untuk `submitted → deal`, transaction pertama bahkan sudah membuat project dari
+client/nama lama sebelum request kedua ditolak.
+
+Test baru hanya menguji edit metadata sendiri, injeksi status, transisi sendiri,
+dan payload metadata saat proposal masih `review`. Tidak ada skenario satu kali
+klik yang mengubah metadata + `review→submitted` atau metadata +
+`submitted→deal`, padahal itulah cabang khusus yang ditambahkan frontend.
+
+**Skenario reproduksi:** buka proposal `submitted`; ubah client atau project name
+dan pilih `deal`; tekan Simpan. Status menjadi Deal dan project dibuat memakai
+metadata lama, lalu UI menampilkan error metadata `PROPOSAL_LOCKED`. Deal final
+tidak dapat diperbaiki dari modal tersebut.
+
+**Dampak:** user diberi kesan satu form adalah satu operasi, padahal terjadi
+partial success yang dapat memfinalkan kontrak/project pada client atau identitas
+lama. Ini bukan sekadar pesan error; efek irreversible sudah commit.
+
+**Rekomendasi konkret:** jangan gabungkan mutation metadata dan workflow dalam
+satu tombol tanpa kontrak atomik. Pilihan aman: simpan metadata dahulu ketika
+status asal masih editable, lalu lakukan transisi hanya setelah metadata sukses;
+untuk Deal, lebih kuat sediakan endpoint command tunggal yang mengunci row,
+memvalidasi expected status/version serta metadata, lalu membuat project dan
+status dalam transaction yang sama. UI wajib menyatakan partial outcome bila
+network gagal sesudah request pertama.
+
+**Acceptance test:** ubah metadata + `review→submitted` dan buktikan keduanya
+tersimpan; ubah metadata + `submitted→deal` dan buktikan project memakai client,
+nama, dan revision baru atau seluruh operasi ditolak tanpa perubahan; paksa
+kegagalan tahap metadata/status dan pastikan tidak ada state parsial; double-click
+tetap menghasilkan satu project.
+
+### [P1 / FINANCIAL-INTEGRITY — DITERAPKAN SEBAGIAN] Overhead kini bertahan, tetapi GRAND TOTAL RAB tetap hanya direct cost
+
+**File:** [backend/src/routes/estimator.routes.ts:2210](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:2340](backend/src/routes/estimator.routes.ts),
+[frontend/src/views/EstimatorRAB.vue:154](frontend/src/views/EstimatorRAB.vue),
+[backend/tests/rab.ts:157](backend/tests/rab.ts),
+[backend/tests/proposal-commercial.ts:162](backend/tests/proposal-commercial.ts)
+
+**Bukti:** bug konkatenasi DECIMAL sudah diperbaiki dan helper uang mencegah
+subtotal menjadi string. Patch komersial berikutnya juga membuat
+`total_project = direct_cost + overhead + risk_contingency`. Namun endpoint RAB
+masih mendefinisikan `grandTotal` sebagai jumlah `section.totalAmount` saja
+(direct lines), lalu frontend mencetak angka itu dengan label **GRAND TOTAL**.
+Beberapa baris di bawahnya layar mencetak **TOTAL PROYEK** yang memasukkan
+overhead/kontinjensi. Untuk overhead non-zero, dua total dokumen berbeda tanpa
+label bahwa yang pertama hanya biaya langsung.
+
+Coverage terpisah menutupi interaksi ini: `rab.ts` menuntut `grandTotal ==
+total_project` tetapi fixture overhead-nya nol; `proposal-commercial.ts`
+membuktikan overhead non-zero bertahan namun tidak pernah memanggil endpoint
+RAB. Jadi kedua suite dapat hijau sementara dokumen aktual tidak rekonsiliasi.
+
+**Skenario:** proposal direct Rp100 juta, overhead Rp10 juta, contingency Rp5
+juta; ubah satu qty agar recalculate berjalan. RAB menampilkan GRAND TOTAL Rp100
+juta dan TOTAL PROYEK Rp115 juta.
+
+**Dampak:** reviewer/client dapat mengutip total berbeda dari dokumen yang sama;
+margin/indirect/risk allowance dapat tertinggal ketika angka GRAND TOTAL dipakai
+untuk quotation atau contractual baseline.
+
+**Rekomendasi konkret:** definisikan kontrak istilahnya. Bila tabel hanya
+menjumlahkan line, ubah label menjadi `TOTAL BIAYA LANGSUNG`, lalu tampilkan
+breakdown overhead, contingency, discount/tax bila ada, dan satu `GRAND TOTAL`
+kanonik yang sama dengan `total_project`. Lebih aman kirim breakdown dan grand
+total final dari satu fungsi pricing server, bukan dihitung terpisah oleh view.
+
+**Acceptance test:** fixture direct + overhead + contingency non-zero;
+rekonsiliasi `sum(lines)=direct`, `direct+OH+risk=grand total=total_project`,
+semua angka dua desimal; CSV/PDF/screen memakai label dan nilai yang sama.
+
+### [P1 / AVAILABILITY + INPUT-VALIDATION] Schedule override persisten menerima durasi hingga ±99.999.999 hari dan Payment Schedule melakukan loop per bulan
+
+**File:** [backend/src/routes/estimator.routes.ts:1223](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:1357](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:1420](backend/src/routes/estimator.routes.ts),
+[backend/database/schema-baseline.sql:2970](backend/database/schema-baseline.sql),
+[backend/tests/schedule-ownership.ts:77](backend/tests/schedule-ownership.ts)
+
+**Bukti:** route PUT override menyimpan `start_day_override` dan
+`duration_days_override` apa adanya. Kolom `DECIMAL(10,2)` menerima nilai sampai
+sekitar 99.999.999 hari. Payment Schedule kemudian membentuk satu entry
+`monthMap` untuk setiap bulan dengan `while (cur < selesaiMs)`. Durasi maksimum
+berarti lebih dari tiga juta iterasi/objek bulan pada satu request. Nilai negatif
+justru diperlakukan sebagai milestone; string non-numeric jatuh sebagai error DB
+500. `start_date`, `workers_per_day`, dan `hours_per_day` juga belum mempunyai
+validasi kalender/rentang yang konsisten.
+
+**Skenario:** user terautentikasi menyimpan override durasi `99999999`, lalu
+memanggil GET payment schedule proposal tersebut. Payload berbahaya tersimpan,
+sehingga setiap pembukaan tab berikutnya dapat mengulang CPU/memory pressure
+sampai proses tidak responsif/OOM.
+
+**Dampak:** satu proposal draft dapat mengganggu availability backend monolitik,
+sementara schedule/cash curve negatif atau bertanggal invalid tetap dapat
+terlihat balance karena nilai direkonsiliasi ke periode terakhir.
+
+**Rekomendasi konkret:** validasi server-side bilangan finite dengan
+`start_day >= 0`, `duration > 0` atau milestone eksplisit, dan batas horizon
+bisnis terukur; validasi tanggal kalender ketat serta workers/hours positif dan
+bounded. Tambah `CHECK` database setelah audit data. Batasi jumlah periode yang
+boleh dibentuk dan tolak 422 sebelum alokasi bila melewati horizon.
+
+**Acceptance test:** NaN/string, negatif, zero yang bukan milestone, tanggal
+invalid, workers/hours ≤0, dan durasi di atas batas mendapat 400/422 dan tidak
+tersimpan; nilai batas sah selesai dalam waktu/memory terbatas; record lama yang
+invalid menghasilkan error domain terkontrol, bukan loop/500.
+
+### [P1 / FINANCIAL-INTEGRITY — DITERAPKAN SEBAGIAN] Gerbang submit masih meloloskan proposal campuran yang mempunyai line scope qty/harga nol
+
+**File:** [backend/src/routes/estimator.routes.ts:1153](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:1643](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:1794](backend/src/routes/estimator.routes.ts),
+[backend/tests/proposal-commercial.ts:107](backend/tests/proposal-commercial.ts)
+
+**Bukti:** validasi qty negatif/non-finite dan penawaran total nol sudah
+diterapkan. Tetapi gerbang hanya menghitung line `< 0` dan total header `> 0`;
+ia tidak menolak line non-section dengan qty nol, unit price nol, AHSP belum
+terpetakan, atau total nol ketika line lain membuat total proposal positif.
+Wizard memang membuat child yang belum matched dengan `ahsp_id=NULL`, harga 0,
+qty 0. Test komersial bahkan sudah membuat satu line qty 0 dan satu line qty 2,5
+pada proposal yang sama, tetapi tidak mencoba submit proposal campuran tersebut.
+
+**Skenario:** template berisi pekerjaan A yang sudah dipetakan/bernilai dan
+pekerjaan B yang belum punya AHSP/qty. Karena total A positif, proposal lolos
+submit lalu Deal dengan B tetap tercantum sebagai scope Rp0 tanpa penanda
+included/free/optional/excluded.
+
+**Dampak:** pekerjaan belum diestimasi dapat berubah menjadi kewajiban kontrak
+tanpa budget; project baseline positif sehingga gate tampak sehat, tetapi scope
+tertentu membawa margin leakage penuh.
+
+**Rekomendasi konkret:** sebelum issued/submitted, setiap line scope wajib
+classified: priced, explicitly included/free, optional, atau excluded. Default
+qty/harga nol dari wizard adalah `incomplete`, bukan gratis. Gerbang harus
+melaporkan ID/nama semua line incomplete dan menolak transisi; kebijakan nol
+harus eksplisit/auditabel.
+
+**Acceptance test:** proposal campuran satu line positif + satu qty/harga nol
+ditolak dengan daftar line; setelah line nol ditandai excluded/optional/included
+dengan actor/alasan yang sah, hasil mengikuti policy; Deal dan project baseline
+menyalin klasifikasi scope yang sama.
+
+### [P2 / API-CONTRACT — DITERAPKAN SEBAGIAN] CRM Client sudah membaca tabel Proposal yang benar, tetapi template masih meminta field kontrak lama
+
+**File:** [backend/src/routes/clients.routes.ts:272](backend/src/routes/clients.routes.ts),
+[frontend/src/views/ClientDetail.vue:879](frontend/src/views/ClientDetail.vue),
+[backend/tests/client-proposals.ts:89](backend/tests/client-proposals.ts)
+
+**Bukti:** sumber `client_proposals` dan seluruh record demo sudah dicabut; query
+sekarang benar memakai `proposals WHERE client_id=?`, nilai dikonversi number,
+dan isolasi antar-client diuji. Namun template tetap merender `valid_until`,
+`email_seen`, dan `preview_seen` yang tidak dikirim backend, tidak menampilkan
+`revision`/`project_name` yang justru tersedia, serta mengecek warna status
+terhadap string lama `Accepted` sementara status kanonik lowercase
+`draft/review/submitted/deal/no_deal`.
+
+Test baru hanya memeriksa bentuk backend dan mencari token mock dalam bundle;
+ia tidak memeriksa field yang benar-benar dibaca template. Akibatnya test hijau
+meski tiga kolom selalu kosong dan status Deal tidak dikenali sebagai accepted.
+
+**Dampak:** source of truth sudah satu, tetapi sales masih melihat tabel proposal
+yang sebagian kosong/tidak bermakna dan tidak dapat membedakan revision yang
+dikirim/Deal dengan styling status lama.
+
+**Rekomendasi/acceptance:** tetapkan DTO Proposal CRM eksplisit dan selaraskan
+kolom dengan kemampuan yang memang ada; field issuance/view tracking yang belum
+dimodelkan harus ditandai `belum tersedia` atau kolomnya dihapus, bukan kosong.
+Contract test harus membaca binding template (seperti test Proposal List), lalu
+membuktikan nomor, project, revision, tanggal, amount, dan semua status kanonik
+dirender; client kosong tetap benar-benar empty.
+
+### Status verifikasi perubahan Proposal lainnya
+
+- **DITERAPKAN:** perbaikan inti Payment Schedule (`total_project`, interval
+  `[start,end)`, milestone, rekonsiliasi), ownership/status lock/FK schedule,
+  CAS status terminal handoff + unique `source_proposal_id`, sinkronisasi relasi
+  Proposal↔Project untuk row konsisten, dan prioritas GET MTO ke baseline project.
+  Status ini hanya untuk klaim sempit tersebut; gap worker recovery/snapshot
+  komposisi yang sudah tercatat sebelumnya tetap terbuka dan tidak diduplikasi.
+- **DITERAPKAN:** smoke test baru memang mencakup route Proposal yang disebut dan
+  seluruh request-nya read-only/berhenti di auth. Ia hanya membuktikan route ada
+  dan terjaga, sesuai komentar source—bukan query/angka benar.
+- **DITERAPKAN SEBAGIAN:** finding release/rollback 16 Agustus 17:04. Commit
+  `a3094759` menambahkan timeout dan membuat kegagalan snapshot terlihat, tetapi
+  gate masih menganggap setiap tepat satu failure sebagai masalah master
+  ([deploy-blackbox.sh:219](deploy-blackbox.sh)); package/lock/database yang
+  disnapshot juga belum dipulihkan oleh `kembalikan_versi_lama()`. Tidak dibuat
+  finding duplikat karena butir P1 tersebut masih terbuka.
+
+---
+
+## System Design Review — Proposal — 20 Agustus 2026 08:49 WIB
+
+**Sub-area tunggal:** kelengkapan paket dokumen kontraktual Proposal—scope,
+commercial terms, validity, payment milestone, attachment, dan output. Tidak ada
+perubahan source/staged/commit Proposal sejak review 08:41 WIB; `review.md`
+diabaikan sebagai artefak reviewer.
+
+### [DESIGN-GAP — prioritas bisnis tinggi] “Submit to Client” belum menerbitkan paket penawaran yang dapat dikirim, disetujui, dan dijadikan baseline kontrak
+
+**Kemampuan saat ini.** Estimator sudah mempunyai header Proposal, item RAB/MTO,
+cost summary, schedule, serta cash curve bulanan. RAB dapat dicetak melalui
+`window.print()`; ekspor CSV/Excel sengaja tetap disembunyikan sesuai keputusan
+13 Agustus karena formatnya belum siap
+([EstimatorRAB.vue:13](frontend/src/views/EstimatorRAB.vue),
+[EstimatorRAB.vue:21](frontend/src/views/EstimatorRAB.vue),
+[EstimatorRAB.vue:262](frontend/src/views/EstimatorRAB.vue)). Kemampuan ini
+adalah baseline minimum dan tidak boleh dicabut.
+
+**Proses yang putus dan bukti source.** Tabel `proposals` hanya menyimpan
+identitas, status, angka biaya, dan timestamp workflow; tidak ada validity date,
+currency/tax/discount treatment, inclusions/exclusions/assumptions, terms and
+conditions, payment terms/milestones, attachment, atau issued-document reference
+([schema-baseline.sql:2240](backend/database/schema-baseline.sql)). Form create/
+edit dan DTO editor juga hanya membawa project, client, lokasi, revision, status,
+dan total ([EstimatorProposalList.vue:359](frontend/src/views/EstimatorProposalList.vue),
+[EstimatorProposalEditor.vue:1198](frontend/src/views/EstimatorProposalEditor.vue)).
+Empat tab editor terbatas pada RAB, MTO, Master Schedule, dan Payment Schedule
+([EstimatorProposalEditor.vue:113](frontend/src/views/EstimatorProposalEditor.vue)).
+
+`Payment Schedule` bukan milestone pembayaran kontraktual: endpoint membagi
+`total_project` ke bulan berdasarkan durasi pekerjaan/AHSP dan bahkan
+memperlakukan item tanpa durasi sebagai “milestone” teknis
+([estimator.routes.ts:1280](backend/src/routes/estimator.routes.ts),
+[estimator.routes.ts:1404](backend/src/routes/estimator.routes.ts)). Tidak ada
+trigger komersial seperti down payment, approval drawing, delivery, progress
+certificate, retention, atau final acceptance. Document Centre hanya dapat
+menautkan file ke `project_id`, tidak mempunyai `proposal_id` atau revision
+Proposal ([schema-baseline.sql:1135](backend/database/schema-baseline.sql),
+[documents.routes.ts:71](backend/src/routes/documents.routes.ts)). Akhirnya tombol
+`Submit to Client` hanya memanggil perubahan status; tidak merender, menyimpan,
+atau mengirim artefak penawaran apa pun
+([EstimatorProposalEditor.vue:73](frontend/src/views/EstimatorProposalEditor.vue),
+[EstimatorProposalEditor.vue:1794](frontend/src/views/EstimatorProposalEditor.vue)).
+
+**Dampak bisnis EPC.** Status `submitted` dapat tercatat walaupun sistem belum
+memiliki dokumen yang layak dikirim dan tidak dapat membuktikan apa yang diterima
+client. RAB print dari browser dapat berbeda antarwaktu/perangkat dan tidak
+membawa batas berlaku, scope carve-out, kewajiban pembayaran, maupun lampiran
+teknis. “Deal” kemudian dapat membentuk project dari angka biaya, tetapi tidak
+menyalin kewajiban komersial seperti DP/retention, inclusions/exclusions, atau
+daftar deliverable; ruang sengketa scope, cash-flow, pajak, dan acceptance tetap
+terbuka meskipun status terlihat final.
+
+**Target design.** Melengkapi revision ledger yang sudah direkomendasikan—bukan
+membuat sumber kebenaran ketiga—dengan `commercial_package` per immutable
+revision: validity/effective window, currency dan FX policy, tax/discount,
+inclusions, exclusions, assumptions/deviations, configurable terms, serta
+`payment_milestones` yang mempunyai urutan, trigger/evidence, persentase atau
+nominal, tax basis, retention, dan total rekonsiliasi. Attachment harus menunjuk
+revision Proposal yang tepat dan menyimpan checksum/metadata. Command `issue`
+harus memvalidasi completeness lalu menghasilkan artefak server-side yang
+stabil (minimal PDF), menyimpan checksum/template version, actor/waktu, dan
+menautkan status `submitted` ke artifact ID tersebut. Cash curve operasional
+tetap dipertahankan sebagai schedule forecast dan tidak disamakan diam-diam
+dengan milestone invoice.
+
+**Dependensi/migrasi.** Bergantung pada revision snapshot/audit/approval yang
+sudah tercatat, pricing breakdown kanonik, klasifikasi line
+priced/included/optional/excluded, serta registry dokumen kanonik. Proposal lama
+dibackfill sebagai `legacy commercial terms unavailable`; jangan mengarang
+validity/terms/evidence. Tampilan RAB print dan endpoint lama tetap tersedia
+selama adapter baru belum mencapai feature parity. Ekspor CSV yang saat ini
+disembunyikan tidak boleh dinyalakan kembali hanya sebagai pengganti PDF
+terkontrol.
+
+**Fase/prioritas.** Fase 1 (tinggi): model commercial terms + milestone +
+attachment revision, completeness gate, dan preview; fase 2: PDF deterministik,
+issue/transmittal/evidence; fase 3: accepted package menjadi input contract,
+invoice schedule, dan change order. Prioritas ini tinggi karena langsung
+menentukan apa yang perusahaan janjikan dan tagihkan, tetapi bukan P0/P1 bug
+source pada patch saat ini.
+
+**Acceptance criteria terukur:**
+
+1. `issue/submitted` ditolak dengan daftar field bila validity, klasifikasi semua
+   scope line, terms wajib, atau payment milestone belum lengkap; kegagalan tidak
+   mengubah status.
+2. Total milestone persentase/nominal rekonsiliasi tepat ke grand total sesuai
+   tax/retention policy; cash curve yang berbeda tetap diberi label forecast.
+3. PDF preview dan issued artifact untuk revision yang sama mempunyai checksum
+   stabil dan angka/terms/attachment manifest identik; perubahan sesudah issue
+   wajib membuat revision/artifact baru tanpa mengubah file lama.
+4. Setiap attachment terikat ke Proposal + revision, terlindungi auth, dan
+   tercantum pada manifest; attachment revision lain tidak ikut terbawa.
+5. Status `submitted` selalu mempunyai `issued_artifact_id`, actor, timestamp,
+   recipient/transmittal evidence; `deal` selalu menunjuk artifact/revision yang
+   diterima.
+6. Handoff ke contract/project menyalin snapshot scope, terms, milestone, dan
+   artifact checksum yang sama; retry idempoten dan reconciliation dapat
+   membuktikan tidak ada komponen yang hilang.
+
+---
+
+## Live Auto Review — 20 Agustus 2026 08:51 WIB
+
+**Sub-area tunggal:** auth, RBAC, ownership, client/project isolation, approval
+actor, dan separation of duties Proposal. Tidak ada perubahan source/staged/
+commit Proposal sejak review 08:49 WIB; `review.md` diabaikan sebagai artefak
+reviewer.
+
+### [P1 / AUTHORIZATION + CONFIDENTIALITY] Semua user desktop terautentikasi dapat membaca seluruh harga Proposal, mengubah RAB/MTO, men-submit, membuat Deal/project, dan me-retry handoff Procurement tanpa permission
+
+**File:** [backend/src/routes/estimator.routes.ts:1](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:751](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:2650](backend/src/routes/estimator.routes.ts),
+[backend/src/config/database.ts:1664](backend/src/config/database.ts),
+[frontend/src/router/index.ts:404](frontend/src/router/index.ts)
+
+**Bukti:** `estimator.routes.ts` hanya mengimpor `authMiddleware`; pencarian
+source tidak menemukan satu pun `requirePermission` di file tersebut. Seluruh 29
+route `/proposals...`—list/detail, RAB/MTO/schedule, create/edit/delete, status,
+Deal, dan retry PR—karena itu menerima setiap JWT desktop yang sah. Endpoint
+list bahkan `SELECT p.*` tanpa owner/client/project scope sehingga seluruh nilai
+biaya dan identitas client dikirim ke pemanggil
+([estimator.routes.ts:751](backend/src/routes/estimator.routes.ts)). Pada transisi
+Deal, actor mana pun yang lolos autentikasi langsung ditulis menjadi
+`approved_by` lalu project dibuat; tidak ada pemeriksaan permission, creator,
+owner, approver policy, atau SoD
+([estimator.routes.ts:2650](backend/src/routes/estimator.routes.ts),
+[estimator.routes.ts:2702](backend/src/routes/estimator.routes.ts)).
+
+Ini bukan karena permission belum tersedia: katalog boot sudah mempunyai
+`estimator.estimator-proposals.{view,create,edit,delete,approve,export}`
+([database.ts:1664](backend/src/config/database.ts)). Menu memang disembunyikan
+berdasarkan resource tersebut, tetapi ketiga route frontend Proposal hanya
+memeriksa `requiresAuth`; URL/API langsung tetap terbuka
+([Layout.vue:341](frontend/src/components/Layout.vue),
+[router/index.ts:404](frontend/src/router/index.ts)). Jadi kontrol UI tidak
+menjadi authorization boundary.
+
+**Skenario reproduksi terverifikasi dari kontrak middleware:** buat/login user
+desktop aktif yang tidak mempunyai permission Estimator—misalnya role HR atau
+Warehouse. Dengan token itu panggil `GET /api/estimator/proposals`: source tidak
+memiliki cabang yang dapat menghasilkan 403 dan akan mengembalikan semua header
+serta total. Ambil satu ID lalu panggil PUT item/MTO/status atau POST
+`/pr-handoff/retry`; setiap handler hanya mensyaratkan token, sehingga operasi
+masuk ke query/transaction bisnis. UI yang tidak menampilkan menu tidak
+menghalangi request langsung. HTTP reproduksi tidak dijalankan reviewer karena
+mutasi Proposal/project/PR dilarang pada run read-only ini.
+
+**Dampak:** data tender, client, harga satuan, overhead, total penawaran, serta
+margin basis bocor lintas fungsi kerja. User kantor yang tidak diberi mandat
+estimating dapat mengubah scope/nilai, menghapus draft/review, mengirim proposal,
+menandai Deal, membuat project, dan memicu PR. Kolom `approved_by` lalu memberi
+kesan approval yang sah padahal actor hanya terbukti berhasil login. Ini adalah
+eskalasi wewenang bisnis dengan efek finansial dan contractual, bukan sekadar
+menu visibility.
+
+**Rekomendasi konkret:** petakan route ke permission yang sudah ada—read ke
+`.view`, create ke `.create`, mutasi draft ke `.edit`, delete ke `.delete`, dan
+transition internal/submit/Deal/retry ke `.approve` atau permission transition
+yang dimigrasikan secara eksplisit. Terapkan pemeriksaan backend pada setiap
+route; route guard/menu hanya UX. Definisikan scope akses berdasarkan keputusan
+bisnis (global estimator team, creator/team, client, atau project) dan gunakan
+filter yang sama pada list serta detail/child. Actor selalu dari token. Deal
+wajib mengikuti approver policy dan SoD; jangan menyamakan orang yang menekan
+tombol dengan approver tanpa rule.
+
+Sebelum enforcement, audit mapping role produksi seperti peringatan AGENTS.md:
+jangan langsung memasang permission lalu mencabut akses user aktif yang selama
+ini bergantung pada `user_level`. Buat migration/mapping, verifikasi role aktif,
+baru aktifkan guard dengan compatibility window dan audit denied request.
+
+**Acceptance test:**
+
+1. Token desktop tanpa permission mendapat 403 pada list/detail/RAB/MTO/schedule
+   dan seluruh mutation; response tidak membocorkan keberadaan ID/total.
+2. `.view` hanya dapat membaca scope yang diizinkan dan tetap 403 pada
+   create/edit/delete/status/retry; ID Proposal di luar scope tidak bisa dibaca
+   lewat child endpoint.
+3. `.edit` dapat mengubah draft yang menjadi scope-nya, tetapi tidak dapat
+   submit/Deal atau mengubah proposal submitted; `.delete` dan `.approve`
+   dipisahkan dan diuji sendiri.
+4. Creator tanpa authority approval tidak dapat self-approve/Deal; approver sah
+   tercatat dari token dan policy/limit yang berlaku.
+5. User dengan mapping role produksi yang sah tetap memiliki parity setelah
+   migrasi; pencabutan permission berlaku pada request berikutnya tanpa login
+   ulang.
+6. Race perubahan permission/ownership versus transition berakhir atomik: Deal,
+   project, dan PR tidak tercipta bila authority sudah dicabut atau scope telah
+   berpindah.
+
+---
+
+## Live Auto Review — 20 Agustus 2026 08:54 WIB
+
+**Sub-area tunggal:** transaction boundary, partial success, idempotency, dan
+concurrency pada create Proposal dari wizard. Tidak ada perubahan source/staged/
+commit Proposal sejak review 08:51 WIB; `review.md` diabaikan sebagai artefak
+reviewer.
+
+### [P2 / PARTIAL-SUCCESS + IDEMPOTENCY — DITERAPKAN SEBAGIAN] Transaction create hanya mencakup header/template; empat zona MTO warehouse ditulis sebagai request terpisah dan retry membuat Proposal baru
+
+**File:** [frontend/src/views/EstimatorProposalList.vue:626](frontend/src/views/EstimatorProposalList.vue),
+[frontend/src/components/ProposalTemplateWizard.vue:349](frontend/src/components/ProposalTemplateWizard.vue),
+[backend/src/routes/estimator.routes.ts:1578](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:3263](backend/src/routes/estimator.routes.ts)
+
+**Verifikasi klaim Diterapkan:** perbaikan DR-P1-05 memang membuat nomor, header,
+section, dan seluruh child template atomik dalam satu transaction backend
+([estimator.routes.ts:1590](backend/src/routes/estimator.routes.ts)). Namun batas
+operasi yang dilihat pengguna lebih luas. Untuk wizard gudang, komponen
+menghasilkan empat engineering zone—foundation, column, roof, slab
+([ProposalTemplateWizard.vue:349](frontend/src/components/ProposalTemplateWizard.vue)).
+Frontend pertama membuat Proposal melalui `POST /proposals`, menunggu commit,
+lalu melakukan empat `POST /proposals/:id/mto` secara serial
+([EstimatorProposalList.vue:638](frontend/src/views/EstimatorProposalList.vue)).
+Setiap MTO mempunyai transaction sendiri; tidak ada command create aggregate,
+idempotency key, completion marker, atau compensating/recovery flow.
+
+Tombol `Create & Open` juga tidak mempunyai state loading/disabled. Dua submit
+cepat dapat mengirim dua `POST /proposals` yang keduanya valid dan mendapat nomor
+unik—counter atomic justru memastikan kedua duplikat berhasil. Bila zona MTO
+kedua/ketiga gagal karena validasi, timeout, atau putus koneksi, header/template
+dan zona sebelumnya sudah commit. Catch hanya menampilkan `Failed to create
+proposal`, modal tetap terbuka, dan ID Proposal yang sebenarnya sudah dibuat
+tidak disimpan/ditawarkan untuk recovery. Menekan tombol lagi membuat Proposal
+baru, bukan melanjutkan ID lama.
+
+**Skenario reproduksi/failure:** gunakan wizard Civil Structure → Warehouse,
+biarkan foundation valid tetapi buat parameter column/roof berikutnya ditolak
+422 atau putuskan koneksi setelah POST header sukses. List database sekarang
+mempunyai draft + foundation MTO, sementara UI mengaku create gagal. Tekan
+`Create & Open` lagi; lahir nomor Proposal kedua dan loop empat zona berjalan
+ulang pada aggregate baru. Tidak ada unique business/idempotency key yang dapat
+mengaitkan kedua attempt. Reproduksi HTTP tidak dijalankan reviewer karena akan
+membuat fixture Proposal/MTO.
+
+**Dampak:** daftar Proposal terisi duplikat dan draft parsial yang terlihat sah;
+operator tidak mengetahui mana attempt kanonik. RAB/template dapat ada sementara
+MTO teknis hanya sebagian, sehingga estimasi volume gudang tidak lengkap dan
+reconciliation sulit. Masalah ini belum langsung P1 karena status masih draft
+dan dapat dikoreksi/dihapus, tetapi menjadi risiko finansial bila draft parsial
+lolos gerbang scope yang saat ini juga belum memeriksa completeness MTO.
+
+**Rekomendasi konkret:** jadikan create wizard satu command aggregate backend
+yang menerima header, template, dan seluruh MTO zones; validasi semua input
+lebih dulu lalu tulis semuanya dalam satu transaction. Sertakan client-generated
+idempotency key dengan unique constraint dan response replay sehingga retry
+setelah timeout mengembalikan Proposal yang sama. Jika rollout bertahap masih
+memerlukan endpoint lama, simpan draft-import job dengan status
+`pending/complete/failed`, ID Proposal setelah langkah pertama, resume per-zone
+idempoten, serta UI recovery yang jujur. Disable submit selama request aktif,
+tetapi jangan menganggap itu pengganti idempotency server.
+
+**Acceptance test:**
+
+1. Paksa kegagalan pada MTO zone ke-2/ke-4 dan buktikan nol header/item/MTO
+   tersisa, atau job eksplisit `failed` dapat di-resume pada Proposal ID yang
+   sama tanpa data parsial tersembunyi.
+2. Dua request paralel dengan idempotency key sama menghasilkan satu nomor,
+   satu Proposal, satu set template, dan tepat empat zone; response ID identik.
+3. Retry setelah server commit tetapi response sengaja diputus mengembalikan
+   aggregate yang sama, bukan membuat nomor berikutnya.
+4. Key berbeda tetap dapat membuat dua Proposal secara sah; collision/replay
+   dicatat dengan actor dan payload hash agar key tidak dapat dipakai untuk
+   payload berbeda.
+5. UI men-disable tombol selama submit, menyimpan ID/recovery status bila flow
+   bertahap, serta membedakan “belum dibuat”, “sudah dibuat tetapi MTO gagal”,
+   dan “selesai”.
+6. Completeness gate submit membuktikan seluruh MTO zone yang diwajibkan template
+   tersedia dan rekonsiliasi dengan RAB sebelum Proposal boleh diterbitkan.
+
+---
+
+## Live Auto Review — 20 Agustus 2026 08:57 WIB
+
+**Sub-area tunggal:** handoff Deal ke contract/project baseline—khusus integritas
+nilai kontrak versus budget project sesudah handoff. Tidak ada perubahan source/
+staged/commit Proposal sejak review 08:54 WIB; `review.md` diabaikan sebagai
+artefak reviewer.
+
+### [P1 / CONTRACT-INTEGRITY + FINANCIAL-INTEGRITY — DITERAPKAN SEBAGIAN] Deal menyalin total Proposal ke `budget`, tetapi layar Project dapat menimpa budget/client itu langsung tanpa change order dan membuat dua baseline berbeda
+
+**File:** [backend/src/routes/estimator.routes.ts:2740](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/project.routes.ts:125](backend/src/routes/project.routes.ts),
+[backend/src/routes/project.routes.ts:771](backend/src/routes/project.routes.ts),
+[backend/src/routes/project.routes.ts:1047](backend/src/routes/project.routes.ts),
+[frontend/src/views/ProjectDetail.vue:314](frontend/src/views/ProjectDetail.vue)
+
+**Verifikasi klaim Diterapkan:** transisi Deal sudah atomik untuk status,
+pembuatan `client_projects`, link dua arah, dan snapshot MTO; `budget` awal memang
+diisi dari `proposal.total_project`
+([estimator.routes.ts:2740](backend/src/routes/estimator.routes.ts)). Namun
+`client_projects` hanya mempunyai satu kolom `budget`, tanpa contract-baseline
+version/source/checksum ([schema-baseline.sql:821](backend/database/schema-baseline.sql)).
+Form edit Project tetap menampilkan `Budget / Price` dan `Client` sebagai input
+biasa, lalu selalu mengirim keduanya ke `PUT /projects/:id`
+([ProjectDetail.vue:308](frontend/src/views/ProjectDetail.vue),
+[ProjectDetail.vue:630](frontend/src/views/ProjectDetail.vue)).
+
+Handler update tidak membaca `proposal_id`, tidak memeriksa bahwa project berasal
+dari Proposal Deal, tidak mengunci row, dan tidak mewajibkan change order/
+approval. Ia langsung menulis `budget = COALESCE(input,budget)` serta `client_id`
+dari body ([project.routes.ts:125](backend/src/routes/project.routes.ts)). Karena
+route hanya memakai `authMiddleware`, setiap user desktop juga dapat melakukan
+mutasi ini melalui API.
+
+Setelah edit, dua layar memakai sumber berbeda: Project RAB tetap membaca
+`proposals.total_project` dan `proposal_items` dari Proposal Deal
+([project.routes.ts:1047](backend/src/routes/project.routes.ts)), sedangkan cost
+summary membaca `client_projects.budget` untuk remaining/usage percentage
+([project.routes.ts:771](backend/src/routes/project.routes.ts)). Jadi contract RAB
+dapat tetap Rp100 juta sementara dashboard kontrol menghitung budget Rp150 juta;
+client project juga dapat berbeda dari client Proposal yang disepakati.
+
+**Skenario reproduksi:** jadikan Proposal Rp100 juta sebagai Deal hingga project
+terbentuk; buka Edit Project, ubah Budget menjadi Rp150 juta dan Client menjadi
+client lain, lalu Simpan. Request sukses. `GET /projects/:id/rab` tetap membawa
+Proposal/client/value asal, sedangkan detail/cost-summary memakai client dan
+budget baru. Tidak ada revision/change-order/audit evidence yang menjelaskan
+selisih Rp50 juta. Reproduksi HTTP tidak dijalankan reviewer karena dilarang
+mengubah project/data.
+
+**Dampak:** nilai kontrak awal yang baru saja dibentuk secara atomik kehilangan
+otoritas segera setelah handoff. Margin, remaining budget, usage %, procurement
+control, reporting client, dan eventual billing dapat memakai angka/scope client
+yang tidak sama dengan Proposal Deal. Perubahan terlihat seperti edit metadata
+biasa, bukan variasi komersial yang disetujui, sehingga traceability sengketa dan
+rekonsiliasi manajemen hilang.
+
+**Rekomendasi konkret:** pisahkan immutable `original_contract_value`/
+`accepted_revision_id` dari `current_control_budget`. Project hasil Deal tidak
+boleh mengubah client atau original value lewat generic update; perubahan
+komersial harus melalui approved change order/rebaseline yang menyimpan delta,
+alasan, actor, evidence, effective date, dan baseline version. Current budget
+diturunkan dari original + approved changes, bukan angka bebas. Generic budget
+edit dapat dipertahankan untuk project legacy/manual yang belum punya Proposal,
+dengan permission dan audit yang sesuai. Cost summary dan RAB harus menerima
+baseline ID yang sama serta memaparkan original/approved change/current secara
+jelas.
+
+**Acceptance test:**
+
+1. Project hasil Deal menolak PUT budget/client langsung dengan 409/403 dan
+   tidak mengubah satu kolom pun; edit metadata non-komersial yang diizinkan
+   tetap bekerja.
+2. Project manual tanpa Proposal mempertahankan kemampuan edit budget lama
+   sesuai permission—tidak ada FEATURE-REGRESSION.
+3. Approved CO +Rp50 juta menghasilkan original Rp100 juta, approved changes
+   Rp50 juta, current Rp150 juta; rejected/draft CO tidak memengaruhi current.
+4. RAB, project detail, cost-summary, margin/reporting, dan procurement control
+   seluruhnya menyebut baseline version yang sama dan rekonsiliasi ke nilai yang
+   sama.
+5. Perubahan client pada project Deal hanya melalui transfer/novation workflow
+   eksplisit dengan approval/evidence; Proposal accepted lama tetap menunjuk
+   client asal.
+6. Dua CO paralel memakai optimistic/row lock dan tidak kehilangan delta;
+   history original serta setiap baseline version tetap dapat direkonstruksi.
+
+---
+
+## Live Auto Review — 20 Agustus 2026 09:00 WIB
+
+**Sub-area tunggal:** hierarchy item/section dan semantik penghapusan scope RAB
+Proposal. Tidak ada perubahan source/staged/commit Proposal sejak review 08:57
+WIB; `review.md` diabaikan sebagai artefak reviewer.
+
+### [P2 / DATA-INTEGRITY + UX-CONTRACT] Tombol “Hapus section” hanya menghapus baris judul; seluruh child scope dan nilainya tetap berada di Proposal
+
+**File:** [frontend/src/views/EstimatorProposalEditor.vue:170](frontend/src/views/EstimatorProposalEditor.vue),
+[frontend/src/views/EstimatorProposalEditor.vue:1782](frontend/src/views/EstimatorProposalEditor.vue),
+[backend/src/routes/estimator.routes.ts:2086](backend/src/routes/estimator.routes.ts),
+[backend/database/schema-baseline.sql:2205](backend/database/schema-baseline.sql)
+
+**Bukti:** template membuat satu row `is_section=1` lalu child normal yang hanya
+berbagi angka `section_order`; schema tidak mempunyai `parent_item_id` atau FK
+child→section ([schema-baseline.sql:2205](backend/database/schema-baseline.sql),
+[estimator.routes.ts:1630](backend/src/routes/estimator.routes.ts)). Di editor,
+ikon sampah pada header diberi title **Hapus section**, tetapi memanggil fungsi
+`deleteItem(item.id)` yang sama dengan line biasa
+([EstimatorProposalEditor.vue:170](frontend/src/views/EstimatorProposalEditor.vue),
+[EstimatorProposalEditor.vue:1782](frontend/src/views/EstimatorProposalEditor.vue)).
+Backend hanya menjalankan `DELETE ... WHERE id=? AND proposal_id=?`; tidak
+membaca `is_section`, `section_order`, maupun child terkait
+([estimator.routes.ts:2086](backend/src/routes/estimator.routes.ts)).
+
+Sesudah header hilang, semua child tetap dikembalikan oleh GET items, tetap
+masuk `recalculateProposal`, gerbang komersial, RAB, dan Deal. Endpoint RAB juga
+tidak mengembalikan `is_section/section_order`, sehingga struktur template yang
+hilang tidak dapat direkonstruksi oleh dokumen RAB
+([estimator.routes.ts:2239](backend/src/routes/estimator.routes.ts)). Jadi aksi UI
+yang secara bahasa berarti menghapus satu work package sebenarnya hanya
+menghapus label nol rupiah; scope dan total kontrak tidak berubah.
+
+**Skenario reproduksi:** buat Proposal dari template dengan satu section dan
+beberapa child berharga; catat total, tekan ikon `Hapus section`, konfirmasi, lalu
+reload. Header lenyap tetapi child serta total tetap sama dan Proposal masih
+dapat disubmit/Deal. Jika user mengira paket itu sudah dibuang, kewajibannya
+tetap masuk kontrak tanpa label kelompok. Reproduksi HTTP/UI tidak dijalankan
+reviewer karena akan membuat/mengubah fixture.
+
+**Dampak:** hierarki BOQ/RAB rusak, nomor/kelompok scope menjadi ambigu, dan
+operator dapat mengirim pekerjaan yang diyakininya sudah dihapus. Subtotal per
+section, inclusion/exclusion, schedule grouping, serta handoff WBS tidak lagi
+memiliki parent yang stabil. Ini P2 karena child tetap terlihat dan dapat
+dikoreksi sebelum submit, tetapi dapat berubah menjadi leakage kontrak bila
+ketidaksesuaian tidak disadari.
+
+**Rekomendasi konkret:** tetapkan semantik eksplisit. Jika “hapus section” berarti
+hapus work package, backend harus lock Proposal lalu menghapus header dan semua
+child milik section dalam satu transaction, menghitung ulang total, serta
+menolak ambiguity/cross-section. Lebih kuat migrasikan hierarchy ke stable
+`parent_item_id`/`section_id` dengan FK dan urutan sibling; `section_order`
+dipertahankan sementara sebagai compatibility field. Jika kebutuhan sebenarnya
+hanya menghapus label, ubah teks aksi menjadi “hapus header saja”, tampilkan
+peringatan bahwa N child tetap ada, dan sediakan operasi terpisah untuk section
+beserta isi. Issued revision harus menyimpan tree, bukan mengandalkan posisi row.
+
+**Acceptance test:**
+
+1. Hapus section berisi N child menghapus tepat header + N child (atau meminta
+   pilihan header-only versus cascade yang jelas), lalu direct/grand total turun
+   sesuai jumlah child dalam transaction yang sama.
+2. Failure injection setelah beberapa child tidak meninggalkan penghapusan
+   parsial; seluruh hierarchy dan total rollback.
+3. Child section A tidak ikut terhapus saat section B dihapus walau order/name
+   mirip; affected-row count diverifikasi server.
+4. Section submitted/deal tetap 409 dan checksum/tree tidak berubah.
+5. RAB/schedule/PDF mengembalikan dan merender hierarchy yang sama; subtotal
+   section rekonsiliasi ke child dan grand total.
+6. Migrasi row lama memetakan child ke parent secara deterministik, melaporkan
+   orphan/ambiguity untuk koreksi, dan tidak mengubah total sebelum/sesudah.
+
+---
+
+## Live Auto Review — 20 Agustus 2026 09:03 WIB
+
+**Sub-area tunggal:** concurrency, transaction boundary, dan optimistic locking
+pengeditan item Proposal. Tidak ada perubahan source/staged/commit Proposal sejak
+review 09:00 WIB; `review.md` diabaikan sebagai artefak reviewer.
+
+### [P1 / FINANCIAL-INTEGRITY + CONCURRENCY] Dua edit paralel quantity dan AHSP dapat meninggalkan total baris yang tidak cocok dengan harga snapshot, tetapi tetap lolos submit/Deal
+
+**File:** [backend/src/routes/estimator.routes.ts:1967](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:1995](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:2022](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:2065](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:1148](backend/src/routes/estimator.routes.ts),
+[frontend/src/views/EstimatorProposalEditor.vue:1739](frontend/src/views/EstimatorProposalEditor.vue)
+
+**Bukti:** handler `PUT /proposals/:proposalId/items/:itemId` membaca
+`unit_price_snapshot` item di luar transaction
+([estimator.routes.ts:1995](backend/src/routes/estimator.routes.ts)). Saat AHSP
+diganti, handler juga membaca quantity lama di luar transaction
+([estimator.routes.ts:2022](backend/src/routes/estimator.routes.ts)), kemudian
+menghitung `total_price` dari snapshot tersebut. Lock Proposal baru diambil
+setelah seluruh derived update selesai disusun
+([estimator.routes.ts:2065](backend/src/routes/estimator.routes.ts)); item sendiri
+tidak pernah dibaca `FOR UPDATE`. Dengan demikian proposal-level lock hanya
+menyerialkan write, bukan state yang dipakai untuk menghitung write.
+
+Frontend mengirim patch quantity atau AHSP tanpa expected `version`/`updated_at`
+([EstimatorProposalEditor.vue:1739](frontend/src/views/EstimatorProposalEditor.vue)),
+dan schema item tidak mempunyai revision counter. Lebih jauh, gerbang komersial
+hanya memeriksa nilai negatif serta rekonsiliasi header terhadap
+`SUM(total_price)`; tidak ada invariant `total_price = quantity ×
+unit_price_snapshot` ([estimator.routes.ts:1148](backend/src/routes/estimator.routes.ts)).
+`recalculateProposal` juga hanya menjumlahkan `total_price`, bukan menghitung
+ulang perkalian baris. Karena itu angka hasil race dapat menjadi source of truth
+header dan lolos menuju submitted/deal.
+
+**Skenario race terverifikasi dari alur kode:** request A mengganti AHSP dan
+membaca quantity lama `10`; request B mengganti quantity menjadi `20` dan membaca
+unit price lama `P1`. Keduanya menghitung sebelum lock. Jika A commit lalu B,
+hasil akhir dapat berupa AHSP/harga baru `P2`, quantity `20`, tetapi total
+`20 × P1`. Jika B commit lalu A, hasil dapat berupa quantity `20`, harga `P2`,
+tetapi total `10 × P2`. Jadi kedua urutan serial write tetap bisa menghasilkan
+baris inkonsisten. Reproduksi HTTP tidak dijalankan reviewer karena akan
+mengubah fixture/data.
+
+**Dampak:** direct cost, markup/overhead, grand total Proposal, nilai Deal, dan
+project budget contractual baseline dapat salah tanpa indikator error. Dua user
+estimator, autosave/tab ganda, atau retry lambat cukup untuk memicunya; proposal
+masih dapat disubmit karena validator menganggap `total_price` tersimpan sebagai
+angka sah. Severity P1 karena korupsi finansial dapat masuk baseline kontrak dan
+tidak dijamin terlihat dari UI.
+
+**Rekomendasi konkret:** mulai transaction dan lock Proposal sebelum membaca
+state komersial, lalu `SELECT` item target `FOR UPDATE`. Bentuk satu final state
+dari row terkunci + request (final quantity, AHSP, unit price snapshot), hitung
+total dengan kebijakan decimal/rounding server, dan tulis seluruh kolom terkait
+sekali. Tambahkan optimistic version/expected `updated_at`; balas 409 untuk stale
+edit agar klien reload/merge, bukan silently overwrite. Tegakkan invariant line
+di write path dan ulangi pada gerbang submit/Deal; jangan mengandalkan kalkulasi
+lokal frontend atau `SUM(total_price)` saja.
+
+**Acceptance test:**
+
+1. Dua request paralel assign-AHSP dan update-quantity dengan barrier terkontrol
+   selalu menghasilkan satu serial state dengan `total = qty × snapshot_price`,
+   atau salah satunya 409; tidak boleh ada kombinasi silang.
+2. Urutan commit dibalik memberi jaminan yang sama, termasuk retry request yang
+   kalah setelah reload/version baru.
+3. Expected version lama dibalas 409 dan tidak mengubah AHSP, qty, price, total,
+   header, maupun audit trail.
+4. Baris inkonsisten yang disiapkan lewat fixture DB ditolak submit/Deal dengan
+   item id dan delta yang diagnostik; recalc tidak melegitimasi angka tersebut.
+5. Setelah setiap edit, `direct_cost = SUM(line total)` dan grand total tetap
+   rekonsiliasi sesuai formula/rounding yang terdokumentasi.
+6. Edit paralel pada item berbeda tidak hilang; bila proposal-level lock tetap
+   dipakai, test juga membuktikan tidak ada deadlock dan timeout ditangani tanpa
+   partial write.
+
+---
+
+## Live Auto Review — 20 Agustus 2026 09:07 WIB
+
+**Sub-area tunggal:** integritas client/counterparty dari create/edit Proposal,
+CRM Client, hingga handoff Deal. Tidak ada perubahan source/staged/commit Proposal
+sejak review 09:03 WIB; `review.md` diabaikan sebagai artefak reviewer.
+
+### [P1 / DATA-INTEGRITY + PARTY-ISOLATION] Edit client manual mempertahankan `client_id` lama, sehingga Proposal berlabel client B tetap masuk CRM dan project milik client A
+
+**File:** [frontend/src/views/EstimatorProposalList.vue:292](frontend/src/views/EstimatorProposalList.vue),
+[frontend/src/views/EstimatorProposalList.vue:425](frontend/src/views/EstimatorProposalList.vue),
+[frontend/src/views/EstimatorProposalList.vue:520](frontend/src/views/EstimatorProposalList.vue),
+[backend/src/routes/estimator.routes.ts:1681](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:2728](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/clients.routes.ts:267](backend/src/routes/clients.routes.ts)
+
+**Bukti:** memilih client dari master memang mengubah pasangan `client` dan
+`client_id` ([EstimatorProposalList.vue:425](frontend/src/views/EstimatorProposalList.vue)).
+Namun aksi **“Ketik manual”** hanya mengubah `editForm.client` dan tidak
+mengosongkan `editForm.client_id`
+([EstimatorProposalList.vue:292](frontend/src/views/EstimatorProposalList.vue)).
+`saveEdit()` kemudian mengirim kedua nilai tersebut
+([EstimatorProposalList.vue:520](frontend/src/views/EstimatorProposalList.vue)).
+
+Backend menulis nama dan ID apa adanya tanpa mengambil nama kanonik dari tabel
+`clients` atau memvalidasi bahwa keduanya menunjuk pihak yang sama
+([estimator.routes.ts:1712](backend/src/routes/estimator.routes.ts)). Endpoint
+create memiliki kontrak serupa: pasangan bebas dari body langsung disimpan.
+Foreign key hanya membuktikan ID ada, bukan bahwa string label cocok. Saat Deal,
+`proposal.client_id` selalu diprioritaskan; pencarian nama hanya fallback jika ID
+kosong ([estimator.routes.ts:2728](backend/src/routes/estimator.routes.ts)). Tab
+CRM juga mengelompokkan Proposal semata-mata dengan `WHERE client_id = ?`
+([clients.routes.ts:267](backend/src/routes/clients.routes.ts)).
+
+**Skenario reproduksi:** buka Proposal draft milik client A, pilih edit, ketik
+manual “Client B”, simpan, lalu reload. Header/list menampilkan Client B tetapi
+row tetap membawa `client_id=A`. Di CRM, Proposal masih muncul pada client A dan
+tidak muncul pada B. Lanjutkan review→submitted→deal: project baru dibuat dengan
+`client_id=A`, walau nama counterparty yang dilihat estimator adalah B. Gerbang
+submit/Deal tidak memeriksa invariant party ini. Reproduksi UI/HTTP tidak
+dijalankan reviewer karena akan mengubah data.
+
+**Dampak:** proposal, pipeline CRM, project, reporting, invoice/AR berikutnya,
+serta dokumen kontrak dapat menunjuk badan hukum yang berbeda. Nilai komersial
+client B dapat terbaca di profil client A dan handoff project membuka pekerjaan
+pada account yang salah. Severity P1 karena kesalahan counterparty bertahan ke
+baseline kontrak dan downstream finance, bukan sekadar label tampilan.
+
+**Rekomendasi konkret:** jadikan `client_id` referensi kanonik. Untuk client
+master, backend menerima ID lalu membaca/snapshot nama resmi dalam transaction;
+jangan menerima pasangan ID+nama bebas. Jika proposal boleh memakai calon client
+yang belum terdaftar, representasikan mode itu eksplisit (`counterparty_type`,
+`prospect_id`/snapshot) dan wajibkan `client_id=NULL`; tombol manual harus
+mengosongkan ID. Sebelum submitted/Deal, validasi reference masih aktif dan
+snapshot legal name/address/tax identity yang akan dibekukan. Migrasikan pasangan
+legacy yang mismatch lewat laporan rekonsiliasi dan pilihan operator—jangan
+menebak berdasarkan nama yang mungkin duplikat.
+
+**Acceptance test:**
+
+1. Memilih client A lalu beralih ke manual B menghasilkan `client_id=NULL` dan
+   mode counterparty manual/prospect yang eksplisit; tidak boleh tersimpan
+   pasangan `A/B`.
+2. Request create/update dengan `client_id=A` dan nama B ditolak 422, atau nama
+   body diabaikan lalu diisi nama kanonik A; perilakunya terdokumentasi konsisten.
+3. Submit/Deal menolak missing, inactive, atau mismatched counterparty dan tidak
+   mengubah status, membuat project, maupun job downstream.
+4. Proposal client A muncul hanya di CRM A; project hasil Deal, issued artifact,
+   dan baseline menyimpan referensi/snapshot pihak A yang sama.
+5. Dua client bernama mirip/identik tidak pernah dipilih lewat fallback nama;
+   keputusan memakai ID stabil dan test membuktikan tidak cross-client.
+6. Laporan migrasi menemukan seluruh row `client_id`+label mismatch; koreksi
+   terotorisasi mempertahankan audit before/after dan tidak mengubah nilai atau
+   revision Proposal.
+
+---
+
+## Live Auto Review — 20 Agustus 2026 09:10 WIB
+
+**Sub-area tunggal:** sumber harga AHSP saat menambah item Proposal dan batas
+antara master aktif versus snapshot historis. Tidak ada perubahan
+source/staged/commit Proposal sejak review 09:07 WIB; `review.md` diabaikan
+sebagai artefak reviewer.
+
+### [P2 / DATA-INTEGRITY + UPSTREAM-CONTRACT] Endpoint tambah item menerima AHSP inactive dan membekukan harga arsip sebagai scope baru Proposal
+
+**File:** [backend/src/routes/estimator.routes.ts:443](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:415](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:1897](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:2011](backend/src/routes/estimator.routes.ts),
+[frontend/src/views/EstimatorProposalEditor.vue:1722](frontend/src/views/EstimatorProposalEditor.vue)
+
+**Bukti:** katalog `GET /ahsp` sengaja hanya mengembalikan
+`h.status='active'`, dan “delete” AHSP sebenarnya mengubah status menjadi
+`inactive` ([estimator.routes.ts:415](backend/src/routes/estimator.routes.ts)).
+Assign AHSP ke item existing juga mensyaratkan `status='active'`
+([estimator.routes.ts:2011](backend/src/routes/estimator.routes.ts)). Namun
+`POST /proposals/:proposalId/items` mengambil snapshot dengan
+`SELECT ... FROM ahsp_headers WHERE id=?` tanpa predicate status
+([estimator.routes.ts:1897](backend/src/routes/estimator.routes.ts)). Jadi kontrak
+write API lebih longgar daripada katalog dan jalur assign untuk operasi bisnis
+yang sama.
+
+Frontend normal memilih dari daftar aktif, tetapi backend dapat dipanggil dengan
+ID lama dari tab/cache, retry, atau request langsung. Endpoint lalu menyimpan
+kode/nama/unit/`harga_satuan` inactive sebagai snapshot sah; gerbang komersial
+hanya melihat quantity/price/total dan tidak dapat membedakan sumber yang sudah
+ditarik. Pembacaan AHSP juga terjadi sebelum transaction/lock Proposal, sehingga
+status master dapat berubah di sela read→insert tanpa pemeriksaan ulang.
+
+**Skenario reproduksi:** catat ID AHSP aktif lalu nonaktifkan melalui operasi
+delete yang sah; POST ID tersebut ke item Proposal draft dengan qty positif.
+Request berhasil 201, row membawa snapshot harga master yang sudah inactive,
+dan Proposal dapat dilanjutkan hingga submitted/Deal selama angka bukan nol.
+Varian race: request add membaca AHSP, admin menonaktifkannya, lalu transaction
+item baru commit tanpa recheck. Reproduksi HTTP tidak dijalankan reviewer karena
+akan mengubah fixture/data.
+
+**Dampak:** estimator dapat menambahkan scope baru memakai harga/metode kerja
+yang sudah ditarik karena salah, kedaluwarsa, atau tidak boleh digunakan. Karena
+snapshot memang harus tetap immutable setelah sah dipilih, sumber inactive ini
+sulit dibedakan dari snapshot historis yang valid dan dapat masuk RAB, margin,
+Deal, serta project baseline. P2 karena jalur UI utama menyaring active, tetapi
+server—otoritas integritas—tidak menegakkan kontraknya.
+
+**Rekomendasi konkret:** di transaction tambah item, setelah mengunci Proposal,
+baca AHSP `FOR SHARE`/`FOR UPDATE` dengan `status='active'`, ambil seluruh snapshot
+dan hitung total dari row yang sama, lalu insert. Balas 409/422 berkode stabil
+untuk inactive/retired, berbeda dari 404. Jangan memvalidasi ulang status AHSP
+pada snapshot item yang sudah ditambahkan secara sah; perubahan master berikutnya
+tidak boleh mengubah revisi Proposal lama. Jika bisnis perlu memakai AHSP retired,
+sediakan aksi override eksplisit dengan permission/alasan/approval dan provenance,
+bukan celah ID generik.
+
+**Acceptance test:**
+
+1. ID AHSP inactive ditolak pada add-item dan assign-item; tidak ada item/header
+   total yang berubah.
+2. Add-item berlomba dengan deactivate menghasilkan tepat satu outcome serial:
+   snapshot dibuat saat AHSP masih aktif atau add ditolak—tidak ada commit setelah
+   status retired tanpa keputusan eksplisit.
+3. AHSP aktif menghasilkan snapshot kode/nama/unit/harga yang berasal dari satu
+   row/version dan `total = qty × snapshot_price` sesuai rounding server.
+4. Menonaktifkan atau mengubah master sesudah item sah dibuat tidak mengubah
+   Proposal/revision lama; revision baru dapat memilih pengganti secara eksplisit.
+5. Override retired (bila diputuskan perlu) hanya dapat dilakukan permission yang
+   tepat, wajib alasan/approval, dan tercatat di issued revision/audit trail.
+
+---
+
+## Live Auto Review — 20 Agustus 2026 09:13 WIB
+
+**Sub-area tunggal:** create/apply-template dari kalkulasi MTO dan pilihan AHSP
+wizard ke item RAB Proposal. Tidak ada perubahan source/staged/commit Proposal
+sejak review 09:10 WIB; `review.md` diabaikan sebagai artefak reviewer.
+
+### [P1 / DATA-LOSS + API-CONTRACT] Wizard mengirim volume, AHSP pilihan, harga, dan total RAB, tetapi backend sukses 201 sambil membuang seluruh angka tersebut
+
+**File:** [frontend/src/components/ProposalTemplateWizard.vue:1048](frontend/src/components/ProposalTemplateWizard.vue),
+[frontend/src/components/ProposalTemplateWizard.vue:1116](frontend/src/components/ProposalTemplateWizard.vue),
+[frontend/src/views/EstimatorProposalList.vue:626](frontend/src/views/EstimatorProposalList.vue),
+[backend/src/routes/estimator.routes.ts:1617](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:1642](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:1774](backend/src/routes/estimator.routes.ts)
+
+**Bukti:** kalkulator wizard membentuk setiap child RAB dengan `volume`, `unit`,
+`ahsp_code`, `unit_price`, dan `total`
+([ProposalTemplateWizard.vue:1048](frontend/src/components/ProposalTemplateWizard.vue)).
+`getResult()` juga mengirim `ahsp_id` dari pilihan user beserta semua field itu
+di dalam `template_sections`
+([ProposalTemplateWizard.vue:1116](frontend/src/components/ProposalTemplateWizard.vue)),
+dan layar create meneruskan payload tersebut ke `POST /proposals`.
+
+Backend tidak membaca `child.volume`, `child.unit`, `child.ahsp_id`,
+`child.ahsp_code`, `child.unit_price`, maupun `child.total`. Ia membangun ulang
+mapping hanya dari exact `child.name`, lalu selalu menyisipkan child dengan
+`qty=0` dan `total_price=0`
+([estimator.routes.ts:1642](backend/src/routes/estimator.routes.ts)). Endpoint
+`apply-template` mengulang perilaku yang sama
+([estimator.routes.ts:1774](backend/src/routes/estimator.routes.ts)). Bahkan
+pilihan AHSP eksplisit user dapat diganti/lenyap: schema hanya mewajibkan kode
+unik, bukan nama, sedangkan lookup `ahspLookup[row.name]=row` menimpa duplicate
+name dari query tanpa `ORDER BY`.
+
+**Skenario reproduksi:** di wizard warehouse, isi dimensi hingga RAB terhitung
+dan pilih AHSP untuk satu child; preview memperlihatkan volume, unit price, dan
+total nonzero. Tekan Create & Open dan biarkan request sukses. Setelah reload,
+semua child hasil template memiliki qty/total nol; AHSP hanya terisi bila exact
+name kebetulan cocok, bukan berdasarkan ID yang dipilih. Jalur `apply-template`
+memberi hasil identik. Gerbang komersial baru memang mencegah Deal dengan baris
+nol, tetapi itu hanya mengubah data-loss menjadi workflow blocker—tidak
+memulihkan estimate yang sudah dihitung. Reproduksi UI/HTTP tidak dijalankan
+reviewer karena akan membuat data.
+
+**Dampak:** alur inti MTO/geometry → RAB → Proposal tidak melakukan transfer
+quantity maupun pricing walaupun UI menyatakan RAB sudah dihasilkan. Estimator
+harus memasukkan ulang angka secara manual, berisiko salah/salah AHSP, dan tidak
+dapat membuktikan provenance terhadap kalkulasi MTO. Proposal otomatis dapat
+menjadi tidak lengkap atau memakai harga AHSP lain dari pilihan user. Severity
+P1 karena kemampuan create-from-estimate yang terlihat tersedia sebenarnya
+kehilangan seluruh nilai komersial dan memblokir submit/Deal yang benar.
+
+**Rekomendasi konkret:** definisikan DTO template child yang versioned dan
+divalidasi. Gunakan `ahsp_id`/stable code sebagai referensi, jangan exact name;
+backend wajib mengambil snapshot kode/nama/unit/harga dari AHSP active, menerima
+quantity hasil MTO dengan precision yang ditetapkan, lalu menghitung total
+sendiri—jangan mempercayai `unit_price`/`total` klien. Simpan provenance
+`source_mto_element/line`, formula version, serta template version. Seluruh
+header, child, quantity, mapping, dan recalc harus satu transaction; mapping
+missing/ambiguous menghasilkan 422 terstruktur, bukan silent zero. Template lama
+tanpa ID dipertahankan sebagai item **unmapped** yang terlihat dan wajib
+diselesaikan, bukan dipetakan nondeterministik berdasarkan nama.
+
+**Acceptance test:**
+
+1. Child wizard volume `12.345` dengan AHSP ID aktif menghasilkan qty `12.345`,
+   snapshot master yang benar, dan total server sesuai formula/rounding setelah
+   reload penuh.
+2. Pilihan AHSP user dipertahankan berdasarkan ID walau ada dua AHSP active
+   bernama sama; hasil create dan apply-template identik/deterministik.
+3. `unit_price`/`total` payload yang dimanipulasi tidak dipercaya; server memakai
+   harga snapshot master dan mengembalikan hasil rekonsiliasi.
+4. AHSP missing/inactive atau mapping ambiguous membalas 422 dengan child yang
+   bermasalah dan transaction rollback—tidak ada header/child setengah jadi.
+5. Template legacy tanpa ID menghasilkan status unmapped yang eksplisit dan
+   completeness gate menolak submit sampai user memilih AHSP; tidak ada pilihan
+   arbitrary berdasarkan urutan query.
+6. Generated RAB, endpoint items/RAB, summary, dan preview menampilkan quantity,
+   harga, total, serta provenance yang sama; proposal lengkap dapat melewati
+   gerbang submit tanpa re-entry manual.
+
+---
+
+## Live Auto Review — 20 Agustus 2026 09:17 WIB
+
+**Sub-area tunggal:** error/partial-response handling pada document output RAB
+Proposal. Tidak ada perubahan source/staged/commit Proposal sejak review 09:13
+WIB; `review.md` diabaikan sebagai artefak reviewer.
+
+### [P2 / DOCUMENT-INTEGRITY + ERROR-HANDLING] Gagal memuat API tetap merender RAB kosong bernilai nol dengan tombol Print aktif
+
+**File:** [frontend/src/views/EstimatorRAB.vue:1](frontend/src/views/EstimatorRAB.vue),
+[frontend/src/views/EstimatorRAB.vue:12](frontend/src/views/EstimatorRAB.vue),
+[frontend/src/views/EstimatorRAB.vue:199](frontend/src/views/EstimatorRAB.vue),
+[frontend/src/views/EstimatorRAB.vue:226](frontend/src/views/EstimatorRAB.vue),
+[frontend/src/views/EstimatorRAB.vue:262](frontend/src/views/EstimatorRAB.vue)
+
+**Bukti:** page langsung merender judul, tabel, ringkasan, dan tombol **Print**;
+tidak ada state loading/error maupun guard pada tombol. State awal `sections=[]`
+dan seluruh summary bernilai `0` ([EstimatorRAB.vue:199](frontend/src/views/EstimatorRAB.vue)).
+Jika GET `/proposals/:id/rab` gagal karena network, 401/403, 404, 500, atau
+response parsing, blok `catch` hanya `console.error`
+([EstimatorRAB.vue:226](frontend/src/views/EstimatorRAB.vue)). UI tetap tampak
+sebagai dokumen RAB sah: identitas kosong, tabel tanpa baris, **GRAND TOTAL Rp0**,
+dan seluruh Ringkasan Biaya Rp0. `printRAB()` tanpa validasi selalu memanggil
+`window.print()` ([EstimatorRAB.vue:262](frontend/src/views/EstimatorRAB.vue)).
+
+Assignment response juga tidak atomik terhadap validasi: `proposal`, `sections`,
+dan `summary` ditulis satu per satu sebelum `sections.value.forEach`. Response
+parsial/malformed dapat meninggalkan sebagian header baru dengan sections/summary
+default atau melempar lalu masuk catch, tetapi tombol print tetap aktif.
+
+**Skenario reproduksi:** buka route RAB dengan backend mati, token tanpa akses,
+ID Proposal tidak ada, atau paksa endpoint membalas 500; tunggu request selesai.
+Tidak ada banner gagal. Tekan Print dan browser menghasilkan dokumen “RAB -
+Rencana Anggaran Biaya” dengan angka nol. Varian response `{proposal: {...}}`
+meninggalkan identitas terisi tetapi total nol/sections invalid. Inspeksi ini
+read-only; request kegagalan tidak dijalankan karena tidak diperlukan untuk
+membuktikan cabang source.
+
+**Dampak:** estimator dapat mencetak/menyimpan PDF nol atau parsial dan
+mengedarkannya sebagai dokumen penawaran, padahal sumbernya gagal dibaca—false
+assurance yang lebih berbahaya daripada error terang-terangan. Pada koneksi
+lambat, pengguna juga dapat menekan Print sebelum response selesai. P2 karena
+memerlukan kegagalan/latensi dan operator masih bisa melihat field kosong, tetapi
+output bisnis tidak memasang pengaman apa pun.
+
+**Rekomendasi konkret:** modelkan state `loading → ready | error`; render
+ringkasan/tabel hanya pada `ready`, tampilkan error diagnostik + retry pada gagal,
+dan disable/sembunyikan Print/Export selama loading/error. Parse serta validasi
+DTO ke object sementara, termasuk proposal ID, sections array, tipe uang, dan
+rekonsiliasi direct/grand/summary, baru commit seluruh state sekali. `printRAB`
+harus melakukan guard final dan menolak output jika response belum lengkap,
+stale, atau tidak rekonsiliasi. Issued contractual PDF nantinya tetap harus
+server-side/checksummed; guard ini mempertahankan keamanan baseline print lama.
+
+**Acceptance test:**
+
+1. Selama response sengaja ditahan, tampil spinner/skeleton dan Print tidak dapat
+   dipanggil; tidak ada Rp0 yang disajikan sebagai hasil final.
+2. Network error serta 401/403/404/500 menampilkan state gagal yang jelas,
+   identitas/tabel/total dokumen tidak dirender, dan `window.print` tidak
+   terpanggil.
+3. Response parsial/malformed ditolak atomik; tidak ada campuran header baru
+   dengan sections/summary default.
+4. Response 200 tetapi `sum(lines)`, direct cost, dan total final tidak
+   rekonsiliasi menampilkan integrity error serta memblokir Print.
+5. Retry sukses memindahkan state ke ready sekali dan baru kemudian mengaktifkan
+   Print; dokumen memuat nomor Proposal, revision, sections, dan total yang benar.
+6. Navigasi cepat ID A→B/response out-of-order tidak boleh merender atau mencetak
+   data A pada route B; request lama dibatalkan atau hasilnya diabaikan.
+
+---
+
+## Live Auto Review — 20 Agustus 2026 09:19 WIB
+
+**Sub-area tunggal:** fidelity deskripsi scope item dari editor ke endpoint dan
+print RAB Proposal. Tidak ada perubahan source/staged/commit Proposal sejak
+review 09:17 WIB; `review.md` diabaikan sebagai artefak reviewer.
+
+### [P2 / DOCUMENT-INTEGRITY + API-CONTRACT] Deskripsi scope tersimpan tidak pernah masuk RAB; nama AHSP menggantikannya dan kode yang sama dicetak dua kali
+
+**File:** [frontend/src/views/EstimatorProposalEditor.vue:190](frontend/src/views/EstimatorProposalEditor.vue),
+[frontend/src/views/EstimatorProposalEditor.vue:1739](frontend/src/views/EstimatorProposalEditor.vue),
+[backend/src/routes/estimator.routes.ts:2049](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:2255](backend/src/routes/estimator.routes.ts),
+[frontend/src/views/EstimatorRAB.vue:81](frontend/src/views/EstimatorRAB.vue),
+[frontend/src/views/EstimatorRAB.vue:128](frontend/src/views/EstimatorRAB.vue)
+
+**Bukti:** editor menyediakan input **Tambah deskripsi...** per item dan
+menyimpannya melalui PUT; backend memang menulis kolom `proposal_items.description`
+([estimator.routes.ts:2049](backend/src/routes/estimator.routes.ts)). Namun query
+RAB tidak memilih `pi.description`, dan DTO item hanya mengembalikan nama/kode
+snapshot AHSP, unit, qty, serta harga
+([estimator.routes.ts:2255](backend/src/routes/estimator.routes.ts)).
+
+Tabel output mempunyai kolom **PEKERJAAN**, **AHSP**, dan **KODE**, tetapi row
+merender `ahspName` pada PEKERJAAN lalu `ahspCode` pada AHSP dan KODE sekaligus
+([EstimatorRAB.vue:128](frontend/src/views/EstimatorRAB.vue)). Jadi deskripsi
+scope/proyek yang sengaja diketik user hilang total, nama analisa hanya tampil
+sekali di kolom yang salah, dan kode master diduplikasi. `window.print()` serta
+fungsi ekspor tersembunyi memakai binding yang sama, sehingga ini bukan sekadar
+kolom layar.
+
+**Skenario reproduksi:** pada dua item yang memakai AHSP “Beton K-250”, isi
+deskripsi berbeda—misalnya “Pedestal P-01 termasuk chamfer” dan “Tie beam TB-02
+exclude grouting”—lalu buka View RAB/Print. Kedua row hanya menampilkan nama AHSP
+generik dan kode dua kali; pembeda scope, inclusion/exclusion lokal, serta catatan
+teknis tidak tercetak. Pemeriksaan dilakukan dari source; tidak dibuat fixture.
+
+**Dampak:** RAB yang direview atau dikirim dapat menyatukan item dengan analisa
+harga sama tetapi kewajiban pekerjaan berbeda. Kualifikasi teknis yang terlihat
+di editor hilang dari dokumen, membuka ambiguity quantity/scope dan potensi
+dispute ketika RAB dipakai sebagai lampiran proposal atau baseline project. P2
+karena angka tetap ada dan deskripsi masih dapat dilihat di editor, tetapi output
+bisnis tidak setia pada data yang disimpan.
+
+**Rekomendasi konkret:** tetapkan kontrak kolom eksplisit pada DTO RAB:
+`description`, `ahspName`, dan `ahspCode` sebagai tiga konsep berbeda. Render
+PEKERJAAN dari description (dengan fallback AHSP name yang diberi aturan jelas),
+AHSP dari nama analisa, dan KODE dari kode snapshot. Bawa description ke snapshot
+revision/issued artifact dan seluruh output print/CSV/PDF yang sama. Jika
+deskripsi adalah scope contractual wajib, completeness gate harus menolak blank;
+jika opsional, fallback tidak boleh menyembunyikan bahwa tidak ada deskripsi
+khusus. Escape multiline/koma/formula CSV dan HTML secara aman.
+
+**Acceptance test:**
+
+1. Description custom tersimpan muncul identik setelah reload editor, endpoint
+   RAB, layar, print, dan export/PDF pada kolom PEKERJAAN.
+2. Dua row dengan AHSP sama tetapi description berbeda tetap dapat dibedakan;
+   kolom AHSP berisi nama dan KODE berisi kode tepat sekali.
+3. Item tanpa description mengikuti fallback terdokumentasi dan tidak menggeser
+   urutan/kolom data lain.
+4. Description multiline, koma, quote, dan karakter non-ASCII aman pada HTML
+   serta CSV—tidak terjadi injection atau pergeseran kolom.
+5. Setelah submitted/issued, description pada revision lama immutable; perubahan
+   hanya masuk revision/artifact baru.
+6. Contract test membaca binding template aktual dan gagal bila `description`
+   hilang atau `ahspCode` kembali dirender pada dua kolom.
+
+---
+
+## Live Auto Review — 20 Agustus 2026 09:22 WIB
+
+**Sub-area tunggal:** concurrency dan uniqueness urutan item RAB Proposal. Tidak
+ada perubahan source/staged/commit Proposal sejak review 09:19 WIB; `review.md`
+diabaikan sebagai artefak reviewer.
+
+### [P2 / CONCURRENCY + DATA-INTEGRITY] Lock menyerialkan insert tetapi `order_no` sudah dihitung dari state stale, sehingga item paralel mendapat urutan yang sama
+
+**File:** [backend/src/routes/estimator.routes.ts:1895](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:1920](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:1939](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:1783](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:2255](backend/src/routes/estimator.routes.ts),
+[backend/database/schema-baseline.sql:2231](backend/database/schema-baseline.sql)
+
+**Bukti:** `POST /proposals/:proposalId/items` membaca `MAX(order_no)+1` memakai
+pool/autocommit sebelum transaction dimulai
+([estimator.routes.ts:1920](backend/src/routes/estimator.routes.ts)). Baru sesudah
+nilai itu dibekukan ke variable `orderNo`, handler membuka transaction dan
+mengunci row Proposal ([estimator.routes.ts:1939](backend/src/routes/estimator.routes.ts)).
+Lock tersebut menyerialkan INSERT, tetapi tidak menghitung ulang urutan dari
+state terkunci. Schema hanya mempunyai index biasa `(proposal_id,order_no)`,
+bukan unique constraint ([schema-baseline.sql:2231](backend/database/schema-baseline.sql)).
+
+`apply-template` menghitung MAX di dalam transaction terkunci dan dapat menambah
+banyak order sekaligus ([estimator.routes.ts:1783](backend/src/routes/estimator.routes.ts)),
+tetapi request add yang sudah membaca MAX lama tetap commit sesudahnya dengan
+nomor yang kini dipakai template. Editor menambahkan `id` sebagai tie-break;
+endpoint RAB hanya `ORDER BY ... pi.order_no`, sehingga urutan row kembar pada
+output tidak mempunyai kontrak deterministik yang sama.
+
+**Skenario race:** Proposal mempunyai max order 10. Request A dan B sama-sama
+membaca 10 lalu menetapkan 11. A mendapat lock, insert order 11, commit; B baru
+mendapat lock tetapi tetap insert order 11 dan juga commit. Varian: add membaca
+11, apply-template lebih dulu menambah order 11–20, lalu add commit sebagai order
+11. Tidak ada error/indikator karena index mengizinkan duplicate. Reproduksi HTTP
+tidak dijalankan reviewer karena akan membuat fixture.
+
+**Dampak:** urutan scope/BOQ menjadi ambigu dan dapat berbeda antara editor,
+RAB, print/export, atau query downstream. Item manual dapat muncul di tengah
+section/template yang baru ditambahkan; numbering serta checksum snapshot masa
+depan tidak dapat mengandalkan sequence ini. Nilai uang tetap terjumlah sehingga
+anomali mudah lolos review. P2 karena memerlukan operasi paralel, tetapi ini bisa
+terjadi dari dua estimator/tab atau double-click pada workflow normal.
+
+**Rekomendasi konkret:** ambil proposal lock lebih dulu, lalu hitung posisi dan
+insert di transaction yang sama. Tambahkan invariant DB unique
+`(proposal_id,order_no)` setelah migrasi duplicate existing, dengan error conflict
+yang dapat diretry aman. Untuk hierarchy yang direkomendasikan sebelumnya,
+gunakan parent/sibling position stabil dan command reorder atomik; jangan
+mengandalkan urutan global ambigu. Semua jalur create, add, apply-template,
+clone/import, dan reorder harus memakai allocator/primitive urutan yang sama.
+Tambahkan `id` sebagai tie-break sementara pada seluruh read, tetapi itu hanya
+membuat legacy duplicate deterministik—bukan menggantikan uniqueness.
+
+**Acceptance test:**
+
+1. Dua dan 20 add-item paralel menghasilkan order unik (serta sesuai kebijakan
+   contiguous/monotonic) tanpa kehilangan item atau 500 generik.
+2. Add-item berlomba dengan apply-template append/replace menghasilkan salah satu
+   serial ordering yang sah; item manual tidak menyusup ke rentang section.
+3. Failure setelah alokasi sebelum insert rollback tanpa meninggalkan counter/gap
+   yang melanggar kebijakan; retry tidak membuat duplicate item bila memakai
+   idempotency key.
+4. Editor, endpoint items/RAB, print, dan snapshot mengembalikan urutan identik
+   pada reload berulang.
+5. Unique constraint menolak duplicate dari setiap jalur; conflict dipetakan ke
+   409/retry terkontrol, bukan silent corruption.
+6. Migrasi mendeteksi dan memperbaiki semua duplicate secara deterministik,
+   mempertahankan hierarchy serta total, dan menghasilkan laporan before/after.
+
+---
+
+## System Design Review — Proposal — 20 Agustus 2026 09:25 WIB
+
+**Sub-area tunggal:** register Proposal—search, filter, pagination, KPI, dan
+traceability list. Tidak ada perubahan source/staged/commit Proposal sejak review
+09:22 WIB; `review.md` diabaikan sebagai artefak reviewer.
+
+### [DESIGN-GAP — prioritas bisnis menengah] Register memuat seluruh row/detail sekaligus, tanpa search/filter/pagination, dan KPI lifecycle tidak rekonsiliasi ke semua status
+
+**Kemampuan saat ini.** `GET /estimator/proposals` mengembalikan semua Proposal
+dengan `SELECT p.*`, satu-satunya urutan `created_at DESC`, tanpa parameter query,
+limit, cursor, atau projection list
+([backend/src/routes/estimator.routes.ts:750](backend/src/routes/estimator.routes.ts)).
+Frontend menyimpan seluruh response dalam satu array, merender seluruh row, dan
+menghitung Total/Draft/Review/Submitted/Deal di browser
+([frontend/src/views/EstimatorProposalList.vue:14](frontend/src/views/EstimatorProposalList.vue),
+[frontend/src/views/EstimatorProposalList.vue:617](frontend/src/views/EstimatorProposalList.vue)).
+Untuk jumlah kecil ini berfungsi dan merupakan baseline minimum yang harus tetap
+tersedia.
+
+**Proses yang putus.** Operator tidak dapat mencari nomor Proposal, project,
+client, lokasi, owner, revision, rentang tanggal, atau status; tidak ada filter
+“butuh tindakan”, expired/no-deal, linked project, maupun nilai. Backend sudah
+mempunyai status `no_deal`, tetapi KPI tidak menampilkannya, sehingga **Total**
+tidak harus sama dengan jumlah kartu status. Lifecycle target juga membutuhkan
+expired/cancelled/revised yang belum mempunyai facet. `SELECT p.*` mengirim
+`design_params` dan seluruh field komersial/timestamp ke list meski tabel hanya
+memerlukan sebagian, memperbesar payload dan permukaan data setelah RBAC
+diterapkan. Error load hanya masuk console; array kosong lalu tampil sebagai “No
+proposals yet”, sehingga gagal query tidak dibedakan dari register sungguh kosong.
+
+**Target design.** Bentuk kontrak register read model terpisah dari detail:
+
+1. Query server-side terparameterisasi untuk `q`, status multi-select,
+   client/counterparty ID, owner/team, proposal/revision family, date/validity,
+   deal/project linkage, dan rentang nilai; semua filter diterapkan **setelah**
+   visibility/RBAC scope yang sama.
+2. Cursor pagination stabil dengan sort allowlist dan tie-break `id`; response
+   membawa `items`, `next_cursor`, serta total/facet KPI yang dihitung server dari
+   scope+filter yang sama—bukan jumlah page saat ini.
+3. DTO list minimum: id/number/project/client snapshot/revision/status/final
+   total/currency bila tersedia/owner/timestamps/link; `design_params`, breakdown,
+   dan scope lengkap hanya lewat detail berpermission.
+4. Status facet kanonik mencakup seluruh lifecycle dan memperlihatkan bucket
+   unknown/legacy; Total wajib rekonsiliasi. Saved view/export dapat menjadi fase
+   berikutnya, dengan query manifest/as-of timestamp agar hasil audit dapat
+   direproduksi.
+5. Frontend mempunyai state loading/error/empty yang berbeda, filter tersimpan di
+   URL, debounce/cancel search, dan tidak mengganti hasil lama dengan response
+   request yang sudah stale.
+
+**Dampak bisnis EPC.** Saat volume tender/revision tumbuh, seluruh register dan
+parameter desain harus ditransfer serta dirender untuk membuka satu halaman;
+pengguna sulit menemukan proposal yang segera expired, revisi client tertentu,
+atau handoff yang gagal. KPI pipeline dapat tampak tidak lengkap karena no-deal
+hilang, sementara ekspor/reporting manual tidak dapat membuktikan filter dan
+waktu data yang digunakan. Ini prioritas menengah: belum ada bukti volume saat
+ini menyebabkan outage, tetapi desain sekarang tidak mendukung register
+Proposal yang auditabel dan scalable.
+
+**Dependensi/migrasi.** Bergantung pada RBAC/ownership Proposal, counterparty ID
+kanonik, state machine lengkap, dan revision lineage dari temuan sebelumnya.
+Tambahkan index berdasarkan query plan nyata—minimal kombinasi visibility/status,
+created timestamp+id, client, owner, dan nomor—tanpa membuat index spekulatif
+berlebihan. Row legacy dengan status di luar enum dipertahankan pada bucket
+unknown dan dilaporkan; tidak perlu menulis ulang nilai komersial. Adapter dapat
+sementara menerima response array lama agar UI/dependent consumer tidak regresi.
+
+**Fase/prioritas.** Fase 1 (menengah): DTO list minimum, error state, server
+search/filter, status facet lengkap, cursor pagination. Fase 2: saved view,
+as-of/export manifest, expiry/action queues, dan reporting pipeline. KPI tidak
+boleh dipakai sebagai angka manajemen sebelum visibility dan denominator
+statusnya terdokumentasi.
+
+**Acceptance criteria terukur:**
+
+1. Dataset uji 100.000 Proposal menghasilkan page bounded (mis. ≤100 row),
+   payload tidak memuat `design_params`, dan target p95 lokal/CI yang disepakati
+   tercapai dengan query plan tanpa full table filesort tak terkendali.
+2. Filter nomor/project/client/status/owner/tanggal dapat dikombinasikan; setiap
+   hasil memenuhi seluruh predicate dan filter tersimpan/reload dari URL.
+3. Pagination dengan beberapa row ber-`created_at` sama tidak duplicate/skip;
+   insert baru saat paging mengikuti kontrak snapshot/cursor yang terdokumentasi.
+4. Total = jumlah seluruh facet status termasuk no-deal/expired/cancelled dan
+   unknown dalam scope yang sama; count tidak berubah hanya karena page size.
+5. User tanpa visibility tidak memperoleh row maupun bocoran count/facet dari
+   Proposal terlarang; list/detail menggunakan kebijakan permission yang sama.
+6. 401/403/500/network menampilkan error+retry, bukan empty state; response search
+   lama yang datang terlambat tidak menimpa filter/hasil terbaru.
+7. Export/saved view menyimpan filter, sort, permission scope, timezone, as-of,
+   actor, serta checksum/manifest sehingga hasil dapat direproduksi untuk audit.
+
+---
+
+## Live Auto Review — 20 Agustus 2026 09:29 WIB
+
+**Sub-area tunggal:** invariant klasifikasi discipline/sub-discipline pada item
+RAB Proposal. Tidak ada perubahan source/staged/commit Proposal sejak review
+09:25 WIB; `review.md` diabaikan sebagai artefak reviewer.
+
+### [P2 / DATA-INTEGRITY + CLASSIFICATION-CONTRACT] Backend menerima sub-discipline milik parent lain, sehingga summary dan RAB mengatribusikan line yang sama ke discipline berbeda
+
+**File:** [frontend/src/views/EstimatorProposalEditor.vue:853](frontend/src/views/EstimatorProposalEditor.vue),
+[frontend/src/views/EstimatorProposalEditor.vue:1466](frontend/src/views/EstimatorProposalEditor.vue),
+[backend/src/routes/estimator.routes.ts:1903](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:1944](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:2140](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:2254](backend/src/routes/estimator.routes.ts),
+[backend/database/schema-baseline.sql:1573](backend/database/schema-baseline.sql)
+
+**Bukti:** UI normal memfilter pilihan sub-discipline berdasarkan
+`sd.discipline_id === selectedDisciplineId`
+([EstimatorProposalEditor.vue:1466](frontend/src/views/EstimatorProposalEditor.vue)).
+Namun add-item backend menerima `discipline_id` dan `sub_discipline_id` sebagai
+dua input independen lalu langsung menyimpannya
+([estimator.routes.ts:1903](backend/src/routes/estimator.routes.ts),
+[estimator.routes.ts:1944](backend/src/routes/estimator.routes.ts)). Tidak ada
+query yang memverifikasi sub-discipline merupakan child dari discipline tersebut.
+
+Schema `master_sub_disciplines` mempunyai parent kanonik `discipline_id`, tetapi
+`proposal_items` hanya memasang FK terpisah ke discipline dan sub-discipline.
+Keduanya dapat valid secara individual sambil pasangannya salah. Summary
+discipline menjumlahkan `pi.discipline_id`, sedangkan summary sub-discipline
+mengembalikan parent kanonik dari master
+([estimator.routes.ts:2140](backend/src/routes/estimator.routes.ts)). Endpoint RAB
+malah membentuk tree memakai `pi.discipline_id` sebagai parent dan menaruh
+sub-discipline apa pun yang tersimpan di bawahnya
+([estimator.routes.ts:2254](backend/src/routes/estimator.routes.ts)).
+
+**Skenario reproduksi:** pilih ID discipline Civil A dan ID sub-discipline Piping
+B yang parent kanoniknya discipline Piping C, lalu POST add-item. Kedua FK valid,
+request berhasil, dan nilai line masuk total discipline A. Sub-discipline summary
+menyatakan B milik C, sedangkan RAB mencetak B di bawah A. Ini dapat timbul dari
+request langsung, consumer lama, atau stale form/cache meskipun dropdown UI saat
+ini menyaring pasangan. Reproduksi HTTP tidak dijalankan reviewer karena akan
+membuat data.
+
+**Dampak:** breakdown biaya per discipline/sub-discipline, ownership estimator,
+reporting engineering, WBS/CBS handoff, dan dokumen RAB saling tidak
+rekonsiliasi walau grand total benar. Budget piping dapat tampak sebagai civil
+di satu laporan dan piping di laporan lain. P2 karena UI utama mencegah pilihan
+silang, tetapi source of truth server/DB menerima dan mempertahankannya tanpa
+indikator.
+
+**Rekomendasi konkret:** jangan percaya dua parent reference dari klien. Pilihan
+paling sederhana: terima `sub_discipline_id`, baca row master active di dalam
+transaction, lalu derive `discipline_id`; bila sub null, validasi discipline
+active secara terpisah. Jika kedua field perlu dipertahankan untuk query,
+tegakkan pasangan melalui validasi server dan composite FK/constraint yang
+sesuai setelah unique parent-pair disiapkan. Semua jalur template/import/clone
+harus memakai primitive klasifikasi yang sama. Audit row legacy dengan join
+`pi.discipline_id <> sd.discipline_id`; jangan reclassify diam-diam jika sudah
+issued—flag untuk keputusan/migrasi revision.
+
+**Acceptance test:**
+
+1. Pair discipline A + sub B milik C ditolak 422 tanpa insert/recalc, atau server
+   mengabaikan A dan menyimpan parent kanonik C sesuai kontrak terdokumentasi.
+2. Pair valid dan sub-only menghasilkan discipline/sub-discipline kanonik yang
+   sama setelah reload.
+3. ID missing/inactive ditolak dengan kode diagnostik; tidak jatuh ke unassigned
+   secara diam-diam.
+4. Summary discipline, summary sub-discipline, RAB tree, dan downstream mapping
+   selalu menempatkan setiap line pada parent yang sama dan subtotal rekonsiliasi.
+5. Consumer template/import/clone tidak dapat bypass invariant; negative contract
+   test memakai payload silang untuk setiap jalur.
+6. Migrasi melaporkan seluruh pair legacy mismatch, nilai sebelum/sesudah tetap,
+   issued revision lama immutable, dan koreksi mempunyai actor/reason/audit.
+
+---
+
+## Live Auto Review — 20 Agustus 2026 09:33 WIB
+
+**Sub-area tunggal:** lifecycle hard-delete Proposal terhadap MTO tersimpan.
+Tidak ada perubahan source/staged/commit Proposal sejak review 09:29 WIB;
+`review.md` diabaikan sebagai artefak reviewer.
+
+### [P2 / DATA-INTEGRITY + LIFECYCLE-CLEANUP] Hard-delete Proposal meninggalkan `engineering_inputs` dan `mto_lines` orphan yang tidak lagi dapat dijangkau dari lifecycle Proposal
+
+**File:** [backend/src/routes/estimator.routes.ts:1839](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:3341](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:3506](backend/src/routes/estimator.routes.ts),
+[backend/database/schema-baseline.sql:1221](backend/database/schema-baseline.sql),
+[backend/database/schema-baseline.sql:1659](backend/database/schema-baseline.sql)
+
+**Bukti:** endpoint delete mengunci row Proposal dan membatasi penghapusan pada
+status editable, tetapi operasi mutasinya hanya
+`DELETE FROM proposals WHERE id = ?` di dalam transaction
+([estimator.routes.ts:1839](backend/src/routes/estimator.routes.ts)). MTO Proposal
+disimpan terpisah ke `engineering_inputs` dengan
+`scope_type='proposal'`, `scope_id=proposalId`, dan `proposal_id=proposalId`
+([estimator.routes.ts:3341](backend/src/routes/estimator.routes.ts)). Schema tabel
+tersebut hanya mempunyai index pada `proposal_id`/scope dan tidak mempunyai FK
+ke `proposals` atau mekanisme cascade
+([schema-baseline.sql:1221](backend/database/schema-baseline.sql)).
+
+`mto_lines` memang mempunyai FK `element_id -> engineering_inputs.id ON DELETE
+CASCADE`, tetapi cascade baru berjalan bila parent MTO-nya dihapus
+([schema-baseline.sql:1659](backend/database/schema-baseline.sql)). Jalur delete
+elemen individual melakukan itu secara eksplisit
+([estimator.routes.ts:3506](backend/src/routes/estimator.routes.ts)); jalur delete
+Proposal tidak. Sebaliknya, pembacaan MTO normal membutuhkan ID Proposal yang
+masih hidup dan filter scope Proposal, sehingga data tertinggal tidak mempunyai
+parent lifecycle yang dapat dibuka pengguna.
+
+**Skenario reproduksi:** buat Proposal draft, simpan satu elemen MTO sehingga ada
+`engineering_inputs` beserta beberapa `mto_lines`, lalu hapus Proposal. Row
+Proposal dan child yang mempunyai FK cascade hilang, tetapi query langsung
+menemukan `engineering_inputs.scope_type='proposal' AND scope_id=<id-lama>` dan
+seluruh line turunannya masih utuh. ID itu menunjuk parent yang sudah tidak ada;
+UI/API normal tidak menyediakan jalur untuk melihat atau membersihkannya.
+Reproduksi HTTP/DB tidak dijalankan karena akan membuat/mengubah data.
+
+**Dampak:** penyimpanan quantity/formula MTO, provenance estimate, dan lineage
+Proposal tidak lagi konsisten. Orphan dapat terhitung oleh audit/migrasi atau
+rekonsiliasi berbasis `engineering_inputs`, membengkakkan data tanpa owner, dan
+membuat kebijakan retensi/penghapusan dokumen komersial tidak dapat dibuktikan.
+P2 karena delete hanya diizinkan untuk draft/review dan tidak langsung mengubah
+deal/project aktif, tetapi kerusakan deterministik terjadi setiap kali Proposal
+editable yang sudah mempunyai MTO dihapus.
+
+**Rekomendasi konkret:** tetapkan satu semantics lifecycle. Pilihan yang lebih
+auditabel adalah soft-delete/archive Proposal dan mempertahankan seluruh snapshot
+di bawah parent yang masih dapat ditelusuri oleh role audit. Jika hard-delete
+draft/review tetap diperlukan, hapus seluruh `engineering_inputs` milik scope
+Proposal di transaction dan setelah lock parent yang sama, sebelum menghapus
+Proposal; biarkan FK `mto_lines` meng-cascade. Karena scope polymorphic menyulitkan
+FK langsung, pusatkan primitive cleanup/ownership agar semua jalur delete memakai
+aturan yang sama, atau pindahkan ownership Proposal-MTO ke link table ber-FK.
+Tambahkan reconciliation legacy untuk mendeteksi scope Proposal tanpa parent;
+laporkan/quarantine dahulu dan jangan purge issued evidence secara buta.
+
+**Acceptance test:**
+
+1. Hard-delete Proposal draft yang memiliki item, satu atau lebih
+   `engineering_inputs`, dan `mto_lines` menghasilkan nol row untuk parent dan
+   seluruh child scope tersebut; MTO project lain tidak berubah.
+2. Failure injection setelah cleanup MTO tetapi sebelum delete Proposal membuat
+   transaction rollback: parent, element, dan seluruh line tetap utuh.
+3. Delete Proposal submitted/deal tetap 409 dan tidak menghapus satu pun child.
+4. Race simpan MTO versus delete terlinearize oleh lock/transaction: hasil akhir
+   adalah Proposal+MTO hidup atau keduanya hilang, tidak pernah orphan.
+5. Reconciliation mendeteksi seluruh legacy `scope_type='proposal'` tanpa parent,
+   menghasilkan report ID/jumlah line/timestamp, dan migrasi idempoten pada run
+   ulang tanpa menyentuh scope project.
+6. Bila soft-delete dipilih, regular list/read menyembunyikannya tetapi role audit
+   dapat merekonstruksi parent, MTO, formula version, dan actor/reason deletion;
+   ID/scope tidak dapat dipakai ulang untuk Proposal lain.
+
+---
+
+## Live Auto Review — 20 Agustus 2026 09:36 WIB
+
+**Sub-area tunggal:** parity lifecycle action delete pada register Proposal.
+Tidak ada perubahan source/staged/commit Proposal sejak review 09:33 WIB;
+`review.md` diabaikan sebagai artefak reviewer.
+
+### [P3 / API-CONTRACT + UX] Register menawarkan Delete untuk Proposal `submitted` dan `no_deal`, padahal backend hanya mengizinkan `draft`/`review` dan UI membuang alasan penolakannya
+
+**File:** [frontend/src/views/EstimatorProposalList.vue:82](frontend/src/views/EstimatorProposalList.vue),
+[frontend/src/views/EstimatorProposalList.vue:680](frontend/src/views/EstimatorProposalList.vue),
+[backend/src/routes/estimator.routes.ts:1856](backend/src/routes/estimator.routes.ts)
+
+**Bukti:** tombol Delete ditampilkan untuk setiap status selain `deal` melalui
+`v-if="proposal.status !== 'deal'"`. Itu mencakup `submitted` dan `no_deal`.
+Kontrak backend sebaliknya memakai `isProposalEditable()` dan mengembalikan 409
+`PROPOSAL_LOCKED` untuk status selain draft/review, disertai status aktual dan
+pesan “Hanya draft dan review yang boleh”. Handler frontend tidak membaca body
+error tersebut; setelah konfirmasi ia selalu menampilkan alert generik
+`Failed to delete proposal`.
+
+**Skenario reproduksi:** buka register yang memuat Proposal submitted atau
+no_deal, tekan Delete, lalu setujui dialog “Are you sure”. Request selalu ditolak
+409 oleh backend, tetapi pengguna hanya melihat kegagalan generik dan tidak tahu
+bahwa aksi tersebut mustahil untuk status saat ini atau jalur lifecycle mana yang
+harus ditempuh. Tidak ada request reproduksi dijalankan reviewer karena delete
+merupakan operasi mutating; perilaku dapat dibuktikan langsung dari dua sisi
+kontrak.
+
+**Dampak:** backend tetap menjaga data sehingga tidak ada corruption langsung,
+tetapi register menyajikan affordance palsu untuk dokumen yang sudah dikirim atau
+ditutup sebagai no-deal. Operator berulang kali mengonfirmasi aksi destruktif yang
+tidak mungkin berhasil, sementara detail 409 yang menjelaskan guard dibuang.
+P3 karena masalah terbatas pada kontrak/feedback UI dan server menolak dengan
+aman.
+
+**Rekomendasi konkret:** derive visibility/disabled state Delete dari capability
+server atau paling sedikit predicate lifecycle yang sama dengan backend
+(`draft`/`review`), bukan `status !== 'deal'`. Pertahankan backend sebagai
+authority. Jika status berubah sesudah list dimuat, tampilkan pesan 409 aktual,
+refresh row, dan jangan mengubah list secara optimistis. Untuk `no_deal`, tawarkan
+aksi Re-open sesuai state machine; jangan menyamarkannya sebagai delete. Saat RBAC
+Proposal diterapkan, capability harus sekaligus memperhitungkan permission dan
+ownership agar UI tidak mengungkap aksi yang tidak dimiliki actor.
+
+**Acceptance test:**
+
+1. Delete hanya terlihat/enabled untuk Proposal draft/review yang actor-nya
+   berhak; submitted/no_deal/deal tidak menampilkan affordance destruktif.
+2. Stale list draft yang berubah menjadi submitted sebelum klik menghasilkan
+   409, menampilkan pesan `PROPOSAL_LOCKED` dari server, dan me-refresh status
+   tanpa menghapus row.
+3. Delete draft/review yang sah meminta konfirmasi dengan nomor/nama Proposal,
+   sukses menghilangkan row setelah response 2xx, dan tidak double-submit.
+4. No-deal menawarkan Re-open ke draft sesuai transisi sah; setelah re-open dan
+   otorisasi terpenuhi, kebijakan delete draft berlaku konsisten.
+5. Contract/component test mencakup seluruh status yang dikenal serta unknown
+   status dengan default fail-closed; capability UI dan respons backend tidak
+   berbeda.
+
+---
+
+## Live Auto Review — 20 Agustus 2026 09:40 WIB
+
+**Sub-area tunggal:** provenance tipe dan parameter desain ketika template
+diterapkan ke Proposal yang sudah ada. Tidak ada perubahan source/staged/commit
+Proposal sejak review 09:36 WIB; `review.md` diabaikan sebagai artefak reviewer.
+
+### [P2 / DATA-INTEGRITY + PROVENANCE] Apply-template membuang `design_params` baru dan menimpa satu-satunya `proposal_type`, sehingga basis desain header dapat bertentangan dengan RAB/MTO yang tersimpan
+
+**File:** [frontend/src/components/ProposalTemplateWizard.vue:1116](frontend/src/components/ProposalTemplateWizard.vue),
+[frontend/src/views/EstimatorProposalEditor.vue:1389](frontend/src/views/EstimatorProposalEditor.vue),
+[backend/src/routes/estimator.routes.ts:1730](backend/src/routes/estimator.routes.ts),
+[backend/src/routes/estimator.routes.ts:1762](backend/src/routes/estimator.routes.ts),
+[backend/database/schema-baseline.sql:2240](backend/database/schema-baseline.sql)
+
+**Bukti:** hasil kanonik wizard sudah membawa `type` dan salinan
+`design_params` yang dipakai menghitung geometry/MTO
+([ProposalTemplateWizard.vue:1116](frontend/src/components/ProposalTemplateWizard.vue)).
+Jalur create mengirim keduanya, tetapi jalur editor `applyWizardTemplate()` hanya
+meneruskan `proposal_type`, `template_sections`, dan `mode`; `design_params`
+tidak pernah dikirim ([EstimatorProposalEditor.vue:1389](frontend/src/views/EstimatorProposalEditor.vue)).
+Backend apply-template juga hanya mendestruktur tiga field tersebut dan hanya
+menulis `proposal_type` ([estimator.routes.ts:1730](backend/src/routes/estimator.routes.ts),
+[estimator.routes.ts:1762](backend/src/routes/estimator.routes.ts)). Kolom
+`proposals.design_params` karena itu tetap berisi geometry lama/null.
+
+Kontradiksi kedua terjadi pada mode `append`: backend mempertahankan seluruh item
+lama tetapi tetap menimpa scalar `proposal_type` dengan tipe template terakhir.
+Proposal Civil yang ditambahi Electrical akan berisi scope keduanya tetapi header
+hanya mengaku Electrical; parameter Civil lama masih berada di satu JSON
+`design_params`. Pada mode `replace`, item RAB memang diganti, tetapi parameter
+header tetap berasal dari template sebelumnya. Schema hanya menyediakan satu
+`proposal_type` dan satu JSON `design_params`, tanpa lineage per template/work
+package ([schema-baseline.sql:2240](backend/database/schema-baseline.sql)).
+
+**Skenario reproduksi:** buat Proposal dari Civil Building dengan parameter luas
+dan tinggi A. Di editor buka wizard Civil Structure/Warehouse dengan dimensi B,
+lalu pilih Replace. Setelah sukses, RAB/MTO baru berasal dari B, tetapi reload
+header masih mengembalikan `design_params` A dan `proposal_type` baru. Varian
+Append Electrical mempertahankan item Civil sambil mengganti header menjadi
+Electrical. Pemeriksaan dilakukan dari source; tidak dibuat fixture mutating.
+
+**Dampak:** estimator/reviewer tidak dapat membuktikan parameter mana yang
+menghasilkan quantity dan RAB aktif, melakukan regenerate secara reproducible,
+atau menelusuri basis desain saat handoff/variation. Integrasi yang memakai
+`proposal_type` akan salah mengklasifikasikan proposal multi-discipline, sementara
+parameter header terlihat valid tetapi sebenarnya stale. P2 karena angka item
+yang sudah tersimpan tidak langsung berubah, tetapi provenance dan source of
+truth estimate rusak deterministik pada alur apply-template normal.
+
+**Rekomendasi konkret:** definisikan template application sebagai aggregate
+versioned yang menyimpan template/type/version, normalized design parameters,
+work package/discipline, generated RAB item IDs, MTO element IDs, actor, dan
+timestamp dalam transaction yang sama. Untuk Replace, ganti basis desain dan
+semua child terikat secara atomik. Untuk Append tipe berbeda, jangan menimpa
+scalar header: simpan beberapa application/work package atau tolak dengan 409
+sampai model multi-type tersedia. Validasi `proposal_type` terhadap enum/template
+registry di server. `design_params` klien harus divalidasi dan disimpan sebagai
+input provenance; quantity/price tetap dihitung server sesuai kontrak temuan
+wizard sebelumnya.
+
+**Acceptance test:**
+
+1. Apply Replace dengan parameter B menghasilkan reload header/application,
+   RAB, dan MTO yang seluruhnya menunjuk tipe, parameter, serta template version
+   B; tidak ada parameter A tersisa sebagai basis aktif.
+2. Append tipe berbeda membuat dua application/work package yang dapat ditelusuri
+   tanpa mengubah tipe application lama, atau ditolak 409 sebelum mutasi apa pun.
+3. Append tipe sama menyimpan application revision/parameter masing-masing dan
+   setiap generated item/element menunjuk sumber yang tepat, bukan satu JSON
+   global yang ambigu.
+4. Payload type unknown atau design parameter missing/invalid ditolak 422 dengan
+   diagnostic field; item, MTO, type, dan parameter lama tetap utuh.
+5. Failure injection pada penulisan parameter/item/MTO rollback seluruh aggregate;
+   tidak ada header baru dengan child lama atau sebaliknya.
+6. Setelah submitted/deal, apply-template dan perubahan provenance tetap 409;
+   issued artifact dapat merekonstruksi type+parameter+formula/template version
+   yang menghasilkan setiap quantity dan nilai kontraktual.
+
+---
+
+## Live Auto Review — 20 Agustus 2026 09:43 WIB
+
+**Sub-area tunggal:** identitas instance item saat memilih AHSP yang sudah dipakai
+lebih dari sekali dalam Proposal. Tidak ada perubahan source/staged/commit
+Proposal sejak review 09:40 WIB; `review.md` diabaikan sebagai artefak reviewer.
+
+### [P2 / DATA-LOSS + ITEM-IDENTITY] Picker AHSP memperlakukan `ahsp_id` sebagai checkbox global; klik pada analisa yang dipakai beberapa scope langsung menghapus instance pertama yang belum tentu dimaksud
+
+**File:** [frontend/src/views/EstimatorProposalEditor.vue:902](frontend/src/views/EstimatorProposalEditor.vue),
+[frontend/src/views/EstimatorProposalEditor.vue:1705](frontend/src/views/EstimatorProposalEditor.vue),
+[backend/src/routes/estimator.routes.ts:1895](backend/src/routes/estimator.routes.ts),
+[backend/database/schema-baseline.sql:2205](backend/database/schema-baseline.sql)
+
+**Bukti:** model backend mengidentifikasi item dengan `proposal_items.id` dan
+tidak mempunyai unique constraint `(proposal_id, ahsp_id)`. Ini benar-benar
+mengizinkan AHSP yang sama dipakai beberapa kali dengan quantity, description,
+discipline/sub-discipline, section, serta order berbeda. Endpoint add juga selalu
+membuat instance baru.
+
+Picker frontend justru menentukan selected state lewat
+`items.some(item => item.ahsp_id === ahspId)`. Bila true, `toggleAHSP()` tidak
+menambahkan ke discipline yang sedang dipilih, melainkan mencari
+`items.find(item => item.ahsp_id === ahsp.id)` lalu langsung memanggil DELETE
+untuk **instance pertama** tersebut tanpa memilih row/section dan tanpa konfirmasi
+([EstimatorProposalEditor.vue:1705](frontend/src/views/EstimatorProposalEditor.vue)).
+Visualnya hanya checkbox per master AHSP, jadi multiplicity dan target penghapusan
+tidak terlihat.
+
+**Skenario reproduksi:** hasil template/API memuat AHSP Beton K-250 dua kali:
+Pedestal P-01 qty 10 dan Tie Beam TB-02 qty 20. Buka picker, pilih discipline lain,
+lalu klik Beton K-250 dengan maksud menambah scope ketiga. Karena AHSP sudah
+dianggap checked, UI langsung menghapus row pertama yang ditemukan—misalnya
+Pedestal—dan total Proposal berkurang; Tie Beam tetap ada sehingga checkbox masih
+terlihat checked setelah reload. Pengguna tidak diberi tahu row mana yang hilang.
+Reproduksi HTTP tidak dijalankan karena aksi akan menghapus data; alurnya
+deterministik dari source.
+
+**Dampak:** scope bernilai dan quantity yang sah dapat terhapus diam-diam dari
+draft/review hanya karena master analisa yang sama digunakan ulang—pola normal
+untuk lokasi, area, work package, atau description berbeda. Total otomatis ikut
+turun sehingga estimator dapat melanjutkan dengan RAB kurang scope tanpa error.
+P2 karena guard backend tetap melindungi submitted/deal dan kehilangan terjadi
+pada dokumen editable, tetapi satu klik UI dapat menghapus instance yang salah
+tanpa recovery/identifikasi.
+
+**Rekomendasi konkret:** pisahkan aksi **Add AHSP** dari **Remove item**. Picker
+catalog sebaiknya selalu membuat instance baru pada discipline/section/work
+package yang dipilih, atau menampilkan jumlah instance dan dialog yang menautkan
+setiap `proposal_item.id`, description, qty, dan lokasi sebelum aksi. Penghapusan
+hanya dari row konkret dengan ID dan konfirmasi yang menyebut scope/nomor/nilai;
+jangan infer target dari `ahsp_id`. Jika bisnis memang ingin satu AHSP per
+Proposal, tegakkan invariant itu di backend+DB dan sediakan model work package
+yang tetap dapat merepresentasikan pengulangan—bukan checkbox frontend saja.
+
+**Acceptance test:**
+
+1. Dua/tiga item dengan `ahsp_id` sama tetapi description, discipline, section,
+   dan qty berbeda tampil sebagai instance terpisah dan bertahan setelah reload.
+2. Memilih AHSP yang sudah dipakai menambah instance baru pada scope yang dipilih,
+   atau membuka pemilih instance; tidak pernah melakukan DELETE implicit.
+3. Delete dari row B hanya menghapus `proposal_item.id` B, mempertahankan A/C,
+   dan dialog menyebut description/qty/nilai B sebelum konfirmasi.
+4. Total sebelum/sesudah add/delete merekonsiliasi tepat ke instance yang berubah;
+   cancel, 409 stale status, dan network failure tidak menghilangkan row lokal.
+5. Template/import yang menghasilkan AHSP duplicate dapat diedit dan dihapus per
+   instance melalui UI tanpa mengandalkan urutan `find()`.
+6. Submitted/deal tetap read-only; actor tanpa capability delete tidak melihat
+   affordance remove sekalipun mempunyai akses baca catalog AHSP.
+
+---
+
+## Live Auto Review — 20 Agustus 2026 09:46 WIB
+
+**Delta yang diperiksa:** working-tree unstaged
+`frontend/src/components/projects/ProjectMTO.vue` (48 penambahan/4 penghapusan),
+dipakai langsung oleh tab MTO Proposal melalui `api-base="/estimator/proposals"`.
+Tidak ada staged diff atau commit lokal baru; `review.md` diabaikan sebagai
+artefak reviewer.
+
+### [P2 / PARTIAL-SUCCESS + UI-DURABILITY — DITERAPKAN SEBAGIAN] Error MTO kini terlihat, tetapi manual save masih dapat menampilkan “tersimpan” pada zona unsaved dan batch multi-zona tetap commit sebagian
+
+**File:** [frontend/src/components/projects/ProjectMTO.vue:104](frontend/src/components/projects/ProjectMTO.vue),
+[frontend/src/components/projects/ProjectMTO.vue:343](frontend/src/components/projects/ProjectMTO.vue),
+[frontend/src/components/projects/ProjectMTO.vue:403](frontend/src/components/projects/ProjectMTO.vue),
+[frontend/src/components/projects/ProjectMTO.vue:432](frontend/src/components/projects/ProjectMTO.vue),
+[frontend/src/views/EstimatorProposalEditor.vue:276](frontend/src/views/EstimatorProposalEditor.vue)
+
+**Verifikasi patch:** perubahan benar-benar berhenti menelan kegagalan auto-save,
+mengekstrak pesan/`problems` dari respons backend, menampilkan field wajib yang
+kurang, serta mempertahankan `isDirty=true` pada catch auto-save. Itu perbaikan
+nyata dibanding silent failure sebelumnya.
+
+**Bukti sisa masalah:** `addDefaultZone()` sengaja menambahkan zona lokal tanpa
+`element_id` dan tanpa menandai dirty, tetapi save bar mengartikan setiap
+`isDirty=false` sebagai `✓ N zona ... tersimpan`. Jadi zona default yang belum
+pernah POST sudah diklaim persisted. Pada manual `saveModule()`, catch baru hanya
+menyetel `saveError`; berbeda dengan catch auto-save, ia tidak menyetel
+`isDirty=true`. Kegagalan POST pertama—422 atau network—karena itu dapat
+menampilkan panel merah “MTO ini tidak tersimpan” tepat di atas bar hijau
+“✓ 1 zona tersimpan”.
+
+Selain itu auto-save dan manual save melakukan satu PUT/POST per zona secara
+serial. Jika zona A sukses lalu B ditolak, A sudah commit dan mendapat
+`element_id`, B belum; catch menampilkan satu error global yang menyatakan MTO
+tidak tersimpan, tanpa menandai zona mana yang committed/failed. Tidak ada batch
+transaction aggregate, rollback/compensation, atau state durability per zona.
+Patch tidak memperkenalkan partial commit ini, tetapi pesan barunya memberi
+kesimpulan all-or-nothing yang tidak sesuai perilaku aktual.
+
+**Skenario reproduksi:** buka tab MTO Proposal pada tipe yang belum mempunyai
+row. `addDefaultZone()` membuat satu zona dan save bar langsung hijau meski belum
+ada POST. Putuskan jaringan atau buat satu parameter wajib invalid, lalu klik
+Simpan: panel merah muncul tetapi bar tetap hijau karena manual catch tidak
+mengubah dirty. Untuk partial variant, buat dua zona; A valid dan B invalid.
+Loop menyimpan A lalu mendapat 422 pada B—reload mempertahankan A saja, sedangkan
+UI sebelum reload tidak membedakan hasil keduanya. Request mutating tidak
+dijalankan reviewer; urutan commit dapat dibuktikan dari loop HTTP serial.
+
+**Dampak:** estimator dapat meninggalkan tab dengan keyakinan zona tersimpan
+padahal data hanya berada di memory, atau salah memahami batch parsial sebagai
+kegagalan total lalu mengulang input. Retry/tab switch dapat menghasilkan
+campuran versi, duplicate/upsert tak terduga, dan basis quantity Proposal berbeda
+dari yang terlihat sebelum reload. P2 karena terjadi di draft/review dan panel
+error baru mengurangi silent loss, tetapi indikator durability yang kontradiktif
+masih dapat menyebabkan kehilangan atau partial MTO.
+
+**Rekomendasi konkret:** jangan derive status persistence seluruh tab dari satu
+boolean. Setiap zona perlu state `new/dirty/saving/saved/error`, server ID,
+revision/hash terakhir, serta error field-level. `addDefaultZone()` wajib
+`new/dirty`; manual dan auto-save memakai primitive state yang sama. Jika aksi
+Simpan dimaksud all-or-nothing, sediakan batch endpoint yang memvalidasi seluruh
+zona lalu menulis satu transaction dengan idempotency key. Jika partial success
+memang dipertahankan, response/UI harus menyebut zona committed dan failed,
+retry hanya failed zone, dan teks jangan mengklaim seluruh MTO tersimpan maupun
+tidak tersimpan.
+
+**Acceptance test:**
+
+1. Zona default tanpa `element_id` selalu berlabel belum tersimpan/dirty; tidak
+   pernah menghasilkan checkmark hijau sebelum response 2xx.
+2. Manual save dan auto-save yang mendapat 422/network sama-sama mempertahankan
+   dirty, menampilkan pesan+field yang benar, dan tidak menampilkan klaim saved.
+3. Dua zona dengan A valid/B invalid menghasilkan nol commit bila kontraknya
+   atomic, atau UI per-zona menunjukkan A saved dan B error persis seperti hasil
+   reload bila kontraknya partial.
+4. Retry setelah response putus tidak membuat duplicate zone; ID/idempotency dan
+   payload hash mengembalikan/memperbarui instance yang sama.
+5. Tab switch ketika save gagal tidak menyembunyikan error atau me-reset dirty;
+   navigasi keluar memperingatkan seluruh zona unsaved secara akurat.
+6. Setelah seluruh zona sukses, baru semua state menjadi saved, error bersih,
+   reload mengembalikan parameter/line identik, dan Proposal submitted/deal tetap
+   read-only terhadap manual maupun auto-save.
+
+---
+
+## Live Auto Review — 20 Agustus 2026 09:48 WIB
+
+**Delta tambahan yang muncul saat run:** working-tree
+`backend/tests/mto-link.ts` menambah kontrak error MTO; perubahan
+`frontend/src/views/LeadDetail.vue` tidak menyentuh kontrak Proposal dan tidak
+dibawa ke audit modul ini. Tidak ada staged diff/commit baru.
+
+### [P2 / TEST-SAFETY + DATA-CLEANUP] Tes MTO baru membersihkan header Proposal tetapi meninggalkan `engineering_inputs`/`mto_lines` fixture orphan pada setiap run
+
+**File:** [backend/tests/mto-link.ts:1123](backend/tests/mto-link.ts),
+[backend/tests/mto-link.ts:1145](backend/tests/mto-link.ts),
+[backend/tests/mto-link.ts:1164](backend/tests/mto-link.ts),
+[backend/src/routes/estimator.routes.ts:1839](backend/src/routes/estimator.routes.ts),
+[backend/database/schema-baseline.sql:1221](backend/database/schema-baseline.sql)
+
+**Bukti:** test membuat Proposal baru, berhasil menyimpan satu elemen column MTO
+beserta lines, membuktikan upsert tetap satu elemen, lalu cleanup hanya memanggil
+`DELETE /estimator/proposals/:id`. Seperti temuan lifecycle 09:33 WIB, endpoint
+itu hanya menghapus row `proposals`; `engineering_inputs` tidak mempunyai FK ke
+Proposal dan tidak ikut dibersihkan. Dengan demikian cleanup test yang tampak
+berhasil justru meninggalkan element scope `proposal` dan child `mto_lines`.
+
+Test memeriksa nol elemen setelah request 422 **sebelum** create valid, tetapi
+tidak memeriksa nol element/line setelah cleanup akhir. ID Proposal selalu baru,
+sehingga unique scope tidak mencegah akumulasi orphan pada run berikutnya.
+Perubahan lain dalam test—kontrak 422 `error`+`problems`, keberhasilan payload
+lengkap, quantity 16,128, dan upsert ID yang sama—selaras dengan endpoint; test
+tidak dijalankan reviewer karena suite HTTP membuat data.
+
+**Skenario:** jalankan `test:mto-link` N kali pada database dev. Setiap run
+menghapus header uji dan tampak bersih di register, tetapi menambah satu
+`engineering_inputs(scope_type='proposal', scope_id=<id-yang-sudah-hilang>)`
+beserta `mto_lines`. Karena proses memanggil `process.exit` dan tidak memakai
+cleanup `finally`, kegagalan assertion lebih awal juga dapat meninggalkan header
+dan fixture tambahan.
+
+**Dampak:** suite yang disebut idempoten mengotori database dev secara monoton,
+mengaburkan audit orphan/migrasi, memperbesar storage, dan dapat memberi false
+positive/negative pada test reconciliation berikutnya. Ini juga membuat test
+baru gagal menangkap bug hard-delete yang persis dilaluinya. P2 karena tidak
+menyentuh produksi bila suite dijalankan sesuai prosedur, tetapi integritas dan
+repeatability environment test rusak pada alur normal.
+
+**Rekomendasi konkret:** perbaiki ownership cleanup aplikasi sesuai temuan 09:33
+dan jadikan test ini regression test-nya: setelah delete Proposal, query/API
+terkontrol harus membuktikan element dan lines scope itu nol. Sampai endpoint
+hard-delete diperbaiki, hapus elemen MTO eksplisit memakai ID yang dikembalikan
+sebelum menghapus Proposal. Bungkus seluruh fixture dalam `try/finally`/cleanup
+registry sehingga kegagalan assertion tetap menjalankan cleanup; verifikasi
+status setiap DELETE dan jangan mengandalkan `process.exit` langsung.
+
+**Acceptance test:**
+
+1. Snapshot jumlah orphan Proposal-MTO sebelum/sesudah satu dan lima run suite
+   identik; tidak ada `scope_id` yang parent Proposal-nya hilang.
+2. Cleanup menghapus `mto_lines`, `engineering_inputs`, lalu Proposal secara
+   benar, atau delete aggregate menghapus semuanya dalam satu transaction.
+3. Forced assertion failure setelah create valid tetap mengeksekusi cleanup
+   `finally`; run berikutnya tidak collision atau melihat fixture lama.
+4. Cleanup response non-2xx membuat suite gagal dengan ID fixture yang perlu
+   direkonsiliasi, bukan tetap mencetak jumlah test lulus.
+5. Regression test hard-delete membuktikan scope project/MTO lain tidak ikut
+   terhapus dan repeated cleanup aman/idempoten.

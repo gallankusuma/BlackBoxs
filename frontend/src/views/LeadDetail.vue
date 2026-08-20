@@ -16,6 +16,24 @@
           </button>
         </div>
 
+        <div class="mb-4 flex gap-3 rounded-lg border border-amber-300 bg-amber-50 p-4">
+          <span class="mt-0.5 text-amber-600" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 8v5" /><path d="M12 17h.01" />
+              <path d="M10.3 3.9 2.4 18a2 2 0 0 0 1.7 3h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+            </svg>
+          </span>
+          <div class="text-sm">
+            <p class="font-semibold text-amber-900">Modul Leads belum tersambung ke server</p>
+            <p class="mt-1 text-amber-800">
+              Halaman ini tidak memuat data dari mana pun, dan perubahan di sini
+              <strong>tidak tersimpan</strong>. Untuk prospek yang benar-benar tercatat,
+              pakai modul Prospects.
+            </p>
+          </div>
+        </div>
+
         <!-- Tabs -->
         <div class="flex gap-6 border-b border-gray-200">
           <button
@@ -333,14 +351,26 @@ const tabs = [
 ];
 
 // Mock lead data - in real app would fetch from API
-const mockLeads: { [key: number]: Lead } = {
-  1: { id: 1, company: 'Sarah Cole', contact_name: 'Sarah Cole', email: 'sarah@example.com', phone: '555-1234', stage: 'New', value: 25000, probability: 10, source: 'Website', created_at: '2026-02-15', notes: 'Initial contact made' },
-  2: { id: 2, company: 'Louie Ziemann', contact_name: 'Louie Ziemann', email: 'louie@example.com', phone: '555-5678', stage: 'Qualified', value: 35000, probability: 50, source: 'LinkedIn', created_at: '2026-02-10', notes: '50% Probably' },
-  3: { id: 3, company: 'Gibson PLC', contact_name: 'Gibson Contact', email: 'gibson@example.com', stage: 'Discussion', value: 45000, probability: 90, source: 'Elsewhere', created_at: '2026-02-08', notes: '90% Probably' },
+/**
+ * Layar ini BELUM terhubung ke backend — sama seperti daftar Leads.
+ *
+ * Sebelumnya di sini ada tiga lead karangan, dan pemilihannya
+ * `mockLeads[leadId] || mockLeads[1]`: alamat id APA PUN — termasuk yang tidak
+ * pernah ada — menampilkan "Sarah Cole" lengkap dengan nilai 25.000 dan
+ * probabilitas 10%, seolah prospek sungguhan. Data itu ikut ter-build ke
+ * produksi.
+ *
+ * Tidak diisi dari API karena memang tidak ada yang bisa dipanggil: tabel
+ * `leads` tidak ada di skema dan `/api/leads` tidak terdaftar di
+ * `backend/src/index.ts`.
+ */
+const LEAD_KOSONG: Lead = {
+  id: 0, company: '', contact_name: '', email: '', phone: '',
+  stage: '', value: 0, probability: 0, source: '', created_at: '', notes: '',
 };
 
 const leadId = parseInt(route.params.id as string);
-const lead = ref<Lead>(mockLeads[leadId] || mockLeads[1]);
+const lead = ref<Lead>({ ...LEAD_KOSONG, id: Number.isFinite(leadId) ? leadId : 0 });
 const editForm = reactive<Lead>({ ...lead.value });
 
 const formatNumber = (num: number) => new Intl.NumberFormat('en-US').format(num);

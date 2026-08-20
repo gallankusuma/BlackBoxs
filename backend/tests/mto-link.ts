@@ -1105,6 +1105,64 @@ async function main() {
     chk('payload nyata layar list diterima backend', kirimNyata.status, 200);
   }
 
+  // ───────────────────────────────────────────────────────────────────────────
+  // Kontrak pesan gagal simpan MTO ↔ layar ProjectMTO.
+  //
+  // Backend menolak dimensi teknis yang belum lengkap dengan 422 dan menyertakan
+  // daftar persis field yang kurang. Layar MTO dulu MEMBUANG daftar itu — auto
+  // save menelannya diam-diam (`catch {}`) dan tombol Simpan hanya berkata
+  // "Gagal menyimpan. Coba lagi." Dari sisi pengguna, MTO "tidak bisa ditambah
+  // atau diedit" tanpa satu pun petunjuk apa yang harus diisi, dan mencoba lagi
+  // dengan data yang sama memang tidak akan pernah berhasil.
+  //
+  // Layar sekarang menampilkan `error` + `problems` apa adanya, jadi bentuk itu
+  // adalah kontrak yang harus dijaga.
+  // ───────────────────────────────────────────────────────────────────────────
+  console.log('\n10. Kontrak penolakan MTO ↔ layar ProjectMTO');
+
+  const propMto = await call('POST', '/estimator/proposals',
+    { project_name: `Uji kontrak MTO ${stamp}`, status: 'draft' }, master);
+  const mtoId = propMto.json?.id ?? propMto.json?.data?.id;
+  chk('proposal uji kontrak dibuat', !!mtoId, true);
+
+  const tolak = await call('POST', `/estimator/proposals/${mtoId}/mto`,
+    { element_type: 'column', element_name: 'Kolom', parameters: {} }, master);
+  chk('dimensi kosong ditolak', tolak.status, 422);
+  chk('kodenya MISSING_REQUIRED_PARAMETERS', tolak.json?.code, 'MISSING_REQUIRED_PARAMETERS');
+  chk('ada pesan yang bisa ditampilkan', typeof tolak.json?.error === 'string' && tolak.json.error.length > 0, true);
+  // Field inilah yang dirender layar sebagai daftar; kalau hilang, pesannya
+  // kembali jadi buntu tanpa ada yang sadar.
+  chk('`problems` berupa array', Array.isArray(tolak.json?.problems), true);
+  chk('`problems` tidak kosong', (tolak.json?.problems || []).length > 0, true);
+  chk('menyebut field yang benar-benar kurang',
+    (tolak.json?.problems || []).some((p: string) => p.includes('qty_per_floor')), true);
+
+  // Tidak boleh ada yang tersimpan separuh.
+  const kosongkah = await call('GET', `/estimator/proposals/${mtoId}/mto`, undefined, master);
+  chk('tidak ada elemen tersimpan saat ditolak', (kosongkah.json?.elements || []).length, 0);
+
+  // Dilengkapi → berhasil, dan pesan gagalnya hilang dengan sendirinya.
+  const lolos = await call('POST', `/estimator/proposals/${mtoId}/mto`, {
+    element_type: 'column', element_name: 'Kolom',
+    parameters: { qty_per_floor: 24, height_per_floor: 4, floors: 1, B: 0.4, H: 0.4, waste_pct: 5 },
+  }, master);
+  chk('dimensi lengkap diterima', lolos.status, 200);
+  chk('mengembalikan id untuk dipakai UI', typeof lolos.json?.id === 'number', true);
+  const betonKolom = (lolos.json?.lines || []).find((l: any) => l.code === 'COL-CONC');
+  chk('beton kolom 24 bh x 4m x 0,4x0,4 + waste 5%', betonKolom?.gross_quantity, 16.128);
+
+  // Simpan ulang dengan payload sama harus MEMPERBARUI, bukan menggandakan —
+  // ini yang membuat tombol Simpan bisa ditekan berkali-kali dengan aman.
+  const ulang = await call('POST', `/estimator/proposals/${mtoId}/mto`, {
+    element_type: 'column', element_name: 'Kolom',
+    parameters: { qty_per_floor: 30, height_per_floor: 4, floors: 1, B: 0.4, H: 0.4, waste_pct: 5 },
+  }, master);
+  chk('simpan ulang memakai id yang sama', ulang.json?.id, lolos.json?.id);
+  const daftarAkhir = await call('GET', `/estimator/proposals/${mtoId}/mto`, undefined, master);
+  chk('tetap satu elemen, tidak menggandakan', (daftarAkhir.json?.elements || []).length, 1);
+
+  await call('DELETE', `/estimator/proposals/${mtoId}`, undefined, master);
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }

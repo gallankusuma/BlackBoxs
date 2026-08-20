@@ -103,6 +103,23 @@
 
           <!-- Save bar -->
           <template v-if="!readonly">
+            <!-- Alasan gagal simpan ditampilkan APA ADANYA dari server.
+                 Backend menolak dimensi teknis yang belum lengkap dengan 422
+                 MISSING_REQUIRED_PARAMETERS berikut daftar persis field yang
+                 kurang — dulu daftar itu dibuang dan diganti "Coba lagi", jadi
+                 pengguna hanya tahu gagal tanpa pernah tahu apa yang harus
+                 diisi, dan mencoba lagi tidak pernah mengubah apa pun. -->
+            <div v-if="saveError" class="zone-missing" style="border-color:#fca5a5;background:#fef2f2">
+              <strong style="color:#991b1b">❌ {{ saveError.message }}</strong>
+              <ul v-if="saveError.problems.length">
+                <li v-for="m in saveError.problems" :key="m">{{ m }}</li>
+              </ul>
+              <span class="zm-note">
+                Lengkapi dimensi di atas lalu Simpan lagi. Selama belum lengkap,
+                MTO ini <strong>tidak tersimpan</strong>.
+              </span>
+            </div>
+
             <div class="dirty-bar" :style="isDirty ? 'background:#fef3c7;border-color:#fcd34d' : 'background:#f0fdf4;border-color:#d1fae5'">
               <span v-if="isDirty" style="color:#92400e">⚠️ Ada perubahan belum disimpan</span>
               <span v-else style="color:#065f46">✓ {{ zones[activeTab]?.length || 0 }} zona {{ activeModule?.label }} tersimpan</span>
@@ -367,7 +384,22 @@ function markDirty() {
   }, 3000);
 }
 
-// Silent auto-save for a given module tab
+/** Alasan gagal simpan terakhir — ditampilkan di bar simpan, bukan dibuang. */
+const saveError = ref<{ message: string; problems: string[] } | null>(null);
+
+/** Ambil pesan dan daftar masalah dari respons error backend. */
+function uraikanGagal(e: any): { message: string; problems: string[] } {
+  const d = e?.response?.data;
+  return {
+    message: d?.error || e?.message || 'Gagal menyimpan MTO.',
+    problems: Array.isArray(d?.problems) ? d.problems
+            : Array.isArray(d?.missing_required) ? d.missing_required
+            : [],
+  };
+}
+
+// Auto-save untuk satu tab modul
+
 async function autoSave(mod: string) {
   if (!zones.value[mod]?.length) return;
   try {
@@ -386,7 +418,15 @@ async function autoSave(mod: string) {
       }
     }
     isDirty.value = false;
-  } catch { /* silent fail — manual save bar still shows */ }
+    saveError.value = null;
+  } catch (e: any) {
+    // Auto-save TIDAK boleh gagal diam-diam. Versi lama menelan errornya
+    // sepenuhnya, jadi perubahan yang ditolak server tetap terlihat di layar
+    // seolah tersimpan — dan baru ketahuan hilang setelah halaman dimuat ulang.
+    // Tanpa alert (ini berjalan di latar), tapi alasannya ditampilkan di bar.
+    saveError.value = uraikanGagal(e);
+    isDirty.value = true;
+  }
 }
 
 async function saveModule() {
@@ -404,8 +444,12 @@ async function saveModule() {
       }
     }
     isDirty.value = false;
-  } catch(e) {
-    alert('Gagal menyimpan. Coba lagi.');
+    saveError.value = null;
+  } catch (e: any) {
+    // Pesan server dipakai apa adanya — ia sudah menyebut field mana yang
+    // kurang. "Coba lagi" adalah saran yang keliru: mencoba lagi dengan data
+    // yang sama akan ditolak lagi.
+    saveError.value = uraikanGagal(e);
   } finally { saving.value = false; }
 }
 
