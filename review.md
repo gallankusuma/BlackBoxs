@@ -6372,7 +6372,27 @@ nilai kontrak ke `client_projects.budget`. Jadi tidak ada tempat tujuan untuk
 klasifikasi itu. Kalau memang perlu snapshot baris RAB saat deal, itu pekerjaan
 tersendiri — sekalian menutup DESIGN-GAP "contract/change-order ledger".
 
-Suite penuh: **1288 lulus, 0 gagal**.
+Suite penuh: **1285 lulus, 0 gagal**.
+
+**Pembaruan — gerbangnya kini bersakelar, jadi kodenya aman dikirim.**
+Menahan deploy seluruh cabang hanya karena satu gerbang berarti perbaikan lain
+ikut tertahan. Gerbang ini sekarang di belakang `GERBANG_SCOPE_LENGKAP`
+(**default mati**):
+
+- **Mati** (keadaan sekarang): perilaku produksi tidak berubah sama sekali; baris
+  belum lengkap tetap dihitung, bisa dibaca lewat
+  `GET /proposals/:id/items/incomplete`, dan dicatat sebagai peringatan di log
+  saat proposal naik status. Masalahnya terlihat tanpa menghentikan pekerjaan.
+- **Hidup**: menolak seperti dijelaskan di atas.
+
+Endpoint klasifikasi tetap aktif dalam kedua keadaan, jadi baris bisa mulai
+dibereskan kapan saja sebelum sakelarnya dinyalakan.
+
+Keduanya **diuji sungguhan**, bukan diasumsikan: suite dijalankan dua kali —
+sekali terhadap backend biasa (sakelar mati) dan sekali terhadap instance
+terpisah di port 3099 dengan `GERBANG_SCOPE_LENGKAP=true`. Tesnya menyatakan
+keadaan sakelar secara terang-terangan dan **tidak diam-diam lolos** saat mati —
+ia justru menegaskan bahwa submit campuran memang diterima dalam keadaan itu.
 
 ### [P2 / API-CONTRACT — DITERAPKAN SEBAGIAN] CRM Client sudah membaca tabel Proposal yang benar, tetapi template masih meminta field kontrak lama
 

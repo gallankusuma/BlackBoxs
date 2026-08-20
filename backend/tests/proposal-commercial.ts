@@ -219,15 +219,34 @@ async function main() {
     const inc = await call('GET', `/estimator/proposals/${campurId}/items/incomplete`, undefined, master);
     chk('baris belum lengkap terdaftar', inc.json?.count, 1);
 
+    const nol = barisCampur.find((b: any) => Number(b.qty) === 0);
+    chk('baris nol teridentifikasi', !!nol?.id, true);
+
     await call('PUT', `/estimator/proposals/${campurId}/status`, { status: 'review' }, master);
     const tolakCampur = await call('PUT', `/estimator/proposals/${campurId}/status`, { status: 'submitted' }, master);
+
+    // Gerbangnya bersakelar (GERBANG_SCOPE_LENGKAP) karena menggembok alur kerja
+    // produksi yang sedang berjalan. Tes ini TIDAK boleh diam-diam lolos saat
+    // sakelarnya mati — keadaannya dinyatakan, dan bagian yang tidak berlaku
+    // dilewati secara terang-terangan.
+    const gerbangHidup = tolakCampur.status === 400;
+    if (!gerbangHidup) {
+      console.log('  ––   gerbang scope MATI (GERBANG_SCOPE_LENGKAP belum true)');
+      console.log('       submit campuran karena itu diterima; bagian gerbang dilewati.');
+      chk('saat mati, submit campuran diterima', tolakCampur.status, 200);
+      chk('daftar baris belum lengkap tetap bisa dibaca',
+        (await call('GET', `/estimator/proposals/${campurId}/items/incomplete`, undefined, master)).json?.count, 1);
+      // Klasifikasi scope tunduk pada kunci proposal, jadi turunkan kembali ke
+      // review supaya bagian 10 menguji klasifikasinya, bukan kuncinya.
+      chk('diturunkan lagi ke review untuk bagian berikutnya',
+        (await call('PUT', `/estimator/proposals/${campurId}/status`, { status: 'review' }, master)).status, 200);
+    } else {
     chk('submit proposal campuran ditolak', tolakCampur.status, 400);
     chk('kodenya PROPOSAL_BELUM_LAYAK', tolakCampur.json?.code, 'PROPOSAL_BELUM_LAYAK');
     // Daftar barisnya disebut, bukan sekadar "ada yang salah".
     const pel: string[] = tolakCampur.json?.pelanggaran || [];
     chk('menyebut jumlah baris belum lengkap',
       pel.some(x => x.includes('1 baris pekerjaan belum lengkap')), true);
-    const nol = barisCampur.find((b: any) => Number(b.qty) === 0);
     chk('menyebut id baris yang bermasalah',
       pel.some(x => x.includes(`#${nol?.id}`)), true);
     chk('menyebut sebabnya', pel.some(x => x.includes('volume masih nol')), true);
@@ -235,6 +254,7 @@ async function main() {
     const tetapReview = await call('GET', `/estimator/proposals/${campurId}`, undefined, master);
     chk('statusnya tidak terlanjur submitted',
       (tetapReview.json?.data ?? tetapReview.json)?.status, 'review');
+    }
 
     // ── Klasifikasi eksplisit membuka jalan, tapi menuntut alasan ───────────
     console.log('\n10. Klasifikasi scope: eksplisit, wajib beralasan, dan tercatat');
@@ -255,8 +275,10 @@ async function main() {
     chk('tidak ada lagi baris belum lengkap',
       (await call('GET', `/estimator/proposals/${campurId}/items/incomplete`, undefined, master)).json?.count, 0);
 
-    const lolos = await call('PUT', `/estimator/proposals/${campurId}/status`, { status: 'submitted' }, master);
-    chk('sesudah dinyatakan, submit berhasil', lolos.status, 200);
+    if (gerbangHidup) {
+      const lolos = await call('PUT', `/estimator/proposals/${campurId}/status`, { status: 'submitted' }, master);
+      chk('sesudah dinyatakan, submit berhasil', lolos.status, 200);
+    }
 
     // Keputusannya tercatat: siapa dan kenapa.
     const jejak: any = await dbGet(

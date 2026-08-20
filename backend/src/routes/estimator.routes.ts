@@ -1114,6 +1114,15 @@ router.get('/proposals/:id/schedule', authMiddleware, async (req: Request, res: 
  */
 const MAX_HARI_JADWAL = 3650;
 
+/**
+ * Sakelar gerbang "baris belum lengkap" (lihat `gerbangKomersial`).
+ *
+ * Default MATI. Nyalakan dengan `GERBANG_SCOPE_LENGKAP=true` di `.env` setelah
+ * proposal berjalan dibereskan atau baris-barisnya dinyatakan.
+ */
+const GERBANG_SCOPE_AKTIF =
+  String(process.env.GERBANG_SCOPE_LENGKAP || '').toLowerCase() === 'true';
+
 /** Angka jadwal: berhingga, tidak negatif, dan dalam batas wajar. */
 const angkaJadwal = (raw: unknown, nama: string): { ok: boolean; nilai: number | null; pesan: string } => {
   if (raw === null || raw === undefined || raw === '') return { ok: true, nilai: null, pesan: '' };
@@ -1233,7 +1242,15 @@ const gerbangKomersial = async (
     [proposalId]
   );
 
-  if (belumLengkap.length > 0) {
+  // Gerbang ini menggembok alur kerja yang sedang berjalan: pada 20 Agustus 2026
+  // ketiga proposal produksi punya 144, 254, dan 52 baris belum lengkap, jadi
+  // menyalakannya berarti tidak satu pun bisa dikirim sebelum dibereskan. Itu
+  // keputusan pemilik proses, bukan keputusan yang pantas ikut diam-diam dalam
+  // sebuah rilis. Kodenya dikirim, efeknya menunggu sakelar.
+  //
+  // Saat MATI, barisnya tetap dihitung dan dilaporkan sebagai `peringatan` di
+  // respons transisi — jadi masalahnya terlihat tanpa menghentikan pekerjaan.
+  if (belumLengkap.length > 0 && GERBANG_SCOPE_AKTIF) {
     const contoh = belumLengkap.slice(0, 15).map((r: any) => {
       const sebab: string[] = [];
       if (r.ahsp_id === null) sebab.push('belum punya AHSP');
@@ -1268,7 +1285,16 @@ const gerbangKomersial = async (
     );
   }
 
-  if (pelanggaran.length === 0) return null;
+  if (pelanggaran.length === 0) {
+    // Tidak menghalangi, tapi tetap dicatat supaya tidak hilang dari pandangan.
+    if (belumLengkap.length > 0) {
+      console.warn(
+        `[Proposal ${proposalId}] ${belumLengkap.length} baris belum lengkap ikut ke status ` +
+        `"${'submitted/deal'}" — gerbang scope masih MATI (GERBANG_SCOPE_LENGKAP).`
+      );
+    }
+    return null;
+  }
   return {
     error: 'Proposal belum memenuhi syarat untuk dikirim atau dijadikan kontrak.',
     code: 'PROPOSAL_BELUM_LAYAK',
