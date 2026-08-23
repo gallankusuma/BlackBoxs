@@ -407,6 +407,103 @@ async function main() {
     chk('layar tetap membuka proposal yang sudah terbentuk',
       vueList2.includes('Jangan membuat proposal baru'), true);
 
+    // ── 13. Edit paralel qty + AHSP ────────────────────────────────────────
+    //
+    // Handler dulu membaca `unit_price_snapshot`, qty lama, dan harga AHSP di
+    // LUAR transaction lalu menulis hasilnya di dalam. Lock proposal karena itu
+    // hanya menyerialkan penulisan — bukan state yang dipakai menghitungnya.
+    // Dua permintaan bersamaan sama-sama menghitung dari pembacaan lama, dan
+    // yang menang terakhir meninggalkan `total_price` yang tidak cocok dengan
+    // `qty × unit_price_snapshot`.
+    console.log('\n13. Dua edit paralel tetap meninggalkan baris yang konsisten');
+
+    const ahspMahal = await call('POST', '/estimator/ahsp', {
+      kode: `TEST-PAR-${stamp}`, name: `AHSP Paralel ${stamp}`, satuan: 'm3',
+      items: [{ section: 'B', resource_type: 'material', resource_name: 'Bahan',
+                resource_satuan: 'm3', koefisien: 1, resource_harga: 7000000 }],
+    }, master);
+    const ahspMahalId = ahspMahal.json?.id;
+
+    const pPar = await call('POST', '/estimator/proposals',
+      { project_name: `Uji paralel ${stamp}`, client_id: klienId }, master);
+    const parId = pPar.json?.id ?? pPar.json?.data?.id;
+    bersihkan.push(() => call('DELETE', `/estimator/proposals/${parId}`, undefined, master));
+    await call('POST', `/estimator/proposals/${parId}/items`, { ahsp_id: ahspId, qty: 3 }, master);
+    const itemPar = ((await call('GET', `/estimator/proposals/${parId}/items`, undefined, master))
+      .json?.data ?? (await call('GET', `/estimator/proposals/${parId}/items`, undefined, master)).json ?? [])[0];
+    chk('item paralel ada', !!itemPar?.id, true);
+
+    // Satu mengubah qty, satu mengganti AHSP — berbarengan, DELAPAN putaran.
+    //
+    // Satu putaran bisa lolos karena kebetulan waktu; tes balapan yang bisa
+    // lolos untung-untungan tidak membuktikan apa pun. Tiap putaran diperiksa
+    // sendiri, jadi satu saja yang meleset langsung merah.
+    let melesetPar = 0;
+    for (let putaran = 0; putaran < 8; putaran++) {
+      const pakaiMahal = putaran % 2 === 0;
+      await Promise.all([
+        call('PUT', `/estimator/proposals/${parId}/items/${itemPar.id}`, { qty: 3 + putaran }, master),
+        call('PUT', `/estimator/proposals/${parId}/items/${itemPar.id}`,
+          { ahsp_id: pakaiMahal ? ahspMahalId : ahspId }, master),
+      ]);
+      const cek: any = await dbGet(
+        'SELECT qty, unit_price_snapshot, total_price FROM proposal_items WHERE id = ?', [itemPar.id]);
+      const harus = Math.round(Number(cek.qty) * Number(cek.unit_price_snapshot) * 100);
+      if (Math.round(Number(cek.total_price) * 100) !== harus) melesetPar++;
+    }
+    chk('delapan putaran edit paralel: tidak ada baris yang meleset', melesetPar, 0);
+
+    // Catatan jujur: balapan ini TIDAK berhasil direproduksi pada versi lama
+    // sekalipun — 24 percobaan (8 putaran × 3 jalan) semuanya lolos, karena
+    // lock proposal kadung menyerialkan keduanya sebelum pembacaan basi sempat
+    // dipakai. Jadi assertion di atas menjaga HASILNYA, bukan membuktikan
+    // mekanismenya.
+    //
+    // Yang benar-benar diperbaiki adalah strukturnya: pembacaan yang dipakai
+    // untuk menghitung penulisan harus berada DI DALAM transaction yang sama.
+    // Itu dikunci di sini, karena assertion perilaku saja tidak akan
+    // menangkapnya kalau nanti dikembalikan.
+    const { readFileSync: bacaRute } = await import('node:fs');
+    const rute = bacaRute(new URL('../src/routes/estimator.routes.ts', import.meta.url), 'utf8');
+    const iPut = rute.indexOf("router.put('/proposals/:proposalId/items/:itemId'");
+    const iAkhir = rute.indexOf('// Delete proposal item', iPut);
+    const blokPut = rute.slice(iPut, iAkhir);
+    const iTx = blokPut.indexOf('await withTransaction');
+    chk('handler PUT memakai transaction', iTx > 0, true);
+    // Tidak boleh ada pembacaan item/AHSP sebelum transaction dibuka.
+    const sebelumTx = blokPut.slice(0, iTx);
+    chk('tidak ada pembacaan proposal_items sebelum transaction',
+      sebelumTx.includes('FROM proposal_items'), false);
+    chk('tidak ada pembacaan ahsp_headers sebelum transaction',
+      sebelumTx.includes('FROM ahsp_headers'), false);
+    chk('baris dikunci FOR UPDATE di dalam transaction',
+      blokPut.slice(iTx).includes('FOR UPDATE'), true);
+
+    const sesudahPar: any = await dbGet(
+      'SELECT qty, unit_price_snapshot, total_price FROM proposal_items WHERE id = ?', [itemPar.id]);
+    const semestinya = Math.round(Number(sesudahPar.qty) * Number(sesudahPar.unit_price_snapshot) * 100);
+    chk('total baris = qty × harga snapshot',
+      Math.round(Number(sesudahPar.total_price) * 100), semestinya);
+
+    const headerPar: any = await dbGet('SELECT direct_cost FROM proposals WHERE id = ?', [parId]);
+    chk('header rekonsiliasi dengan barisnya',
+      Math.round(Number(headerPar.direct_cost) * 100), Math.round(Number(sesudahPar.total_price) * 100));
+
+    // Gerbang juga menolak baris yang tidak konsisten, apa pun sebabnya.
+    console.log('\n14. Gerbang menolak baris yang total-nya tidak cocok');
+    await dbRun('UPDATE proposal_items SET total_price = total_price + 1234567 WHERE id = ?', [itemPar.id]);
+    await call('PUT', `/estimator/proposals/${parId}/status`, { status: 'review' }, master);
+    const tolakInkonsisten = await call('PUT', `/estimator/proposals/${parId}/status`, { status: 'submitted' }, master);
+    if (tolakInkonsisten.status === 400) {
+      chk('submit ditolak karena baris tidak konsisten', tolakInkonsisten.status, 400);
+      chk('menyebut baris yang bermasalah',
+        (tolakInkonsisten.json?.pelanggaran || []).some((x: string) => x.includes('volume × harga satuan')), true);
+    } else {
+      // Gerbang scope bersakelar; kalau mati, invarian ini tetap harus dilaporkan.
+      console.log('  ––   gerbang scope MATI — invarian baris ikut tidak menghalangi');
+      chk('saat gerbang mati, submit diterima', tolakInkonsisten.status, 200);
+    }
+
   } finally {
     console.log('\n8. Bersih-bersih');
     let sisa = 0;

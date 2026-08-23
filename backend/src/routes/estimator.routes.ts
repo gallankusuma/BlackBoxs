@@ -1333,6 +1333,35 @@ const gerbangKomersial = async (
       `Direct cost di header (${direct}) tidak sama dengan jumlah baris (${jumlahBaris}).`
     );
   }
+  // Tiap baris harus konsisten dengan dirinya sendiri: total = qty × harga.
+  //
+  // Gerbang sebelumnya hanya memeriksa nilai negatif dan rekonsiliasi header
+  // terhadap SUM(total_price) — jadi baris yang total-nya tidak cocok dengan
+  // qty × harga snapshot tetap lolos, dan header pun ikut "cocok" karena
+  // dijumlahkan dari angka yang sama-sama salah.
+  const takKonsisten: any[] = await tx.all(
+    `SELECT id,
+            COALESCE(NULLIF(ahsp_name_snapshot, ''), NULLIF(description, ''), CONCAT('Baris #', id)) AS nama,
+            qty, unit_price_snapshot, total_price
+     FROM proposal_items
+     WHERE proposal_id = ? AND is_section = 0
+       AND ABS(ROUND(COALESCE(total_price,0), 2)
+             - ROUND(COALESCE(qty,0) * COALESCE(unit_price_snapshot,0), 2)) >= 0.01
+     ORDER BY order_no, id`,
+    [proposalId]
+  );
+  if (takKonsisten.length > 0) {
+    pelanggaran.push(
+      `${takKonsisten.length} baris nilainya tidak cocok dengan volume × harga satuan.`
+    );
+    for (const r of takKonsisten.slice(0, 10)) {
+      pelanggaran.push(
+        `  • #${r.id} ${r.nama} — tercatat ${uang(r.total_price)}, ` +
+        `semestinya ${bulatUang(uang(r.qty) * uang(r.unit_price_snapshot))}`
+      );
+    }
+  }
+
   const semestinya = bulatUang(direct + uang(proposal.overhead) + uang(proposal.risk_contingency));
   if (Math.abs(semestinya - total) >= 0.005) {
     pelanggaran.push(
@@ -2241,114 +2270,108 @@ router.post('/proposals/:proposalId/items', authMiddleware, bolehUbah, async (re
 // Update proposal item (qty)
 router.put('/proposals/:proposalId/items/:itemId', authMiddleware, bolehUbah, async (req: Request, res: Response) => {
   try {
-    // EST-MTO-R18: seluruh perubahan yang menggeser nilai komersial ikut dikunci.
-    // Mengunci MTO saja tidak cukup — qty item RAB bisa diubah langsung lewat
-    // endpoint ini dan penawaran yang sudah dikirim ikut berubah.
+    // EST-MTO-R18: perubahan yang menggeser nilai komersial ikut dikunci.
     const lockedRab = await proposalLock(req.params.proposalId);
     if (lockedRab) return res.status(lockedRab.status).json(lockedRab.body);
 
-    // EST-MTO-R21: item harus benar-benar milik proposal di URL.
-    //
-    // Kunci status diperiksa berdasarkan `:proposalId`, tapi query-nya dulu
-    // `WHERE id = ?` saja. Artinya cukup menyebut proposal draft di URL lalu
-    // menunjuk id item milik proposal yang sudah submitted — kuncinya lolos,
-    // dan penawaran yang sudah dikirim ikut berubah.
-    const ownedItem: any = await dbGet(
-      'SELECT id FROM proposal_items WHERE id = ? AND proposal_id = ?',
-      [req.params.itemId, req.params.proposalId]
-    );
-    if (!ownedItem) {
-      return res.status(404).json({
-        error: 'Item RAB tidak ditemukan pada proposal ini',
-        code: 'ITEM_NOT_IN_PROPOSAL',
-      });
-    }
-
     const { qty, description, ahsp_id } = req.body;
     const { proposalId, itemId } = req.params;
-    
-    // Get current item to recalculate
-    const item = await dbGet(
-      `SELECT unit_price_snapshot FROM proposal_items WHERE id = ? AND proposal_id = ?`,
-      [itemId, proposalId]
-    );
-    
-    if (!item) {
-      return res.status(404).json({ error: 'Item not found' });
-    }
-    
-    // Build update query dynamically
-    const updates: string[] = [];
-    const values: any[] = [];
 
-    // Assign AHSP to an existing item (from wizard sub-items)
-    if (ahsp_id !== undefined) {
-      const ahsp: any = await dbGet(
-        `SELECT id, kode, name, satuan, harga_satuan FROM ahsp_headers WHERE id = ? AND status = 'active'`,
-        [ahsp_id]
-      );
-      if (!ahsp) {
-        return res.status(404).json({ error: 'AHSP not found' });
-      }
-      updates.push('ahsp_id = ?', 'ahsp_code_snapshot = ?', 'ahsp_name_snapshot = ?', 'unit_snapshot = ?', 'unit_price_snapshot = ?');
-      values.push(ahsp.id, ahsp.kode, ahsp.name, ahsp.satuan, ahsp.harga_satuan);
-      
-      // Also recalculate total_price with new unit price
-      const currentItem: any = await dbGet(`SELECT qty FROM proposal_items WHERE id = ? AND proposal_id = ?`, [itemId, proposalId]);
-      const currentQty = parseFloat(currentItem?.qty) || 0;
-      updates.push('total_price = ?');
-      values.push(currentQty * parseFloat(ahsp.harga_satuan));
-    }
-    
-    if (qty !== undefined) {
-      // `parseFloat(qty) || 0` menerima apa saja: "-1" menjadi -1 dan langsung
-      // dikalikan harga snapshot, menghasilkan line total serta `total_project`
-      // negatif; "abc" dan Infinity diam-diam menjadi 0.
-      const qtyCek = validasiQty(qty);
-      if (!qtyCek.ok) return res.status(400).json({ error: qtyCek.pesan, code: 'QTY_TIDAK_VALID' });
-      const qtyValue = qtyCek.qty;
-
-      // Use new unit price if ahsp was also assigned, otherwise use existing
-      let unitPrice: number;
-      if (ahsp_id !== undefined) {
-        const ahsp: any = await dbGet(`SELECT harga_satuan FROM ahsp_headers WHERE id = ?`, [ahsp_id]);
-        unitPrice = parseFloat(ahsp?.harga_satuan) || 0;
-      } else {
-        unitPrice = parseFloat((item as any).unit_price_snapshot) || 0;
-      }
-      const totalPrice = bulatUang(qtyValue * unitPrice);
-      updates.push('qty = ?', 'total_price = ?');
-      values.push(qtyValue, totalPrice);
-    }
-    
-    if (description !== undefined) {
-      updates.push('description = ?');
-      values.push(description);
-    }
-    
-    if (updates.length === 0) {
+    if (qty === undefined && description === undefined && ahsp_id === undefined) {
       return res.status(400).json({ error: 'No fields to update' });
     }
-    
-    // EST-MTO-R29: mutasi item dan penghitungan ulang ringkasan adalah SATU unit.
+
+    // Validasi bentuk qty dilakukan di luar — murni pemeriksaan input, tidak
+    // bergantung state apa pun.
+    let qtyBaru: number | null = null;
+    if (qty !== undefined) {
+      const qtyCek = validasiQty(qty);
+      if (!qtyCek.ok) return res.status(400).json({ error: qtyCek.pesan, code: 'QTY_TIDAK_VALID' });
+      qtyBaru = qtyCek.qty;
+    }
+
+    // ── Seluruh baca-hitung-tulis berada DI DALAM satu transaction ───────────
     //
-    // Melempar error dari recalculateProposal() tidak bisa membatalkan SQL yang
-    // sudah ter-commit sebelumnya. Kalau recalc gagal setelah item berubah,
-    // yang tersisa: baris sudah berubah, header belum, dan klien menerima 500.
-    values.push(itemId, proposalId);
-
-    const hasilHapus = await withTransaction(async tx => {
-      // EST-MTO-R33: status diperiksa ulang DI DALAM transaction ini.
+    // Versi sebelumnya membaca `unit_price_snapshot`, `qty` lama, dan harga AHSP
+    // di LUAR transaction, lalu menulis hasilnya di dalam. Lock proposal karena
+    // itu hanya menyerialkan penulisan — bukan state yang dipakai untuk
+    // menghitung penulisan itu. Dua permintaan bersamaan (satu mengubah qty,
+    // satu mengganti AHSP) sama-sama menghitung dari pembacaan lama, dan yang
+    // menang terakhir meninggalkan `total_price` yang tidak cocok dengan
+    // `qty × unit_price_snapshot` — tanpa satu pun pemeriksaan yang menangkapnya.
+    //
+    // Barisnya kini dikunci `FOR UPDATE`, jadi permintaan kedua menunggu dan
+    // membaca keadaan yang SUDAH diperbarui.
+    const hasil = await withTransaction(async tx => {
+      // EST-MTO-R33: status diperiksa ulang di dalam transaction ini.
       const raceLock = await proposalLockTx(proposalId, tx);
-      if (raceLock) throw Object.assign(new Error('PROPOSAL_LOCKED'), { lock: raceLock });
+      if (raceLock) return { error: raceLock.status, body: raceLock.body };
 
+      // EST-MTO-R21: item harus benar-benar milik proposal di URL — tanpa ini
+      // cukup menyebut proposal draft lalu menunjuk id milik proposal submitted.
+      const item: any = await tx.get(
+        `SELECT id, qty, unit_price_snapshot FROM proposal_items
+         WHERE id = ? AND proposal_id = ? FOR UPDATE`,
+        [itemId, proposalId]
+      );
+      if (!item) {
+        return { error: 404, body: {
+          error: 'Item RAB tidak ditemukan pada proposal ini',
+          code: 'ITEM_NOT_IN_PROPOSAL',
+        } };
+      }
+
+      const updates: string[] = [];
+      const values: any[] = [];
+
+      // Keadaan efektif dihitung dari baris yang SUDAH dikunci.
+      let hargaEfektif = uang(item.unit_price_snapshot);
+      let qtyEfektif = uang(item.qty);
+
+      if (ahsp_id !== undefined) {
+        const ahsp: any = await tx.get(
+          `SELECT id, kode, name, satuan, harga_satuan FROM ahsp_headers
+           WHERE id = ? AND status = 'active'`,
+          [ahsp_id]
+        );
+        if (!ahsp) return { error: 404, body: { error: 'AHSP not found' } };
+        updates.push('ahsp_id = ?', 'ahsp_code_snapshot = ?', 'ahsp_name_snapshot = ?',
+                     'unit_snapshot = ?', 'unit_price_snapshot = ?');
+        values.push(ahsp.id, ahsp.kode, ahsp.name, ahsp.satuan, ahsp.harga_satuan);
+        hargaEfektif = uang(ahsp.harga_satuan);
+      }
+
+      if (qtyBaru !== null) {
+        qtyEfektif = qtyBaru;
+        updates.push('qty = ?');
+        values.push(qtyBaru);
+      }
+
+      // `total_price` SELALU diturunkan dari qty × harga yang berlaku setelah
+      // perubahan ini — tidak pernah dari pembacaan lama.
+      if (ahsp_id !== undefined || qtyBaru !== null) {
+        updates.push('total_price = ?');
+        values.push(bulatUang(qtyEfektif * hargaEfektif));
+      }
+
+      if (description !== undefined) {
+        updates.push('description = ?');
+        values.push(description ?? null);
+      }
+
+      if (updates.length === 0) return { error: 400, body: { error: 'No fields to update' } };
+
+      values.push(itemId, proposalId);
       await tx.run(
         `UPDATE proposal_items SET ${updates.join(', ')} WHERE id = ? AND proposal_id = ?`,
         values
       );
+      // EST-MTO-R29: mutasi item dan penghitungan ulang ringkasan satu unit.
       await recalculateProposal(proposalId as string, tx);
+      return { ok: true as const };
     });
 
+    if ('error' in hasil) return res.status(hasil.error).json(hasil.body);
     res.json({ message: 'Item updated' });
   } catch (error: any) {
     if (error?.lock) return res.status(error.lock.status).json(error.lock.body);

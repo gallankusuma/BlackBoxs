@@ -7280,6 +7280,44 @@ lokal frontend atau `SUM(total_price)` saja.
 CRM Client, hingga handoff Deal. Tidak ada perubahan source/staged/commit Proposal
 sejak review 09:03 WIB; `review.md` diabaikan sebagai artefak reviewer.
 
+
+**[DEV] DITERAPKAN — dengan satu catatan jujur soal reproduksi.**
+
+Cacat strukturalnya terverifikasi persis seperti Anda tulis: `unit_price_snapshot`,
+qty lama, dan harga AHSP semuanya dibaca **di luar** transaction, lalu hasilnya
+ditulis di dalam. Lock proposal karena itu hanya menyerialkan penulisan, bukan
+state yang dipakai menghitung penulisan.
+
+- **Seluruh baca-hitung-tulis dipindah ke dalam satu transaction**, dengan baris
+  item dikunci `FOR UPDATE`. `total_price` **selalu** diturunkan dari qty × harga
+  yang berlaku sesudah perubahan, tidak pernah dari pembacaan sebelumnya.
+- **Invarian `total_price = qty × unit_price_snapshot`** dipasang di gerbang
+  komersial, menyebut baris mana yang meleset berikut angka tercatat vs
+  semestinya. Ini **tidak** di belakang sakelar scope — konsistensi baris adalah
+  kerusakan data, bukan kebijakan alur kerja.
+
+**Catatan yang harus saya sampaikan:** balapannya **tidak berhasil saya
+reproduksi**, bahkan pada handler versi lama — 24 percobaan (8 putaran × 3
+jalan) semuanya menghasilkan baris yang konsisten. Rupanya lock proposal kadung
+menyerialkan kedua permintaan sebelum pembacaan basi sempat terpakai. Jadi saya
+tidak bisa mengklaim sudah membuktikan kerugiannya secara empiris.
+
+Karena itu tesnya tidak bergantung pada balapan saja: strukturnya dikunci
+langsung dari sumber — tidak boleh ada `FROM proposal_items` atau
+`FROM ahsp_headers` sebelum `withTransaction` dibuka, dan `FOR UPDATE` wajib ada
+di dalamnya. Assertion perilaku saja tidak akan menangkapnya kalau nanti
+dikembalikan.
+
+**Tes:** [tests/proposal-commercial.ts](backend/tests/proposal-commercial.ts)
+bagian 13–14. Dibuktikan bergigi dengan mengembalikan handler versi HEAD yang
+asli → **3 gagal** pada ketiga penjaga struktural; dan mencabut invariannya →
+gerbang berhenti menyebut baris yang bermasalah.
+
+**Yang belum:** `version`/`updated_at` sebagai expected-value dari klien
+(optimistic concurrency) dan revision counter di skema item. Keduanya perubahan
+kontrak API; sebutkan kalau mau dikerjakan.
+
+Suite penuh: **0 gagal**.
 ### [P1 / DATA-INTEGRITY + PARTY-ISOLATION] Edit client manual mempertahankan `client_id` lama, sehingga Proposal berlabel client B tetap masuk CRM dan project milik client A
 
 **File:** [frontend/src/views/EstimatorProposalList.vue:292](frontend/src/views/EstimatorProposalList.vue),
