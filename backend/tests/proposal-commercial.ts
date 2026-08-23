@@ -347,6 +347,66 @@ async function main() {
     chk('layar menuntut alasan sebelum mengirim', vueEditor.includes('!alasanScope.trim()'), true);
     chk('layar menyediakan pilih-semua', vueEditor.includes('pilihSemuaScope'), true);
 
+    // ── 12. Create proposal: klik ganda & zona MTO gagal sebagian ──────────
+    //
+    // Batas operasi yang DILIHAT pengguna lebih luas daripada satu transaction
+    // backend. Dua cacat yang diuji di sini:
+    //
+    //   a) Tombol tanpa keadaan sedang-mengirim: dua klik cepat mengirim dua
+    //      POST /proposals yang dua-duanya sah — counter nomor yang atomic
+    //      justru MEMASTIKAN keduanya berhasil dengan nomor berbeda.
+    //   b) Zona MTO dikirim SESUDAH proposal commit. Kalau satu zona gagal,
+    //      proposalnya sudah ada tapi layar dulu berkata "Failed to create"
+    //      dan membuang id-nya — menekan tombol lagi melahirkan proposal baru.
+    console.log('\n12. Create: duplikat & zona MTO gagal sebagian');
+
+    // (a) Backend memang meloloskan dua create berbarengan — itulah sebabnya
+    //     penjagaannya harus ada di layar.
+    const kembar = await Promise.all([
+      call('POST', '/estimator/proposals', { project_name: `Kembar ${stamp}`, client_id: klienId }, master),
+      call('POST', '/estimator/proposals', { project_name: `Kembar ${stamp}`, client_id: klienId }, master),
+    ]);
+    const idKembar = kembar.map(r => r.json?.id ?? r.json?.data?.id).filter(Boolean);
+    for (const id of idKembar) bersihkan.push(() => call('DELETE', `/estimator/proposals/${id}`, undefined, master));
+    chk('dua create berbarengan dua-duanya berhasil (perilaku backend)', idKembar.length, 2);
+    chk('nomornya berbeda, jadi keduanya terlihat sah',
+      new Set(kembar.map(r => r.json?.proposal_number ?? r.json?.data?.proposal_number)).size, 2);
+    // Karena itu penjaganya WAJIB ada di layar — diperiksa dari sumbernya.
+    const { readFileSync: bacaList } = await import('node:fs');
+    const vueList2 = bacaList(
+      new URL('../../frontend/src/views/EstimatorProposalList.vue', import.meta.url), 'utf8');
+    chk('layar menolak pengiriman kedua', vueList2.includes('if (membuatProposal.value) return;'), true);
+    chk('tombol create dinonaktifkan saat mengirim', vueList2.includes(':disabled="membuatProposal"'), true);
+
+    // (b) Zona MTO gagal tidak boleh membuang proposal yang sudah jadi.
+    const pZona = await call('POST', '/estimator/proposals',
+      { project_name: `Uji zona ${stamp}`, client_id: klienId }, master);
+    const zonaId = pZona.json?.id ?? pZona.json?.data?.id;
+    bersihkan.push(() => call('DELETE', `/estimator/proposals/${zonaId}`, undefined, master));
+
+    // Zona pertama sah, zona kedua dimensinya belum lengkap → 422.
+    const zonaOk = await call('POST', `/estimator/proposals/${zonaId}/mto`, {
+      element_type: 'foundation', element_name: 'Pondasi',
+      parameters: { L: 2, W: 2, H: 0.4, depth: 1.5, qty: 6, waste_pct: 5 },
+    }, master);
+    chk('zona pertama tersimpan', zonaOk.status, 200);
+    const zonaGagal = await call('POST', `/estimator/proposals/${zonaId}/mto`, {
+      element_type: 'column', element_name: 'Kolom', parameters: {},
+    }, master);
+    chk('zona kedua ditolak 422', zonaGagal.status, 422);
+
+    // Inti temuannya: proposal DAN zona pertama tetap ada — itulah keadaan
+    // parsial yang dulu disamarkan sebagai "gagal membuat proposal".
+    const cekZona = await call('GET', `/estimator/proposals/${zonaId}`, undefined, master);
+    chk('proposalnya tetap ada meski satu zona gagal', cekZona.status, 200);
+    chk('zona pertama tetap tersimpan',
+      ((await call('GET', `/estimator/proposals/${zonaId}/mto`, undefined, master)).json?.elements || []).length, 1);
+
+    chk('layar melaporkan zona yang gagal, bukan mengaku gagal total',
+      vueList2.includes('zona MTO belum tersimpan'), true);
+    chk('layar tetap membuka proposal yang sudah terbentuk',
+      vueList2.includes('Jangan membuat proposal baru'), true);
+
   } finally {
     console.log('\n8. Bersih-bersih');
     let sisa = 0;

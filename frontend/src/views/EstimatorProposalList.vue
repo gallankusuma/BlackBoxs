@@ -205,9 +205,12 @@
                   class="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50">
                   Cancel
                 </button>
-                <button type="submit" 
-                  class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
-                  Create & Open
+                <!-- Dinonaktifkan selama pengiriman: dua klik cepat dulu
+                     melahirkan dua proposal, dan counter nomor yang atomic
+                     justru memastikan keduanya berhasil dengan nomor berbeda. -->
+                <button type="submit" :disabled="membuatProposal"
+                  class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
+                  {{ membuatProposal ? 'Membuat…' : 'Create & Open' }}
                 </button>
               </div>
             </form>
@@ -662,11 +665,47 @@ const loadProposals = async () => {
   }
 };
 
+/**
+ * Buat proposal beserta zona MTO dari wizard.
+ *
+ * ───────────────────────────────────────────────────────────────────────────
+ * Dua cacat yang diperbaiki di sini, keduanya soal batas operasi yang DILIHAT
+ * PENGGUNA — bukan atomicity di dalam satu request:
+ *
+ * 1. **Klik ganda melahirkan dua proposal.** Tombolnya tidak punya keadaan
+ *    sedang-mengirim, jadi dua klik cepat mengirim dua `POST /proposals` yang
+ *    dua-duanya sah — dan counter nomor yang atomic justru MEMASTIKAN keduanya
+ *    berhasil dengan nomor berbeda. Sekarang pengiriman kedua ditolak di depan
+ *    dan tombolnya dinonaktifkan selama proses.
+ *
+ * 2. **Proposal yang sudah jadi dibuang saat zona MTO gagal.** Header dan
+ *    template ditulis dalam satu transaction, tapi zonanya dikirim satu per
+ *    satu SESUDAH commit. Kalau zona kedua gagal, proposalnya sudah ada di
+ *    database — sementara layar berkata "Failed to create proposal" dan
+ *    membuang id-nya. Menekan tombol lagi melahirkan proposal BARU, bukan
+ *    melanjutkan yang tadi, dan daftar terisi draft parsial yang terlihat sah.
+ *
+ *    Sekarang: begitu proposalnya jadi, ia diperlakukan sebagai JADI. Zona yang
+ *    gagal dilaporkan satu per satu, lalu layar tetap membuka proposal itu
+ *    supaya pengguna melanjutkan di sana — tidak ada lagi jalan menuju
+ *    duplikat.
+ *
+ * Yang BELUM dikerjakan dan sengaja tidak disamarkan: perintah create agregat
+ * di backend yang menulis header + template + seluruh zona dalam SATU
+ * transaction. Itu menghapus kemungkinan parsial sepenuhnya; yang di sini
+ * membuat parsialnya terlihat dan tidak berlipat.
+ * ───────────────────────────────────────────────────────────────────────────
+ */
+const membuatProposal = ref(false);
+
 const createProposal = async () => {
+  if (membuatProposal.value) return;   // penjaga klik ganda
+  membuatProposal.value = true;
+
+  let idBaru: number | null = null;
   try {
-    // Get template data from wizard
     const wizardData: any = templateWizardRef.value?.getResult?.() || {};
-    
+
     const payload = {
       ...newProposal.value,
       client_id: selectedClientId.value || undefined,
@@ -675,32 +714,52 @@ const createProposal = async () => {
       template_sections: wizardData.template_sections || [],
     };
     const { data } = await api.post('/estimator/proposals', payload);
+    idBaru = data?.id ?? null;
+    if (!idBaru) throw new Error('Server tidak mengembalikan id proposal');
 
-    const warehouseZones = wizardData.warehouse_mto_zones || [];
-    for (const zone of warehouseZones) {
-      await api.post(`/estimator/proposals/${data.id}/mto`, zone);
+    // Zona MTO: tiap kegagalan dicatat, tidak menghentikan sisanya, dan TIDAK
+    // membatalkan proposal yang sudah terbentuk.
+    const zonaGagal: string[] = [];
+    for (const zone of (wizardData.warehouse_mto_zones || [])) {
+      try {
+        await api.post(`/estimator/proposals/${idBaru}/mto`, zone);
+      } catch (e: any) {
+        const d = e?.response?.data;
+        const sebab = Array.isArray(d?.problems) ? d.problems.join('; ') : (d?.error || 'gagal disimpan');
+        zonaGagal.push(`${zone?.element_name || zone?.element_type || 'zona'}: ${sebab}`);
+      }
     }
 
     showCreateModal.value = false;
-
-    // Reset form
     wizardStep.value = 1;
     wizardReady.value = false;
-    newProposal.value = {
-      project_name: '',
-      client: '',
-      lokasi: '',
-      revision: 'Rev-0'
-    };
+    newProposal.value = { project_name: '', client: '', lokasi: '', revision: 'Rev-0' };
     clientSearch.value = '';
     selectedClientName.value = '';
     selectedClientId.value = null;
-    
-    // Open the new proposal
-    router.push(`/estimator/proposals/${data.id}`);
-  } catch (error) {
+
+    if (zonaGagal.length) {
+      alert(
+        `Proposal berhasil dibuat, tetapi ${zonaGagal.length} zona MTO belum tersimpan:\n\n` +
+        zonaGagal.map(z => `• ${z}`).join('\n') +
+        `\n\nProposalnya dibuka sekarang — lengkapi zona tersebut di tab MTO. ` +
+        `Jangan membuat proposal baru, nanti jadi duplikat.`
+      );
+    }
+    router.push(`/estimator/proposals/${idBaru}`);
+  } catch (error: any) {
     console.error('Failed to create proposal:', error);
-    alert('Failed to create proposal');
+    if (idBaru) {
+      // Proposalnya SUDAH ada. Jangan sampai pengguna mengira gagal lalu
+      // membuatnya lagi.
+      alert(`Proposal sudah terbentuk (id ${idBaru}) meski ada kendala setelahnya. Proposal itu dibuka sekarang.`);
+      showCreateModal.value = false;
+      router.push(`/estimator/proposals/${idBaru}`);
+    } else {
+      alert(error?.response?.data?.error || 'Gagal membuat proposal. Tidak ada yang tersimpan.');
+    }
+  } finally {
+    membuatProposal.value = false;
   }
 };
 

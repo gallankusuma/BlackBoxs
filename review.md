@@ -6801,6 +6801,23 @@ dan terhadap instance terpisah di port 3098 dengan `ESTIMATOR_RBAC=true` — 27
 assertion lulus di sana. Saat mati, tesnya **tidak diam-diam lolos**: ia justru
 membuktikan daftar proposal masih terbuka 200 untuk user tanpa hak, sehingga
 keadaan celahnya tercatat, bukan disamarkan.
+
+**Pembaruan 23 Agustus 2026 — SUDAH AKTIF DI PRODUKSI.** Keputusan pemilik
+proses: *"Finance boleh baca saja, nyalakan"*. Dijalankan:
+
+- Role `Manager Finannce & Acc` (id 17) diberi `estimator.estimator-proposals.view`
+  **saja** — terverifikasi tidak ada create/edit/delete/approve/export.
+- `ESTIMATOR_RBAC=true` di `.env` produksi (append satu baris; `.env` dicadangkan
+  lebih dulu, 10 → 11 baris, seluruh kunci lama utuh, tidak ada nilai kredensial
+  yang dibaca atau disentuh).
+- Restart, health 200, smoke 30 lulus / 1 gagal (tetap kredensial master).
+
+Celah yang dilaporkan **tertutup**: harga penawaran tidak lagi terbuka untuk
+sembarang token desktop, dan `submit`/`deal` menuntut `approve`.
+
+Bentuk yang persis diputuskan dikunci sebagai tes (bagian 3b): role dengan
+**hanya `view`** boleh membaca daftar dan RAB, tapi 403 untuk mengubah metadata,
+menambah item, membuat proposal, menghapus, dan mengubah status.
 ### [P2 / PARTIAL-SUCCESS + IDEMPOTENCY — DITERAPKAN SEBAGIAN] Transaction create hanya mencakup header/template; empat zona MTO warehouse ditulis sebagai request terpisah dan retry membuat Proposal baru
 
 **File:** [frontend/src/views/EstimatorProposalList.vue:626](frontend/src/views/EstimatorProposalList.vue),
@@ -6882,6 +6899,41 @@ nilai kontrak versus budget project sesudah handoff. Tidak ada perubahan source/
 staged/commit Proposal sejak review 08:54 WIB; `review.md` diabaikan sebagai
 artefak reviewer.
 
+
+**[DEV] DITERAPKAN untuk kerugian yang dilihat pengguna; perintah create agregat
+ditandai PERLU KLARIFIKASI.** Kedua cacat terverifikasi, dan yang pertama saya
+buktikan langsung ke backend — bukan hanya dibaca dari kode:
+
+**dua `POST /proposals` berbarengan dua-duanya berhasil dengan nomor berbeda.**
+Counter nomor yang atomic justru **memastikan** keduanya lolos, persis seperti
+Anda tulis. Karena itu penjagaannya memang harus di layar.
+
+- **Klik ganda ditutup**: pengiriman kedua ditolak di depan, tombolnya
+  dinonaktifkan dan berubah jadi "Membuat…" selama proses.
+- **Proposal yang sudah jadi tidak dibuang lagi.** Begitu `POST /proposals`
+  berhasil, ia diperlakukan sebagai JADI. Zona MTO yang gagal dikumpulkan satu
+  per satu berikut alasannya, lalu layar **tetap membuka proposal itu** dengan
+  pesan yang menyebut zona mana yang belum tersimpan dan peringatan eksplisit:
+  *"Jangan membuat proposal baru, nanti jadi duplikat."* Jalan menuju duplikat
+  ditutup, bukan sekadar dikurangi.
+- Satu zona gagal tidak lagi menghentikan zona sesudahnya.
+
+**Yang belum dikerjakan dan tidak saya samarkan:** perintah create **agregat** di
+backend yang menulis header + template + seluruh zona dalam satu transaction.
+Itu yang menghapus kemungkinan parsial sepenuhnya; yang saya kerjakan membuat
+parsialnya **terlihat dan tidak berlipat**. Idempotency key juga belum ada.
+Keduanya perubahan kontrak API — mau saya kerjakan?
+
+**Tes:** [tests/proposal-commercial.ts](backend/tests/proposal-commercial.ts)
+bagian 12. Membuktikan perilaku backend apa adanya (dua create berbarengan
+sama-sama sah, nomornya berbeda), lalu memverifikasi penjagaan di layar dari
+sumbernya. Untuk kasus parsial: zona pertama sah + zona kedua 422, lalu
+dipastikan **proposal dan zona pertama tetap ada** — keadaan yang dulu
+disamarkan sebagai "gagal membuat proposal".
+
+Dibuktikan bergigi: penjaga dan pesannya dicabut sementara → **3 gagal**.
+
+Suite penuh: **0 gagal**.
 ### [P1 / CONTRACT-INTEGRITY + FINANCIAL-INTEGRITY — DITERAPKAN SEBAGIAN] Deal menyalin total Proposal ke `budget`, tetapi layar Project dapat menimpa budget/client itu langsung tanpa change order dan membuat dua baseline berbeda
 
 **File:** [backend/src/routes/estimator.routes.ts:2740](backend/src/routes/estimator.routes.ts),
