@@ -160,6 +160,41 @@ async function main() {
       }
     }
 
+    // ── 7. Field yang dibaca template benar-benar dikirim ──────────────────
+    //
+    // Tes lama hanya memeriksa bentuk backend dan mencari token mock di bundle,
+    // jadi ia tetap hijau meski template merender tiga kolom yang tidak pernah
+    // ada di respons (`valid_until`, `email_seen`, `preview_seen`) dan
+    // membandingkan status dengan string lama `Accepted` yang tidak akan pernah
+    // cocok. Sekarang kontraknya diperiksa dari DUA arah.
+    console.log('\n7. Kontrak DTO ↔ template CRM');
+    const { readFileSync: bacaBerkas } = await import('node:fs');
+    const vueClient = bacaBerkas(
+      new URL('../../frontend/src/views/ClientDetail.vue', import.meta.url), 'utf8');
+
+    // Ambil blok tabel proposal saja, supaya tidak tertukar dengan tab lain.
+    const iAwal = vueClient.indexOf("v-for=\"prop in client?.proposals\"");
+    chk('blok tabel proposal ditemukan di sumber', iAwal > 0, true);
+    const blok = vueClient.slice(iAwal, iAwal + 2200);
+
+    // Field yang dirender harus ada di respons backend.
+    const dikirim = Object.keys(p || {});
+    for (const f of ['proposal_number', 'project_name', 'date', 'revision', 'amount', 'status']) {
+      chk(`backend mengirim "${f}"`, dikirim.includes(f), true);
+      chk(`template membaca "${f}"`, blok.includes(`prop.${f}`), true);
+    }
+
+    // Field hantu tidak boleh dirender lagi.
+    for (const hantu of ['prop.valid_until', 'prop.email_seen', 'prop.preview_seen']) {
+      chk(`template tidak lagi merender ${hantu}`, blok.includes(hantu), false);
+    }
+
+    // Status dibandingkan dengan kosakata kanonik, bukan string lama.
+    chk("tidak ada lagi perbandingan status 'Accepted'", blok.includes("=== 'Accepted'"), false);
+    chk('template memakai helper status kanonik', blok.includes('kelasStatusProposal'), true);
+    chk('status yang dikirim memang lowercase kanonik',
+      ['draft', 'review', 'submitted', 'deal', 'no_deal'].includes(String(p?.status)), true);
+
   } finally {
     console.log('\n7. Bersih-bersih');
     let sisa = 0;

@@ -6423,6 +6423,39 @@ Contract test harus membaca binding template (seperti test Proposal List), lalu
 membuktikan nomor, project, revision, tanggal, amount, dan semua status kanonik
 dirender; client kosong tetap benar-benar empty.
 
+
+**[DEV] DITERAPKAN.** Benar seluruhnya, termasuk kritik terhadap tes saya sendiri:
+ia memeriksa bentuk backend dan menyisir bundle untuk token mock, tapi **tidak
+pernah memeriksa field yang benar-benar dibaca template**. Itu sebabnya tiga
+kolom kosong dan status Deal yang tak dikenali bisa lolos hijau.
+
+Tabelnya sekarang memakai field yang memang dikirim:
+
+| dulu | sekarang |
+|---|---|
+| Proposal · Proposal date · **Valid until** · **Last email seen** · **Last preview seen** · Amount · Status | Proposal · **Nama Proyek** · Tanggal · **Revisi** · Nilai · Status |
+
+Tiga kolom hantu itu tidak pernah ada di tabel `proposals` maupun di respons —
+selalu kosong. Sementara `project_name` dan `revision` tersedia tapi tidak pernah
+ditampilkan.
+
+Status memakai kosakata kanonik (`draft`/`review`/`submitted`/`deal`/`no_deal`)
+dengan label dan warna per status. Perbandingan lama terhadap `'Accepted'` tidak
+akan pernah cocok, jadi proposal yang sudah Deal tampil sama saja dengan draft.
+
+Sekalian: nomor proposal dulu bergaya bisa-diklik (`cursor-pointer
+hover:underline`) tapi tidak melakukan apa-apa — sekarang membuka proposalnya.
+
+**Tes:** [tests/client-proposals.ts](backend/tests/client-proposals.ts) bagian 7
+memeriksa kontraknya **dari dua arah**: tiap field yang dirender template wajib
+ada di respons backend, dan tiap field yang dikirim backend wajib dibaca
+template. Ditambah penegasan bahwa ketiga field hantu tidak dirender lagi dan
+perbandingan `'Accepted'` sudah hilang. Blok yang diperiksa dibatasi pada tabel
+proposal saja supaya tidak tertukar dengan tab lain.
+
+Dibuktikan bergigi: template lama dikembalikan sementara → **6 gagal**.
+
+Suite penuh: **1291 lulus, 0 gagal**.
 ### Status verifikasi perubahan Proposal lainnya
 
 - **DITERAPKAN:** perbaikan inti Payment Schedule (`total_project`, interval

@@ -876,29 +876,38 @@
                             <table class="min-w-full text-sm text-left">
                                 <thead class="bg-slate-50 text-slate-500 font-medium border-b border-slate-200">
                                     <tr>
+                                        <!-- Kolom disesuaikan dengan yang benar-benar dikirim backend.
+                                             Sebelumnya ada "Valid until", "Last email seen", dan "Last
+                                             preview seen" — tiga field yang tidak pernah ada di tabel
+                                             `proposals` maupun di respons, jadi selalu kosong. Sementara
+                                             `project_name` dan `revision` yang justru tersedia tidak
+                                             ditampilkan sama sekali. -->
                                         <th class="px-6 py-3">Proposal</th>
-                                        <th class="px-6 py-3">Proposal date</th>
-                                        <th class="px-6 py-3">Valid until</th>
-                                        <th class="px-6 py-3">Last email seen</th>
-                                        <th class="px-6 py-3">Last preview seen</th>
-                                        <th class="px-6 py-3 text-right">Amount</th>
+                                        <th class="px-6 py-3">Nama Proyek</th>
+                                        <th class="px-6 py-3">Tanggal</th>
+                                        <th class="px-6 py-3">Revisi</th>
+                                        <th class="px-6 py-3 text-right">Nilai</th>
                                         <th class="px-6 py-3 text-center">Status</th>
                                     </tr>
                                 </thead>
                                 <tbody class="divide-y divide-slate-100">
                                     <tr v-for="prop in client?.proposals" :key="prop.id" class="hover:bg-slate-50/50 transition-colors">
-                                        <td class="px-6 py-4 font-medium text-primary-600 cursor-pointer hover:underline">{{ prop.proposal_number }}</td>
-                                        <td class="px-6 py-4 text-slate-600">{{ prop.date }}</td>
-                                        <td class="px-6 py-4 text-slate-600">{{ prop.valid_until }}</td>
-                                        <td class="px-6 py-4 text-slate-600">{{ prop.email_seen }}</td>
-                                        <td class="px-6 py-4 text-slate-600">{{ prop.preview_seen }}</td>
+                                        <td class="px-6 py-4 font-medium text-primary-600 cursor-pointer hover:underline"
+                                            @click="bukaProposal(prop.id)">{{ prop.proposal_number }}</td>
+                                        <td class="px-6 py-4 text-slate-600">{{ prop.project_name || '—' }}</td>
+                                        <td class="px-6 py-4 text-slate-600">{{ prop.date || '—' }}</td>
+                                        <td class="px-6 py-4 text-slate-600">{{ prop.revision || '—' }}</td>
                                         <td class="px-6 py-4 text-right font-medium text-slate-700">{{ formatCurrency(prop.amount) }}</td>
                                         <td class="px-6 py-4 text-center">
-                                            <span class="px-2 py-1 rounded text-xs font-semibold" :class="prop.status === 'Accepted' ? 'bg-primary-600 text-white' : 'bg-blue-500 text-white'">{{ prop.status }}</span>
+                                            <!-- Status kanonik lowercase (draft/review/submitted/deal/no_deal).
+                                                 Perbandingan lama terhadap 'Accepted' tidak pernah cocok,
+                                                 sehingga proposal yang sudah Deal tampil sama saja dengan draft. -->
+                                            <span class="px-2 py-1 rounded text-xs font-semibold"
+                                                  :class="kelasStatusProposal(prop.status)">{{ labelStatusProposal(prop.status) }}</span>
                                         </td>
                                     </tr>
                                     <tr v-if="!client?.proposals?.length" class="text-center text-slate-500">
-                                        <td colspan="7" class="py-8">No proposals found.</td>
+                                        <td colspan="6" class="py-8">Belum ada proposal untuk client ini.</td>
                                     </tr>
                                 </tbody>
                             </table>
@@ -2411,6 +2420,31 @@ const viewInvoice = (id: number) => {
 const deleteProject = (id: number) => {
      if (!confirm('Are you sure you want to delete this project?')) return;
      client.value.projects = client.value.projects.filter((p: any) => p.id !== id);
+};
+
+/**
+ * Kosakata status proposal — sama persis dengan yang dipakai Estimator.
+ * Backend mengirim lowercase; layar ini dulu membandingkannya dengan 'Accepted'
+ * sehingga tidak ada satu pun status yang pernah cocok, dan proposal yang sudah
+ * Deal tampil sama saja dengan draft.
+ */
+const LABEL_STATUS_PROPOSAL: Record<string, string> = {
+  draft: 'Draft', review: 'In Review', submitted: 'Submitted',
+  deal: 'Deal', no_deal: 'No Deal',
+};
+const KELAS_STATUS_PROPOSAL: Record<string, string> = {
+  draft: 'bg-slate-200 text-slate-700',
+  review: 'bg-blue-500 text-white',
+  submitted: 'bg-purple-600 text-white',
+  deal: 'bg-emerald-600 text-white',
+  no_deal: 'bg-rose-600 text-white',
+};
+const labelStatusProposal = (s: string) => LABEL_STATUS_PROPOSAL[s] || s || '—';
+const kelasStatusProposal = (s: string) => KELAS_STATUS_PROPOSAL[s] || 'bg-slate-200 text-slate-700';
+
+/** Nomor proposal dulu bergaya bisa-diklik tapi tidak melakukan apa-apa. */
+const bukaProposal = (id: number) => {
+  if (id) router.push({ name: 'EstimatorProposalEditor', params: { id } });
 };
 
 const notImplemented = () => {
