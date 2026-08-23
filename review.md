@@ -6704,6 +6704,59 @@ concurrency pada create Proposal dari wizard. Tidak ada perubahan source/staged/
 commit Proposal sejak review 08:51 WIB; `review.md` diabaikan sebagai artefak
 reviewer.
 
+
+**[DEV] DITERAPKAN — MENUNGGU KETOKAN USER sebelum di-deploy.** Klaimnya
+terverifikasi: `grep -c requirePermission` pada `estimator.routes.ts` = **0**,
+dan ada **31** route `/proposals…` yang semuanya hanya bergantung
+`authMiddleware`. Betul juga bahwa ini bukan soal permission yang belum ada —
+katalognya sudah mencetak kuncinya sejak lama.
+
+**Yang dipasang:**
+
+- `view` untuk seluruh GET; `create` untuk membuat proposal; `edit` untuk
+  mutasi RAB/MTO/jadwal/metadata; `delete` untuk penghapusan.
+- **`approve` dipisah untuk transisi yang mengikat komersial** (`submitted` dan
+  `deal`); draft/review cukup `edit`. Pemisahan ini yang membuat "boleh menyusun
+  penawaran" tidak otomatis berarti "boleh mengirimkannya ke pelanggan atau
+  menjadikannya kontrak" — sebelumnya actor mana pun yang lolos autentikasi
+  langsung ditulis menjadi `approved_by` lalu project dibuat atas namanya.
+
+**Kenapa belum di-deploy.** Aturan yang berlaku di project ini: sebelum
+menggembok endpoint modul yang sudah live, periksa dulu apakah role produksi
+memang memegang permission-nya. Hasilnya:
+
+| user | level | role | permission `estimator.estimator-proposals.*` |
+|---|---|---|---|
+| master | 10 | Admin | 6 |
+| admin | 5 | Admin | 6 |
+| anshor | 0 | Admin | 6 |
+| **beni** | 3 | Manager Finannce & Acc | **0** |
+| **takbir** | 0 | Manager Finannce & Acc | **0** |
+
+Dua user aktif akan langsung menerima **403** di seluruh modul Estimator. Ini
+pola yang sama persis dengan approval Procurement yang sudah tercatat di
+CLAUDE.md, jadi saya tidak menyelesaikannya sendiri.
+
+**Yang bisa saya sampaikan untuk keputusan itu:** role `Manager Finannce & Acc`
+memegang **240** permission di modul lain — kekosongan di estimator terlihat
+seperti kelalaian pemetaan, bukan pembatasan yang disengaja. Dan ketiga proposal
+produksi dibuat `admin`; **tidak satu pun** pernah dibuat atau disetujui oleh
+beni/takbir. Jadi risiko memutus pekerjaan yang sedang berjalan kecil, tapi
+apakah Finance boleh **membaca** harga penawaran tetap keputusan Anda.
+
+Kalau jawabannya "boleh baca, tidak boleh ubah", yang perlu diberikan hanya
+`view`. Saya tidak menjalankan perubahan hak akses di produksi tanpa perintah.
+
+**Tes:** [tests/estimator-rbac.ts](backend/tests/estimator-rbac.ts) — 27
+assertion, masuk `test:all`. Memakai role uji **tanpa** permission estimator
+yang meniru keadaan Manager Finance, lalu membuktikan: enam jalur baca ditolak
+403, lima mutasi ditolak, dan — inti pemisahannya — user **dengan** hak `edit`
+tetap ditolak saat men-submit (`BUTUH_PERMISSION`) sementara `draft → review`
+diizinkan, dan statusnya terbukti tidak bergeser. Master tidak ikut terkunci.
+
+Dibuktikan bergigi: seluruh gembok dicabut sementara → **20 gagal**.
+
+Suite penuh: **1342 lulus, 0 gagal**.
 ### [P2 / PARTIAL-SUCCESS + IDEMPOTENCY — DITERAPKAN SEBAGIAN] Transaction create hanya mencakup header/template; empat zona MTO warehouse ditulis sebagai request terpisah dan retry membuat Proposal baru
 
 **File:** [frontend/src/views/EstimatorProposalList.vue:626](frontend/src/views/EstimatorProposalList.vue),

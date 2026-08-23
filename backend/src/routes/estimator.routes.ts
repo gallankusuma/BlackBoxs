@@ -3,11 +3,44 @@ import { calculateMto, toLegacyQuantities, FORMULA_VERSION, MtoResult } from '..
 import { checkUnitCompatibility, isProposalEditable } from '../modules/estimator/mto/units';
 import { enrichMtoElement, groupStoredLines } from '../modules/estimator/mto/enrich';
 import { authMiddleware } from '../middleware/auth';
+import { requirePermission, loadUserAccess } from '../middleware/permission';
 import { dbAll, dbGet, dbRun , withTransaction, TxRunner} from '../config/database';
 import { nextSequentialCode } from './procurement.routes';
 import { uang, bulatUang, jumlahUang } from '../utils/money';
 
 const router = Router();
+
+/**
+ * Otorisasi modul Estimator.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Sebelum ini seluruh route `/proposals…` hanya memakai `authMiddleware`, jadi
+ * SETIAP token desktop yang sah bisa membaca seluruh harga dan identitas client,
+ * mengubah RAB/MTO, men-submit, membuat Deal berikut project-nya, dan me-retry
+ * handoff Procurement. Menunya memang disembunyikan lewat permission, tapi
+ * URL dan API-nya tetap terbuka — penyembunyian menu bukan otorisasi.
+ *
+ * Nama permission-nya sudah ada di katalog boot sejak lama
+ * (`estimator.estimator-proposals.{view,create,edit,delete,approve,export}`),
+ * jadi ini memasang gembok yang kuncinya memang sudah dicetak.
+ *
+ * `approve` dipakai untuk transisi yang mengikat komersial — `submitted` dan
+ * `deal` — sementara draft/review cukup `edit`. Pemisahan itu yang membuat
+ * "boleh menyusun penawaran" tidak otomatis berarti "boleh mengirimkannya ke
+ * pelanggan atau menjadikannya kontrak".
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+const P_LIHAT   = 'estimator.estimator-proposals.view';
+const P_BUAT    = 'estimator.estimator-proposals.create';
+const P_UBAH    = 'estimator.estimator-proposals.edit';
+const P_HAPUS   = 'estimator.estimator-proposals.delete';
+const P_SETUJU  = 'estimator.estimator-proposals.approve';
+
+const bolehLihat  = requirePermission(P_LIHAT, P_UBAH, P_BUAT, P_SETUJU);
+const bolehBuat   = requirePermission(P_BUAT, P_UBAH);
+const bolehUbah   = requirePermission(P_UBAH);
+const bolehHapus  = requirePermission(P_HAPUS);
+const bolehSetuju = requirePermission(P_SETUJU);
 
 // ============================================
 // MASTER DATA ENDPOINTS
@@ -748,7 +781,7 @@ router.post('/ahsp/:id/calculate', authMiddleware, async (req: Request, res: Res
 // ============================================
 
 // Get all proposals
-router.get('/proposals', authMiddleware, async (_req: Request, res: Response) => {
+router.get('/proposals', authMiddleware, bolehLihat, async (_req: Request, res: Response) => {
   try {
     const proposals = await dbAll(
       `SELECT p.*, u.username as created_by_name
@@ -764,7 +797,7 @@ router.get('/proposals', authMiddleware, async (_req: Request, res: Response) =>
 });
 
 // Get proposal detail
-router.get('/proposals/:id', authMiddleware, async (req: Request, res: Response) => {
+router.get('/proposals/:id', authMiddleware, bolehLihat, async (req: Request, res: Response) => {
   try {
     const proposal = await dbGet(
       `SELECT p.*, u.username as created_by_name
@@ -786,7 +819,7 @@ router.get('/proposals/:id', authMiddleware, async (req: Request, res: Response)
 });
 
 // Get proposal items (grouped by discipline & sub-discipline)
-router.get('/proposals/:id/items', authMiddleware, async (req: Request, res: Response) => {
+router.get('/proposals/:id/items', authMiddleware, bolehLihat, async (req: Request, res: Response) => {
   try {
     const items = await dbAll(
       `SELECT 
@@ -820,7 +853,7 @@ router.get('/proposals/:id/items', authMiddleware, async (req: Request, res: Res
 // ============================================
 // GET /proposals/:id/schedule
 // Returns WBS structure with duration calculated from AHSP labor (Section A) × qty
-router.get('/proposals/:id/schedule', authMiddleware, async (req: Request, res: Response) => {
+router.get('/proposals/:id/schedule', authMiddleware, bolehLihat, async (req: Request, res: Response) => {
   try {
     const proposalId    = req.params.id;
     const workersPerDay = parseFloat(req.query.workers_per_day as string) || 8;
@@ -1337,7 +1370,7 @@ const BUKAN_MILIK = {
  */
 const SCOPE_SAH = ['priced', 'included', 'optional', 'excluded'];
 
-router.put('/proposals/:id/items/scope', authMiddleware, async (req: Request, res: Response) => {
+router.put('/proposals/:id/items/scope', authMiddleware, bolehUbah, async (req: Request, res: Response) => {
   try {
     const { item_ids, scope_status, scope_note } = req.body;
     const userId = (req as any).userId || null;
@@ -1393,7 +1426,7 @@ router.put('/proposals/:id/items/scope', authMiddleware, async (req: Request, re
 });
 
 /** Daftar baris yang belum lengkap — dipakai layar untuk menampilkannya. */
-router.get('/proposals/:id/items/incomplete', authMiddleware, async (req: Request, res: Response) => {
+router.get('/proposals/:id/items/incomplete', authMiddleware, bolehLihat, async (req: Request, res: Response) => {
   try {
     const rows = await dbAll(
       `SELECT id, order_no, ahsp_name_snapshot, description, qty, unit_price_snapshot,
@@ -1412,7 +1445,7 @@ router.get('/proposals/:id/items/incomplete', authMiddleware, async (req: Reques
 });
 
 // ── Override: save manual start/duration for a schedule item
-router.put('/proposals/:id/schedule/overrides', authMiddleware, async (req: Request, res: Response) => {
+router.put('/proposals/:id/schedule/overrides', authMiddleware, bolehUbah, async (req: Request, res: Response) => {
   try {
     const { proposal_item_id, start_day_override, duration_days_override, is_pinned, notes } = req.body;
     if (proposal_item_id == null) {
@@ -1459,7 +1492,7 @@ router.put('/proposals/:id/schedule/overrides', authMiddleware, async (req: Requ
 });
 
 // ── Override: reset item back to auto (delete override)
-router.delete('/proposals/:id/schedule/overrides/:itemId', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/proposals/:id/schedule/overrides/:itemId', authMiddleware, bolehHapus, async (req: Request, res: Response) => {
   try {
     const hasil = await withTransaction(async tx => {
       const terkunci = await proposalLockTx(req.params.id, tx);
@@ -1477,7 +1510,7 @@ router.delete('/proposals/:id/schedule/overrides/:itemId', authMiddleware, async
 });
 
 // ── PAYMENT SCHEDULE: bobot × contract = monthly planned billing
-router.get('/proposals/:id/payment-schedule', authMiddleware, async (req: Request, res: Response) => {
+router.get('/proposals/:id/payment-schedule', authMiddleware, bolehLihat, async (req: Request, res: Response) => {
   try {
     const proposalId   = req.params.id;
     const startDateStr = req.query.start_date as string || new Date().toISOString().slice(0, 10);
@@ -1737,7 +1770,7 @@ router.get('/proposals/:id/payment-schedule', authMiddleware, async (req: Reques
 
 // ── Progress: GET per-item progress
 
-router.get('/proposals/:proposalId/schedule-progress/:itemId', authMiddleware, async (req: Request, res: Response) => {
+router.get('/proposals/:proposalId/schedule-progress/:itemId', authMiddleware, bolehLihat, async (req: Request, res: Response) => {
   try {
     // Membaca pun harus terikat induknya: tanpa ini, `:itemId` milik proposal
     // lain tetap dilayani dan isinya bocor ke pemanggil yang tidak berhak.
@@ -1759,7 +1792,7 @@ router.get('/proposals/:proposalId/schedule-progress/:itemId', authMiddleware, a
 });
 
 // ── Progress: PUT update step status
-router.put('/proposals/:proposalId/schedule-progress', authMiddleware, async (req: Request, res: Response) => {
+router.put('/proposals/:proposalId/schedule-progress', authMiddleware, bolehUbah, async (req: Request, res: Response) => {
   try {
     const { proposal_item_id, unit_number, step_code, step_name, status, notes } = req.body;
     // `authMiddleware` menyetel `userId` (camelCase). Membaca `user_id` selalu
@@ -1795,7 +1828,7 @@ router.put('/proposals/:proposalId/schedule-progress', authMiddleware, async (re
 });
 
 
-router.post('/proposals', authMiddleware, async (req: Request, res: Response) => {
+router.post('/proposals', authMiddleware, bolehBuat, async (req: Request, res: Response) => {
   try {
     const { project_name, client, client_id, lokasi, revision, proposal_type, design_params, template_sections } = req.body;
     // `authMiddleware` menyetel `userId` (camelCase). Membaca `user_id` selalu
@@ -1898,7 +1931,7 @@ router.post('/proposals', authMiddleware, async (req: Request, res: Response) =>
 });
 
 // Update proposal
-router.put('/proposals/:id', authMiddleware, async (req: Request, res: Response) => {
+router.put('/proposals/:id', authMiddleware, bolehUbah, async (req: Request, res: Response) => {
   try {
     const { project_name, client, client_id, lokasi, revision } = req.body;
 
@@ -1947,7 +1980,7 @@ router.put('/proposals/:id', authMiddleware, async (req: Request, res: Response)
 });
 
 // Apply template wizard to existing proposal
-router.post('/proposals/:id/apply-template', authMiddleware, async (req: Request, res: Response) => {
+router.post('/proposals/:id/apply-template', authMiddleware, bolehUbah, async (req: Request, res: Response) => {
   try {
     // EST-MTO-R23: menerapkan template menyisipkan item RAB baru, jadi ia
     // mengubah nilai komersial persis seperti menambah item satu per satu.
@@ -2057,7 +2090,7 @@ router.post('/proposals/:id/apply-template', authMiddleware, async (req: Request
 });
 
 // Delete proposal
-router.delete('/proposals/:id', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/proposals/:id', authMiddleware, bolehHapus, async (req: Request, res: Response) => {
   try {
     // EST-MTO-R25: penghapusan proposal sebelumnya tanpa pemeriksaan apa pun.
     //
@@ -2112,7 +2145,7 @@ router.delete('/proposals/:id', authMiddleware, async (req: Request, res: Respon
 // ============================================
 
 // Add item to proposal
-router.post('/proposals/:proposalId/items', authMiddleware, async (req: Request, res: Response) => {
+router.post('/proposals/:proposalId/items', authMiddleware, bolehUbah, async (req: Request, res: Response) => {
   try {
     // EST-MTO-R18: seluruh perubahan yang menggeser nilai komersial ikut dikunci.
     // Mengunci MTO saja tidak cukup — qty item RAB bisa diubah langsung lewat
@@ -2184,7 +2217,7 @@ router.post('/proposals/:proposalId/items', authMiddleware, async (req: Request,
 });
 
 // Update proposal item (qty)
-router.put('/proposals/:proposalId/items/:itemId', authMiddleware, async (req: Request, res: Response) => {
+router.put('/proposals/:proposalId/items/:itemId', authMiddleware, bolehUbah, async (req: Request, res: Response) => {
   try {
     // EST-MTO-R18: seluruh perubahan yang menggeser nilai komersial ikut dikunci.
     // Mengunci MTO saja tidak cukup — qty item RAB bisa diubah langsung lewat
@@ -2303,7 +2336,7 @@ router.put('/proposals/:proposalId/items/:itemId', authMiddleware, async (req: R
 });
 
 // Delete proposal item
-router.delete('/proposals/:proposalId/items/:itemId', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/proposals/:proposalId/items/:itemId', authMiddleware, bolehHapus, async (req: Request, res: Response) => {
   try {
     // EST-MTO-R18: seluruh perubahan yang menggeser nilai komersial ikut dikunci.
     // Mengunci MTO saja tidak cukup — qty item RAB bisa diubah langsung lewat
@@ -2353,7 +2386,7 @@ router.delete('/proposals/:proposalId/items/:itemId', authMiddleware, async (req
 });
 
 // Get proposal summary/calculations
-router.get('/proposals/:id/summary', authMiddleware, async (req: Request, res: Response) => {
+router.get('/proposals/:id/summary', authMiddleware, bolehLihat, async (req: Request, res: Response) => {
   try {
     const proposalId = req.params.id;
     
@@ -2457,7 +2490,7 @@ async function recalculateProposal(proposalId: string | number, tx?: TxRunner) {
 // ============================================
 
 // Get RAB Report Data (grouped by discipline and sub-discipline with calculations)
-router.get('/proposals/:id/rab', authMiddleware, async (req: Request, res: Response) => {
+router.get('/proposals/:id/rab', authMiddleware, bolehLihat, async (req: Request, res: Response) => {
   try {
     const proposalId = req.params.id;
     
@@ -2848,7 +2881,7 @@ const processDealPrJob = async (proposalId: any, userId: any): Promise<any> => {
 };
 
 // GET status handoff — supaya kegagalannya terlihat, bukan cuma tersimpan.
-router.get('/proposals/:id/pr-handoff', authMiddleware, async (req: Request, res: Response) => {
+router.get('/proposals/:id/pr-handoff', authMiddleware, bolehLihat, async (req: Request, res: Response) => {
   try {
     const job: any = await dbGet('SELECT * FROM deal_pr_jobs WHERE proposal_id = ?', [req.params.id]);
     if (!job) return res.status(404).json({ error: 'Belum ada handoff untuk proposal ini', code: 'NO_HANDOFF' });
@@ -2857,7 +2890,7 @@ router.get('/proposals/:id/pr-handoff', authMiddleware, async (req: Request, res
 });
 
 // POST retry — idempoten; kalau sudah sukses tidak membuat PR kedua.
-router.post('/proposals/:id/pr-handoff/retry', authMiddleware, async (req: Request, res: Response) => {
+router.post('/proposals/:id/pr-handoff/retry', authMiddleware, bolehUbah, async (req: Request, res: Response) => {
   try {
     const job: any = await dbGet('SELECT status FROM deal_pr_jobs WHERE proposal_id = ?', [req.params.id]);
     if (!job) return res.status(404).json({ error: 'Belum ada handoff untuk proposal ini', code: 'NO_HANDOFF' });
@@ -2867,11 +2900,29 @@ router.post('/proposals/:id/pr-handoff/retry', authMiddleware, async (req: Reque
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });
 
-router.put('/proposals/:id/status', authMiddleware, async (req: Request, res: Response) => {
+router.put('/proposals/:id/status', authMiddleware, bolehUbah, async (req: Request, res: Response) => {
   try {
     const { status: newStatus } = req.body;
     const userId = (req as any).userId || 1;
     const proposalId = req.params.id;
+
+    // Transisi yang mengikat komersial menuntut `approve`, bukan sekadar `edit`.
+    // Menyusun penawaran dan MENGIRIMKANNYA ke pelanggan — apalagi menjadikannya
+    // kontrak — adalah dua kewenangan berbeda. Sebelum ini, actor mana pun yang
+    // lolos autentikasi langsung ditulis menjadi `approved_by` lalu project
+    // dibuat atas namanya.
+    if (newStatus === 'submitted' || newStatus === 'deal') {
+      const akses = await loadUserAccess(userId);
+      const bolehSetujui = !akses ? false
+        : akses.level >= 10 || akses.perms.has(P_SETUJU);
+      if (!bolehSetujui) {
+        return res.status(403).json({
+          error: `Anda tidak berwenang mengubah status proposal menjadi "${newStatus}".`,
+          code: 'BUTUH_PERMISSION',
+          required: [P_SETUJU],
+        });
+      }
+    }
 
     // EST-MTO-R38: SELURUH transisi — termasuk deal berikut efek sampingnya —
     // berjalan dalam SATU transaction yang dimulai dari lock baris proposal.
@@ -3120,7 +3171,7 @@ router.put('/proposals/:id/status', authMiddleware, async (req: Request, res: Re
 // ============================================
 // PROPOSAL RESUME (Resource Summary)
 // ============================================
-router.get('/proposals/:id/resume', authMiddleware, async (req: Request, res: Response) => {
+router.get('/proposals/:id/resume', authMiddleware, bolehLihat, async (req: Request, res: Response) => {
   try {
     const proposalId = req.params.id;
 
@@ -3466,7 +3517,7 @@ async function persistMtoLines(elementId: number | string, mto: MtoResult, tx: T
 }
 
 // GET all MTO elements for a proposal — single source of truth: proposal_id only
-router.get('/proposals/:id/mto', authMiddleware, async (req: Request, res: Response) => {
+router.get('/proposals/:id/mto', authMiddleware, bolehLihat, async (req: Request, res: Response) => {
   try {
     const proposalId = req.params.id;
     const rows = await dbAll(
@@ -3498,7 +3549,7 @@ router.get('/proposals/:id/mto', authMiddleware, async (req: Request, res: Respo
 });
 
 // POST create/upsert MTO element for proposal — only uses proposal_id
-router.post('/proposals/:id/mto', authMiddleware, async (req: Request, res: Response) => {
+router.post('/proposals/:id/mto', authMiddleware, bolehUbah, async (req: Request, res: Response) => {
   try {
     const proposalId = req.params.id;
     const { element_type, element_name, parameters = {}, sort_order = 0 } = req.body;
@@ -3611,7 +3662,7 @@ router.post('/proposals/:id/mto', authMiddleware, async (req: Request, res: Resp
 });
 
 // PUT update MTO element for proposal — works for both proposal & project records
-router.put('/proposals/:id/mto/:elementId', authMiddleware, async (req: Request, res: Response) => {
+router.put('/proposals/:id/mto/:elementId', authMiddleware, bolehUbah, async (req: Request, res: Response) => {
   try {
     const proposalId = req.params.id;
     const locked = await proposalLock(proposalId);
@@ -3692,7 +3743,7 @@ router.put('/proposals/:id/mto/:elementId', authMiddleware, async (req: Request,
 });
 
 // DELETE MTO element for proposal — only proposal_id
-router.delete('/proposals/:id/mto/:elementId', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/proposals/:id/mto/:elementId', authMiddleware, bolehHapus, async (req: Request, res: Response) => {
   try {
     const locked = await proposalLock(req.params.id);
     if (locked) return res.status(locked.status).json(locked.body);
@@ -3759,7 +3810,7 @@ router.delete('/proposals/:id/mto/:elementId', authMiddleware, async (req: Reque
 
 // GET all linkable MTO quantities for a proposal
 // Returns per-element quantities that can be linked to RAB items
-router.get('/proposals/:id/mto-quantities', authMiddleware, async (req: Request, res: Response) => {
+router.get('/proposals/:id/mto-quantities', authMiddleware, bolehLihat, async (req: Request, res: Response) => {
   try {
     const rows: any[] = await dbAll(
       `SELECT id, element_type, element_name, parameters
@@ -3806,7 +3857,7 @@ router.get('/proposals/:id/mto-quantities', authMiddleware, async (req: Request,
 });
 
 // PUT link a RAB item to an MTO quantity (saves link + updates qty/unit)
-router.put('/proposals/:id/items/:itemId/mto-link', authMiddleware, async (req: Request, res: Response) => {
+router.put('/proposals/:id/items/:itemId/mto-link', authMiddleware, bolehUbah, async (req: Request, res: Response) => {
   try {
     const proposalId = req.params.id;
     const itemId = req.params.itemId;
@@ -3958,7 +4009,7 @@ router.put('/proposals/:id/items/:itemId/mto-link', authMiddleware, async (req: 
 });
 
 // PUT unlink (remove MTO link from item, restore manual qty)
-router.delete('/proposals/:id/items/:itemId/mto-link', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/proposals/:id/items/:itemId/mto-link', authMiddleware, bolehHapus, async (req: Request, res: Response) => {
   try {
     const lockedUnlink = await proposalLock(req.params.id);
     if (lockedUnlink) return res.status(lockedUnlink.status).json(lockedUnlink.body);
