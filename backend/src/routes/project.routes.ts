@@ -73,6 +73,30 @@ router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Project not found' });
     }
 
+    // Selisih antara budget project dan nilai kontrak proposalnya dinyatakan
+    // terang-terangan. Tanpa ini, RAB project (membaca `proposals.total_project`)
+    // dan cost summary (membaca `client_projects.budget`) menampilkan dua angka
+    // berbeda tanpa satu pun keterangan — dan yang melihatnya tidak punya cara
+    // tahu mana yang mengikat.
+    if ((project as any).proposal_id) {
+      const kontrak: any = await dbGet(
+        'SELECT proposal_number, total_project, client_id FROM proposals WHERE id = ?',
+        [(project as any).proposal_id]
+      );
+      if (kontrak) {
+        const sen = (v: any) => Math.round(Number(v ?? 0) * 100);
+        const selisih = sen((project as any).budget) - sen(kontrak.total_project);
+        (project as any).kontrak = {
+          proposal_number: kontrak.proposal_number,
+          nilai_kontrak: Number(kontrak.total_project ?? 0),
+          budget_project: Number((project as any).budget ?? 0),
+          selisih: selisih / 100,
+          sepadan: selisih === 0,
+          client_sepadan: Number(kontrak.client_id) === Number((project as any).client_id),
+        };
+      }
+    }
+
     // Get members
     const members = await dbAll(`
       SELECT u.id, u.full_name, u.email, pm.role 
@@ -102,6 +126,16 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
       priority,
       assigned_to 
     } = req.body;
+
+    // `client_projects.client_id` NOT NULL — tanpa client, INSERT-nya melempar
+    // dan pemanggil hanya menerima 500 "Failed to create project" tanpa satu pun
+    // petunjuk. Datanya memang belum lengkap; itu 400, bukan kesalahan server.
+    if (!client_id) {
+      return res.status(400).json({
+        error: 'Project harus punya client. Pilih client-nya lebih dulu.',
+        code: 'CLIENT_WAJIB',
+      });
+    }
 
     const projectNumber = `PRJ-${Date.now()}`; // Simple auto-generation
 
@@ -137,8 +171,61 @@ router.put('/:id', authMiddleware, async (req: Request, res: Response) => {
     } = req.body;
 
     const effectiveName = title || project_name || null;
-    const effectiveBudget = price || budget || null;
+    const effectiveBudget = price ?? budget ?? null;
     const effectiveEnd = deadline || end_date || null;
+
+    // ── Nilai kontrak & client project hasil Deal tidak boleh digeser di sini ──
+    //
+    // `budget` diisi dari `proposals.total_project` saat Deal, dalam satu
+    // transaction bersama pembuatan project dan snapshot MTO. Tapi form Edit
+    // Project menampilkan Budget dan Client sebagai input biasa dan SELALU
+    // mengirim keduanya, sementara handler ini menulisnya apa adanya tanpa
+    // melihat `proposal_id`. Nilai kontrak yang baru saja dibentuk secara
+    // atomik karena itu kehilangan otoritasnya begitu handoff selesai.
+    //
+    // Akibatnya dua layar memakai sumber berbeda: RAB project membaca
+    // `proposals.total_project`, sedangkan cost summary membaca
+    // `client_projects.budget` — dan selisihnya tidak dijelaskan apa pun.
+    // Sudah terjadi di produksi: PRJ-2026-0001 budget 73.582.827 sementara
+    // proposal kontraknya 217.056.077,72.
+    //
+    // Yang diizinkan hanya MENYAMAKAN kembali dengan nilai kontrak, tidak
+    // pernah menjauhinya. Mengubah nilai kontrak sungguhan adalah change order,
+    // dan mekanismenya belum ada — menyediakannya lewat form edit biasa berarti
+    // membiarkannya terjadi tanpa jejak.
+    const proyekLama: any = await dbGet(
+      `SELECT cp.proposal_id, cp.budget, cp.client_id,
+              p.total_project, p.client_id AS klien_proposal, p.proposal_number
+       FROM client_projects cp LEFT JOIN proposals p ON p.id = cp.proposal_id
+       WHERE cp.id = ?`,
+      [req.params.id]
+    );
+    if (!proyekLama) return res.status(404).json({ error: 'Project not found' });
+
+    if (proyekLama.proposal_id) {
+      const nilaiKontrak = Number(proyekLama.total_project ?? 0);
+      const sen = (v: any) => Math.round(Number(v ?? 0) * 100);
+
+      if (effectiveBudget !== null && sen(effectiveBudget) !== sen(nilaiKontrak)) {
+        return res.status(409).json({
+          error: `Nilai project ini terikat kontrak ${proyekLama.proposal_number}. ` +
+                 `Budget hanya boleh sama dengan nilai kontraknya (${nilaiKontrak}).`,
+          code: 'BUDGET_TERIKAT_KONTRAK',
+          nilai_kontrak: nilaiKontrak,
+          budget_sekarang: Number(proyekLama.budget ?? 0),
+          diminta: Number(effectiveBudget),
+        });
+      }
+
+      if (client_id !== undefined && client_id !== null &&
+          Number(client_id) !== Number(proyekLama.klien_proposal)) {
+        return res.status(409).json({
+          error: `Client project ini mengikuti kontrak ${proyekLama.proposal_number} dan tidak bisa diganti dari sini.`,
+          code: 'CLIENT_TERIKAT_KONTRAK',
+          client_kontrak: Number(proyekLama.klien_proposal),
+        });
+      }
+    }
 
     await dbRun(`
       UPDATE client_projects SET 
@@ -153,7 +240,12 @@ router.put('/:id', authMiddleware, async (req: Request, res: Response) => {
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `, [
-      effectiveName, description || null, status, start_date || null, effectiveEnd, effectiveBudget, assigned_to || null, client_id ?? null, req.params.id
+      // `status` dulu diteruskan MENTAH. Update parsial — mis. hanya mengubah
+      // deskripsi — mengirimkan `undefined`, dan mysql2 menolaknya dengan
+      // "Bind parameters must not contain undefined": setiap penyuntingan
+      // sebagian berakhir 500 tanpa ada yang tahu sebabnya.
+      effectiveName, description ?? null, status ?? null, start_date || null, effectiveEnd,
+      effectiveBudget, assigned_to ?? null, client_id ?? null, req.params.id
     ]);
 
     res.json({ message: 'Project updated' });

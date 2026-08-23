@@ -143,8 +143,77 @@ async function main() {
     chk('summary project manual terbaca', sManual.status, 200);
     chk('betonnya terhitung', Number((sManual.json?.summary ?? {}).total_vol_concrete) > 0, true);
 
+    // ── 8. Nilai kontrak project tidak bisa digeser dari layar Project ─────
+    //
+    // `budget` diisi dari `proposals.total_project` saat Deal, dalam satu
+    // transaction. Tapi form Edit Project menampilkan Budget dan Client sebagai
+    // input biasa dan selalu mengirim keduanya, sementara handler update
+    // menulisnya apa adanya tanpa melihat `proposal_id` — nilai kontrak yang
+    // baru dibentuk kehilangan otoritasnya begitu handoff selesai.
+    //
+    // Akibatnya dua layar memakai sumber berbeda: RAB project membaca
+    // `proposals.total_project`, cost summary membaca `client_projects.budget`.
+    // Sudah terjadi di produksi: PRJ-2026-0001 budget 73.582.827 sementara
+    // proposal kontraknya 217.056.077,72 — selisih 143 juta tanpa penjelasan.
+    console.log('\n8. Nilai kontrak & client project terikat proposalnya');
+
+    const detail = await call('GET', `/projects/${projId}`, undefined, master);
+    const dp = detail.json?.data ?? detail.json;
+    chk('detail project terbaca', detail.status, 200);
+    chk('selisih kontrak dinyatakan di respons', !!dp?.kontrak, true);
+    chk('awalnya sepadan dengan kontrak', dp?.kontrak?.sepadan, true);
+    const nilaiKontrak = Number(dp?.kontrak?.nilai_kontrak || 0);
+    chk('nilai kontraknya > 0', nilaiKontrak > 0, true);
+
+    const geser = await call('PUT', `/projects/${projId}`,
+      { budget: nilaiKontrak + 50000000 }, master);
+    chk('menggeser budget ditolak 409', geser.status, 409);
+    chk('kodenya BUDGET_TERIKAT_KONTRAK', geser.json?.code, 'BUDGET_TERIKAT_KONTRAK');
+    chk('responsnya menyebut nilai kontraknya', Number(geser.json?.nilai_kontrak), nilaiKontrak);
+
+    const klienLain = await call('POST', '/clients',
+      { name: `PT Selundupan ${stamp}`, client_type: 'buyer' }, master);
+    const klienLainId = klienLain.json?.id;
+    bersihkan.push(() => call('DELETE', `/clients/${klienLainId}`, undefined, master));
+    const gantiKlien = await call('PUT', `/projects/${projId}`, { client_id: klienLainId }, master);
+    chk('mengganti client ditolak 409', gantiKlien.status, 409);
+    chk('kodenya CLIENT_TERIKAT_KONTRAK', gantiKlien.json?.code, 'CLIENT_TERIKAT_KONTRAK');
+
+    // Datanya benar-benar tidak bergeser.
+    const sesudahTolak = await call('GET', `/projects/${projId}`, undefined, master);
+    const sp = sesudahTolak.json?.data ?? sesudahTolak.json;
+    chk('budget tidak berubah', Math.round(Number(sp?.budget) * 100), Math.round(nilaiKontrak * 100));
+    chk('masih sepadan dengan kontrak', sp?.kontrak?.sepadan, true);
+
+    // Menyamakan kembali dengan kontrak tetap boleh — itu jalan perbaikan.
+    chk('menyamakan dengan nilai kontrak diizinkan',
+      (await call('PUT', `/projects/${projId}`, { budget: nilaiKontrak }, master)).status, 200);
+
+    // Metadata lain tetap bisa diubah — gemboknya tidak kebablasan.
+    chk('mengubah deskripsi tetap boleh',
+      (await call('PUT', `/projects/${projId}`, { description: `Catatan ${stamp}` }, master)).status, 200);
+
+    // Project manual (tanpa proposal) tidak ikut terkunci.
+    chk('project manual boleh diubah budgetnya',
+      (await call('PUT', `/projects/${manualId}`, { budget: 12345678 }, master)).status, 200);
+
+    // Dua cacat lama yang tersingkap saat menguji ini — keduanya 500 yang
+    // seharusnya 400/200:
+    chk('update parsial (tanpa status) tidak lagi 500',
+      (await call('PUT', `/projects/${manualId}`, { description: 'parsial' }, master)).status, 200);
+    const tanpaKlien = await call('POST', '/projects', { title: `Tanpa klien ${stamp}` }, master);
+    chk('buat project tanpa client → 400, bukan 500', tanpaKlien.status, 400);
+    chk('kodenya CLIENT_WAJIB', tanpaKlien.json?.code, 'CLIENT_WAJIB');
+
+    // Layar ikut mengunci kolomnya.
+    const { readFileSync: bacaPd } = await import('node:fs');
+    const vuePd = bacaPd(
+      new URL('../../frontend/src/views/ProjectDetail.vue', import.meta.url), 'utf8');
+    chk('layar mengunci kolom kontrak', vuePd.includes('terikatKontrak'), true);
+    chk('layar menyebut alasannya', vuePd.includes('adalah change order'), true);
+
   } finally {
-    console.log('\n7. Bersih-bersih');
+    console.log('\n9. Bersih-bersih');
     let sisa = 0;
     for (const h of bersihkan.reverse()) { try { await h(); } catch { sisa++; } }
     chk('data uji terhapus', sisa, 0);

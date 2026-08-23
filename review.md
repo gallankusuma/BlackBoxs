@@ -7020,6 +7020,62 @@ jelas.
 Proposal. Tidak ada perubahan source/staged/commit Proposal sejak review 08:57
 WIB; `review.md` diabaikan sebagai artefak reviewer.
 
+
+**[DEV] DITERAPKAN — dan penyimpangannya SUDAH TERJADI di produksi.** Sebelum
+menyentuh kode saya periksa datanya, dan temuan Anda bukan lagi risiko:
+
+| | |
+|---|---|
+| `PRJ-2026-0001` budget project | **Rp 73.582.827** |
+| Nilai kontrak `PROP/2026/0001` | **Rp 217.056.077,72** |
+| **Selisih tanpa penjelasan** | **Rp 143.473.250,72** |
+
+Client-nya masih sepadan (keduanya id 3), tapi budgetnya sudah menjauh. Persis
+seperti Anda tulis: RAB project membaca `proposals.total_project` sementara cost
+summary membaca `client_projects.budget`, dan tidak ada revision/change-order
+yang menjelaskan selisihnya.
+
+**Datanya TIDAK saya sentuh.** Angka mana yang mengikat — 73,5 juta atau 217
+juta — itu keputusan komersial, bukan keputusan yang pantas saya ambil sendiri.
+
+**Yang dipasang:**
+
+- `PUT /projects/:id` membaca `proposal_id` lebih dulu. Untuk project hasil Deal,
+  budget hanya boleh **sama dengan nilai kontraknya** (409 `BUDGET_TERIKAT_KONTRAK`,
+  responsnya menyebut nilai kontrak, budget sekarang, dan yang diminta), dan
+  client **tidak bisa diganti** (409 `CLIENT_TERIKAT_KONTRAK`). Menyamakan
+  kembali tetap diizinkan — itu jalan perbaikan untuk PRJ-2026-0001.
+- Metadata lain tetap bebas diubah, dan project **manual** tidak ikut terkunci.
+- `GET /projects/:id` kini membawa blok `kontrak` — nomor proposal, nilai
+  kontrak, budget project, **selisih**, dan `sepadan`. Selisihnya jadi terlihat,
+  bukan tersembunyi di antara dua layar.
+- Layar Edit Project mengunci kolom Client dan Budget untuk project kontrak,
+  berikut alasannya ("Mengubahnya adalah change order").
+
+**Dua cacat lama tersingkap saat menguji ini, keduanya 500:**
+
+1. `PUT /projects/:id` dengan body parsial — mis. hanya mengubah deskripsi —
+   selalu **500**. `status` diteruskan mentah sebagai bind parameter, dan mysql2
+   menolak `undefined`. Jadi setiap penyuntingan sebagian sudah gagal sejak
+   lama, tanpa ada yang tahu sebabnya.
+2. `POST /projects` tanpa client juga **500** (`client_id` NOT NULL). Kini 400
+   `CLIENT_WAJIB` — sekelas dengan deal-tanpa-client yang sudah diperbaiki.
+
+**Tes:** [tests/qto-summary.ts](backend/tests/qto-summary.ts) bagian 8 mengikuti
+skenario reproduksi Anda: project dari Deal → geser budget → ditolak, ganti
+client → ditolak, dan **datanya dipastikan tidak bergeser**. Ditambah: menyamakan
+dengan kontrak diizinkan, metadata lain tetap bisa diubah, project manual tidak
+terkunci, dan kedua regresi 500 di atas.
+
+Dibuktikan bergigi: gembok dicabut sementara → **7 gagal**, termasuk
+`budget tidak berubah → dapat 6650000000` (bergeser 50 juta) — kerugian yang
+sama persis dengan yang sudah terjadi di produksi.
+
+**PERLU KLARIFIKASI:** untuk `PRJ-2026-0001`, mana yang mengikat? Kalau
+**217 juta** (nilai kontrak), saya bisa samakan lewat endpoint yang sekarang
+sudah mengizinkannya. Kalau **73,5 juta** yang benar, berarti nilai kontraknya
+memang pernah berubah dan yang dibutuhkan adalah change-order ledger — pekerjaan
+tersendiri yang sudah tercatat sebagai DESIGN-GAP.
 ### [P2 / DATA-INTEGRITY + UX-CONTRACT] Tombol “Hapus section” hanya menghapus baris judul; seluruh child scope dan nilainya tetap berada di Proposal
 
 **File:** [frontend/src/views/EstimatorProposalEditor.vue:170](frontend/src/views/EstimatorProposalEditor.vue),

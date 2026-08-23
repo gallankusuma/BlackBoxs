@@ -304,16 +304,28 @@
                 <option value="hold">On Hold</option>
               </select>
             </div>
+            <!-- Client dan Budget terikat kontrak kalau project ini lahir dari
+                 Proposal Deal. Sebelumnya keduanya input biasa yang selalu
+                 dikirim, sehingga nilai kontrak yang dibentuk atomik saat Deal
+                 kehilangan otoritasnya begitu handoff selesai. -->
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">Client</label>
-              <select v-model="editForm.client_id" class="w-full border border-gray-300 rounded-lg px-3 py-2">
+              <select v-model="editForm.client_id" :disabled="terikatKontrak"
+                class="w-full border border-gray-300 rounded-lg px-3 py-2 disabled:bg-gray-100 disabled:text-gray-500">
                 <option :value="null">— Select Client —</option>
                 <option v-for="c in clients" :key="c.id" :value="c.id">{{ c.name }}</option>
               </select>
+              <p v-if="terikatKontrak" class="mt-1 text-xs text-gray-500">
+                Mengikuti kontrak {{ project?.kontrak?.proposal_number }} — tidak bisa diganti dari sini.
+              </p>
             </div>
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">Budget / Price</label>
-              <input v-model.number="editForm.budget" type="number" class="w-full border border-gray-300 rounded-lg px-3 py-2" />
+              <input v-model.number="editForm.budget" type="number" :disabled="terikatKontrak"
+                class="w-full border border-gray-300 rounded-lg px-3 py-2 disabled:bg-gray-100 disabled:text-gray-500" />
+              <p v-if="terikatKontrak" class="mt-1 text-xs text-gray-500">
+                Nilai kontrak {{ project?.kontrak?.proposal_number }}. Mengubahnya adalah change order.
+              </p>
             </div>
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">Start Date</label>
@@ -404,6 +416,9 @@ const showEditModal = ref(false);
 const showActionsMenu = ref(false);
 const saving = ref(false);
 const clients = ref<any[]>([]);
+
+/** Project yang lahir dari Proposal Deal: nilai & client-nya terikat kontrak. */
+const terikatKontrak = computed(() => !!project.value?.proposal_id);
 
 const editForm = ref({
   title: '',
