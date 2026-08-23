@@ -1236,6 +1236,39 @@ const validasiQty = (raw: unknown): { ok: boolean; qty: number; pesan: string } 
 };
 
 /**
+ * Selaraskan pasangan `client` (label) dan `client_id` (pihak yang mengikat).
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Keduanya dulu ditulis apa adanya dari body. Foreign key hanya membuktikan
+ * id-nya ADA, bukan bahwa labelnya menunjuk pihak yang sama — jadi proposal bisa
+ * bertuliskan "PT B" sementara `client_id`-nya menunjuk PT A.
+ *
+ * Itu bukan cacat kosmetik: saat Deal, yang dipakai membuat project adalah
+ * `client_id`. Penawaran yang ditandatangani atas nama satu pihak berakhir
+ * menjadi project, entri CRM, dan dasar penagihan milik pihak LAIN.
+ *
+ * Aturannya sekarang: kalau `client_id` diberikan, namanya diambil kanonik dari
+ * tabel `clients` — label tidak bisa menyimpang dari relasinya. Kalau id-nya
+ * kosong, nama bebas tetap boleh (client belum terdaftar), tapi relasinya juga
+ * ikut kosong.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+const selaraskanClient = async (
+  clientId: any, namaBebas: any, get: (sql: string, p?: any[]) => Promise<any>
+): Promise<{ ok: boolean; client_id: number | null; client: string | null; pesan?: string }> => {
+  if (clientId === undefined || clientId === null || clientId === '') {
+    return { ok: true, client_id: null, client: namaBebas ? String(namaBebas) : null };
+  }
+  const row: any = await get('SELECT id, name FROM clients WHERE id = ?', [clientId]);
+  if (!row) {
+    return { ok: false, client_id: null, client: null,
+             pesan: `Client dengan id ${clientId} tidak ditemukan.` };
+  }
+  // Nama kanonik menang. Label yang dikirim klien tidak pernah dipercaya.
+  return { ok: true, client_id: Number(row.id), client: row.name };
+};
+
+/**
  * Syarat minimum sebuah proposal boleh dikirim atau dijadikan kontrak.
  *
  * Mengembalikan `null` kalau lolos, atau body error 400 yang menyebutkan
@@ -1900,10 +1933,19 @@ router.post('/proposals', authMiddleware, bolehBuat, async (req: Request, res: R
     const { proposalId, proposalNumber } = await withTransaction(async tx => {
     const proposalNumber = await nextProposalNumber(tx);
 
-    const result = await tx.run(
+    // Label dan relasi client diselaraskan sejak pembuatan — lihat
+      // `selaraskanClient`. Endpoint create punya kontrak yang sama dengan
+      // update: pasangan bebas dari body tidak pernah disimpan apa adanya.
+      const klienBaru = await selaraskanClient(client_id, client, tx.get);
+      if (!klienBaru.ok) {
+        throw Object.assign(new Error('CLIENT_TIDAK_DITEMUKAN'),
+          { lock: { status: 400, body: { error: klienBaru.pesan, code: 'CLIENT_TIDAK_DITEMUKAN' } } });
+      }
+
+      const result = await tx.run(
       `INSERT INTO proposals (proposal_number, project_name, client, client_id, lokasi, revision, proposal_type, design_params, status, created_by)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?)`,
-      [proposalNumber, project_name, client || null, client_id || null, lokasi || null, revision || 'Rev-0', 
+      [proposalNumber, project_name, klienBaru.client, klienBaru.client_id, lokasi || null, revision || 'Rev-0', 
        proposal_type || null, design_params ? JSON.stringify(design_params) : null, userId]
     );
     
@@ -2013,11 +2055,17 @@ router.put('/proposals/:id', authMiddleware, bolehUbah, async (req: Request, res
       const terkunci = await proposalLockTx(req.params.id, tx);
       if (terkunci) return { error: terkunci.status, body: terkunci.body };
 
+      // Label dan relasi client diselaraskan — lihat `selaraskanClient`.
+      const klien = await selaraskanClient(client_id, client, tx.get);
+      if (!klien.ok) {
+        return { error: 400, body: { error: klien.pesan, code: 'CLIENT_TIDAK_DITEMUKAN' } };
+      }
+
       await tx.run(
         `UPDATE proposals
          SET project_name = ?, client = ?, client_id = ?, lokasi = ?, revision = ?
          WHERE id = ?`,
-        [project_name, client, client_id || null, lokasi, revision, req.params.id]
+        [project_name, klien.client, klien.client_id, lokasi, revision, req.params.id]
       );
       return { ok: true as const };
     });

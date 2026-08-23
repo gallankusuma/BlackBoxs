@@ -7395,6 +7395,55 @@ antara master aktif versus snapshot historis. Tidak ada perubahan
 source/staged/commit Proposal sejak review 09:07 WIB; `review.md` diabaikan
 sebagai artefak reviewer.
 
+
+**[DEV] DITERAPKAN — dan penyimpangannya SUDAH ADA di produksi, pada proposal
+yang sudah menjadi kontrak.** Sebelum menyentuh kode saya periksa datanya:
+
+| | |
+|---|---|
+| `PROP/2026/0001` tertulis | **PT INTI EVERSPRING INDONESIA** (id 7, aktif) |
+| tapi `client_id`-nya | **3 → "Test Client Updated"** (`is_active = 0`, record uji) |
+| `PRJ-2026-0001` mewarisi | `client_id = 3` juga |
+
+Jadi project senilai Rp 217 juta itu — yang budget-nya baru saja kita samakan —
+di database menempel pada **client uji yang sudah dinonaktifkan**, sementara
+dokumennya bertuliskan PT INTI EVERSPRING INDONESIA. Persis kerugian yang Anda
+sebut: label dan pihak yang mengikat berbeda, dan yang dipakai hilir adalah
+ID-nya.
+
+**Yang dipasang:**
+
+- `selaraskanClient()` di backend: kalau `client_id` diberikan, **nama diambil
+  kanonik dari tabel `clients`** — label tidak bisa lagi menyimpang dari relasi.
+  Kalau id-nya kosong, nama bebas tetap boleh (client belum terdaftar) tapi
+  relasinya ikut dikosongkan. `client_id` yang tidak dikenal → 400
+  `CLIENT_TIDAK_DITEMUKAN`, bukan disimpan diam-diam (dulu 500).
+- Berlaku pada **create dan update** — endpoint create punya celah yang sama.
+- Layar: aksi "Ketik manual" kini melepas `client_id` juga, tidak hanya
+  mengganti namanya.
+
+**Tes:** [tests/client-proposals.ts](backend/tests/client-proposals.ts) bagian 8.
+Mengirim id PT Alpha dengan label "PT Beta" — bentuk persis yang dulu tersimpan —
+lalu membuktikan yang tersimpan adalah nama kanonik. Ditambah: update juga
+kanonik, nama bebas tanpa id tetap diterima dan relasinya dilepas, id tak dikenal
+ditolak 400, dan pelepasan `client_id` di layar ikut dikunci dari sumbernya.
+Dibuktikan bergigi: penyelarasan dicabut → **4 gagal**, termasuk label kembali
+tersimpan sebagai "PT Beta" dan id palsu kembali 500.
+
+**PERLU KLARIFIKASI — dan ada risiko yang harus saya sebutkan lebih dulu.**
+Perbaikan ini membuat **nama kanonik menang**. Untuk `PROP/2026/0001` itu berarti:
+begitu ada yang menyunting metadatanya, labelnya akan berubah menjadi
+**"Test Client Updated"** — mengikuti `client_id = 3` yang kemungkinan besar
+justru yang salah.
+
+Yang mengikat adalah **ID**, bukan labelnya: project, CRM, dan dasar penagihan
+semuanya sudah mengikuti id 3. Jadi memperbaiki labelnya saja tidak menyelesaikan
+apa pun. Kalau memang client sebenarnya PT INTI EVERSPRING INDONESIA, yang perlu
+diperbaiki adalah `proposals.client_id` **dan** `client_projects.client_id`
+menjadi **7**.
+
+Saya tidak melakukannya tanpa perintah — mengganti pihak pada kontrak yang sudah
+berjalan bukan keputusan teknis.
 ### [P2 / DATA-INTEGRITY + UPSTREAM-CONTRACT] Endpoint tambah item menerima AHSP inactive dan membekukan harga arsip sebagai scope baru Proposal
 
 **File:** [backend/src/routes/estimator.routes.ts:443](backend/src/routes/estimator.routes.ts),

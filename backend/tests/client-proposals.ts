@@ -50,7 +50,7 @@ async function main() {
   if (!master) { console.log('  FAIL login master'); process.exit(1); }
   pass++; console.log('  ok   login master');
 
-  const { dbRun } = await import('../src/config/database');
+  const { dbRun, dbGet } = await import('../src/config/database');
 
   try {
     const klien = await call('POST', '/clients',
@@ -194,6 +194,64 @@ async function main() {
     chk('template memakai helper status kanonik', blok.includes('kelasStatusProposal'), true);
     chk('status yang dikirim memang lowercase kanonik',
       ['draft', 'review', 'submitted', 'deal', 'no_deal'].includes(String(p?.status)), true);
+
+    // ── 8. Label client tidak bisa menyimpang dari relasinya ───────────────
+    //
+    // Aksi "Ketik manual" dulu hanya mengganti `editForm.client` dan
+    // membiarkan `client_id` lama terbawa, sementara backend menulis keduanya
+    // apa adanya. Foreign key hanya membuktikan id-nya ADA, bukan bahwa
+    // labelnya menunjuk pihak yang sama.
+    //
+    // Bukan cacat kosmetik: saat Deal, yang dipakai membuat project adalah
+    // `client_id`. Penawaran bertuliskan PT B berakhir menjadi project, entri
+    // CRM, dan dasar penagihan milik PT A.
+    console.log('\n8. Label client selalu kanonik, tidak bisa menyimpang');
+
+    const klienA = await call('POST', '/clients',
+      { name: `PT Alpha ${stamp}`, client_type: 'buyer' }, master);
+    const klienAId = klienA.json?.id;
+    bersihkan.push(() => call('DELETE', `/clients/${klienAId}`, undefined, master));
+
+    // Kirim id PT Alpha tapi label "PT Beta" — persis bentuk yang dulu tersimpan.
+    const pSelisih = await call('POST', '/estimator/proposals',
+      { project_name: `Uji label ${stamp}`, client_id: klienAId, client: `PT Beta ${stamp}` }, master);
+    const selisihId = pSelisih.json?.id ?? pSelisih.json?.data?.id;
+    bersihkan.push(() => call('DELETE', `/estimator/proposals/${selisihId}`, undefined, master));
+
+    const cekBuat: any = await dbGet('SELECT client, client_id FROM proposals WHERE id = ?', [selisihId]);
+    chk('label mengikuti nama kanonik client', cekBuat?.client, `PT Alpha ${stamp}`);
+    chk('relasinya tetap ke client yang benar', Number(cekBuat?.client_id), Number(klienAId));
+
+    // Update juga: label palsu tidak boleh menempel.
+    await call('PUT', `/estimator/proposals/${selisihId}`, {
+      project_name: `Uji label ${stamp}`, client: `PT Gamma ${stamp}`,
+      client_id: klienAId, lokasi: 'Gresik', revision: 'Rev-0',
+    }, master);
+    const cekUbah: any = await dbGet('SELECT client, client_id FROM proposals WHERE id = ?', [selisihId]);
+    chk('update tetap memakai nama kanonik', cekUbah?.client, `PT Alpha ${stamp}`);
+
+    // Nama bebas TANPA id tetap boleh — client belum terdaftar.
+    await call('PUT', `/estimator/proposals/${selisihId}`, {
+      project_name: `Uji label ${stamp}`, client: `PT Belum Terdaftar ${stamp}`,
+      client_id: null, lokasi: 'Gresik', revision: 'Rev-0',
+    }, master);
+    const cekBebas: any = await dbGet('SELECT client, client_id FROM proposals WHERE id = ?', [selisihId]);
+    chk('nama bebas tanpa id tetap diterima', cekBebas?.client, `PT Belum Terdaftar ${stamp}`);
+    chk('relasinya ikut dilepas', cekBebas?.client_id, null);
+
+    // id yang tidak ada ditolak, bukan disimpan diam-diam.
+    const idPalsu = await call('PUT', `/estimator/proposals/${selisihId}`, {
+      project_name: 'X', client: 'Y', client_id: 999999999, lokasi: 'Z', revision: 'Rev-0',
+    }, master);
+    chk('client_id tidak dikenal ditolak', idPalsu.status, 400);
+    chk('kodenya CLIENT_TIDAK_DITEMUKAN', idPalsu.json?.code, 'CLIENT_TIDAK_DITEMUKAN');
+
+    // Layar juga melepas relasinya saat mengetik manual.
+    const { readFileSync: bacaLst } = await import('node:fs');
+    const vueLst = bacaLst(
+      new URL('../../frontend/src/views/EstimatorProposalList.vue', import.meta.url), 'utf8');
+    chk('layar melepas client_id saat ketik manual',
+      vueLst.includes('editForm.value.client_id = null;'), true);
 
   } finally {
     console.log('\n7. Bersih-bersih');

@@ -292,7 +292,11 @@
                   <div v-if="editFilteredClients.length === 0" class="px-3 py-3 text-sm text-gray-500 text-center">Tidak ditemukan</div>
                 </div>
                 <div class="border-t border-gray-200 p-2">
-                  <button type="button" @click="editForm.client = editClientSearch; editShowClientDropdown = false"
+                  <!-- `client_id` WAJIB ikut dikosongkan. Sebelumnya tombol ini
+                       hanya mengganti namanya, sementara id client lama tetap
+                       terbawa — proposal berlabel client B tapi terikat client A,
+                       dan saat Deal yang dipakai adalah ID-nya. -->
+                  <button type="button" @click="pakaiClientManual()"
                     class="w-full text-left px-2 py-1.5 text-sm text-indigo-600 hover:bg-indigo-50 rounded">
                     + Ketik manual: "{{ editClientSearch }}"
                   </button>
@@ -428,6 +432,20 @@ const filterEditClients = () => {
   editFilteredClients.value = !q
     ? clients.value.slice(0, 20)
     : clients.value.filter(c => c.name.toLowerCase().includes(q) || (c.code && c.code.toLowerCase().includes(q))).slice(0, 20);
+};
+
+/**
+ * Pakai nama client yang diketik bebas — dan LEPASKAN ikatan ke client master.
+ *
+ * Tanpa mengosongkan `client_id`, proposal menyandang nama client B sementara
+ * relasinya masih ke client A. Label dan pihak yang mengikat jadi berbeda, dan
+ * saat Deal yang dipakai adalah `client_id` — jadi project, CRM, dan penagihan
+ * mengikuti client yang TIDAK tertulis di penawaran.
+ */
+const pakaiClientManual = () => {
+  editForm.value.client = editClientSearch.value;
+  editForm.value.client_id = null;
+  editShowClientDropdown.value = false;
 };
 
 const selectEditClient = (client: Client) => {
