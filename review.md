@@ -7071,11 +7071,27 @@ Dibuktikan bergigi: gembok dicabut sementara → **7 gagal**, termasuk
 `budget tidak berubah → dapat 6650000000` (bergeser 50 juta) — kerugian yang
 sama persis dengan yang sudah terjadi di produksi.
 
-**PERLU KLARIFIKASI:** untuk `PRJ-2026-0001`, mana yang mengikat? Kalau
-**217 juta** (nilai kontrak), saya bisa samakan lewat endpoint yang sekarang
-sudah mengizinkannya. Kalau **73,5 juta** yang benar, berarti nilai kontraknya
-memang pernah berubah dan yang dibutuhkan adalah change-order ledger — pekerjaan
-tersendiri yang sudah tercatat sebagai DESIGN-GAP.
+**TERJAWAB — sudah disamakan.** Keputusan pemilik proses (23 Agustus 2026):
+*"217 juta yang mengikat, samakan sekarang"*.
+
+Dijalankan di produksi pada `PRJ-2026-0001`:
+
+| | sebelum | sesudah |
+|---|---|---|
+| budget project | 73.582.827,00 | **217.056.077,72** |
+| selisih terhadap kontrak | 143.473.250,72 | **0,00** |
+
+Nilainya **tidak diketik ulang** — `UPDATE … SET cp.budget = p.total_project`
+mengambilnya langsung dari proposal kontraknya, dengan `WHERE cp.id = 5 AND
+cp.budget <> p.total_project` supaya tidak ada baris lain yang tersentuh.
+`ROW_COUNT()` = 1. Client sudah sepadan sejak awal dan tidak diubah.
+
+Seluruh project produksi kini `sepadan` atau `manual`; tidak ada lagi yang
+`MENYIMPANG`. Smoke sesudahnya: 30 lulus, 1 gagal (tetap kredensial master).
+
+Mulai sekarang penyimpangan serupa tidak bisa terbentuk lagi lewat layar Project
+— dan kalau toh muncul dari jalur lain, `GET /projects/:id` akan menyebutnya di
+blok `kontrak`.
 ### [P2 / DATA-INTEGRITY + UX-CONTRACT] Tombol “Hapus section” hanya menghapus baris judul; seluruh child scope dan nilainya tetap berada di Proposal
 
 **File:** [frontend/src/views/EstimatorProposalEditor.vue:170](frontend/src/views/EstimatorProposalEditor.vue),
