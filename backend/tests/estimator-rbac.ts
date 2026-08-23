@@ -84,6 +84,19 @@ async function main() {
     bersihkan.push(() => call('DELETE', `/estimator/proposals/${pid}`, undefined, master));
     await call('POST', `/estimator/proposals/${pid}/items`, { ahsp_id: ah.json?.id, qty: 4 }, master);
 
+    // Penegakannya bersakelar (ESTIMATOR_RBAC) karena menggemboknya sekarang
+    // membuat dua user produksi langsung 403. Tes ini TIDAK boleh diam-diam
+    // lolos saat sakelarnya mati — keadaannya dinyatakan terang-terangan.
+    const sondir = await call('GET', '/estimator/proposals', undefined, tanpa.tok);
+    const rbacHidup = sondir.status === 403;
+    if (!rbacHidup) {
+      console.log('\n  ––   ESTIMATOR_RBAC MATI — celah masih terbuka, ini yang diverifikasi:');
+      chk('tanpa hak estimator, daftar proposal MASIH terbuka', sondir.status, 200);
+      chk('artinya harga penawaran memang masih terbaca semua token',
+        Array.isArray(sondir.json?.data ?? sondir.json), true);
+      console.log('       Bagian penegakan dilewati sampai sakelarnya dinyalakan.');
+    } else {
+
     // ── 1. Baca ditolak ─────────────────────────────────────────────────────
     console.log('\n1. Harga & identitas client tidak lagi terbuka untuk semua token');
     for (const [label, path] of [
@@ -151,6 +164,7 @@ async function main() {
     }
     chk('master boleh submit',
       (await call('PUT', `/estimator/proposals/${pid}/status`, { status: 'submitted' }, master)).status, 200);
+    }
 
   } finally {
     console.log('\n5. Bersih-bersih');

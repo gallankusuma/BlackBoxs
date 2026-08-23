@@ -6756,7 +6756,24 @@ diizinkan, dan statusnya terbukti tidak bergeser. Master tidak ikut terkunci.
 
 Dibuktikan bergigi: seluruh gembok dicabut sementara → **20 gagal**.
 
-Suite penuh: **1342 lulus, 0 gagal**.
+Suite penuh: **1322 lulus, 0 gagal**.
+
+**Pembaruan — penegakannya bersakelar, jadi kodenya aman dikirim.** Penegakan
+kini di belakang `ESTIMATOR_RBAC` (**default mati**), sama seperti gerbang scope.
+Alasannya sama: menahan seluruh cabang karena satu keputusan berarti perbaikan
+lain ikut tertahan.
+
+Perlu dinyatakan terang-terangan: **selama sakelarnya mati, celah ini masih
+terbuka.** Setiap token desktop tetap bisa membaca seluruh harga penawaran. Ini
+penundaan sadar demi tidak memutus pekerjaan dua user, **bukan** anggapan bahwa
+masalahnya selesai. Menyalakannya butuh satu keputusan Anda dan satu baris di
+`.env`.
+
+Kedua keadaan diuji sungguhan: suite dijalankan terhadap backend biasa (mati)
+dan terhadap instance terpisah di port 3098 dengan `ESTIMATOR_RBAC=true` — 27
+assertion lulus di sana. Saat mati, tesnya **tidak diam-diam lolos**: ia justru
+membuktikan daftar proposal masih terbuka 200 untuk user tanpa hak, sehingga
+keadaan celahnya tercatat, bukan disamarkan.
 ### [P2 / PARTIAL-SUCCESS + IDEMPOTENCY — DITERAPKAN SEBAGIAN] Transaction create hanya mencakup header/template; empat zona MTO warehouse ditulis sebagai request terpisah dan retry membuat Proposal baru
 
 **File:** [frontend/src/views/EstimatorProposalList.vue:626](frontend/src/views/EstimatorProposalList.vue),

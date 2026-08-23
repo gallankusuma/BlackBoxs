@@ -36,11 +36,33 @@ const P_UBAH    = 'estimator.estimator-proposals.edit';
 const P_HAPUS   = 'estimator.estimator-proposals.delete';
 const P_SETUJU  = 'estimator.estimator-proposals.approve';
 
-const bolehLihat  = requirePermission(P_LIHAT, P_UBAH, P_BUAT, P_SETUJU);
-const bolehBuat   = requirePermission(P_BUAT, P_UBAH);
-const bolehUbah   = requirePermission(P_UBAH);
-const bolehHapus  = requirePermission(P_HAPUS);
-const bolehSetuju = requirePermission(P_SETUJU);
+/**
+ * Sakelar penegakan.
+ *
+ * Menggembok modul ini SEKARANG membuat dua user aktif — `beni` dan `takbir`,
+ * keduanya "Manager Finannce & Acc" yang tidak memegang satu pun permission
+ * estimator — langsung menerima 403 di seluruh Estimator. Aturan project ini
+ * jelas: sebelum menggembok modul live, pemetaan role produksi diverifikasi
+ * dulu, dan itu keputusan pemilik proses.
+ *
+ * Jadi kodenya dikirim, penegakannya menunggu `ESTIMATOR_RBAC=true`.
+ *
+ * **Selama MATI, celahnya masih terbuka** — setiap token desktop tetap bisa
+ * membaca seluruh harga penawaran. Ini penundaan sadar demi tidak memutus
+ * pekerjaan orang, bukan anggapan bahwa masalahnya sudah selesai.
+ */
+const ESTIMATOR_RBAC_AKTIF =
+  String(process.env.ESTIMATOR_RBAC || '').toLowerCase() === 'true';
+
+const lewat = (_req: Request, _res: Response, next: any) => next();
+const gembok = (...perms: string[]) =>
+  ESTIMATOR_RBAC_AKTIF ? requirePermission(...perms) : lewat;
+
+const bolehLihat  = gembok(P_LIHAT, P_UBAH, P_BUAT, P_SETUJU);
+const bolehBuat   = gembok(P_BUAT, P_UBAH);
+const bolehUbah   = gembok(P_UBAH);
+const bolehHapus  = gembok(P_HAPUS);
+const bolehSetuju = gembok(P_SETUJU);
 
 // ============================================
 // MASTER DATA ENDPOINTS
@@ -2911,7 +2933,7 @@ router.put('/proposals/:id/status', authMiddleware, bolehUbah, async (req: Reque
     // kontrak — adalah dua kewenangan berbeda. Sebelum ini, actor mana pun yang
     // lolos autentikasi langsung ditulis menjadi `approved_by` lalu project
     // dibuat atas namanya.
-    if (newStatus === 'submitted' || newStatus === 'deal') {
+    if (ESTIMATOR_RBAC_AKTIF && (newStatus === 'submitted' || newStatus === 'deal')) {
       const akses = await loadUserAccess(userId);
       const bolehSetujui = !akses ? false
         : akses.level >= 10 || akses.perms.has(P_SETUJU);
