@@ -153,6 +153,40 @@ async function main() {
     const cekStatus = await call('GET', `/estimator/proposals/${pid}`, undefined, master);
     chk('statusnya tidak bergeser', (cekStatus.json?.data ?? cekStatus.json)?.status, 'review');
 
+    // ── 3b. Bentuk "view saja" — persis yang diputuskan untuk Finance ───────
+    //
+    // Keputusan pemilik proses (23 Agustus 2026): role "Manager Finannce & Acc"
+    // diberi `estimator.estimator-proposals.view` SAJA, lalu penegakan
+    // dinyalakan. Bentuk itu diuji tersendiri karena berbeda dari kombinasi
+    // view+edit di atas: boleh membaca seluruh harga, tapi tidak boleh menyentuh
+    // apa pun.
+    console.log('\n3b. Role "view saja" — boleh baca, tidak boleh ubah');
+    const roleView = await call('POST', '/roles',
+      { code: `ESTV${stamp}`, name: `Uji View Saja ${stamp}`, description: 'fixture view-only' }, master);
+    const roleViewId = roleView.json?.data?.id ?? roleView.json?.id;
+    bersihkan.push(() => call('DELETE', `/roles/${roleViewId}`, undefined, master));
+    if (permView?.id) {
+      await dbRun('INSERT IGNORE INTO role_permissions (role_id, permission_id) VALUES (?, ?)',
+        [roleViewId, permView.id]);
+    }
+    const uv = await buatUser(`ujiview${stamp}`, roleViewId);
+    chk('user view-saja dibuat', uv.status, 201);
+
+    chk('view-saja boleh membaca daftar proposal',
+      (await call('GET', '/estimator/proposals', undefined, uv.tok)).status, 200);
+    chk('view-saja boleh membaca RAB',
+      (await call('GET', `/estimator/proposals/${pid}/rab`, undefined, uv.tok)).status, 200);
+    chk('view-saja TIDAK boleh mengubah metadata',
+      (await call('PUT', `/estimator/proposals/${pid}`, { project_name: 'X' }, uv.tok)).status, 403);
+    chk('view-saja TIDAK boleh menambah item',
+      (await call('POST', `/estimator/proposals/${pid}/items`, { ahsp_id: ah.json?.id, qty: 1 }, uv.tok)).status, 403);
+    chk('view-saja TIDAK boleh membuat proposal',
+      (await call('POST', '/estimator/proposals', { project_name: 'X' }, uv.tok)).status, 403);
+    chk('view-saja TIDAK boleh menghapus',
+      (await call('DELETE', `/estimator/proposals/${pid}`, undefined, uv.tok)).status, 403);
+    chk('view-saja TIDAK boleh mengubah status',
+      (await call('PUT', `/estimator/proposals/${pid}/status`, { status: 'draft' }, uv.tok)).status, 403);
+
     // ── 4. Master tetap bisa ────────────────────────────────────────────────
     console.log('\n4. Yang berwenang tidak ikut terkunci');
     for (const [label, path] of [
