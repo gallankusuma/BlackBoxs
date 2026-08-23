@@ -7166,6 +7166,40 @@ beserta isi. Issued revision harus menyimpan tree, bukan mengandalkan posisi row
 pengeditan item Proposal. Tidak ada perubahan source/staged/commit Proposal sejak
 review 09:00 WIB; `review.md` diabaikan sebagai artefak reviewer.
 
+
+**[DEV] DITERAPKAN.** Terverifikasi, termasuk bahwa skemanya memang tidak punya
+`parent_item_id` maupun FK child→section. Yang menghubungkan anak ke headernya
+adalah `section_order`, dan itu saya periksa pada **data produksi** sebelum
+memakainya sebagai dasar penghapusan: tiap `section_order` di `PROP/2026/0001`
+berisi **tepat satu header dan sekumpulan anaknya** (mis. `Pekerjaan Persiapan`
+1 header + 6 anak). Jadi pengelompokannya nyata, bukan asumsi.
+
+- **Backend**: `DELETE /proposals/:id/items/:itemId` kini membaca `is_section`
+  lebih dulu. Kalau barisnya header, seluruh baris dengan `section_order` yang
+  sama ikut terhapus dalam **transaction yang sama** dengan `recalculateProposal`,
+  dan responsnya menyebut berapa baris yang benar-benar hilang. Baris biasa tetap
+  terhapus satuan.
+- **Layar**: konfirmasinya berhenti berbunyi "Delete this item?" untuk sesuatu
+  yang menghapus satu paket pekerjaan. Sekarang ia menyebut nama section, **jumlah
+  baris**, dan **nilai rupiah yang ikut hilang**, plus peringatan bahwa tindakan
+  itu tidak bisa dibatalkan.
+
+**Tes:** [tests/mto-link.ts](backend/tests/mto-link.ts) bagian 12 — template dua
+section, hapus section A, lalu buktikan ketiganya hilang, **tidak ada anak yatim
+tersisa**, dan section B tidak ikut terbawa. Ditambah: baris biasa tetap terhapus
+satuan (`terhapus: 1`, `section: false`), dan isi konfirmasi layar ikut dikunci.
+
+Dibuktikan bergigi: pengelompokan section dicabut sementara → **3 gagal**,
+termasuk `tidak ada anak yatim dari section A → dapat 2` — persis kerugian yang
+Anda laporkan.
+
+**Satu bagian temuan Anda belum dikerjakan:** endpoint RAB masih tidak
+mengembalikan `is_section`/`section_order`, jadi dokumen RAB memang belum bisa
+merekonstruksi struktur templatenya. Itu perubahan kontrak dokumen RAB dan saya
+pisahkan supaya tidak tercampur dengan perbaikan penghapusan ini — sebutkan saja
+kalau mau saya kerjakan sekarang.
+
+Suite penuh: **0 gagal**.
 ### [P1 / FINANCIAL-INTEGRITY + CONCURRENCY] Dua edit paralel quantity dan AHSP dapat meninggalkan total baris yang tidak cocok dengan harga snapshot, tetapi tetap lolos submit/Deal
 
 **File:** [backend/src/routes/estimator.routes.ts:1967](backend/src/routes/estimator.routes.ts),

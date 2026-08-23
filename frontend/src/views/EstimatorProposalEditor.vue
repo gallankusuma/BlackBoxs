@@ -1934,15 +1934,41 @@ const applyCalcResult = async (value: number) => {
   }
 };
 
+/**
+ * Hapus satu baris RAB — atau satu paket pekerjaan utuh kalau barisnya header.
+ *
+ * Ikon sampah pada baris header berjudul "Hapus section", tapi dulu memakai
+ * konfirmasi yang sama dengan baris biasa ("Delete this item?") dan backend pun
+ * hanya menghapus baris judulnya. Anak-anaknya tetap ada dan tetap terhitung —
+ * biayanya masih tertagih tanpa judul yang menjelaskan asalnya.
+ *
+ * Sekarang backend menghapus satu paket utuh, jadi konfirmasinya WAJIB menyebut
+ * apa yang benar-benar ikut hilang: berapa baris dan berapa nilainya.
+ */
 const deleteItem = async (itemId: number) => {
-  if (!confirm('Delete this item?')) return;
-  
+  const baris: any = items.value.find((i: any) => i.id === itemId);
+
+  let pesan = 'Hapus baris ini?';
+  if (baris?.is_section) {
+    const seksi = items.value.filter((i: any) => i.section_order === baris.section_order);
+    const anak = seksi.filter((i: any) => !i.is_section);
+    const nilai = anak.reduce((a: number, i: any) => a + Number(i.total_price || 0), 0);
+    pesan =
+      `Hapus section "${baris.section_label || '-'}" beserta ${anak.length} baris pekerjaan di dalamnya?\n\n` +
+      `Nilai yang ikut hilang: ${formatNumber(nilai)}\n\n` +
+      `Tindakan ini tidak bisa dibatalkan.`;
+  }
+  if (!confirm(pesan)) return;
+
   try {
-    await api.delete(`/estimator/proposals/${proposalId}/items/${itemId}`);
+    const { data } = await api.delete(`/estimator/proposals/${proposalId}/items/${itemId}`);
     await loadItems();
     await loadSummary();
-  } catch (error) {
+    await muatBarisBelumLengkap();
+    if (data?.section) alert(data.message);
+  } catch (error: any) {
     console.error('Failed to delete item:', error);
+    alert(error?.response?.data?.error || 'Gagal menghapus baris.');
   }
 };
 

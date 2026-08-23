@@ -1275,6 +1275,77 @@ async function main() {
 
   await call('DELETE', `/clients/${klienSatuId}`, undefined, master);
 
+  // ───────────────────────────────────────────────────────────────────────────
+  // Hapus section = hapus paket pekerjaannya.
+  //
+  // Ikon sampah pada header berjudul "Hapus section", tapi dulu memanggil
+  // penghapusan baris biasa: hanya judulnya hilang, seluruh anaknya tetap ada
+  // dan tetap terhitung di recalculate, gerbang komersial, RAB, dan Deal.
+  // Aksi yang secara bahasa berarti "buang satu paket pekerjaan" sebenarnya
+  // hanya menghapus labelnya, dan biayanya tetap tertagih tanpa judul.
+  //
+  // Anak terhubung ke headernya lewat `section_order` — tidak ada
+  // `parent_item_id` maupun FK. Diverifikasi pada data produksi: tiap
+  // `section_order` berisi tepat satu header dan sekumpulan anaknya.
+  // ───────────────────────────────────────────────────────────────────────────
+  console.log('\n12. Hapus section membawa serta anaknya');
+
+  const propSek = await call('POST', '/estimator/proposals',
+    { project_name: `Uji section ${stamp}`, status: 'draft' }, master);
+  const sekId = propSek.json?.id ?? propSek.json?.data?.id;
+  chk('proposal section dibuat', !!sekId, true);
+
+  const tpl = await call('POST', `/estimator/proposals/${sekId}/apply-template`, {
+    proposal_type: 'civil_building',
+    template_sections: [
+      { code: 'A', name: 'Pekerjaan Persiapan', children: [{ num: '1', name: 'Mobilisasi' }, { num: '2', name: 'Direksi Keet' }] },
+      { code: 'B', name: 'Pekerjaan Tanah', children: [{ num: '1', name: 'Galian' }] },
+    ],
+  }, master);
+  chk('template dua section diterapkan', tpl.status, 200);
+
+  const barisAwal = await call('GET', `/estimator/proposals/${sekId}/items`, undefined, master);
+  const semuaAwal: any[] = Array.isArray(barisAwal.json) ? barisAwal.json : (barisAwal.json?.data || []);
+  const headerA = semuaAwal.find((b: any) => b.is_section && String(b.section_label || '').includes('Persiapan'));
+  chk('header section A ada', !!headerA?.id, true);
+  const anggotaA = semuaAwal.filter((b: any) => b.section_order === headerA?.section_order);
+  chk('section A berisi header + 2 anak', anggotaA.length, 3);
+  const jumlahAwal = semuaAwal.length;
+
+  const hapus = await call('DELETE', `/estimator/proposals/${sekId}/items/${headerA.id}`, undefined, master);
+  chk('hapus section berhasil', hapus.status, 200);
+  chk('responsnya menyatakan ini section', hapus.json?.section, true);
+  chk('menyebut jumlah baris yang terhapus', hapus.json?.terhapus, 3);
+
+  const barisAkhir = await call('GET', `/estimator/proposals/${sekId}/items`, undefined, master);
+  const semuaAkhir: any[] = Array.isArray(barisAkhir.json) ? barisAkhir.json : (barisAkhir.json?.data || []);
+  chk('tiga baris benar-benar hilang', jumlahAwal - semuaAkhir.length, 3);
+  // Inti temuannya: sebelum perbaikan, anak-anak ini masih ada tanpa judul.
+  chk('tidak ada anak yatim dari section A',
+    semuaAkhir.filter((b: any) => b.section_order === headerA.section_order).length, 0);
+  chk('section B tidak ikut terhapus',
+    semuaAkhir.some((b: any) => b.is_section && String(b.section_label || '').includes('Tanah')), true);
+
+  // Baris biasa tetap terhapus satuan, bukan seluruh sectionnya.
+  const headerB = semuaAkhir.find((b: any) => b.is_section);
+  const anakB = semuaAkhir.find((b: any) => !b.is_section && b.section_order === headerB?.section_order);
+  if (anakB) {
+    const hapusSatu = await call('DELETE', `/estimator/proposals/${sekId}/items/${anakB.id}`, undefined, master);
+    chk('hapus baris biasa hanya satu', hapusSatu.json?.terhapus, 1);
+    chk('bukan section', hapusSatu.json?.section, false);
+    const sisaB = await call('GET', `/estimator/proposals/${sekId}/items`, undefined, master);
+    const arrB: any[] = Array.isArray(sisaB.json) ? sisaB.json : (sisaB.json?.data || []);
+    chk('header B masih ada', arrB.some((b: any) => b.id === headerB.id), true);
+  }
+
+  // Layar harus menyebut apa yang ikut hilang, bukan "Delete this item?".
+  const vueEd = readFileSync(
+    new URL('../../frontend/src/views/EstimatorProposalEditor.vue', import.meta.url), 'utf8');
+  chk('konfirmasi menyebut jumlah baris', vueEd.includes('baris pekerjaan di dalamnya'), true);
+  chk('konfirmasi menyebut nilai yang hilang', vueEd.includes('Nilai yang ikut hilang'), true);
+
+  await call('DELETE', `/estimator/proposals/${sekId}`, undefined, master);
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }

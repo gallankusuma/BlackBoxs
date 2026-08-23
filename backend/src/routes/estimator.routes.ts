@@ -2337,7 +2337,7 @@ router.put('/proposals/:proposalId/items/:itemId', authMiddleware, bolehUbah, as
     // yang tersisa: baris sudah berubah, header belum, dan klien menerima 500.
     values.push(itemId, proposalId);
 
-    await withTransaction(async tx => {
+    const hasilHapus = await withTransaction(async tx => {
       // EST-MTO-R33: status diperiksa ulang DI DALAM transaction ini.
       const raceLock = await proposalLockTx(proposalId, tx);
       if (raceLock) throw Object.assign(new Error('PROPOSAL_LOCKED'), { lock: raceLock });
@@ -2390,16 +2390,55 @@ router.delete('/proposals/:proposalId/items/:itemId', authMiddleware, bolehHapus
     // Melempar error dari recalculateProposal() tidak bisa membatalkan SQL yang
     // sudah ter-commit sebelumnya. Kalau recalc gagal setelah item berubah,
     // yang tersisa: baris sudah berubah, header belum, dan klien menerima 500.
-    await withTransaction(async tx => {
+    const hasilHapus = await withTransaction(async tx => {
       // EST-MTO-R33: status diperiksa ulang DI DALAM transaction ini.
       const raceLock = await proposalLockTx(proposalId, tx);
       if (raceLock) throw Object.assign(new Error('PROPOSAL_LOCKED'), { lock: raceLock });
 
-      await tx.run('DELETE FROM proposal_items WHERE id = ? AND proposal_id = ?', [itemId, proposalId]);
+      // ── Menghapus header section berarti menghapus paket pekerjaannya ─────
+      //
+      // Ikon sampah pada baris header diberi judul "Hapus section", tapi dulu
+      // memanggil penghapusan baris biasa: hanya judulnya yang hilang,
+      // sementara seluruh anaknya tetap ada — masih terhitung di
+      // `recalculateProposal`, gerbang komersial, RAB, dan Deal.
+      //
+      // Akibatnya aksi yang secara bahasa berarti "buang satu paket pekerjaan"
+      // sebenarnya hanya menghapus labelnya, dan biayanya tetap tertagih tanpa
+      // ada judul yang menjelaskan asalnya.
+      //
+      // Anak terhubung ke headernya lewat `section_order` — tidak ada
+      // `parent_item_id` maupun FK di skema. Diverifikasi pada data produksi:
+      // tiap `section_order` berisi tepat satu header dan sekumpulan anaknya.
+      const baris: any = await tx.get(
+        'SELECT is_section, section_order, section_label FROM proposal_items WHERE id = ? AND proposal_id = ?',
+        [itemId, proposalId]
+      );
+
+      let terhapus = 1;
+      if (baris?.is_section && baris.section_order !== null && baris.section_order !== undefined) {
+        const isi: any = await tx.get(
+          'SELECT COUNT(*) AS n FROM proposal_items WHERE proposal_id = ? AND section_order = ?',
+          [proposalId, baris.section_order]
+        );
+        terhapus = Number(isi?.n || 1);
+        await tx.run(
+          'DELETE FROM proposal_items WHERE proposal_id = ? AND section_order = ?',
+          [proposalId, baris.section_order]
+        );
+      } else {
+        await tx.run('DELETE FROM proposal_items WHERE id = ? AND proposal_id = ?', [itemId, proposalId]);
+      }
       await recalculateProposal(proposalId as string, tx);
+      return { terhapus, section: !!baris?.is_section, label: baris?.section_label || null };
     });
 
-    res.json({ message: 'Item deleted' });
+    res.json({
+      message: hasilHapus.section
+        ? `Section "${hasilHapus.label || '-'}" dihapus beserta ${hasilHapus.terhapus - 1} baris pekerjaannya`
+        : 'Item deleted',
+      terhapus: hasilHapus.terhapus,
+      section: hasilHapus.section,
+    });
   } catch (error: any) {
     if (error?.lock) return res.status(error.lock.status).json(error.lock.body);
     console.error('Error deleting proposal item:', error);
