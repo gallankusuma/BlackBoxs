@@ -136,6 +136,91 @@
 
         <!-- ═══ RAB TAB ═══ -->
         <div v-show="activeProposalTab === 'rab'">
+
+        <!-- ══ Baris belum lengkap ══════════════════════════════════════════
+             Template wizard meninggalkan baris ber-AHSP dan berharga satuan
+             sungguhan tapi volumenya nol. Kalau proposal menjadi kontrak,
+             pekerjaan itu masuk lingkup tanpa anggaran. Nol berarti "belum
+             diisi", bukan "gratis" — kalau memang disengaja, harus dinyatakan.
+             Panel ini yang membuat menyatakannya praktis untuk ratusan baris. -->
+        <div v-if="isEditable && barisBelumLengkap.length" class="mb-4 rounded-lg border border-amber-300 bg-amber-50">
+          <div class="flex flex-wrap items-center justify-between gap-3 border-b border-amber-200 px-4 py-3">
+            <div class="text-sm">
+              <p class="font-semibold text-amber-900">
+                {{ barisBelumLengkap.length }} baris pekerjaan belum lengkap
+              </p>
+              <p class="mt-0.5 text-amber-800">
+                Baris ini akan masuk kontrak sebagai lingkup <strong>Rp0</strong>.
+                Lengkapi volumenya, atau nyatakan statusnya kalau memang disengaja.
+              </p>
+            </div>
+            <button @click="panelScopeTerbuka = !panelScopeTerbuka"
+              class="rounded-lg border border-amber-400 bg-white px-3 py-1.5 text-sm font-medium text-amber-900 hover:bg-amber-100">
+              {{ panelScopeTerbuka ? 'Tutup' : 'Tandai massal' }}
+            </button>
+          </div>
+
+          <div v-if="panelScopeTerbuka" class="px-4 py-3">
+            <div class="mb-3 flex flex-wrap items-center gap-2 text-sm">
+              <button @click="pilihSemuaScope(true)" class="rounded border border-amber-400 bg-white px-2 py-1 hover:bg-amber-100">Pilih semua</button>
+              <button @click="pilihSemuaScope(false)" class="rounded border border-amber-400 bg-white px-2 py-1 hover:bg-amber-100">Kosongkan</button>
+              <span class="text-amber-900">{{ pilihanScope.size }} dipilih</span>
+            </div>
+
+            <div class="mb-3 max-h-64 overflow-y-auto rounded border border-amber-200 bg-white">
+              <table class="w-full text-xs">
+                <thead class="sticky top-0 bg-amber-100 text-amber-900">
+                  <tr>
+                    <th class="w-8 px-2 py-2"></th>
+                    <th class="px-2 py-2 text-left">Pekerjaan</th>
+                    <th class="px-2 py-2 text-right">Volume</th>
+                    <th class="px-2 py-2 text-right">Harga Satuan</th>
+                    <th class="px-2 py-2 text-left">Sebabnya</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-amber-100">
+                  <tr v-for="b in barisBelumLengkap" :key="b.id" class="hover:bg-amber-50">
+                    <td class="px-2 py-1.5 text-center">
+                      <input type="checkbox" :checked="pilihanScope.has(b.id)" @change="togglePilihanScope(b.id)" />
+                    </td>
+                    <td class="px-2 py-1.5">{{ b.ahsp_name_snapshot || b.description || ('Baris #' + b.id) }}</td>
+                    <td class="px-2 py-1.5 text-right">{{ Number(b.qty || 0) }}</td>
+                    <td class="px-2 py-1.5 text-right">{{ formatNumber(Number(b.unit_price_snapshot || 0)) }}</td>
+                    <td class="px-2 py-1.5 text-amber-800">{{ sebabBelumLengkap(b) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="flex flex-wrap items-end gap-3">
+              <div>
+                <label class="mb-1 block text-xs font-medium text-amber-900">Nyatakan sebagai</label>
+                <select v-model="statusScope" class="rounded-lg border border-amber-300 px-3 py-2 text-sm">
+                  <option value="excluded">Excluded — tidak termasuk lingkup</option>
+                  <option value="optional">Optional — di luar harga dasar</option>
+                  <option value="included">Included — dikerjakan, tidak ditagih terpisah</option>
+                </select>
+              </div>
+              <div class="min-w-[16rem] flex-1">
+                <label class="mb-1 block text-xs font-medium text-amber-900">Alasan (wajib)</label>
+                <input v-model="alasanScope" type="text" placeholder="mis. dikerjakan kontraktor lain"
+                  class="w-full rounded-lg border border-amber-300 px-3 py-2 text-sm" />
+              </div>
+              <button @click="terapkanScope" :disabled="!pilihanScope.size || !alasanScope.trim() || menyimpanScope"
+                class="rounded-lg bg-amber-700 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-800 disabled:opacity-50">
+                {{ menyimpanScope ? 'Menyimpan…' : `Terapkan ke ${pilihanScope.size} baris` }}
+              </button>
+            </div>
+
+            <p v-if="galatScope" class="mt-2 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+              {{ galatScope }}
+            </p>
+            <p class="mt-2 text-xs text-amber-800">
+              Keputusan ini tercatat berikut nama penetap dan waktunya.
+            </p>
+          </div>
+        </div>
+
         <!-- Items Table (Excel-like) -->
         <div class="bg-white rounded-lg shadow overflow-x-auto">
           <!-- Add AHSP Button -->
@@ -1277,6 +1362,77 @@ const isContractQty = computed(() =>
 const disciplines = ref<Discipline[]>([]);
 const subDisciplines = ref<SubDiscipline[]>([]);
 const items = ref<ProposalItem[]>([]);
+
+// ── Baris RAB yang belum lengkap ────────────────────────────────────────────
+//
+// Backend menolak (atau kelak menolak) submit selama ada baris berkuantitas
+// nol, berharga nol, atau tanpa AHSP yang masih berstatus `priced`. Panel ini
+// membuat pembereskannya praktis: di produksi ada proposal dengan 254 baris
+// seperti itu, dan menyatakannya satu per satu bukan pekerjaan yang masuk akal.
+const barisBelumLengkap = ref<any[]>([]);
+const panelScopeTerbuka = ref(false);
+const pilihanScope = ref<Set<number>>(new Set());
+const statusScope = ref<'excluded' | 'optional' | 'included'>('excluded');
+const alasanScope = ref('');
+const menyimpanScope = ref(false);
+const galatScope = ref('');
+
+const sebabBelumLengkap = (b: any): string => {
+  const sebab: string[] = [];
+  if (b.ahsp_id === null || b.ahsp_id === undefined) sebab.push('belum punya AHSP');
+  if (!(Number(b.qty) > 0)) sebab.push('volume masih nol');
+  if (!(Number(b.unit_price_snapshot) > 0)) sebab.push('harga satuan nol');
+  else if (!(Number(b.total_price) > 0)) sebab.push('nilai baris nol');
+  return sebab.join(', ');
+};
+
+const muatBarisBelumLengkap = async () => {
+  try {
+    const { data } = await api.get(`/estimator/proposals/${proposalId}/items/incomplete`);
+    barisBelumLengkap.value = data?.items || [];
+    // Buang pilihan yang barisnya sudah tidak ada lagi.
+    const ada = new Set(barisBelumLengkap.value.map((b: any) => b.id));
+    pilihanScope.value = new Set([...pilihanScope.value].filter(id => ada.has(id)));
+  } catch {
+    // Endpoint ini pelengkap; kegagalannya tidak boleh menghalangi layar RAB.
+    barisBelumLengkap.value = [];
+  }
+};
+
+const togglePilihanScope = (id: number) => {
+  const s = new Set(pilihanScope.value);
+  s.has(id) ? s.delete(id) : s.add(id);
+  pilihanScope.value = s;
+};
+
+const pilihSemuaScope = (semua: boolean) => {
+  pilihanScope.value = semua
+    ? new Set(barisBelumLengkap.value.map((b: any) => b.id))
+    : new Set();
+};
+
+const terapkanScope = async () => {
+  if (!pilihanScope.value.size || !alasanScope.value.trim()) return;
+  menyimpanScope.value = true;
+  galatScope.value = '';
+  try {
+    await api.put(`/estimator/proposals/${proposalId}/items/scope`, {
+      item_ids: [...pilihanScope.value],
+      scope_status: statusScope.value,
+      scope_note: alasanScope.value.trim(),
+    });
+    alasanScope.value = '';
+    pilihanScope.value = new Set();
+    await muatBarisBelumLengkap();
+    await loadItems();
+    await loadSummary();
+    if (!barisBelumLengkap.value.length) panelScopeTerbuka.value = false;
+  } catch (e: any) {
+    galatScope.value = e?.response?.data?.error || 'Gagal menyimpan status lingkup.';
+  } finally {
+    menyimpanScope.value = false;
+  }
+};
 const availableAHSP = ref<AHSP[]>([]);
 const ahspCategories = ref<{work_category: string; work_category_code: string; jumlah: number}[]>([]);
 
@@ -1919,7 +2075,8 @@ onMounted(async () => {
     loadProposal(),
     loadDisciplines(),
     loadItems(),
-    loadSummary()
+    loadSummary(),
+    muatBarisBelumLengkap(),
   ]);
 });
 </script>

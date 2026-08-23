@@ -6388,6 +6388,33 @@ ikut tertahan. Gerbang ini sekarang di belakang `GERBANG_SCOPE_LENGKAP`
 Endpoint klasifikasi tetap aktif dalam kedua keadaan, jadi baris bisa mulai
 dibereskan kapan saja sebelum sakelarnya dinyalakan.
 
+**Pembaruan 23 Agustus 2026 — layar penanda massal sudah ada.** Keputusan
+pemilik proses: *"buatkan layarnya dulu"*. Panelnya kini ada di tab RAB
+([EstimatorProposalEditor.vue](frontend/src/views/EstimatorProposalEditor.vue)),
+muncul sendiri hanya kalau ada baris belum lengkap:
+
+- Menyebut jumlahnya dan menyatakan akibatnya — baris ini akan masuk kontrak
+  sebagai lingkup **Rp0**.
+- Daftar barisnya berikut volume, harga satuan, dan **sebabnya per baris**
+  ("volume masih nol", "belum punya AHSP"), jadi pengguna tidak perlu menebak.
+- Pilih semua / kosongkan, lalu satu tombol menandai **semuanya sekaligus** —
+  254 baris jadi satu permintaan, bukan 254.
+- Alasan **wajib** sebelum tombolnya bisa ditekan; penetap dan waktunya tercatat.
+
+**Tes:** [tests/proposal-commercial.ts](backend/tests/proposal-commercial.ts)
+bagian 11 menguji alur yang benar-benar dilakukan layar itu — baca daftar,
+tandai lima baris dalam satu permintaan, pastikan kelimanya tercatat lengkap
+dengan penetap dan alasan, lalu submit berhasil. Keberadaan panelnya ikut
+dikunci lewat pembacaan sumber layar (termasuk bahwa ia menuntut alasan dan
+menyediakan pilih-semua), supaya endpoint-nya tidak bisa "selesai" tanpa
+layarnya.
+
+Diverifikasi terhadap instance dengan `GERBANG_SCOPE_LENGKAP=true` **dan**
+`ESTIMATOR_RBAC=true` sekaligus: **71 assertion lulus**. Jadi begitu sakelarnya
+dinyalakan, alur bereskan-lalu-kirim sudah terbukti bekerja utuh.
+
+Sakelarnya masih **mati** di produksi — menyalakannya tinggal satu keputusan.
+
 Keduanya **diuji sungguhan**, bukan diasumsikan: suite dijalankan dua kali —
 sekali terhadap backend biasa (sakelar mati) dan sekali terhadap instance
 terpisah di port 3099 dengan `GERBANG_SCOPE_LENGKAP=true`. Tesnya menyatakan

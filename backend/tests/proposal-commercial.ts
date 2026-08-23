@@ -288,6 +288,65 @@ async function main() {
     chk('penetapnya tercatat', Number(jejak?.scope_set_by) > 0, true);
     chk('waktunya tercatat', !!jejak?.scope_set_at, true);
 
+    // ── 11. Alur layar penanda massal ──────────────────────────────────────
+    //
+    // Keputusan pemilik proses (23 Agustus 2026): "buatkan layarnya dulu".
+    // Yang diuji di sini adalah alur yang benar-benar dilakukan layar itu —
+    // baca daftar belum lengkap, tandai BANYAK sekaligus, lalu submit — karena
+    // di produksi ada proposal dengan 254 baris seperti itu dan menandainya
+    // satu per satu bukan pekerjaan yang masuk akal.
+    console.log('\n11. Penandaan massal: banyak baris sekaligus');
+    const pMassal = await call('POST', '/estimator/proposals',
+      { project_name: `Uji massal ${stamp}`, client_id: klienId, client: `PT Uji Komersial ${stamp}` }, master);
+    const massalId = pMassal.json?.id ?? pMassal.json?.data?.id;
+    bersihkan.push(() => call('DELETE', `/estimator/proposals/${massalId}`, undefined, master));
+
+    // Satu baris bernilai + LIMA baris belum lengkap.
+    await call('POST', `/estimator/proposals/${massalId}/items`, { ahsp_id: ahspId, qty: 8 }, master);
+    for (let i = 0; i < 5; i++) {
+      await call('POST', `/estimator/proposals/${massalId}/items`, { ahsp_id: ahspId, qty: 0 }, master);
+    }
+
+    const incMassal = await call('GET', `/estimator/proposals/${massalId}/items/incomplete`, undefined, master);
+    chk('lima baris belum lengkap terdaftar', incMassal.json?.count, 5);
+    // Layar menampilkan sebabnya per baris — datanya harus cukup untuk itu.
+    const contohBaris = (incMassal.json?.items || [])[0];
+    chk('baris membawa qty untuk ditampilkan', contohBaris?.qty !== undefined, true);
+    chk('baris membawa harga satuan', contohBaris?.unit_price_snapshot !== undefined, true);
+    chk('baris membawa nama pekerjaan',
+      !!(contohBaris?.ahsp_name_snapshot || contohBaris?.description), true);
+
+    // Inilah yang dilakukan tombol "Terapkan": satu permintaan, banyak id.
+    const idMassal = (incMassal.json?.items || []).map((x: any) => x.id);
+    const terap = await call('PUT', `/estimator/proposals/${massalId}/items/scope`,
+      { item_ids: idMassal, scope_status: 'excluded',
+        scope_note: 'Di luar lingkup, dikerjakan pihak lain' }, master);
+    chk('satu permintaan menandai 5 baris', terap.status, 200);
+    chk('jumlahnya dilaporkan', terap.json?.jumlah, 5);
+    chk('daftar belum lengkap jadi kosong',
+      (await call('GET', `/estimator/proposals/${massalId}/items/incomplete`, undefined, master)).json?.count, 0);
+
+    // Jejaknya tercatat untuk kelimanya, bukan hanya yang pertama.
+    const jejakMassal: any = await dbGet(
+      `SELECT COUNT(*) n FROM proposal_items
+       WHERE proposal_id = ? AND scope_status = 'excluded' AND scope_set_by IS NOT NULL
+         AND scope_note IS NOT NULL AND scope_set_at IS NOT NULL`, [massalId]);
+    chk('kelimanya tercatat lengkap dengan penetap & alasan', Number(jejakMassal?.n), 5);
+
+    await call('PUT', `/estimator/proposals/${massalId}/status`, { status: 'review' }, master);
+    const submitMassal = await call('PUT', `/estimator/proposals/${massalId}/status`, { status: 'submitted' }, master);
+    chk('sesudah ditandai, proposal bisa dikirim', submitMassal.status, 200);
+
+    // Layarnya harus benar-benar ada, bukan cuma endpoint-nya.
+    const { readFileSync: bacaVue } = await import('node:fs');
+    const vueEditor = bacaVue(
+      new URL('../../frontend/src/views/EstimatorProposalEditor.vue', import.meta.url), 'utf8');
+    chk('layar memuat panel penanda massal', vueEditor.includes('barisBelumLengkap'), true);
+    chk('layar memanggil endpoint incomplete', vueEditor.includes('/items/incomplete'), true);
+    chk('layar mengirim penandaan massal', vueEditor.includes('/items/scope'), true);
+    chk('layar menuntut alasan sebelum mengirim', vueEditor.includes('!alasanScope.trim()'), true);
+    chk('layar menyediakan pilih-semua', vueEditor.includes('pilihSemuaScope'), true);
+
   } finally {
     console.log('\n8. Bersih-bersih');
     let sisa = 0;
