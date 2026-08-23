@@ -7442,8 +7442,27 @@ apa pun. Kalau memang client sebenarnya PT INTI EVERSPRING INDONESIA, yang perlu
 diperbaiki adalah `proposals.client_id` **dan** `client_projects.client_id`
 menjadi **7**.
 
-Saya tidak melakukannya tanpa perintah — mengganti pihak pada kontrak yang sudah
-berjalan bukan keputusan teknis.
+**TERJAWAB — sudah diarahkan ke id 7.** Keputusan pemilik proses (24 Agustus
+2026): *"arahkan keduanya ke id 7"*.
+
+| | sebelum | sesudah |
+|---|---|---|
+| `proposals.client_id` (PROP/2026/0001) | 3 — *Test Client Updated*, nonaktif | **7 — PT INTI EVERSPRING INDONESIA**, aktif |
+| `client_projects.client_id` (PRJ-2026-0001) | 3 | **7** |
+| label vs relasi | MENYIMPANG | **SEPADAN** |
+
+Keduanya diubah dalam **satu transaction**, masing-masing dengan
+`WHERE … AND client_id = 3` supaya hanya baris yang memang menyimpang yang
+tersentuh. `ROW_COUNT()` = 1 dan 1. Nama label diambil dari
+`(SELECT name FROM clients WHERE id = 7)`, bukan diketik ulang.
+
+Sesudahnya: ketiga proposal produksi berstatus `sepadan`, `PRJ-2026-0001`
+memakai client aktif yang benar, dan budget-nya tetap sepadan dengan nilai
+kontrak. Smoke: 30 lulus, 1 gagal (tetap kredensial master).
+
+Risiko relabel yang saya sebutkan di atas dengan sendirinya hilang — nama kanonik
+sekarang memang PT INTI EVERSPRING INDONESIA, jadi menyunting proposal itu tidak
+lagi mengubah apa pun.
 ### [P2 / DATA-INTEGRITY + UPSTREAM-CONTRACT] Endpoint tambah item menerima AHSP inactive dan membekukan harga arsip sebagai scope baru Proposal
 
 **File:** [backend/src/routes/estimator.routes.ts:443](backend/src/routes/estimator.routes.ts),
