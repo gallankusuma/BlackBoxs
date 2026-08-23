@@ -6474,6 +6474,33 @@ Suite penuh: **1291 lulus, 0 gagal**.
   disnapshot juga belum dipulihkan oleh `kembalikan_versi_lama()`. Tidak dibuat
   finding duplikat karena butir P1 tersebut masih terbuka.
 
+**[DEV] KEDUANYA DITUTUP.**
+
+- **Gerbang identitas kegagalan** — sudah diperbaiki di commit `da316efc`, yang
+  landing **setelah** ronde ini; tanggapan lengkapnya ada di bawah butir P1
+  release/rollback 16 Agustus 17:04. Smoke kini dijalankan sekali, keluarannya
+  ditangkap, dan pengecualian hanya berlaku bila daftarnya persis satu baris
+  **dan** labelnya kredensial master.
+- **Manifest yang disnapshot tapi tidak dipulihkan** — benar, dan itu celah yang
+  saya sendiri tinggalkan: `package.json`, `package-lock.json`, dan `database/`
+  memang disalin ke titik pulang, tapi `kembalikan_versi_lama()` hanya
+  mengembalikan frontend dan `dist`. Akibatnya dist lama berjalan di atas
+  `node_modules` hasil `npm install` rilis **baru** — kalau rilis baru membuang
+  dependency yang masih di-import dist lama, hasilnya `MODULE_NOT_FOUND`:
+  rollback "berhasil" tapi produksinya mati.
+
+  Ketiganya kini ikut dipulihkan, dan `npm install --omit=dev` dijalankan lagi
+  sesudah manifest dikembalikan supaya `node_modules` benar-benar menyesuaikan
+  rilis lama.
+
+**Tes:** [scripts/test-deploy-gate.sh](scripts/test-deploy-gate.sh) bagian 3
+memeriksa **kesepadanan** antara yang disnapshot dan yang dipulihkan — bukan
+hanya keberadaan salah satunya. Kalau nanti ada artefak yang ditambahkan ke
+snapshot tanpa ditambahkan ke rollback (atau sebaliknya), tesnya merah.
+Dibuktikan bergigi dengan mencabut salah satu pemulihan.
+
+Suite penuh: **1315 lulus, 0 gagal**.
+
 ---
 
 ## System Design Review — Proposal — 20 Agustus 2026 08:49 WIB

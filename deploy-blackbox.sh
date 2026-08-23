@@ -174,10 +174,28 @@ echo "✅ Backend restarted"
 kembalikan_versi_lama() {
   echo ""
   echo "↩️  Mengembalikan ke versi sebelumnya..."
-  ssh "$VPS" "if [ -d /var/www/blackboxs/.rollback/frontend ]; then \
-      rm -rf $REMOTE_FRONTEND && cp -a /var/www/blackboxs/.rollback/frontend $REMOTE_FRONTEND; fi; \
-    if [ -d /var/www/blackboxs/.rollback/dist ]; then \
-      rm -rf $REMOTE_BACKEND/dist && cp -a /var/www/blackboxs/.rollback/dist $REMOTE_BACKEND/dist; fi; \
+  # Manifest dan lockfile ikut DIPULIHKAN, bukan hanya disimpan.
+  #
+  # Sebelumnya `package.json`/`package-lock.json`/`database/` memang disnapshot,
+  # tapi rollback hanya mengembalikan frontend dan `dist` — jadi dist lama
+  # berjalan di atas `node_modules` hasil `npm install` rilis BARU. Kalau rilis
+  # baru membuang sebuah dependency yang masih di-import dist lama, pemulihannya
+  # jatuh sebagai MODULE_NOT_FOUND: rollback "berhasil" tapi produksinya mati.
+  #
+  # `npm install` dijalankan lagi sesudah manifest dipulihkan supaya
+  # `node_modules` benar-benar kembali menyesuaikan rilis lama.
+  ssh "$VPS" "R=/var/www/blackboxs/.rollback
+    if [ -d \$R/frontend ]; then rm -rf $REMOTE_FRONTEND && cp -a \$R/frontend $REMOTE_FRONTEND; fi
+    if [ -d \$R/dist ]; then rm -rf $REMOTE_BACKEND/dist && cp -a \$R/dist $REMOTE_BACKEND/dist; fi
+    if [ -d \$R/database ]; then rm -rf $REMOTE_BACKEND/database && cp -a \$R/database $REMOTE_BACKEND/database; fi
+    PULIH_MANIFEST=0
+    for f in package.json package-lock.json; do
+      if [ -f \$R/\$f ]; then cp -a \$R/\$f $REMOTE_BACKEND/\$f; PULIH_MANIFEST=1; fi
+    done
+    if [ \$PULIH_MANIFEST -eq 1 ]; then
+      echo '   memulihkan node_modules sesuai manifest lama...'
+      (cd $REMOTE_BACKEND && npm install --omit=dev >/dev/null 2>&1) || echo '   ⚠️ npm install saat rollback gagal'
+    fi
     pm2 restart $PM2_NAME >/dev/null 2>&1 || true"
   sleep 6
   local kode

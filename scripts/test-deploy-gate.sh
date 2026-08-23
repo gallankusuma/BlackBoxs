@@ -97,7 +97,33 @@ PANGGILAN=$(grep -c 'scripts/smoke-test.js' "$DEPLOY" || true)
 chk 'smoke test dipanggil sekali saja' "$PANGGILAN" '1'
 
 echo ""
-echo "3. Skrip deploy sehat secara sintaks"
+echo "3. Rollback memulihkan artefak yang diganti deploy"
+# Deploy mengganti frontend, dist, package.json, package-lock.json, dan
+# database/, lalu memutasi node_modules lewat `npm install`. Rollback yang hanya
+# mengembalikan frontend + dist meninggalkan dist lama berjalan di atas
+# node_modules rilis BARU — kalau sebuah dependency dibuang, hasilnya
+# MODULE_NOT_FOUND: rollback "berhasil" tapi produksinya mati.
+BLOK_ROLLBACK=$(sed -n '/^kembalikan_versi_lama() {/,/^}/p' "$DEPLOY")
+for bagian in 'R/frontend' 'R/dist' 'R/database' 'package.json' 'package-lock.json' 'npm install --omit=dev'; do
+  if printf '%s' "$BLOK_ROLLBACK" | grep -qF -- "$bagian"; then
+    lulus=$((lulus+1)); echo "  ok   rollback memulihkan: $bagian"
+  else
+    gagal=$((gagal+1)); echo "  FAIL rollback TIDAK memulihkan: $bagian"
+  fi
+done
+
+# Yang disnapshot dan yang dipulihkan harus sepadan.
+BLOK_SNAPSHOT=$(sed -n '/Menyimpan titik pulang/,/Titik pulang tersimpan/p' "$DEPLOY")
+for bagian in 'package.json' 'package-lock.json' 'database'; do
+  if printf '%s' "$BLOK_SNAPSHOT" | grep -qF -- "$bagian"; then
+    lulus=$((lulus+1)); echo "  ok   disnapshot juga: $bagian"
+  else
+    gagal=$((gagal+1)); echo "  FAIL disnapshot tapi tidak ada: $bagian"
+  fi
+done
+
+echo ""
+echo "4. Skrip deploy sehat secara sintaks"
 if bash -n "$DEPLOY" 2>/dev/null; then
   lulus=$((lulus+1)); echo "  ok   bash -n bersih"
 else
