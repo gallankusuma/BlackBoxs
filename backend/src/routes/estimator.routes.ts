@@ -1236,6 +1236,66 @@ const validasiQty = (raw: unknown): { ok: boolean; qty: number; pesan: string } 
 };
 
 /**
+ * Tentukan isi satu baris RAB dari child template wizard.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Wizard mengirim `volume`, `unit`, `ahsp_id`, `ahsp_code`, `unit_price`, dan
+ * `total` untuk tiap child — hasil kalkulator dan pilihan AHSP pengguna. Backend
+ * dulu MEMBUANG semuanya: ia mencocokkan ulang AHSP hanya dari `child.name`
+ * yang persis sama, lalu menyisipkan baris dengan `qty = 0` dan
+ * `total_price = 0`.
+ *
+ * Jadi pengguna mengisi volume di wizard, menekan simpan, menerima 201 — dan
+ * angkanya tidak pernah ada. Inilah asal ratusan baris berkuantitas nol di
+ * produksi (PROP/2026/0001: 144 dari 182 baris; PROP/2026/0003: 254 dari 305),
+ * yang belakangan muncul lagi sebagai temuan "proposal campuran".
+ *
+ * Pembagian kepercayaannya tetap dijaga: **identitas dan kuantitas** boleh
+ * datang dari klien, **harga** tidak pernah — ia selalu diambil dari master
+ * AHSP, dan `total_price` dihitung di server. Prinsip yang sama dengan nama
+ * client yang harus kanonik.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+const barisDariTemplate = async (
+  child: any, section: any, ahspLookup: Record<string, any>,
+  get: (sql: string, p?: any[]) => Promise<any>
+) => {
+  // Pilihan eksplisit pengguna menang atas pencocokan nama.
+  let ahsp: any = null;
+  if (child?.ahsp_id) {
+    ahsp = await get(
+      `SELECT id, kode, name, satuan, harga_satuan FROM ahsp_headers WHERE id = ? AND status = 'active'`,
+      [child.ahsp_id]
+    );
+  }
+  if (!ahsp && child?.ahsp_code) {
+    ahsp = await get(
+      `SELECT id, kode, name, satuan, harga_satuan FROM ahsp_headers WHERE kode = ? AND status = 'active'`,
+      [child.ahsp_code]
+    );
+  }
+  if (!ahsp) ahsp = ahspLookup[child?.name] || null;
+
+  // Volume dari wizard dipakai, tapi tetap lewat validasi yang sama dengan
+  // input manual — angka liar tidak boleh masuk lewat pintu template.
+  const cek = validasiQty(child?.volume);
+  const qty = cek.ok ? cek.qty : 0;
+
+  const harga = ahsp ? uang(ahsp.harga_satuan) : 0;
+
+  return {
+    ahspId: ahsp ? ahsp.id : null,
+    ahspCode: ahsp ? ahsp.kode : `${section.code}.${child?.num ?? ''}`.replace(/\.$/, ''),
+    ahspName: ahsp ? ahsp.name : child?.name,
+    ahspUnit: ahsp ? ahsp.satuan : (child?.unit || ''),
+    harga,
+    qty,
+    // Dihitung di server. `child.total` dari klien sengaja tidak dipercaya.
+    total: bulatUang(qty * harga),
+  };
+};
+
+/**
  * Selaraskan pasangan `client` (label) dan `client_id` (pihak yang mengikat).
  *
  * ─────────────────────────────────────────────────────────────────────────────
@@ -1988,25 +2048,33 @@ router.post('/proposals', authMiddleware, bolehBuat, async (req: Request, res: R
         // Insert sub-items (children) as regular proposal items
         if (section.children && Array.isArray(section.children)) {
           for (const child of section.children) {
-            // Try auto-assign AHSP by exact name match
-            const matched = ahspLookup[child.name];
-            const ahspId = matched ? matched.id : null;
-            const ahspCode = matched ? matched.kode : `${section.code}.${child.num}`.replace(/\.$/, '');
-            const ahspName = matched ? matched.name : child.name;
-            const ahspUnit = matched ? matched.satuan : '';
-            const ahspPrice = matched ? parseFloat(matched.harga_satuan) || 0 : 0;
+            // Volume, unit, dan pilihan AHSP dari wizard dipakai — lihat
+            // `barisDariTemplate`. Sebelumnya semuanya dibuang dan baris selalu
+            // masuk dengan qty 0.
+            const b = await barisDariTemplate(child, section, ahspLookup, tx.get);
 
             await tx.run(
               `INSERT INTO proposal_items 
                (proposal_id, ahsp_id, ahsp_code_snapshot, ahsp_name_snapshot, unit_snapshot, unit_price_snapshot,
                 description, qty, total_price, order_no, section_label, is_section, section_order)
-               VALUES (?, ?, ?, ?, ?, ?, NULL, 0, 0, ?, NULL, 0, ?)`,
-              [proposalId, ahspId, ahspCode, ahspName, ahspUnit, ahspPrice, orderNo, i + 1]
+               VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL, 0, ?)`,
+              [proposalId, b.ahspId, b.ahspCode, b.ahspName, b.ahspUnit, b.harga,
+               b.qty, b.total, orderNo, i + 1]
             );
             orderNo++;
           }
         }
       }
+    }
+
+    // Header wajib mencerminkan baris yang barusan disisipkan.
+    //
+    // Selama template selalu masuk dengan qty 0, memanggil ini tidak pernah
+    // terasa perlu — hasilnya nol juga. Begitu volume dari wizard benar-benar
+    // dipakai, ketiadaannya langsung terlihat: baris bernilai 11 juta sementara
+    // `total_project` di header tetap 0.
+    if (template_sections && Array.isArray(template_sections) && template_sections.length > 0) {
+      await recalculateProposal(proposalId, tx);
     }
 
     return { proposalId, proposalNumber };
@@ -2156,19 +2224,17 @@ router.post('/proposals/:id/apply-template', authMiddleware, bolehUbah, async (r
 
       if (section.children && Array.isArray(section.children)) {
         for (const child of section.children) {
-          const matched = ahspLookup[child.name];
-          const ahspId   = matched ? matched.id   : null;
-          const ahspCode = matched ? matched.kode  : `${section.code}.${child.num}`.replace(/\.$/, '');
-          const ahspName = matched ? matched.name  : child.name;
-          const ahspUnit = matched ? matched.satuan : '';
-          const ahspPrice = matched ? parseFloat(matched.harga_satuan) || 0 : 0;
+          // Sama seperti jalur create: volume dan pilihan AHSP dari wizard
+          // dipakai, bukan dibuang lalu diganti qty 0.
+          const b = await barisDariTemplate(child, section, ahspLookup, tx.get);
 
           await tx.run(
             `INSERT INTO proposal_items
              (proposal_id, ahsp_id, ahsp_code_snapshot, ahsp_name_snapshot, unit_snapshot, unit_price_snapshot,
               description, qty, total_price, order_no, section_label, is_section, section_order)
-             VALUES (?, ?, ?, ?, ?, ?, NULL, 0, 0, ?, NULL, 0, ?)`,
-            [proposalId, ahspId, ahspCode, ahspName, ahspUnit, ahspPrice, orderNo, startSection + i + 1]
+             VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL, 0, ?)`,
+            [proposalId, b.ahspId, b.ahspCode, b.ahspName, b.ahspUnit, b.harga,
+             b.qty, b.total, orderNo, startSection + i + 1]
           );
           orderNo++;
         }

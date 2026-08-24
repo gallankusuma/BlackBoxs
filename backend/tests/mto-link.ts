@@ -1346,6 +1346,88 @@ async function main() {
 
   await call('DELETE', `/estimator/proposals/${sekId}`, undefined, master);
 
+  // ───────────────────────────────────────────────────────────────────────────
+  // Wizard mengirim volume & pilihan AHSP — backend wajib memakainya.
+  //
+  // Dulu backend membuang `child.volume`, `child.ahsp_id`, `child.unit_price`,
+  // dan `child.total`; ia mencocokkan ulang AHSP hanya dari nama yang PERSIS
+  // sama, lalu menyisipkan baris dengan qty 0 dan total 0 — sambil menjawab
+  // 201. Pengguna mengisi volume, menerima sukses, dan angkanya tidak pernah
+  // ada. Inilah asal ratusan baris berkuantitas nol di produksi.
+  // ───────────────────────────────────────────────────────────────────────────
+  console.log('\n13. Volume & pilihan AHSP dari wizard benar-benar tersimpan');
+
+  const ahspWiz = await call('POST', '/estimator/ahsp', {
+    kode: `TWIZ.${stamp}`, name: `AHSP Wizard ${stamp}`, satuan: 'm3', status: 'active',
+    items: [{ section: 'B', resource_type: 'material', resource_name: 'Bahan',
+              resource_satuan: 'm3', koefisien: 1, resource_harga: 800000 }],
+  }, master);
+  const ahspWizId = ahspWiz.json?.id;
+  const ahspWizDetail: any = await (async () => {
+    const r = await call('GET', `/estimator/ahsp?search=TWIZ.${stamp}`, undefined, master);
+    const arr = r.json?.data ?? r.json ?? [];
+    return Array.isArray(arr) ? arr.find((a: any) => a.id === ahspWizId) : null;
+  })();
+  const hargaWiz = Number(ahspWizDetail?.harga_satuan || 0);
+  chk('AHSP wizard punya harga', hargaWiz > 0, true);
+
+  // Payload persis bentuk yang dikirim getResult() wizard.
+  const propWiz = await call('POST', '/estimator/proposals', {
+    project_name: `Uji wizard ${stamp}`,
+    template_sections: [{
+      code: 'A', name: 'Pekerjaan Utama', description: '',
+      children: [
+        { num: '1', name: `Pekerjaan Beton ${stamp}`, volume: 12.5, unit: 'm3',
+          ahsp_id: ahspWizId, ahsp_code: `TWIZ.${stamp}`, unit_price: hargaWiz, total: 12.5 * hargaWiz },
+        { num: '2', name: `Tanpa AHSP ${stamp}`, volume: 4, unit: 'm3' },
+      ],
+    }],
+  }, master);
+  const wizId = propWiz.json?.id ?? propWiz.json?.data?.id;
+  chk('proposal wizard dibuat', propWiz.status, 201);
+
+  const barisWiz = await call('GET', `/estimator/proposals/${wizId}/items`, undefined, master);
+  const arrWiz: any[] = Array.isArray(barisWiz.json) ? barisWiz.json : (barisWiz.json?.data || []);
+  const anakBeton = arrWiz.find((b: any) => !b.is_section && String(b.ahsp_name_snapshot || '').includes('AHSP Wizard'));
+  chk('child ber-AHSP tersimpan', !!anakBeton, true);
+  // Inti temuannya: dulu ketiga angka ini semuanya 0.
+  chk('volume dari wizard tersimpan', Number(anakBeton?.qty), 12.5);
+  chk('AHSP pilihan pengguna dipakai', Number(anakBeton?.ahsp_id), Number(ahspWizId));
+  chk('harga diambil dari master AHSP', Number(anakBeton?.unit_price_snapshot), hargaWiz);
+  chk('total dihitung server = qty × harga',
+    Math.round(Number(anakBeton?.total_price) * 100), Math.round(12.5 * hargaWiz * 100));
+
+  // Header ikut mencerminkan angkanya, bukan nol.
+  const wizHeader = await call('GET', `/estimator/proposals/${wizId}`, undefined, master);
+  const wh = wizHeader.json?.data ?? wizHeader.json;
+  chk('total_project bukan nol lagi', Number(wh?.total_project) > 0, true);
+
+  // Child tanpa AHSP tetap masuk, volumenya tetap dihormati.
+  const anakTanpa = arrWiz.find((b: any) => String(b.ahsp_name_snapshot || '').includes('Tanpa AHSP'));
+  chk('child tanpa AHSP tetap tersimpan', !!anakTanpa, true);
+  chk('volumenya ikut tersimpan', Number(anakTanpa?.qty), 4);
+  chk('tapi nilainya nol karena belum ada harga', Number(anakTanpa?.total_price), 0);
+
+  // Harga dari klien TIDAK dipercaya — dikirim menggelembung, tetap harga master.
+  const propPalsu = await call('POST', '/estimator/proposals', {
+    project_name: `Uji harga palsu ${stamp}`,
+    template_sections: [{
+      code: 'A', name: 'Utama', children: [
+        { num: '1', name: 'X', volume: 2, ahsp_id: ahspWizId, unit_price: 999999999, total: 999999999 },
+      ],
+    }],
+  }, master);
+  const palsuId = propPalsu.json?.id ?? propPalsu.json?.data?.id;
+  const barisPalsu = await call('GET', `/estimator/proposals/${palsuId}/items`, undefined, master);
+  const arrPalsu: any[] = Array.isArray(barisPalsu.json) ? barisPalsu.json : (barisPalsu.json?.data || []);
+  const anakPalsu = arrPalsu.find((b: any) => !b.is_section);
+  chk('harga dari klien diabaikan', Number(anakPalsu?.unit_price_snapshot), hargaWiz);
+  chk('total memakai harga master', Math.round(Number(anakPalsu?.total_price) * 100),
+    Math.round(2 * hargaWiz * 100));
+
+  await call('DELETE', `/estimator/proposals/${wizId}`, undefined, master);
+  await call('DELETE', `/estimator/proposals/${palsuId}`, undefined, master);
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }

@@ -7618,6 +7618,43 @@ diselesaikan, bukan dipetakan nondeterministik berdasarkan nama.
 Proposal. Tidak ada perubahan source/staged/commit Proposal sejak review 09:13
 WIB; `review.md` diabaikan sebagai artefak reviewer.
 
+
+**[DEV] DITERAPKAN — dan ini ternyata akar dari temuan lain.** Terverifikasi:
+backend membangun ulang mapping hanya dari `child.name` yang persis sama, lalu
+menyisipkan `qty = 0` dan `total_price = 0` — sambil menjawab **201**.
+
+**Hubungannya dengan temuan "proposal campuran".** Ratusan baris berkuantitas nol
+di produksi (PROP/2026/0001: 144 dari 182; PROP/2026/0003: 254 dari 305;
+PROP/2026/0004: 52 dari 61) bukan karena pengguna lupa mengisi volume — mereka
+**sudah mengisinya di wizard**, dan backend yang membuangnya. Gerbang scope yang
+kita bahas sebelumnya sebenarnya sedang menghukum korban dari cacat ini.
+
+- `barisDariTemplate()`: `child.ahsp_id` (pilihan eksplisit pengguna) menang atas
+  pencocokan nama, lalu `child.ahsp_code`, baru fallback nama. `child.volume`
+  dipakai sebagai qty — tetap lewat `validasiQty` yang sama dengan input manual,
+  supaya angka liar tidak bisa masuk lewat pintu template.
+- **Pembagian kepercayaannya dijaga**: identitas dan kuantitas boleh datang dari
+  klien, **harga tidak pernah** — selalu diambil dari master AHSP, dan
+  `total_price` dihitung di server. `child.unit_price`/`child.total` dari klien
+  sengaja diabaikan, prinsip yang sama dengan nama client yang harus kanonik.
+- Berlaku di **create dan apply-template** — keduanya punya cacat identik.
+
+**Cacat lanjutan yang baru terlihat setelah ini diperbaiki:** `recalculateProposal`
+tidak pernah dipanggil sesudah template disisipkan. Selama baris selalu masuk
+dengan qty 0 hal itu tidak terasa — hasilnya nol juga. Begitu volumenya benar
+tersimpan, ketiadaannya langsung tampak: baris bernilai 11 juta sementara
+`total_project` di header tetap **0**. Sekarang dipanggil.
+
+**Tes:** [tests/mto-link.ts](backend/tests/mto-link.ts) bagian 13 memakai payload
+persis bentuk `getResult()` wizard. Membuktikan volume tersimpan (12,5), AHSP
+pilihan pengguna dipakai, harga diambil dari master, `total_price` = qty × harga,
+dan header ikut mencerminkannya. Ditambah: child tanpa AHSP tetap masuk dengan
+volumenya, dan **harga palsu dari klien (999.999.999) diabaikan** — yang tersimpan
+tetap harga master.
+
+Dibuktikan bergigi: volume dan pilihan AHSP dibuang lagi → **6 gagal**.
+
+Suite penuh: **0 gagal**.
 ### [P2 / DOCUMENT-INTEGRITY + ERROR-HANDLING] Gagal memuat API tetap merender RAB kosong bernilai nol dengan tombol Print aktif
 
 **File:** [frontend/src/views/EstimatorRAB.vue:1](frontend/src/views/EstimatorRAB.vue),
