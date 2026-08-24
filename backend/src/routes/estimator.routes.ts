@@ -2711,6 +2711,10 @@ router.get('/proposals/:id/rab', authMiddleware, bolehLihat, async (req: Request
         pi.total_price,
         pi.ahsp_code_snapshot as ahsp_code,
         pi.ahsp_name_snapshot as ahsp_name,
+        -- Deskripsi yang sengaja diketik pengguna lewat "Tambah deskripsi..."
+        -- tersimpan di kolom ini, tapi query RAB dulu tidak pernah memilihnya —
+        -- jadi keterangan lingkup pekerjaan hilang total dari dokumen.
+        pi.description,
         pi.unit_snapshot as unit,
         pi.unit_price_snapshot as unit_price,
         d.id as discipline_id,
@@ -2764,6 +2768,9 @@ router.get('/proposals/:id/rab', authMiddleware, bolehLihat, async (req: Request
         rowNo: rowNumber++,
         ahspCode: item.ahsp_code,
         ahspName: item.ahsp_name,
+        // Kolom PEKERJAAN pada dokumen mengambil deskripsi ini; kalau kosong,
+        // barulah nama analisa dipakai sebagai penggantinya.
+        description: item.description || null,
         unit: item.unit,
         qty: item.qty,
         unitPrice: bulatUang(item.unit_price),

@@ -7822,6 +7822,33 @@ khusus. Escape multiline/koma/formula CSV dan HTML secara aman.
 ada perubahan source/staged/commit Proposal sejak review 09:19 WIB; `review.md`
 diabaikan sebagai artefak reviewer.
 
+
+**[DEV] DITERAPKAN.** Ketiga hal terverifikasi: `pi.description` memang ditulis
+tapi tidak pernah dipilih query RAB, dan tabelnya merender `ahspName` di kolom
+PEKERJAAN lalu `ahspCode` **dua kali** di kolom AHSP dan KODE.
+
+Yang paling merugikan bagian pertamanya: pengguna sengaja mengetik keterangan
+lingkup pekerjaan lewat "Tambah deskripsi…", tersimpan rapi di database — dan
+dokumen penawaran yang dicetak tidak pernah memuatnya. Yang muncul justru nama
+analisa AHSP, yang bahasanya teknis dan bukan lingkup yang disepakati.
+
+- `pi.description` masuk ke query dan DTO RAB.
+- Kolomnya dipulangkan ke maknanya: **PEKERJAAN** = deskripsi lingkup (jatuh ke
+  nama AHSP kalau kosong, supaya baris lama tetap terbaca), **AHSP** = nama
+  analisanya, **KODE** = kodenya. Tidak ada lagi kode yang tercetak dua kali.
+- Ekspor CSV mengikuti kolom yang sama, dan teksnya kini di-escape — deskripsi
+  yang memuat koma atau tanda kutip tidak lagi menggeser kolom berkasnya.
+
+**Tes:** [tests/rab.ts](backend/tests/rab.ts) bagian 8 — menyimpan deskripsi
+lewat PUT, lalu membuktikan ia ikut di respons RAB **dan** bahwa nama serta kode
+AHSP tetap dikirim terpisah dan memang berbeda. Baris tanpa deskripsi diperiksa
+tetap terbaca. Jumlah kemunculan `item.ahspCode` di layar ikut dikunci = 1,
+supaya duplikasi kolomnya tidak bisa kembali.
+
+Dibuktikan bergigi: `description` dicabut dari DTO dan kolomnya dikembalikan →
+**5 gagal**, termasuk `kode tidak lagi dicetak dua kali → dapat 2`.
+
+Suite penuh: **0 gagal**.
 ### [P2 / CONCURRENCY + DATA-INTEGRITY] Lock menyerialkan insert tetapi `order_no` sudah dihitung dari state stale, sehingga item paralel mendapat urutan yang sama
 
 **File:** [backend/src/routes/estimator.routes.ts:1895](backend/src/routes/estimator.routes.ts),

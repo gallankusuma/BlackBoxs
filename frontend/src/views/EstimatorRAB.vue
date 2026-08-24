@@ -170,8 +170,14 @@
                     <td class="px-4 py-3 text-gray-600">{{ item.rowNo }}</td>
                     <td class="px-4 py-3 text-gray-600">{{ section.name }}</td>
                     <td class="px-4 py-3 text-gray-600">{{ subSection.name }}</td>
-                    <td class="px-4 py-3">{{ item.ahspName }}</td>
-                    <td class="px-4 py-3 text-gray-600">{{ item.ahspCode }}</td>
+                    <!-- PEKERJAAN = keterangan lingkup yang diketik pengguna;
+                         AHSP = nama analisanya; KODE = kodenya.
+                         Sebelumnya kolom PEKERJAAN menampilkan nama AHSP,
+                         kolom AHSP dan KODE dua-duanya menampilkan kode yang
+                         sama, dan deskripsi lingkup tidak pernah muncul sama
+                         sekali. -->
+                    <td class="px-4 py-3">{{ item.description || item.ahspName }}</td>
+                    <td class="px-4 py-3 text-gray-600">{{ item.ahspName }}</td>
                     <td class="px-4 py-3 text-gray-600">{{ item.ahspCode }}</td>
                     <td class="px-4 py-3 text-right">{{ formatNumber(item.qty) }} {{ item.unit }}</td>
                     <td class="px-4 py-3 text-right">{{ formatCurrency(item.unitPrice) }}</td>
@@ -410,7 +416,11 @@ const exportToExcel = async () => {
     sections.value.forEach((section) => {
       section.subDisciplines.forEach((subSection: any) => {
         subSection.items.forEach((item: any) => {
-          csvContent += `${item.rowNo},${section.name},${subSection.name},"${item.ahspName}",${item.ahspCode},${item.ahspCode},${item.qty} ${item.unit},${item.unitPrice},${item.totalPrice}\n`;
+          // Kolomnya mengikuti tabel: PEKERJAAN, AHSP, KODE — bukan kode
+          // yang sama dua kali. Tanda kutip pada teks di-escape supaya
+          // deskripsi yang memuat koma tidak menggeser kolom CSV.
+          const csvTeks = (v: any) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+          csvContent += `${item.rowNo},${csvTeks(section.name)},${csvTeks(subSection.name)},${csvTeks(item.description || item.ahspName)},${csvTeks(item.ahspName)},${csvTeks(item.ahspCode)},${item.qty} ${item.unit},${item.unitPrice},${item.totalPrice}\n`;
         });
         csvContent += `,,,SUB TOTAL ${subSection.code},,,,${subSection.subtotal}\n`;
       });

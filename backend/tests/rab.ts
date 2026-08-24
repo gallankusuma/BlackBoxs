@@ -246,8 +246,51 @@ async function main() {
     chk('sisa data dibersihkan saat gagal',
       vueRab2.includes('proposal.value = null;'), true);
 
+    // ── 8. Deskripsi lingkup masuk dokumen, kolom tidak tertukar ───────────
+    //
+    // Editor menyediakan "Tambah deskripsi..." per item dan backend memang
+    // menulisnya ke `proposal_items.description` — tapi query RAB tidak pernah
+    // memilih kolom itu. Keterangan lingkup yang sengaja diketik pengguna hilang
+    // total dari dokumen, sementara kolom PEKERJAAN menampilkan nama AHSP dan
+    // kolom AHSP + KODE menampilkan kode yang sama dua kali.
+    console.log('\n8. Deskripsi lingkup ikut ke dokumen RAB');
+
+    const daftarUntukDeskripsi = await call('GET', `/estimator/proposals/${propId}/items`, undefined, master);
+    const itemPertama = (daftarUntukDeskripsi.json?.data ?? daftarUntukDeskripsi.json ?? [])[0];
+    chk('item untuk diberi deskripsi ada', !!itemPertama?.id, true);
+
+    const teksLingkup = `Galian tanah zona utara, kedalaman 1,5 m ${stamp}`;
+    chk('deskripsi tersimpan lewat PUT',
+      (await call('PUT', `/estimator/proposals/${propId}/items/${itemPertama.id}`,
+        { description: teksLingkup }, master)).status, 200);
+
+    const rab3 = await call('GET', `/estimator/proposals/${propId}/rab`, undefined, master);
+    const semuaBaris = (rab3.json?.sections || [])
+      .flatMap((s: any) => s.subDisciplines || [])
+      .flatMap((s: any) => s.items || []);
+    const barisBerdeskripsi = semuaBaris.find((b: any) => b.description === teksLingkup);
+    // Inti temuannya: dulu field ini tidak pernah ada di respons RAB.
+    chk('deskripsi ikut dikembalikan RAB', !!barisBerdeskripsi, true);
+    chk('nama AHSP tetap dikirim terpisah',
+      typeof barisBerdeskripsi?.ahspName === 'string' && barisBerdeskripsi.ahspName.length > 0, true);
+    chk('kode AHSP tetap dikirim terpisah',
+      typeof barisBerdeskripsi?.ahspCode === 'string' && barisBerdeskripsi.ahspCode.length > 0, true);
+    chk('nama dan kode memang berbeda',
+      barisBerdeskripsi?.ahspName !== barisBerdeskripsi?.ahspCode, true);
+
+    // Baris tanpa deskripsi tetap terbaca — layar jatuh ke nama AHSP.
+    const tanpaDeskripsi = semuaBaris.find((b: any) => !b.description);
+    chk('baris tanpa deskripsi tetap ada', !!tanpaDeskripsi, true);
+
+    const { readFileSync: bacaRab3 } = await import('node:fs');
+    const vRab = bacaRab3(
+      new URL('../../frontend/src/views/EstimatorRAB.vue', import.meta.url), 'utf8');
+    chk('kolom PEKERJAAN memakai deskripsi', vRab.includes('item.description || item.ahspName'), true);
+    chk('kode tidak lagi dicetak dua kali',
+      (vRab.match(/\{\{ item\.ahspCode \}\}/g) || []).length, 1);
+
   } finally {
-    console.log('\n8. Bersih-bersih');
+    console.log('\n9. Bersih-bersih');
     let sisa = 0;
     for (const hapus of bersihkan.reverse()) {
       try { await hapus(); } catch { sisa++; }
