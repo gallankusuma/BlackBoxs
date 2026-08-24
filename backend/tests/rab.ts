@@ -217,8 +217,37 @@ async function main() {
     chk('layar menutup dengan TOTAL PROYEK', vueRab.includes('>TOTAL PROYEK<'), true);
     chk('tidak ada lagi label GRAND TOTAL yang ambigu', vueRab.includes('>GRAND TOTAL<'), false);
 
+    // ── 7. Layar RAB tidak boleh menampilkan dokumen kosong yang tampak sah ─
+    //
+    // Kegagalan apa pun dulu hanya masuk `console.error`, sementara halaman
+    // tetap merender judul, tabel, ringkasan, dan tombol **Print** dengan
+    // seluruh angka Rp0. Dokumen semacam itu bisa dicetak dan diedarkan sebagai
+    // penawaran.
+    console.log('\n7. Layar RAB menyatakan gagal, bukan mencetak nol');
+
+    // Backend memang menjawab 404 untuk proposal yang tidak ada — itu yang
+    // dulu berakhir sebagai dokumen kosong di layar.
+    const rabHilang = await call('GET', '/estimator/proposals/99999999/rab', undefined, master);
+    chk('RAB proposal tak dikenal → 404', rabHilang.status, 404);
+
+    const { readFileSync: bacaRab } = await import('node:fs');
+    const vueRab2 = bacaRab(
+      new URL('../../frontend/src/views/EstimatorRAB.vue', import.meta.url), 'utf8');
+    chk('layar punya keadaan memuat', vueRab2.includes('Memuat dokumen RAB'), true);
+    chk('layar punya keadaan gagal', vueRab2.includes('Dokumen RAB tidak bisa dimuat'), true);
+    chk('layar punya keadaan tanpa baris', vueRab2.includes('belum punya baris RAB'), true);
+    chk('tombol Print dinonaktifkan saat belum siap',
+      vueRab2.includes(':disabled="!dokumenSiap"'), true);
+    chk('printRAB menolak dokumen belum siap',
+      vueRab2.includes('if (!dokumenSiap.value)'), true);
+    // Respons parsial tidak boleh meninggalkan campuran data lama dan baru.
+    chk('respons divalidasi sebelum ditulis',
+      vueRab2.includes('Respons RAB tidak lengkap'), true);
+    chk('sisa data dibersihkan saat gagal',
+      vueRab2.includes('proposal.value = null;'), true);
+
   } finally {
-    console.log('\n7. Bersih-bersih');
+    console.log('\n8. Bersih-bersih');
     let sisa = 0;
     for (const hapus of bersihkan.reverse()) {
       try { await hapus(); } catch { sisa++; }

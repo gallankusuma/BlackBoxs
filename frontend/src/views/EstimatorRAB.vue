@@ -1,6 +1,47 @@
 <template>
   <div class="min-h-screen bg-gray-50 p-6">
     <div class="max-w-7xl mx-auto">
+
+      <!-- Keadaan memuat & gagal dinyatakan.
+           Sebelumnya kegagalan apa pun hanya masuk console, sementara halaman
+           tetap merender dokumen RAB lengkap dengan tombol Print dan seluruh
+           angka Rp0 — dokumen kosong yang tampak sah dan bisa diedarkan. -->
+      <div v-if="memuat" class="rounded-lg bg-white p-8 text-center text-gray-500 shadow-sm">
+        ⏳ Memuat dokumen RAB…
+      </div>
+
+      <div v-else-if="galatMuat" class="rounded-lg border border-red-200 bg-red-50 p-6 shadow-sm">
+        <p class="font-semibold text-red-800">Dokumen RAB tidak bisa dimuat</p>
+        <p class="mt-1 text-sm text-red-700">{{ galatMuat }}</p>
+        <p class="mt-2 text-sm text-red-700">
+          Yang ditampilkan di bawah <strong>bukan</strong> dokumen kosong bernilai nol —
+          memang tidak ada yang bisa ditampilkan. Jangan dicetak atau diedarkan.
+        </p>
+        <div class="mt-4 flex gap-3">
+          <button @click="muatRab"
+            class="rounded-lg bg-red-700 px-4 py-2 text-sm font-semibold text-white hover:bg-red-800">
+            Coba muat ulang
+          </button>
+          <button @click="goBack"
+            class="rounded-lg border border-red-300 bg-white px-4 py-2 text-sm text-red-800 hover:bg-red-100">
+            Kembali
+          </button>
+        </div>
+      </div>
+
+      <div v-else-if="!sections.length" class="rounded-lg border border-amber-300 bg-amber-50 p-6 shadow-sm">
+        <p class="font-semibold text-amber-900">Proposal ini belum punya baris RAB</p>
+        <p class="mt-1 text-sm text-amber-800">
+          Tambahkan pekerjaan di editor proposal lebih dulu. Dokumen tanpa baris
+          tidak bisa dipakai sebagai penawaran.
+        </p>
+        <button @click="goBack"
+          class="mt-4 rounded-lg border border-amber-400 bg-white px-4 py-2 text-sm text-amber-900 hover:bg-amber-100">
+          Kembali ke proposal
+        </button>
+      </div>
+
+      <template v-else>
       <!-- Header -->
       <div class="bg-white rounded-lg shadow-sm p-6 mb-6">
         <div class="flex justify-between items-start mb-6">
@@ -11,7 +52,8 @@
           <div class="flex gap-3">
             <button
               @click="printRAB"
-              class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+              :disabled="!dokumenSiap"
+              class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" />
@@ -209,6 +251,7 @@
           </div>
         </div>
       </div>
+      </template><!-- dokumen siap -->
     </div>
   </div>
 </template>
@@ -261,24 +304,67 @@ const grandTotal = computed(() => {
   return sections.value.reduce((sum, section) => sum + Number(section.totalAmount || 0), 0);
 });
 
-onMounted(async () => {
-  try {
-    const response = await api.get(`/estimator/proposals/${proposalId}/rab`);
-    proposal.value = response.data.proposal;
-    sections.value = response.data.sections;
-    summary.value = response.data.summary;
-    grandTotalApi.value = typeof response.data.grandTotal === 'number'
-      ? response.data.grandTotal
-      : null;
+/**
+ * Muat dokumen RAB.
+ *
+ * ───────────────────────────────────────────────────────────────────────────
+ * Sebelumnya kegagalan apa pun — jaringan putus, 401/403, 404, 500, respons
+ * tak terbaca — hanya masuk `console.error`. Halaman tetap merender judul,
+ * tabel, ringkasan, dan tombol **Print** dengan seluruh angka Rp0. Yang terlihat
+ * di layar adalah dokumen RAB yang tampak sah: identitas kosong, tanpa baris,
+ * total nol. Dokumen semacam itu bisa dicetak dan diedarkan sebagai penawaran.
+ *
+ * Penulisannya juga tidak atomik: `proposal`, `sections`, dan `summary` ditulis
+ * satu per satu, jadi respons parsial bisa meninggalkan header baru bersama
+ * tabel lama.
+ *
+ * Sekarang: keadaan memuat/gagal dinyatakan, respons divalidasi dulu lalu
+ * ditulis sekaligus, dan Print baru bisa ditekan kalau dokumennya memang ada.
+ * ───────────────────────────────────────────────────────────────────────────
+ */
+const memuat = ref(true);
+const galatMuat = ref('');
 
-    // Expand all sections by default
-    sections.value.forEach((_, idx) => {
-      expandedSections.value[idx] = true;
-    });
-  } catch (error) {
+/** Dokumen dianggap siap hanya kalau benar-benar ada isinya. */
+const dokumenSiap = computed(() =>
+  !memuat.value && !galatMuat.value && !!proposal.value && sections.value.length > 0);
+
+const muatRab = async () => {
+  memuat.value = true;
+  galatMuat.value = '';
+  try {
+    const { data } = await api.get(`/estimator/proposals/${proposalId}/rab`);
+
+    // Divalidasi SEBELUM apa pun ditulis — respons parsial tidak boleh
+    // meninggalkan campuran data lama dan baru.
+    if (!data || !data.proposal || !Array.isArray(data.sections) || !data.summary) {
+      throw new Error('Respons RAB tidak lengkap');
+    }
+
+    proposal.value = data.proposal;
+    sections.value = data.sections;
+    summary.value = data.summary;
+    grandTotalApi.value = typeof data.grandTotal === 'number' ? data.grandTotal : null;
+
+    expandedSections.value = {};
+    sections.value.forEach((_, idx) => { expandedSections.value[idx] = true; });
+  } catch (error: any) {
     console.error('Error loading RAB:', error);
+    // Jangan tinggalkan sisa data yang bisa terbaca sebagai dokumen sah.
+    proposal.value = null;
+    sections.value = [];
+    summary.value = { directCost: 0, overhead: 0, riskContingency: 0, totalProject: 0 };
+    grandTotalApi.value = null;
+    galatMuat.value = error?.response?.data?.error
+      || (error?.response?.status ? `Gagal memuat RAB (HTTP ${error.response.status}).` : '')
+      || error?.message
+      || 'Gagal memuat RAB.';
+  } finally {
+    memuat.value = false;
   }
-});
+};
+
+onMounted(muatRab);
 
 const toggleSection = (sectionIdx: number) => {
   expandedSections.value[sectionIdx] = !expandedSections.value[sectionIdx];
@@ -297,7 +383,18 @@ const goBack = () => {
   router.push(`/estimator/proposals/${proposalId}`);
 };
 
+/**
+ * Cetak hanya kalau dokumennya memang ada.
+ *
+ * Dulu `window.print()` dipanggil tanpa syarat, jadi RAB yang gagal dimuat —
+ * identitas kosong, tanpa baris, total Rp0 — tetap bisa dicetak dan diedarkan
+ * sebagai penawaran.
+ */
 const printRAB = () => {
+  if (!dokumenSiap.value) {
+    alert('Dokumen RAB belum siap dicetak. Muat ulang datanya lebih dulu.');
+    return;
+  }
   window.print();
 };
 

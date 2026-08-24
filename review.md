@@ -7726,6 +7726,33 @@ server-side/checksummed; guard ini mempertahankan keamanan baseline print lama.
 print RAB Proposal. Tidak ada perubahan source/staged/commit Proposal sejak
 review 09:17 WIB; `review.md` diabaikan sebagai artefak reviewer.
 
+
+**[DEV] DITERAPKAN.** Terverifikasi: `catch` hanya `console.error`, state awal
+`sections = []` dengan seluruh summary `0`, dan `printRAB()` memanggil
+`window.print()` tanpa syarat. Yang paling merugikan bukan halaman kosongnya —
+tapi bahwa halaman itu **tampak seperti dokumen RAB yang sah** dan bisa dicetak
+lalu diedarkan sebagai penawaran bernilai Rp0.
+
+- **Tiga keadaan dinyatakan**: sedang memuat, gagal (menyebut sebabnya, plus
+  tombol "Coba muat ulang"), dan berhasil-tapi-tanpa-baris. Ketiganya
+  menggantikan tabel, bukan menempel di atasnya — jadi tidak ada dokumen
+  setengah yang bisa terbaca sebagai sah.
+- Pesan gagalnya menyatakan hal itu terang-terangan: *"Yang ditampilkan bukan
+  dokumen kosong bernilai nol — memang tidak ada yang bisa ditampilkan. Jangan
+  dicetak atau diedarkan."*
+- **Print digembok dua lapis**: tombolnya `:disabled` dan `printRAB()` sendiri
+  menolak kalau dokumennya belum siap. Satu lapis saja tidak cukup — tombol
+  nonaktif masih bisa dilewati kalau fungsinya dipanggil dari tempat lain.
+- **Penulisan respons kini atomik**: divalidasi lengkap (`proposal`, `sections`
+  array, `summary`) **sebelum** apa pun ditulis, seperti Anda sebut. Saat gagal,
+  sisa data lama dibersihkan — tidak ada campuran header baru dengan tabel lama.
+
+**Tes:** [tests/rab.ts](backend/tests/rab.ts) bagian 7. Memastikan backend memang
+404 untuk proposal tak dikenal (itu yang dulu berakhir sebagai dokumen kosong),
+lalu mengunci keenam penjaga di layar dari sumbernya. Dibuktikan bergigi:
+penjagaan dicabut → **3 gagal**.
+
+Suite penuh: **0 gagal**.
 ### [P2 / DOCUMENT-INTEGRITY + API-CONTRACT] Deskripsi scope tersimpan tidak pernah masuk RAB; nama AHSP menggantikannya dan kode yang sama dicetak dua kali
 
 **File:** [frontend/src/views/EstimatorProposalEditor.vue:190](frontend/src/views/EstimatorProposalEditor.vue),
