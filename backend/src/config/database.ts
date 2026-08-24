@@ -1442,6 +1442,35 @@ const ensureProposalScopeStatus = async (connection: any) => {
   console.log('✅ Klasifikasi scope proposal ensured');
 };
 
+/**
+ * UNIQUE `(proposal_id, order_no)` pada `proposal_items`.
+ *
+ * Skema hanya punya index biasa, jadi urutan ganda tidak pernah tertahan di
+ * lapisan database — ia bergantung sepenuhnya pada kebenaran kode. `order_no`
+ * dulu dihitung dari pembacaan di luar transaction, sehingga dua penambahan
+ * bersamaan bisa memakai urutan yang sama dan dokumen RAB menampilkan dua baris
+ * bernomor identik.
+ *
+ * Aman dipasang: produksi diperiksa lebih dulu — 548 baris dengan 548 pasangan
+ * `(proposal_id, order_no)` unik, jadi tidak ada duplikat yang perlu dibereskan.
+ * Kalau nanti gagal karena duplikat, `execSchemaEnsure` hanya mencatat
+ * peringatan dan boot tetap jalan; membereskan urutan baris adalah keputusan
+ * operator, bukan sesuatu yang pantas dilakukan diam-diam saat startup.
+ */
+const ensureProposalItemOrderUnique = async (connection: any) => {
+  const [ada]: any = await connection.execute(
+    `SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'proposal_items'
+       AND INDEX_NAME = 'uq_proposal_item_order'`
+  );
+  if ((ada || []).length === 0) {
+    await execSchemaEnsure(connection,
+      `ALTER TABLE proposal_items
+       ADD CONSTRAINT uq_proposal_item_order UNIQUE (proposal_id, order_no)`);
+  }
+  console.log('✅ Urutan item proposal unik ensured');
+};
+
 const ensureApprovalRuleLink = async (connection: any) => {
   // Kolom prasyarat pada tabel approval LAMA.
   //
@@ -2013,6 +2042,7 @@ export async function initializeDatabase() {
     await ensureMtoLinesSchema(connection);
     await ensureScheduleChildFk(connection);
     await ensureProposalScopeStatus(connection);
+    await ensureProposalItemOrderUnique(connection);
     await ensureDisposalSchema(connection);
     await ensureAssetStatusHistorySchema(connection);
     await ensurePermissionCatalog(connection);

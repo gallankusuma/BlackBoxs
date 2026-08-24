@@ -7922,6 +7922,41 @@ membuat legacy duplicate deterministik—bukan menggantikan uniqueness.
 traceability list. Tidak ada perubahan source/staged/commit Proposal sejak review
 09:22 WIB; `review.md` diabaikan sebagai artefak reviewer.
 
+
+**[DEV] DITERAPKAN.** Terverifikasi persis: `MAX(order_no)+1` dibaca lewat pool
+(autocommit) lalu dibekukan ke variabel, dan transaction baru dibuka sesudahnya.
+Lock proposal menyerialkan INSERT-nya, tapi bukan state yang dipakai
+menghitungnya — pola yang sama dengan pembacaan harga/qty pada `PUT` item.
+
+- **Perhitungan dipindah ke dalam transaction** yang sudah mengunci proposal,
+  jadi penambahan kedua membaca `MAX` sesudah yang pertama commit.
+- **UNIQUE `(proposal_id, order_no)`** ditambahkan lewat
+  `ensureProposalItemOrderUnique` — benar juga bahwa skema hanya punya index
+  biasa, jadi jaminannya selama ini bergantung sepenuhnya pada kebenaran kode.
+  Sekarang lapisan database ikut menahannya.
+
+**Diperiksa dulu sebelum menambah constraint:** produksi **548 baris dengan 548
+pasangan `(proposal_id, order_no)` unik**, dev 3.844/3.844 — tidak ada duplikat
+yang perlu dibereskan, jadi aman dipasang. Kalau nanti gagal karena duplikat,
+boot hanya mencatat peringatan; membereskan urutan baris adalah keputusan
+operator.
+
+**Catatan jujur yang sama seperti pada temuan concurrency sebelumnya:** balapannya
+**tidak berhasil saya reproduksi** — 12 penambahan paralel (2 putaran × 6) tetap
+menghasilkan urutan unik bahkan pada handler versi lama, karena lock proposal
+kadung menyerialkan keduanya sebelum pembacaan basi terpakai. Jadi saya tidak
+mengklaim sudah membuktikan kerugiannya secara empiris.
+
+Karena itu tesnya mengunci **strukturnya** langsung dari sumber: `MAX(order_no)`
+tidak boleh muncul sebelum `withTransaction` dibuka, dan wajib ada di dalamnya.
+Ditambah pemeriksaan bahwa indeksnya benar-benar `UNIQUE` (bukan index biasa),
+mencakup dua kolom, dengan urutan kolom yang benar.
+
+**Tes:** [tests/proposal-commercial.ts](backend/tests/proposal-commercial.ts)
+bagian 15. Dibuktikan bergigi dengan mengembalikan handler versi HEAD → **2
+gagal** pada kedua penjaga struktural.
+
+Suite penuh: **0 gagal**.
 ### [DESIGN-GAP — prioritas bisnis menengah] Register memuat seluruh row/detail sekaligus, tanpa search/filter/pagination, dan KPI lifecycle tidak rekonsiliasi ke semua status
 
 **Kemampuan saat ini.** `GET /estimator/proposals` mengembalikan semua Proposal

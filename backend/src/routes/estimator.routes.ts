@@ -2335,13 +2335,6 @@ router.post('/proposals/:proposalId/items', authMiddleware, bolehUbah, async (re
       return res.status(404).json({ error: 'AHSP not found' });
     }
     
-    // Get next order_no
-    const lastOrder = await dbGet(
-      `SELECT MAX(order_no) as max_order FROM proposal_items WHERE proposal_id = ?`,
-      [proposalId]
-    );
-    const orderNo = ((lastOrder as any)?.max_order || 0) + 1;
-    
     const qtyCek = validasiQty(qty);
     if (!qtyCek.ok) return res.status(400).json({ error: qtyCek.pesan, code: 'QTY_TIDAK_VALID' });
 
@@ -2358,6 +2351,20 @@ router.post('/proposals/:proposalId/items', authMiddleware, bolehUbah, async (re
       // EST-MTO-R33: status diperiksa ulang DI DALAM transaction ini.
       const raceLock = await proposalLockTx(proposalId, tx);
       if (raceLock) throw Object.assign(new Error('PROPOSAL_LOCKED'), { lock: raceLock });
+
+      // `order_no` dihitung DI DALAM transaction yang sudah mengunci proposal.
+      //
+      // Sebelumnya `MAX(order_no)+1` dibaca lewat pool sebelum transaction
+      // dibuka, lalu dibekukan ke variabel. Lock-nya memang menyerialkan INSERT,
+      // tapi tidak menghitung ulang urutan dari state terkunci — dua penambahan
+      // bersamaan sama-sama membaca angka lama dan memakai urutan yang sama.
+      // Sama pola dengan pembacaan harga/qty pada PUT item: yang dikunci harus
+      // state yang dipakai menghitung, bukan hanya penulisannya.
+      const urutan: any = await tx.get(
+        'SELECT COALESCE(MAX(order_no), 0) AS maks FROM proposal_items WHERE proposal_id = ?',
+        [proposalId]
+      );
+      const orderNo = Number(urutan?.maks || 0) + 1;
 
       const r = await tx.run(
         `INSERT INTO proposal_items

@@ -55,7 +55,7 @@ async function main() {
   if (!master) { console.log('  FAIL login master'); process.exit(1); }
   pass++; console.log('  ok   login master');
 
-  const { dbRun, dbGet } = await import('../src/config/database');
+  const { dbRun, dbGet, dbAll } = await import('../src/config/database');
 
   try {
     const ahsp = await call('POST', '/estimator/ahsp', {
@@ -503,6 +503,66 @@ async function main() {
       console.log('  ––   gerbang scope MATI — invarian baris ikut tidak menghalangi');
       chk('saat gerbang mati, submit diterima', tolakInkonsisten.status, 200);
     }
+
+    // ── 15. order_no dihitung dari state terkunci ───────────────────────────
+    //
+    // `MAX(order_no)+1` dulu dibaca lewat pool SEBELUM transaction dibuka, lalu
+    // dibekukan ke variabel. Lock proposal memang menyerialkan INSERT, tapi
+    // tidak menghitung ulang urutan dari state terkunci — dua penambahan
+    // bersamaan sama-sama membaca angka lama dan memakai urutan yang sama,
+    // sehingga dokumen RAB menampilkan dua baris bernomor identik.
+    console.log('\n15. Penambahan item paralel: urutan tidak bertabrakan');
+
+    const pUrut = await call('POST', '/estimator/proposals',
+      { project_name: `Uji urutan ${stamp}`, client_id: klienId }, master);
+    const urutId = pUrut.json?.id ?? pUrut.json?.data?.id;
+    bersihkan.push(() => call('DELETE', `/estimator/proposals/${urutId}`, undefined, master));
+
+    // Enam penambahan berbarengan, dua putaran — satu putaran bisa lolos karena
+    // kebetulan waktu.
+    let bentrok = 0;
+    for (let putaran = 0; putaran < 2; putaran++) {
+      await Promise.all(Array.from({ length: 6 }, () =>
+        call('POST', `/estimator/proposals/${urutId}/items`, { ahsp_id: ahspId, qty: 1 }, master)
+      ));
+      const dobel: any[] = await dbAll(
+        `SELECT order_no, COUNT(*) n FROM proposal_items
+         WHERE proposal_id = ? GROUP BY order_no HAVING COUNT(*) > 1`, [urutId]);
+      bentrok += dobel.length;
+    }
+    chk('tidak ada order_no bertabrakan setelah 12 penambahan paralel', bentrok, 0);
+
+    const semuaUrut: any[] = await dbAll(
+      'SELECT order_no FROM proposal_items WHERE proposal_id = ? ORDER BY order_no', [urutId]);
+    chk('semua urutan unik', new Set(semuaUrut.map(r => Number(r.order_no))).size, semuaUrut.length);
+
+    // Jaminannya juga struktural, bukan hanya bergantung kebenaran kode.
+    // Indeks komposit muncul SATU BARIS PER KOLOM di INFORMATION_SCHEMA, jadi
+    // yang diperiksa adalah keunikan namanya, jumlah kolomnya, dan bahwa ia
+    // benar-benar UNIQUE (`NON_UNIQUE = 0`).
+    const idxUnik: any[] = await dbAll(
+      `SELECT COLUMN_NAME, NON_UNIQUE FROM INFORMATION_SCHEMA.STATISTICS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'proposal_items'
+         AND INDEX_NAME = 'uq_proposal_item_order'
+       ORDER BY SEQ_IN_INDEX`);
+    chk('indeks mencakup dua kolom', idxUnik.length, 2);
+    chk('kolomnya proposal_id lalu order_no',
+      idxUnik.map(r => r.COLUMN_NAME).join(','), 'proposal_id,order_no');
+    chk('benar-benar UNIQUE, bukan index biasa',
+      idxUnik.every(r => Number(r.NON_UNIQUE) === 0), true);
+
+    // Perhitungannya harus berada DI DALAM transaction — assertion perilaku
+    // saja tidak akan menangkapnya kalau dikembalikan ke luar.
+    const { readFileSync: bacaRute2 } = await import('node:fs');
+    const rute2 = bacaRute2(new URL('../src/routes/estimator.routes.ts', import.meta.url), 'utf8');
+    const iPost = rute2.indexOf("router.post('/proposals/:proposalId/items'");
+    const iAkhirPost = rute2.indexOf("router.put('/proposals/:proposalId/items/:itemId'", iPost);
+    const blokPost = rute2.slice(iPost, iAkhirPost);
+    const iTxPost = blokPost.indexOf('await withTransaction');
+    chk('MAX(order_no) tidak dibaca sebelum transaction',
+      blokPost.slice(0, iTxPost).includes('MAX(order_no)'), false);
+    chk('MAX(order_no) dibaca di dalam transaction',
+      blokPost.slice(iTxPost).includes('MAX(order_no)'), true);
 
   } finally {
     console.log('\n8. Bersih-bersih');
