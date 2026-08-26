@@ -1428,6 +1428,74 @@ async function main() {
   await call('DELETE', `/estimator/proposals/${wizId}`, undefined, master);
   await call('DELETE', `/estimator/proposals/${palsuId}`, undefined, master);
 
+  // ───────────────────────────────────────────────────────────────────────────
+  // Tambah / edit / hapus zona MTO — jalur yang dipakai saat desain pondasi
+  // kurang atau kelebihan.
+  //
+  // Laporan pengguna: "tidak ada tombol edit dan delete". Kontrolnya sebenarnya
+  // ada, tapi hapus hanya berupa "×" kecil di dalam pill zona, dan kegagalannya
+  // ditelan `catch { console.error }` — zona lenyap dari layar, masih ada di
+  // database, lalu muncul lagi saat halaman dimuat ulang.
+  // ───────────────────────────────────────────────────────────────────────────
+  console.log('\n14. Tambah, edit, dan hapus zona MTO');
+
+  const propZona = await call('POST', '/estimator/proposals',
+    { project_name: `Uji zona MTO ${stamp}`, status: 'draft' }, master);
+  const zonaPropId = propZona.json?.id ?? propZona.json?.data?.id;
+
+  const pondasi = (nama: string, qty: number) => ({
+    element_type: 'foundation', element_name: nama,
+    parameters: { L: 2, W: 2, H: 0.4, depth: 1.5, qty, waste_pct: 5 },
+  });
+
+  // Tambah dua zona pondasi.
+  const z1 = await call('POST', `/estimator/proposals/${zonaPropId}/mto`, pondasi('P1', 6), master);
+  const z2 = await call('POST', `/estimator/proposals/${zonaPropId}/mto`, pondasi('P2', 4), master);
+  chk('zona pondasi pertama dibuat', z1.status, 200);
+  chk('zona pondasi kedua dibuat', z2.status, 200);
+
+  const daftarZona = await call('GET', `/estimator/proposals/${zonaPropId}/mto`, undefined, master);
+  chk('dua zona terdaftar', (daftarZona.json?.elements || []).length, 2);
+
+  // EDIT: desain pondasi berubah — jumlah titik dari 6 jadi 9.
+  const idP1 = (daftarZona.json?.elements || []).find((e: any) => e.element_name === 'P1')?.id;
+  const edit = await call('PUT', `/estimator/proposals/${zonaPropId}/mto/${idP1}`, pondasi('P1', 9), master);
+  chk('edit zona diterima', edit.status, 200);
+  const zonaSesudahEdit = await call('GET', `/estimator/proposals/${zonaPropId}/mto`, undefined, master);
+  const p1Baru = (zonaSesudahEdit.json?.elements || []).find((e: any) => e.id === idP1);
+  chk('jumlah titik pondasi ikut berubah', Number(p1Baru?.parameters?.qty), 9);
+  // Kuantitasnya ikut dihitung ulang, bukan menyisakan angka lama.
+  chk('kuantitas dihitung ulang', Number(p1Baru?.quantities?.fnd_conc) > 0, true);
+
+  // HAPUS: desain pondasi kelebihan — satu zona dibuang.
+  const idP2 = (zonaSesudahEdit.json?.elements || []).find((e: any) => e.element_name === 'P2')?.id;
+  const hapusZona = await call('DELETE', `/estimator/proposals/${zonaPropId}/mto/${idP2}`, undefined, master);
+  chk('hapus zona diterima', hapusZona.status, 200);
+  const zonaSesudahHapus = await call('GET', `/estimator/proposals/${zonaPropId}/mto`, undefined, master);
+  chk('tinggal satu zona', (zonaSesudahHapus.json?.elements || []).length, 1);
+  chk('yang tersisa P1', (zonaSesudahHapus.json?.elements || [])[0]?.element_name, 'P1');
+
+  // Proposal terkunci: hapus DITOLAK — dan layar tidak boleh berpura-pura hilang.
+  await pastikanBernilai(zonaPropId);
+  await call('PUT', `/estimator/proposals/${zonaPropId}/status`, { status: 'review' }, master);
+  await call('PUT', `/estimator/proposals/${zonaPropId}/status`, { status: 'submitted' }, master);
+  const hapusTerkunci = await call('DELETE', `/estimator/proposals/${zonaPropId}/mto/${idP1}`, undefined, master);
+  chk('hapus zona pada proposal terkunci ditolak', hapusTerkunci.status, 409);
+  const masihUtuh = await call('GET', `/estimator/proposals/${zonaPropId}/mto`, undefined, master);
+  chk('zonanya memang masih ada di database',
+    (masihUtuh.json?.elements || []).some((e: any) => e.id === idP1), true);
+
+  // Layar: tombol hapus harus terlihat, dan kegagalan tidak boleh ditelan.
+  const vueMto = readFileSync(
+    new URL('../../frontend/src/components/projects/ProjectMTO.vue', import.meta.url), 'utf8');
+  chk('ada tombol hapus zona yang terlihat', vueMto.includes('🗑 Hapus zona'), true);
+  chk('kegagalan hapus tidak lagi ditelan',
+    vueMto.includes("catch (e) { console.error('Failed to delete zone from backend:', e); }"), false);
+  chk('baris dipertahankan saat server menolak',
+    vueMto.includes('saveError.value = uraikanGagal(e);\n      return;'), true);
+
+  await call('DELETE', `/estimator/proposals/${zonaPropId}`, undefined, master);
+
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
 }

@@ -83,6 +83,13 @@
                 @change="markDirty" />
               <span v-else class="zone-name-input" style="background:#f8fafc;border-color:#e2e8f0;color:#0f172a">{{ activeZone.name || activeModule.label + ' ' + (activeZoneIdx+1) }}</span>
               <span class="zone-hint">{{ activeModule.label }} — Zona {{ activeZoneIdx + 1 }}</span>
+              <!-- Tombol hapus yang bisa dilihat. Sebelumnya satu-satunya jalan
+                   menghapus zona adalah "×" kecil di dalam pill, yang praktis
+                   tidak ketemu kalau tidak sengaja dicari. -->
+              <button v-if="!readonly" @click="removeZone(activeZoneIdx)" class="zone-hapus-btn"
+                title="Hapus zona ini beserta kuantitas MTO-nya">
+                🗑 Hapus zona
+              </button>
             </div>
 
             <!-- Dimensi wajib yang kurang pada zona ini (EST-MTO-R35) -->
@@ -358,20 +365,37 @@ function addZone() {
   markDirty();
 }
 
+/**
+ * Hapus satu zona — dan JANGAN hilangkan dari layar kalau servernya menolak.
+ *
+ * Versi sebelumnya menelan kegagalan DELETE (`catch { console.error }`) lalu
+ * tetap membuang barisnya dari layar. Zonanya lenyap di depan mata, masih ada
+ * di database, dan muncul kembali saat halaman dimuat ulang — pengguna mengira
+ * sudah terhapus padahal tidak.
+ */
 async function removeZone(i: number) {
-  if (!confirm('Hapus zona ini?')) return;
   const mod = activeTab.value;
   const zone = zones.value[mod][i];
-  // Delete from backend if it was previously saved
+  const nama = zone?.name || `${activeModule.value?.label || mod} ${i + 1}`;
+
+  if (!confirm(`Hapus zona "${nama}" beserta kuantitas MTO-nya?\n\nTindakan ini tidak bisa dibatalkan.`)) return;
+
   if (zone.element_id) {
     try {
       await api.delete(`${baseUrl.value}/mto/${zone.element_id}`);
-    } catch (e) { console.error('Failed to delete zone from backend:', e); }
+    } catch (e: any) {
+      // Gagal di server = tidak terhapus. Barisnya dipertahankan supaya layar
+      // tidak berbohong tentang keadaan data.
+      saveError.value = uraikanGagal(e);
+      return;
+    }
   }
+
   zones.value[mod].splice(i, 1);
   if (activeZoneIdx.value >= zones.value[mod].length)
     activeZoneIdx.value = Math.max(0, zones.value[mod].length - 1);
-  // Don't just markDirty — the deletion is already persisted
+  saveError.value = null;
+  // Tidak perlu markDirty — penghapusannya sudah tersimpan.
 }
 
 function markDirty() {
@@ -759,6 +783,8 @@ const f0 = (v:number) => v.toLocaleString('id-ID',{maximumFractionDigits:0});
 .zone-pill{display:flex;align-items:center;gap:6px;padding:5px 12px;border-radius:20px;border:2px solid #e2e8f0;background:white;cursor:pointer;font-size:.78rem;font-weight:600;color:#475569;transition:all .2s;}
 .zone-pill:hover{border-color:#3b82f6;}
 .zone-pill.active{border-color:#1d4ed8;background:#eff6ff;color:#1d4ed8;}
+.zone-hapus-btn{margin-left:auto;border:1px solid #fca5a5;background:#fef2f2;color:#991b1b;border-radius:6px;padding:4px 10px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;}
+.zone-hapus-btn:hover{background:#fee2e2;}
 .zone-del{font-size:.9rem;color:#94a3b8;line-height:1;cursor:pointer;margin-left:2px;}
 .zone-del:hover{color:#ef4444;}
 .zone-empty{padding:32px;text-align:center;color:#94a3b8;font-size:.84rem;border-bottom:1px solid #e2e8f0;}
