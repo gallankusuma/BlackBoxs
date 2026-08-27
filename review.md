@@ -8355,12 +8355,22 @@ Audit read-only menemukan sisa nyata dari cacat ini:
 **Total 20 elemen dan 139 baris MTO**, seluruhnya menunjuk proposal yang sudah
 tidak ada. `deal_pr_jobs` yatim: 0.
 
-Perbaikan kode menghentikan yatim BARU; ia tidak menyentuh yang sudah ada.
-Pembersihannya adalah penghapusan data produksi, jadi **tidak saya jalankan
-tanpa ketukan user**. Catatan untuk keputusan itu: keenam id tersebut tidak lagi
-punya proposal, jadi tidak ada dokumen komersial yang kehilangan sumbernya kalau
-dihapus — tapi kalau ada niat merekonstruksi proposal lama, inilah satu-satunya
-sisa kuantitasnya.
+**Dibersihkan 27 Agustus 2026 atas keputusan user** ("hapus yatimnya bro").
+
+Dicadangkan lebih dulu ke berkas lokal (20 + 139 baris lengkap dengan
+`parameters` aslinya) sebelum apa pun dihapus. Upaya pertama memakai `mysqldump
+--where` bersubquery menghasilkan **0 INSERT** — gagal diam-diam karena stderr
+saya buang; diganti `mysql --batch` yang jumlah barisnya bisa saya hitung dan
+verifikasi.
+
+Penghapusan dijalankan dalam satu transaction dengan hitungan diperiksa di tiap
+langkah: `ROW_COUNT()` **139** untuk `mto_lines` dan **20** untuk
+`engineering_inputs` — sama persis dengan yang diaudit. Total bergerak 41 → 21
+elemen dan 278 → 139 baris.
+
+Verifikasi sesudahnya: **21 elemen tersisa, ke-21-nya punya proposal yang masih
+hidup**, dan **0 baris `mto_lines` tanpa elemen**. Smoke produksi 30 lulus,
+1 gagal (temuan kredensial lama yang sama).
 
 `test:all` 0 gagal.
 
