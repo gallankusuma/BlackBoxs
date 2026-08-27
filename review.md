@@ -8795,6 +8795,70 @@ tidak tersimpan.
    reload mengembalikan parameter/line identik, dan Proposal submitted/deal tetap
    read-only terhadap manual maupun auto-save.
 
+**Status: [DEV] DITERAPKAN** — 27 Agustus 2026
+
+Butir ini "diterapkan sebagian", dan sebagian sisanya sudah tertutup pekerjaan
+setelah review ditulis. Saya periksa keadaan **sekarang**, bukan yang dilihat
+reviewer, dan memisahkan mana yang masih benar:
+
+**Sudah tidak berlaku** — `saveModule()` sekarang menyetel `isDirty.value = true`
+pada kegagalan, sama seperti auto-save. Panel merah di atas bar hijau tidak lagi
+mungkin. Loop-nya juga sudah per-zona sejak perbaikan "MTO tidak bisa diedit":
+zona yang benar tetap tersimpan dan yang gagal dilaporkan berikut namanya.
+
+**Masih benar, dan inti perkaranya** — bar menurunkan seluruh keadaan dari
+`isDirty`, padahal `isDirty` hanya menjawab "ada yang diubah sejak terakhir
+disimpan". Ia tidak tahu apa-apa tentang zona yang **belum pernah dikirim sama
+sekali**. Dan `addDefaultZone()` memang sengaja tidak menandai dirty — supaya
+membuka tab kosong tidak otomatis mem-POST zona yang tidak diminta siapa pun.
+Gabungan keduanya: membuka tab MTO yang belum punya data langsung menampilkan
+"✓ 1 zona tersimpan" untuk zona yang cuma ada di memori.
+
+Yang berubah (`ProjectMTO.vue`):
+
+1. `semuaTersimpan` menggantikan `isDirty` sebagai gerbang bar hijau. Hijau hanya
+   kalau tidak ada perubahan tertunda **dan** setiap zona punya `element_id` dari
+   server **dan** tidak ada zona yang gagal pada penyimpanan terakhir.
+   `element_id` adalah satu-satunya bukti server pernah menerimanya.
+2. Keadaan menengah dinyatakan apa adanya: "⚠️ N zona belum pernah disimpan".
+3. **Penanda per zona** pada baris nama — `✓ tersimpan`, `● belum disimpan`,
+   `● ada perubahan`, `❌ gagal disimpan`. Setelah simpan sebagian, satu tab bisa
+   berisi zona tersimpan dan zona gagal sekaligus; satu label global tidak bisa
+   mewakili keduanya.
+4. `saveError` membawa modul asalnya dan menampilkannya sebagai prefiks saat
+   pengguna sedang membuka tab lain — errornya **tidak disembunyikan** (acceptance
+   5), tapi juga tidak salah alamat.
+
+**Soal atomicity, saya ambil sikap eksplisit.** Review menawarkan dua jalan:
+batch transaction all-or-nothing, atau partial yang dinyatakan jujur. Saya pilih
+yang kedua, dan bukan karena lebih mudah — penyimpanan per zona itu perbaikan
+yang sengaja dibuat untuk kasus nyata di produksi: tab Kolom memuat "Kolom Gudang"
+bertipe WF yang `wf_profile`-nya belum diisi, sehingga mengedit "Kolom 1" pun
+selalu gagal. Mengembalikannya jadi all-or-nothing akan menghidupkan lagi
+penyanderaan itu. Karena partial, layarnya wajib menyebut mana yang commit — dan
+itu yang dikerjakan di poin 1–3.
+
+**Tes: `backend/tests/mto-durability.ts` — 25 asersi, masuk `test:all`.**
+Terbukti bisa gagal: **9 dari 25 gagal** di kode lama, seluruhnya asersi sumber —
+konsekuensi wajar karena cacatnya di layar. Bagian backend (bagian 1–4) lulus di
+kedua versi dan bukan asersi kosong: ia membuktikan bahwa **partial itu nyata**,
+sehingga kalimat yang ditampilkan layar memang menggambarkan yang terjadi — zona
+valid commit, zona tak lengkap ditolak berikut daftar field yang kurang dan
+**tidak** mendapat `element_id`, melengkapi dimensinya menyimpan tanpa menyentuh
+zona lain, dan menyimpan ulang tidak menggandakan.
+
+Terhadap acceptance test: (1) zona tanpa `element_id` tidak pernah hijau —
+terpenuhi; (2) manual dan auto-save sama-sama mempertahankan dirty dengan pesan
+dan field yang benar — terpenuhi; (3) kontraknya **partial**, dan UI per-zona
+menunjukkan A saved dan B error persis seperti hasil reload — terpenuhi;
+(4) menyimpan ulang zona yang sama tidak menggandakan (upsert per
+`element_name`) — terpenuhi dan diuji; (5) pindah tab tidak menyembunyikan error
+maupun me-reset dirty — terpenuhi; peringatan saat navigasi keluar halaman
+**belum** ada. (6) Setelah seluruh zona sukses, semua state jadi saved dan error
+bersih — terpenuhi.
+
+`test:all` 0 gagal.
+
 ---
 
 ## Live Auto Review — 20 Agustus 2026 09:48 WIB

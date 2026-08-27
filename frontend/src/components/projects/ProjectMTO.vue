@@ -153,6 +153,19 @@
                 @change="markDirty" />
               <span v-else class="zone-name-input" style="background:#f8fafc;border-color:#e2e8f0;color:#0f172a">{{ activeZone.name || activeModule.label + ' ' + (activeZoneIdx+1) }}</span>
               <span class="zone-hint">{{ activeModule.label }} — Zona {{ activeZoneIdx + 1 }}</span>
+              <!-- Keadaan zona INI, bukan keadaan seluruh tab. Setelah simpan
+                   sebagian, tab bisa berisi zona tersimpan dan zona gagal
+                   sekaligus — satu label global tidak bisa mewakili keduanya. -->
+              <span v-if="!readonly && zonaGagal.has(activeZone.zid)" class="zone-status zs-gagal">
+                ❌ gagal disimpan
+              </span>
+              <span v-else-if="!readonly && !activeZone.element_id" class="zone-status zs-baru">
+                ● belum disimpan
+              </span>
+              <span v-else-if="!readonly && isDirty" class="zone-status zs-ubah">
+                ● ada perubahan
+              </span>
+              <span v-else-if="!readonly" class="zone-status zs-simpan">✓ tersimpan</span>
               <!-- Tombol hapus yang bisa dilihat. Sebelumnya satu-satunya jalan
                    menghapus zona adalah "×" kecil di dalam pill, yang praktis
                    tidak ketemu kalau tidak sengaja dicari. -->
@@ -187,7 +200,10 @@
                  pengguna hanya tahu gagal tanpa pernah tahu apa yang harus
                  diisi, dan mencoba lagi tidak pernah mengubah apa pun. -->
             <div v-if="saveError" class="zone-missing" style="border-color:#fca5a5;background:#fef2f2">
-              <strong style="color:#991b1b">❌ {{ saveError.message }}</strong>
+              <strong style="color:#991b1b">
+                ❌ <span v-if="saveError.modul && saveError.modul !== activeTab">[{{ labelModul(saveError.modul) }}]</span>
+                {{ saveError.message }}
+              </strong>
               <ul v-if="saveError.problems.length">
                 <li v-for="m in saveError.problems" :key="m">{{ m }}</li>
               </ul>
@@ -197,11 +213,25 @@
               </span>
             </div>
 
-            <div class="dirty-bar" :style="isDirty ? 'background:#fef3c7;border-color:#fcd34d' : 'background:#f0fdf4;border-color:#d1fae5'">
-              <span v-if="isDirty" style="color:#92400e">⚠️ Ada perubahan belum disimpan</span>
-              <span v-else style="color:#065f46">✓ {{ zones[activeTab]?.length || 0 }} zona {{ activeModule?.label }} tersimpan</span>
+            <!-- EST-MTO-R45: status persistensi TIDAK diturunkan dari satu
+                 boolean. `isDirty` hanya tahu "ada yang diubah sejak terakhir
+                 disimpan"; ia tidak tahu apa-apa tentang zona yang belum pernah
+                 di-POST sama sekali. `addDefaultZone()` sengaja tidak menandai
+                 dirty — supaya tab yang dibuka tidak otomatis mengirim zona
+                 kosong — sehingga bar lama langsung hijau "✓ 1 zona tersimpan"
+                 untuk zona yang cuma ada di memori. Sekarang hijau hanya kalau
+                 tidak ada perubahan tertunda DAN setiap zona benar-benar punya
+                 `element_id` dari server. -->
+            <div class="dirty-bar" :style="semuaTersimpan ? 'background:#f0fdf4;border-color:#d1fae5' : 'background:#fef3c7;border-color:#fcd34d'">
+              <span v-if="semuaTersimpan" style="color:#065f46">
+                ✓ {{ zones[activeTab]?.length || 0 }} zona {{ activeModule?.label }} tersimpan
+              </span>
+              <span v-else-if="zonaBelumTersimpan > 0" style="color:#92400e">
+                ⚠️ {{ zonaBelumTersimpan }} zona belum pernah disimpan
+              </span>
+              <span v-else style="color:#92400e">⚠️ Ada perubahan belum disimpan</span>
               <button @click="saveModule" :disabled="saving" class="save-btn-sm"
-                :style="isDirty ? 'background:#d97706' : 'background:#059669'">
+                :style="semuaTersimpan ? 'background:#059669' : 'background:#d97706'">
                 {{ saving ? 'Menyimpan...' : '💾 Simpan' }}
               </button>
             </div>
@@ -551,7 +581,33 @@ function markDirty() {
 }
 
 /** Alasan gagal simpan terakhir — ditampilkan di bar simpan, bukan dibuang. */
-const saveError = ref<{ message: string; problems: string[] } | null>(null);
+const saveError = ref<{ message: string; problems: string[]; modul?: string } | null>(null);
+
+/**
+ * EST-MTO-R45: keadaan persistensi per zona, bukan satu boolean untuk seluruh tab.
+ *
+ * `isDirty` hanya menjawab "ada yang diubah sejak terakhir disimpan". Ia tidak
+ * tahu apa-apa tentang zona yang **belum pernah dikirim sama sekali** — dan
+ * `addDefaultZone()` memang sengaja tidak menandai dirty, supaya membuka tab
+ * kosong tidak otomatis mem-POST zona yang tidak diminta siapa pun. Akibatnya
+ * bar lama langsung hijau "✓ 1 zona tersimpan" untuk zona yang cuma ada di
+ * memori, dan estimator bisa meninggalkan tab dengan yakin datanya aman.
+ *
+ * Sumber kebenarannya sekarang `element_id`: zona hanya tersimpan kalau server
+ * pernah memberinya id.
+ */
+const zonaGagal = ref<Set<string>>(new Set());
+
+const zonaBelumTersimpan = computed(() =>
+  (zones.value[activeTab.value] || []).filter((z: any) => !z.element_id).length);
+
+const semuaTersimpan = computed(() =>
+  !isDirty.value
+  && zonaGagal.value.size === 0
+  && (zones.value[activeTab.value] || []).length > 0
+  && zonaBelumTersimpan.value === 0);
+
+const labelModul = (id: string) => MODULES.find(m => m.id === id)?.label || id;
 
 /** Ambil pesan dan daftar masalah dari respons error backend. */
 function uraikanGagal(e: any): { message: string; problems: string[] } {
@@ -590,14 +646,15 @@ async function autoSave(mod: string) {
     if (gagalAuto.length) throw Object.assign(new Error('sebagian zona gagal'), { daftar: gagalAuto });
     isDirty.value = false;
     saveError.value = null;
+    zonaGagal.value = new Set();
   } catch (e: any) {
     // Auto-save TIDAK boleh gagal diam-diam. Versi lama menelan errornya
     // sepenuhnya, jadi perubahan yang ditolak server tetap terlihat di layar
     // seolah tersimpan — dan baru ketahuan hilang setelah halaman dimuat ulang.
     // Tanpa alert (ini berjalan di latar), tapi alasannya ditampilkan di bar.
     saveError.value = e?.daftar
-      ? { message: 'Sebagian zona belum tersimpan — dimensi teknisnya belum lengkap.', problems: e.daftar }
-      : uraikanGagal(e);
+      ? { modul: mod, message: 'Sebagian zona belum tersimpan — dimensi teknisnya belum lengkap.', problems: e.daftar }
+      : { ...uraikanGagal(e), modul: mod };
     isDirty.value = true;
   }
 }
@@ -624,6 +681,7 @@ async function autoSave(mod: string) {
 async function saveModule() {
   saving.value = true;
   const gagal: { zona: string; problems: string[] }[] = [];
+  const gagalZid = new Set<string>();
   try {
     const mod = activeTab.value;
     const zoneList = zones.value[mod] || [];
@@ -640,8 +698,15 @@ async function saveModule() {
       } catch (e: any) {
         const u = uraikanGagal(e);
         gagal.push({ zona: nama, problems: u.problems.length ? u.problems : [u.message] });
+        gagalZid.add(z.zid);
       }
     }
+
+    // Penyimpanan di sini memang partial per zona — itu keputusan yang sudah
+    // ada dan disengaja (satu zona bermasalah tidak boleh menyandera zona lain).
+    // Karena partial, layarnya WAJIB menyebut mana yang commit dan mana yang
+    // tidak; pesan all-or-nothing akan menyesatkan ke dua arah sekaligus.
+    zonaGagal.value = gagalZid;
 
     if (gagal.length === 0) {
       isDirty.value = false;
@@ -650,6 +715,7 @@ async function saveModule() {
       // Zona yang berhasil sudah tersimpan; yang tersisa hanya yang gagal.
       isDirty.value = true;
       saveError.value = {
+        modul: mod,
         message: gagal.length === zoneList.length
           ? 'Tidak ada zona yang bisa disimpan — dimensi teknisnya belum lengkap.'
           : `${gagal.length} dari ${zoneList.length} zona gagal disimpan. Zona lain sudah tersimpan.`,
@@ -925,6 +991,11 @@ const f0 = (v:number) => v.toLocaleString('id-ID',{maximumFractionDigits:0});
 .zone-pill{display:flex;align-items:center;gap:6px;padding:5px 12px;border-radius:20px;border:2px solid #e2e8f0;background:white;cursor:pointer;font-size:.78rem;font-weight:600;color:#475569;transition:all .2s;}
 .zone-pill:hover{border-color:#3b82f6;}
 .zone-pill.active{border-color:#1d4ed8;background:#eff6ff;color:#1d4ed8;}
+.zone-status{font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;white-space:nowrap;}
+.zs-simpan{background:#dcfce7;color:#166534;}
+.zs-baru{background:#fef3c7;color:#92400e;}
+.zs-ubah{background:#e0f2fe;color:#075985;}
+.zs-gagal{background:#fee2e2;color:#991b1b;}
 .usul-btn{border:1px solid #93c5fd;background:#eff6ff;color:#1d4ed8;border-radius:8px;padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;}
 .usul-btn:hover{background:#dbeafe;}
 .usul-panel{margin:12px 18px;padding:12px 14px;border:1px solid #bfdbfe;background:#f8fafc;border-radius:10px;font-size:13px;}
