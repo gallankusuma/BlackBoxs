@@ -10671,3 +10671,51 @@ riwayat percakapan sebaiknya dicabut dan diganti.
 `tests/mto-usul-gambar.ts` **61 asersi**, `tests/mto-diskusi.ts` **45**.
 `test:all` 0 gagal, 0 residu.
 
+---
+
+## [DEV] OpenAI sebagai penyedia utama — dan cacat desain yang permintaan itu munculkan
+
+Permintaan user: *"sekarang kita buat pakai open ai, harusnya hasilnya
+mendekati."*
+
+### Cacat yang ketahuan justru karena diminta
+
+Aturan fallback semula: **hanya kegagalan kuota** yang memicu perpindahan
+penyedia. Itu terlalu sempit, dan konsekuensinya baru terlihat saat OpenAI
+hendak dijadikan utama.
+
+Kalau OpenAI di depan sementara kuncinya ditolak, sistem **berhenti total di
+penyedia pertama** dan tidak pernah mencoba Gemini yang sebenarnya siap.
+Menjadikan OpenAI utama justru akan **mematikan fitur yang tadinya jalan** —
+kebalikan dari yang diminta.
+
+Kunci ditolak dan kuota habis sama-sama berarti *"penyedia ini tidak bisa
+dipakai sekarang"*. Keduanya kini disatukan sebagai `penyediaTakTersedia()`.
+Yang tetap **tidak** di-fallback: kegagalan isi — gambar yang memang tidak
+terbaca. Mencoba penyedia kedua untuk itu hanya menghabiskan kuota kedua demi
+jawaban yang sama.
+
+Dibuktikan: dengan `AI_VISION_PROVIDER=openai` dan kunci OpenAI yang ditolak,
+sistem **mundur ke Gemini** (yang kebetulan sedang kena kuota, sehingga error
+akhirnya milik Gemini — bukan lagi berhenti di OpenAI).
+
+### Konfigurasi
+
+`AI_VISION_PROVIDER` ditambahkan ke `.env` lokal (`openai`) dan
+`.env.example` (`gemini` sebagai default yang aman). Ini **konfigurasi biasa,
+bukan kredensial** — jadi saya yang menuliskannya.
+
+Produksi **belum** diubah, dan itu keputusan sadar: kunci OpenAI di sana masih
+yang lama dan ditolak, sehingga menjadikannya utama hanya menambah satu
+perjalanan bolak-balik yang pasti gagal pada setiap pembacaan. Diubah setelah
+kuncinya berlaku.
+
+### Yang masih menahan
+
+Kunci OpenAI di `.env` masih yang lama (ekor `yPCucA`), dan Gemini masih kena
+kuota harian. Keduanya urusan akun. Kunci yang dikirim user di percakapan
+**tidak saya tuliskan ke berkas mana pun**.
+
+`tests/mto-usul-gambar.ts` **64 asersi**, `tests/mto-diskusi.ts` **45**.
+`test:all` 0 gagal, 0 residu.
+

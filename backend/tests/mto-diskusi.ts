@@ -208,8 +208,10 @@ async function main() {
     chk('jalur OpenAI teks ada', ai.includes('export async function callOpenAiText'), true);
     chk('endpoint diskusi memakai lapisan, bukan satu penyedia langsung',
       rute.includes('await jalankanTeksAi(') && !rute.includes('await callGeminiText('), true);
-    chk('perilakunya sama dengan lapisan gambar — hanya kuota yang di-fallback',
-      (ai.match(/if \(!galatKuota\(e\)\) throw e;/g) || []).length, 2);
+    // Diperluas dari "hanya kuota" menjadi "penyedia tidak tersedia" — kunci
+    // yang ditolak juga berarti penyedia itu tidak bisa dipakai sekarang.
+    chk('perilakunya sama dengan lapisan gambar — ketersediaan penyedia yang di-fallback',
+      (ai.match(/if \(!penyediaTakTersedia\(e\)\) throw e;/g) || []).length, 2);
     chk('penyedia yang gagal dicatat di kedua lapisan',
       (ai.match(/e\.penyediaGagal = p;/g) || []).length, 2);
     chk('penyedia yang dipakai dilaporkan juga di diskusi',

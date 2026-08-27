@@ -268,7 +268,21 @@ async function main() {
     // Kegagalan SELAIN kuota tidak boleh di-fallback: kalau gambarnya memang
     // tidak terbaca, mencoba penyedia kedua hanya menghabiskan kuota kedua
     // untuk jawaban yang sama.
-    chk('hanya kegagalan kuota yang di-fallback', ai.includes('if (!galatKuota(e)) throw e;'), true);
+    // Awalnya HANYA kegagalan kuota yang di-fallback, dan itu terlalu sempit.
+    // Ketahuan saat user meminta OpenAI dijadikan penyedia utama: kalau
+    // kuncinya ditolak sementara aturannya hanya mem-fallback kuota, sistem
+    // berhenti total di penyedia pertama dan tidak pernah mencoba yang kedua —
+    // menjadikan OpenAI utama justru akan MEMATIKAN fitur yang tadinya jalan.
+    chk('kunci ditolak juga memicu perpindahan penyedia',
+      ai.includes('export function galatKunci'), true);
+    chk('keduanya disatukan sebagai "penyedia tidak tersedia"',
+      ai.includes('export function penyediaTakTersedia'), true);
+    chk('dipakai kedua lapisan',
+      (ai.match(/if \(!penyediaTakTersedia\(e\)\) throw e;/g) || []).length, 2);
+    // Tapi kegagalan ISI tetap tidak di-fallback — mencoba penyedia kedua untuk
+    // gambar yang memang tidak terbaca hanya menghabiskan kuota kedua.
+    chk('kegagalan selain ketersediaan tetap dilempar',
+      ai.includes('if (!penyediaTakTersedia(e)) throw e;'), true);
 
     // Penyedia yang gagal ditempelkan ke errornya. Tanpa ini pesannya
     // menyesatkan — terjadi sungguhan saat menguji: Gemini kehabisan kuota,

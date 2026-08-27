@@ -242,8 +242,8 @@ export async function jalankanTeksAi(
     } catch (e: any) {
       e.penyediaGagal = p;
       terakhir = e;
-      if (!galatKuota(e)) throw e;
-      console.error(`[AI Teks] ${p} kehabisan kuota, mencoba penyedia berikutnya:`, e.message?.slice(0, 100));
+      if (!penyediaTakTersedia(e)) throw e;
+      console.error(`[AI Teks] ${p} tidak tersedia, mencoba penyedia berikutnya:`, e.message?.slice(0, 100));
     }
   }
 
@@ -400,6 +400,30 @@ export function galatKuota(err: any): boolean {
   return /quota|rate limit|RESOURCE_EXHAUSTED|429|insufficient_quota/i.test(String(err?.message || ''));
 }
 
+/** Kunci ditolak / tidak berwenang — penyedia itu memang tidak bisa dipakai. */
+export function galatKunci(err: any): boolean {
+  return /API key|API_KEY_INVALID|PERMISSION_DENIED|Incorrect API key|Unauthorized|invalid_api_key|401|403/i
+    .test(String(err?.message || ''));
+}
+
+/**
+ * Penyedia ini sedang TIDAK TERSEDIA — pantas dicoba yang lain.
+ *
+ * Awalnya hanya kegagalan kuota yang di-fallback, dan itu terlalu sempit.
+ * Ketahuan saat user meminta OpenAI dijadikan penyedia utama: kalau kuncinya
+ * ditolak sementara aturannya hanya mem-fallback kuota, sistem berhenti total
+ * di penyedia pertama dan TIDAK PERNAH mencoba Gemini yang sebenarnya siap.
+ * Menjadikan OpenAI utama justru akan mematikan fitur yang tadinya jalan.
+ *
+ * Kunci ditolak dan kuota habis sama-sama berarti "penyedia ini tidak bisa
+ * dipakai sekarang" — beda dengan gambar yang memang tidak terbaca, di mana
+ * mencoba penyedia kedua hanya menghabiskan kuota kedua untuk jawaban yang
+ * sama.
+ */
+export function penyediaTakTersedia(err: any): boolean {
+  return galatKuota(err) || galatKunci(err);
+}
+
 /**
  * Baca gambar lewat penyedia yang tersedia, dengan cadangan otomatis.
  *
@@ -443,8 +467,10 @@ export async function bacaGambarAi(
       // diperbaiki kunci OpenAI. Terjadi sungguhan saat menguji.
       e.penyediaGagal = p;
       terakhir = e;
-      if (!galatKuota(e)) throw e;   // bukan soal kuota — jangan buang kuota kedua
-      console.error(`[AI Visi] ${p} kehabisan kuota, mencoba penyedia berikutnya:`, e.message?.slice(0, 100));
+      // Bukan soal ketersediaan penyedia — jangan buang kuota kedua untuk
+      // mendapat jawaban yang sama.
+      if (!penyediaTakTersedia(e)) throw e;
+      console.error(`[AI Visi] ${p} tidak tersedia, mencoba penyedia berikutnya:`, e.message?.slice(0, 100));
     }
   }
 
