@@ -8647,6 +8647,78 @@ compatible, dan qty RAB sama dengan net tersimpan pada tolerance yang ditetapkan
    menampilkan perbandingan drift, tidak mengubah stored MTO, RAB, total,
    baseline project, atau dokumen yang sudah diterbitkan.
 
+**Status: [DEV] DITERAPKAN** — 27 Agustus 2026
+
+**Klaimnya diverifikasi dulu, dan benar seluruhnya.** `PUT /mto-link` memanggil
+`calculateMto(element.element_type, params)` lalu menulis `line.net_quantity` ke
+`proposal_items.qty`; ia tidak pernah menyentuh `mto_lines`, tidak membandingkan
+`formula_version`, dan tidak menolak drift. `syncLinkedRabItems` melakukan hal
+yang sama. Sementara jalur Deal menyalin `mto_lines` **beserta**
+`formula_version` apa adanya ke baseline project (`estimator.routes.ts:3422`).
+`enrichMtoElement` memang sudah menghitung `formula_drift`, tapi hasilnya hanya
+ditampilkan — tidak satu pun jalur tulis yang bertindak atasnya.
+
+Yang membuat ini tidak pernah terlihat: selama formula tidak pernah berubah,
+kedua sumber identik. Cacatnya baru muncul pada deploy yang memperbaiki formula
+— justru deploy yang dimaksudkan sebagai perbaikan.
+
+**Aturan yang ditetapkan: baris tersimpan yang mengikat.** Alasannya bukan
+selera; `mto_lines` adalah angka yang disalin Deal menjadi baseline kontrak,
+jadi itulah angka yang disepakati. Kalau RAB boleh berdiri di atas hasil
+kalkulator terbaru sementara baseline berdiri di atas baris lama, satu kontrak
+punya dua kuantitas resmi dan tidak ada satu pun tindakan estimator yang
+menandainya.
+
+Yang berubah (`backend/src/routes/estimator.routes.ts`):
+
+1. `PUT /mto-link` membaca `mto_lines`, bukan hasil kalkulator. Kalau baris
+   tersimpan sudah tidak sama dengan kalkulator sekarang → **409 `FORMULA_DRIFT`**
+   yang menyebut elemen serta kedua versinya, bukan diam-diam memakai angka baru.
+2. Provenance `mto_link` sekarang membawa `formula_version` — versi yang
+   disepakati saat tautan dibuat.
+3. Elemen lama yang belum punya `mto_lines` (sisa sebelum EST-MTO-019;
+   `backfill-mto-lines.js` melewatkan 3 di produksi) dimaterialkan saat
+   ditautkan, di dalam transaction yang sama. Ini tidak mengubah satu angka pun
+   — parameter dan kalkulatornya sama — tapi membuat elemen itu punya versi,
+   sehingga perubahan formula berikutnya terdeteksi.
+4. `gerbangKomersial` sekarang memanggil `periksaTautanMto()`. Karena gerbang itu
+   berjalan pada transisi `submitted` **dan** `deal`, baseline yang disalin Deal
+   dijamin sama dengan qty yang tertulis di RAB. Ditolak kalau: elemennya sudah
+   tidak ada, baris tersimpannya tidak ada, `formula_version` berbeda, satuan
+   tidak kompatibel, atau `qty` RAB ≠ `net_quantity` tersimpan di luar toleransi.
+   Pesannya menyebut item, elemen, dan angkanya.
+5. Penyelesaian drift adalah satu tindakan yang sudah ada: **simpan ulang
+   elemennya**. `persistMtoLines` + `syncLinkedRabItems` sudah berjalan dalam
+   satu transaction — baris ditulis ulang dan seluruh RAB tertaut ikut
+   diselaraskan, atau tidak sama sekali.
+
+**Tes: `backend/tests/mto-version-drift.ts` — 29 asersi, masuk `test:all`.**
+
+Perubahan formula sungguhan tidak bisa dilakukan di dalam tes (kalkulatornya
+kode, bukan data), jadi yang digeser adalah baris tersimpannya — kondisi yang
+dihadapi sistem identik dengan "stored V1, kalkulator V2".
+
+**Tesnya terbukti bisa gagal, bukan sekadar lulus:** kode dikembalikan ke versi
+sebelum perbaikan lewat `git stash`, dan **19 dari 29 asersi gagal** — termasuk
+`submit ditolak → dapat 200`, `baris tersimpan kembali ke nilai kalkulator →
+dapat 99.5`, dan `submit ditolak saat elemen tautan hilang → dapat 200`. Itu
+kalimat langsung dari cacat yang dilaporkan: proposal yang RAB-nya tidak lagi
+sama dengan baseline MTO-nya lolos menjadi kontrak.
+
+Terhadap acceptance test yang diminta: (1) drift memblokir link dan submit —
+terpenuhi; (2) Recalculate & Save transactional — sudah ada sebelumnya, kini
+diuji; (3) submit/deal menolak link hilang/versi beda/unit/qty beda — terpenuhi;
+(4) baseline Deal identik dengan RAB — terpenuhi lewat gerbang yang sama;
+(5) proposal submitted/deal tetap immutable — terpenuhi (`PROPOSAL_LOCKED`).
+
+**Dampak produksi diperiksa sebelum deploy:** dari 548 `proposal_items`,
+**0 punya `mto_link`**. Gerbang ini karena itu tidak memblokir satu pun proposal
+yang sudah ada — murni penjagaan ke depan. 41 elemen proposal punya 278 baris
+tersimpan; 3 elemen tanpa baris adalah tiga yang memang dilewatkan backfill
+(satu `manpower`, dua `precast_pile` yang formulanya belum ada).
+
+`test:all` 0 gagal.
+
 ---
 
 ## Live Auto Review — 20 Agustus 2026 09:56 WIB

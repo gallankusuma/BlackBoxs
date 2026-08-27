@@ -1366,6 +1366,11 @@ const gerbangKomersial = async (
     pelanggaran.push(`${ringkas.total_negatif} item bernilai total negatif.`);
   }
 
+  // EST-MTO-R38: tautan RAB→MTO wajib menunjuk baris tersimpan yang sah dan
+  // sama angkanya. Tanpa ini, gerbang hanya merekonsiliasi total komersial —
+  // dua angka resmi untuk scope yang sama tidak pernah menjadi pelanggaran.
+  pelanggaran.push(...await periksaTautanMto(proposalId, tx));
+
   const total = uang(proposal.total_project);
   if (!(total > 0)) {
     pelanggaran.push(`Nilai penawaran ${total} — harus lebih besar dari nol sebelum dikirim.`);
@@ -3834,6 +3839,9 @@ async function syncLinkedRabItems(proposalId: any, elementId: any, tx?: TxRunner
       [value, JSON.stringify({
         ...link, line_code: line.code, value, unit: line.unit,
         basis: 'net', gross_quantity: line.gross_quantity, waste_percent: line.waste_percent,
+        // Dipanggil tepat setelah `persistMtoLines`, jadi baris tersimpan dan
+        // hasil kalkulator identik di titik ini — versinya boleh distempel.
+        formula_version: FORMULA_VERSION,
       }), value, item.id]
     );
     updated++;
@@ -3856,6 +3864,122 @@ async function syncLinkedRabItems(proposalId: any, elementId: any, tx?: TxRunner
   return updated;
 }
 
+
+/** Toleransi banding kuantitas — sama dengan yang dipakai `enrichMtoElement`. */
+const TOLERANSI_KUANTITAS = 0.0001;
+
+/**
+ * EST-MTO-R38: satu scope hanya boleh punya SATU kuantitas resmi.
+ *
+ * Sebelum ini, tiga jalur memakai sumber yang berbeda untuk angka yang sama:
+ * `mto-link` dan `syncLinkedRabItems` menghitung ulang dengan `calculateMto()`
+ * versi yang sedang ter-deploy, sementara Deal menyalin `mto_lines` tersimpan
+ * apa adanya. Selama formulanya tidak pernah berubah keduanya identik, jadi
+ * masalahnya tidak terlihat — tapi begitu formula diperbaiki, satu kontrak
+ * berdiri di atas dua angka: RAB dan nilai penawaran pakai formula baru,
+ * baseline MTO dan jejak procurement pakai formula lama. Tidak ada tindakan
+ * estimator, tidak ada audit event, dan selisihnya baru ketahuan setelah
+ * kontrak terbentuk.
+ *
+ * Aturannya sekarang: **baris tersimpan yang mengikat.** Itu angka yang disalin
+ * Deal, jadi itu yang harus ditautkan RAB. Perubahan formula tidak diam-diam
+ * masuk penawaran — ia memunculkan drift yang harus diselesaikan estimator
+ * dengan menyimpan ulang elemennya (yang menulis ulang baris DAN menyelaraskan
+ * seluruh RAB tertaut dalam satu transaction).
+ */
+async function bacaBarisTersimpan(elementId: any, tx: TxRunner): Promise<any[]> {
+  return tx.all(
+    `SELECT line_code, label, net_quantity, waste_percent, gross_quantity, unit, formula_version
+     FROM mto_lines WHERE element_id = ?`,
+    [elementId]
+  );
+}
+
+/** Apakah baris tersimpan sudah tidak cocok dengan hasil kalkulator sekarang? */
+function adaDrift(tersimpan: any[], mto: MtoResult): boolean {
+  if (tersimpan.length === 0) return false;
+  if (tersimpan.length !== mto.lines.length) return true;
+  return tersimpan.some(sl => {
+    const cur = mto.lines.find(l => l.code === sl.line_code);
+    if (!cur) return true;
+    return Math.abs(Number(sl.net_quantity) - cur.net_quantity) > TOLERANSI_KUANTITAS
+      || Math.abs(Number(sl.waste_percent) - cur.waste_percent) > TOLERANSI_KUANTITAS
+      || Math.abs(Number(sl.gross_quantity) - cur.gross_quantity) > TOLERANSI_KUANTITAS
+      || String(sl.unit) !== String(cur.unit);
+  });
+}
+
+/**
+ * Buktikan setiap tautan RAB→MTO masih menunjuk baris tersimpan yang sah
+ * sebelum penawaran keluar atau menjadi kontrak.
+ *
+ * Ini yang membuat "dua angka resmi" tidak bisa lolos diam-diam: gerbang
+ * berjalan pada transisi `submitted` DAN `deal`, jadi baseline yang disalin
+ * Deal dijamin sama dengan qty yang tertulis di RAB.
+ */
+async function periksaTautanMto(proposalId: any, tx: TxRunner): Promise<string[]> {
+  const pelanggaran: string[] = [];
+  const items: any[] = await tx.all(
+    `SELECT id, description, qty, unit_snapshot, mto_link
+     FROM proposal_items WHERE proposal_id = ? AND mto_link IS NOT NULL`,
+    [proposalId]
+  );
+
+  for (const item of items) {
+    let link: any;
+    try { link = typeof item.mto_link === 'string' ? JSON.parse(item.mto_link) : item.mto_link; }
+    catch { pelanggaran.push(`Item "${item.description}" punya tautan MTO yang tidak terbaca.`); continue; }
+    if (!link || !link.element_id) continue;
+
+    const nama = item.description || `Item #${item.id}`;
+    const el: any = await tx.get(
+      `SELECT id, element_name FROM engineering_inputs
+       WHERE id = ? AND scope_type = 'proposal' AND scope_id = ?`,
+      [link.element_id, proposalId]
+    );
+    if (!el) {
+      pelanggaran.push(`"${nama}" menaut elemen MTO yang sudah tidak ada di proposal ini.`);
+      continue;
+    }
+
+    const kode = link.line_code || link.field;
+    const tersimpan = await bacaBarisTersimpan(el.id, tx);
+    if (tersimpan.length === 0) {
+      pelanggaran.push(
+        `Elemen "${el.element_name}" belum punya baris MTO tersimpan, `
+        + `sehingga "${nama}" tidak punya angka yang bisa dijadikan baseline. Simpan ulang elemennya.`);
+      continue;
+    }
+
+    const baris = tersimpan.find(l => String(l.line_code) === String(kode));
+    if (!baris) {
+      pelanggaran.push(`"${nama}" menaut baris "${kode}" yang sudah tidak ada pada elemen "${el.element_name}".`);
+      continue;
+    }
+
+    if (link.formula_version && String(link.formula_version) !== String(baris.formula_version)) {
+      pelanggaran.push(
+        `"${nama}" ditautkan pada formula ${link.formula_version}, `
+        + `sedangkan baris tersimpan "${el.element_name}" versi ${baris.formula_version}. Simpan ulang elemennya.`);
+      continue;
+    }
+
+    const cocokSatuan = checkUnitCompatibility(baris.unit, item.unit_snapshot);
+    if (!cocokSatuan.compatible) {
+      pelanggaran.push(`"${nama}": ${cocokSatuan.reason}`);
+      continue;
+    }
+
+    if (Math.abs(Number(item.qty) - Number(baris.net_quantity)) > TOLERANSI_KUANTITAS) {
+      pelanggaran.push(
+        `"${nama}" berkuantitas ${item.qty} ${item.unit_snapshot || ''}`.trim()
+        + `, sedangkan baris MTO tersimpan "${el.element_name}" bernilai ${baris.net_quantity}. `
+        + `Simpan ulang elemennya supaya RAB ikut diselaraskan.`);
+    }
+  }
+
+  return pelanggaran;
+}
 
 /**
  * Tulis ulang baris MTO tersimpan untuk satu elemen (EST-MTO-019).
@@ -4309,8 +4433,53 @@ router.put('/proposals/:id/items/:itemId/mto-link', authMiddleware, bolehUbah, a
       const params = typeof element.parameters === 'string' ? JSON.parse(element.parameters || '{}') : (element.parameters || {});
       const mto = calculateMto(element.element_type, params);
 
+      // EST-MTO-R38: yang mengikat adalah baris TERSIMPAN, bukan hasil
+      // kalkulator saat ini — karena baris tersimpan itulah yang disalin Deal
+      // menjadi baseline kontrak. Menautkan hasil kalkulator terbaru ke RAB
+      // sementara baseline memakai baris lama menghasilkan dua kuantitas resmi
+      // untuk satu scope, dan selisihnya baru terlihat setelah kontrak jadi.
+      let tersimpan = await bacaBarisTersimpan(element.id, tx);
+
+      if (tersimpan.length === 0) {
+        // Elemen lama dari sebelum `mto_lines` ada (lihat backfill-mto-lines.js).
+        // Materialkan proyeksinya di sini juga: ini tidak mengubah satu angka
+        // pun — parameternya sama, kalkulatornya sama — tapi membuat elemen itu
+        // punya versi, sehingga perubahan formula berikutnya terdeteksi.
+        await persistMtoLines(element.id, mto, tx);
+        await tx.run('UPDATE engineering_inputs SET formula_version = ? WHERE id = ?',
+          [FORMULA_VERSION, element.id]);
+        tersimpan = await bacaBarisTersimpan(element.id, tx);
+      } else if (adaDrift(tersimpan, mto)) {
+        // Ditolak, bukan diam-diam memakai angka baru. Penyelesaiannya satu
+        // tindakan eksplisit: simpan ulang elemennya — yang menulis ulang baris
+        // tersimpan DAN menyelaraskan seluruh RAB tertaut dalam satu transaction.
+        return {
+          error: 409,
+          body: {
+            error: `Formula kalkulator berubah sejak elemen "${element.element_name}" disimpan. `
+              + 'Simpan ulang elemen MTO itu dulu supaya angka tersimpan dan angka sekarang kembali sama, '
+              + 'baru tautkan ke RAB.',
+            code: 'FORMULA_DRIFT',
+            element_id: element.id,
+            element_name: element.element_name,
+            formula_version_stored: tersimpan[0]?.formula_version || null,
+            formula_version_current: FORMULA_VERSION,
+          },
+        };
+      }
+
       const wantedCode = line_code || field;
-      const line = mto.lines.find(l => l.code === wantedCode);
+      const barisTersimpan = tersimpan.find(l => String(l.line_code) === String(wantedCode));
+      const line = barisTersimpan
+        ? {
+            code: barisTersimpan.line_code,
+            label: barisTersimpan.label,
+            unit: barisTersimpan.unit,
+            net_quantity: Number(barisTersimpan.net_quantity),
+            gross_quantity: Number(barisTersimpan.gross_quantity),
+            waste_percent: Number(barisTersimpan.waste_percent),
+          }
+        : undefined;
       if (!line) {
         return {
           error: 404,
@@ -4349,6 +4518,9 @@ router.put('/proposals/:id/items/:itemId/mto-link', authMiddleware, bolehUbah, a
         waste_percent: line.waste_percent,
         value,
         unit: line.unit,
+        // Versi yang disepakati saat tautan dibuat. Gerbang submit/deal
+        // membandingkannya dengan versi baris tersimpan.
+        formula_version: barisTersimpan?.formula_version || FORMULA_VERSION,
       };
 
       await tx.run(
