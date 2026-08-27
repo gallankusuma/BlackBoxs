@@ -232,6 +232,33 @@ error samar. Kegagalan dari sisi Google dipetakan: **429 `AI_KUOTA_HABIS`**
 dan **503 `AI_KUNCI_DITOLAK`**. Keduanya bukan jalan buntu — penyuntingan dimensi
 dan pratinjau tidak menyentuh AI sama sekali, dan layar mengatakannya.
 
+### Ledger kontrak & change order
+
+Deal membuat **kontrak + baseline BOQ immutable** di dalam transaction yang sama
+dengan projectnya (`contract.routes.ts`). Tiga aturan yang harus dijaga:
+
+1. **`contracts.original_value` tidak pernah berubah.** Change order tidak
+   menyentuhnya. Nilai berjalan = `original + SUM(CO approved)`, **dihitung saat
+   dibaca**, tidak disimpan sebagai kolom — kolom denormalisasi akan melenceng
+   dan selisihnya tidak bisa dijelaskan.
+2. **`contract_baseline_lines` tidak boleh punya jalur tulis.** Tidak ada
+   `UPDATE`/`DELETE` terhadapnya di rute mana pun, dan tes menghitungnya (harus
+   nol). Inilah yang membuat mengedit proposal setelah award tidak menggeser
+   kontrak.
+3. **Hanya CO `approved` yang mengubah nilai.** `submitted` dilaporkan terpisah
+   sebagai `pending_co_value` — eksposur yang tidak terlihat baru ketahuan saat
+   terlambat. `approved`/`rejected` final; koreksi lewat CO baru.
+
+Checksum baseline **menormalkan angka ke presisi kolomnya** sebelum di-hash
+(qty 4 desimal, nilai 2). `mysql2` mengembalikan DECIMAL sebagai string, jadi
+tanpa normalisasi checksum tidak akan pernah cocok saat dihitung ulang.
+
+⚠️ Komentar SQL di dalam template literal TS **tidak boleh memuat backtick** —
+ia memutus literalnya dan errornya menunjuk baris lain.
+
+Fase 3 (progress certificate, retensi, invoice/AR) **belum ada** dan menunggu
+keputusan terms komersial.
+
 ### Aturan bisnis procurement
 
 **Satu PO = satu GRN aktif.** Ini keputusan pemilik bisnis (Agustus 2026), bukan

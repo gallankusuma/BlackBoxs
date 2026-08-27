@@ -129,6 +129,19 @@ async function main() {
        AND NOT EXISTS (SELECT 1 FROM client_projects c WHERE c.id = ei.scope_id)`);
   chk('nol elemen yatim ber-scope project', Number(yatimProyek?.n), 0);
 
+  // Kontrak tanpa project adalah keadaan yang sama dengan elemen MTO yatim: ia
+  // menunjuk pekerjaan yang sudah tidak ada, dan tidak ada layar yang bisa
+  // membukanya untuk membersihkannya. Dijaga FK cascade, dan diperiksa di sini.
+  const kontrakYatim: any = await dbGet(
+    `SELECT COUNT(*) n FROM contracts c
+     WHERE NOT EXISTS (SELECT 1 FROM client_projects p WHERE p.id = c.project_id)`);
+  chk('nol kontrak tanpa project', Number(kontrakYatim?.n), 0);
+
+  const coYatim: any = await dbGet(
+    `SELECT COUNT(*) n FROM change_orders o
+     WHERE NOT EXISTS (SELECT 1 FROM contracts c WHERE c.id = o.contract_id)`);
+  chk('nol change order tanpa kontrak', Number(coYatim?.n), 0);
+
   const barisTanpaElemen: any = await dbGet(
     `SELECT COUNT(*) n FROM mto_lines ml
      WHERE NOT EXISTS (SELECT 1 FROM engineering_inputs ei WHERE ei.id = ml.element_id)`);

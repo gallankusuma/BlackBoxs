@@ -1506,6 +1506,100 @@ dan invoice lama tetap terbaca selama migrasi.
 
 ---
 
+
+**Status: [DEV] DITERAPKAN — fase 1 & 2** — 27 Agustus 2026
+(fase 3 menunggu keputusan terms)
+
+**Klaimnya diverifikasi dan benar.** `SalesContracts.vue` memang halaman
+"coming soon" utuh, dan pencarian source tidak menemukan satu pun model
+contract, change order, variation, atau amendment. Satu-satunya jejak nilai
+kontrak adalah `client_projects.budget` — **satu angka yang bisa ditimpa siapa
+saja**. Begitu ia bergeser, tidak ada cara membuktikan berapa nilai aslinya, apa
+yang mengubahnya, atau siapa yang menyetujuinya.
+
+### Fase 1 — contract source of truth + baseline immutable
+
+Lima tabel di `ensureContractLedgerSchema`: `contracts`,
+`contract_baseline_lines`, `change_orders`, `change_order_lines`,
+`change_order_events`.
+
+Kontrak dibuat **di dalam transaction Deal yang sama** dengan projectnya —
+project tanpa kontrak berarti nilai kesepakatannya tidak punya dokumen, kontrak
+tanpa project menunjuk pekerjaan yang tidak ada.
+
+Tiga keputusan yang menentukan bentuknya:
+
+1. **Nilai asli tidak pernah berubah.** `contracts.original_value` ditulis
+   sekali. Change order tidak menyentuhnya sama sekali.
+2. **Baseline immutable.** `contract_baseline_lines` **tidak punya satu pun
+   jalur tulis** setelah dibuat — diuji dengan menghitung `UPDATE`/`DELETE`
+   terhadap tabel itu di seluruh berkas rute (harus nol). Inilah yang membuat
+   mengedit proposal setelah award tidak bisa menggeser kontrak. Tes
+   membuktikannya secara langsung: `qty` proposal dikalikan tiga **di database**,
+   dan nilai kontrak serta checksumnya tidak bergerak.
+3. **Nilai berjalan dihitung, tidak disimpan.** `revised_value` selalu
+   `original + SUM(CO approved)`. Kolom denormalisasi akan melenceng dari isinya,
+   dan selisih itu tidak akan bisa dijelaskan siapa pun.
+
+Idempotensi dijaga dua lapis: pemeriksaan di kode **dan**
+`UNIQUE KEY uq_contract_project`. Pemeriksaan di kode saja bisa dilewati dua
+permintaan bersamaan.
+
+### Fase 2 — change order workflow
+
+`draft → submitted → approved | rejected`, dengan `cancelled` dari draft/submitted.
+`approved` dan `rejected` **final** — koreksi dilakukan lewat CO baru, bukan
+dengan mengubah yang sudah diputuskan, dan pesan penolakannya mengatakan itu.
+
+- **Nilai header diturunkan dari barisnya**, tidak diterima dari klien. Kalau
+  klien bisa menentukannya, header dan baris bisa menyatakan angka berbeda dan
+  yang disetujui menjadi ambigu.
+- **CO tanpa baris ditolak** (`BARIS_WAJIB`): nilainya tidak punya asal-usul,
+  dan tidak ada yang bisa diperiksa saat menyetujuinya.
+- **Eksposur tertunda dilaporkan terpisah** (`pending_co_value`). Yang belum
+  disetujui bukan bagian dari nilai kontrak — tapi menyembunyikannya membuat
+  eksposur tidak terlihat sampai terlambat.
+- **Setiap perpindahan status berjejak** di `change_order_events`: dari status
+  apa, ke apa, oleh siapa, kapan, dengan catatan keputusan.
+- Nomor `CTR/` dan `CO/` dihitung di dalam transaction dari baris terkunci.
+
+Layar `SalesContracts.vue` menggantikan placeholder: daftar kontrak dengan nilai
+asli / CO disetujui / nilai berlaku / tertunda, detail berisi baseline BOQ dan
+riwayat CO, dan **penanda merah kalau checksum baseline berbeda dari potret saat
+award**.
+
+### Satu cacat desain saya sendiri, ditangkap tesnya
+
+Checksum baseline versi pertama memakai `String(l.qty)`. Saat ditulis nilainya
+number `10` → `"10"`; saat dibaca kembali `mysql2` mengembalikan DECIMAL sebagai
+string `"10.0000"`. **Checksumnya karena itu tidak pernah cocok saat dihitung
+ulang** — dan checksum yang tidak bisa dihitung ulang dari data tersimpan tidak
+membuktikan apa pun, padahal itu justru yang acceptance-nya minta. Angkanya kini
+dinormalkan ke presisi kolomnya (qty 4 desimal, nilai 2 desimal).
+
+### Tes
+
+`backend/tests/contract-ledger.ts` — **57 asersi**, masuk `test:all`. Terbukti
+diskriminatif: penjagaan dilemahkan sengaja (CO `submitted` ikut menambah nilai,
+dan `approved` bisa dikembalikan ke draft) → **7 asersi gagal**.
+
+Terhadap acceptance: (1) Deal membuat tepat satu contract + baseline dengan
+checksum dan total yang sama dengan proposal, retry tidak menduplikasi —
+terpenuhi; (2) edit proposal sesudah award tidak mengubah kontrak/BOQ —
+terpenuhi, diuji langsung di database; (3) hanya CO approved yang mengubah nilai,
+reject tidak, dan setiap transisi punya actor/audit — terpenuhi;
+(6) rekonsiliasi `original + approved CO = current value` — terpenuhi, dicocokkan
+dengan jumlah di database.
+
+**Belum dikerjakan — fase 3:** progress certificate, retention, advance recovery,
+tax, dan invoice/AR. Semuanya bergantung pada terms komersial yang belum
+diputuskan pemilik sistem — pertanyaan yang sama dengan yang menahan bagian
+Syarat & Ketentuan pada PDF penawaran. Rekonsiliasi dua tabel invoice
+(`invoices`/`client_invoices`) juga belum disentuh, dan review sendiri
+menempatkannya sebagai prasyarat fase 3.
+
+`test:all` 0 gagal, 0 residu.
+
 ## Live Auto Review — 16 Agustus 2026 14:48 WIB
 
 Baseline: working tree di atas commit `2c4e96f4`, patch DR-P0-06 pada

@@ -11,6 +11,7 @@ import multer from 'multer';
 import { callGeminiVision, callGeminiText } from './ai.routes';
 import { dbAll, dbGet, dbRun , withTransaction, TxRunner} from '../config/database';
 import { nextSequentialCode } from './procurement.routes';
+import { buatKontrakDariProposal } from './contract.routes';
 import { uang, bulatUang, jumlahUang } from '../utils/money';
 
 const router = Router();
@@ -3732,6 +3733,8 @@ type StatusOutcome =
       projectNumber: string | null;
       createdProject: boolean;
       proposal: any;
+      /** CONTRACT-R51: kontrak + baseline yang lahir bersama projectnya. */
+      kontrak?: { id: number; nomor: string; checksum: string; dibuat: boolean } | null;
     };
 
 /**
@@ -4051,6 +4054,26 @@ router.put('/proposals/:id/status', authMiddleware, bolehUbah, async (req: Reque
       // Link back to proposal
       await tx.run('UPDATE proposals SET project_id = ? WHERE id = ?', [projectId, proposalId]);
 
+      // CONTRACT-R51: kontrak + baseline BOQ lahir bersama projectnya.
+      //
+      // Di dalam transaction yang sama, dan itu disengaja: project tanpa kontrak
+      // berarti nilai kesepakatannya tidak punya dokumen, sementara kontrak
+      // tanpa project menunjuk pekerjaan yang tidak ada. Sebelum ini satu-satunya
+      // jejak nilai kontrak adalah `client_projects.budget` — satu angka yang
+      // bisa ditimpa siapa saja, sehingga begitu ia bergeser tidak ada cara
+      // membuktikan berapa yang sebenarnya disepakati di awal.
+      const barisKontrak = await tx.all(
+        `SELECT id, is_section, section_label, section_order, order_no,
+                ahsp_code_snapshot, ahsp_name_snapshot, description,
+                unit_snapshot, unit_price_snapshot, qty, total_price
+         FROM proposal_items WHERE proposal_id = ?
+         ORDER BY section_order IS NULL, section_order, is_section DESC, order_no, id`,
+        [proposalId]
+      );
+      const kontrak = await buatKontrakDariProposal(tx, {
+        projectId, proposal, items: barisKontrak as any[], userId,
+      });
+
       // EST-MTO-017 + R32/019: pembuatan project, penautan, dan penyalinan
       // baseline MTO dijadikan SATU transaction.
       //
@@ -4118,7 +4141,7 @@ router.put('/proposals/:id/status', authMiddleware, bolehUbah, async (req: Reque
       );
 
       console.log(`[Proposal ${proposalId} → deal] ${baselineCount} elemen MTO disalin sebagai baseline project ${projectId}`);
-      return { ok: true, projectId, projectNumber, createdProject: true, proposal };
+      return { ok: true, projectId, projectNumber, createdProject: true, proposal, kontrak };
     });
 
     if ('error' in outcome) {

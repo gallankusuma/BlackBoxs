@@ -102,6 +102,8 @@ export async function sapuFixture(stamp: string | number, kodeAhsp: string[] = [
       const re = await dbRun(`DELETE FROM engineering_inputs WHERE id IN (${t3})`, elP.map(e => e.id));
       hasil.elemen += re?.affectedRows ?? 0;
     }
+    // `contracts` ber-FK CASCADE ke `client_projects`, jadi menghapus project
+    // sudah cukup — change order dan baseline ikut lewat cascade berantai.
     await dbRun(`DELETE FROM client_projects WHERE id IN (${tp})`, pids).catch(() => {});
   }
 

@@ -754,6 +754,156 @@ const ensureWebauthnChallengeOffice = async (connection: any) => {
     'ALTER TABLE webauthn_challenges ADD COLUMN IF NOT EXISTS office_location_id INT NULL');
 };
 
+/**
+ * CONTRACT-R51: ledger kontrak & change order.
+ *
+ * Sebelum ini, satu-satunya jejak nilai kontrak adalah `client_projects.budget`
+ * — satu angka yang bisa ditimpa siapa saja. Tidak ada yang memisahkan nilai
+ * kontrak ASLI dari perubahan yang disetujui, jadi begitu budget bergeser tidak
+ * ada cara membuktikan berapa yang sebenarnya disepakati di awal, apa yang
+ * mengubahnya, atau siapa yang menyetujuinya.
+ *
+ * Tiga tabel, dan pembagiannya menentukan:
+ *
+ *   `contracts`              — satu per project. Nilai ASLI di sini, dan tidak
+ *                              pernah diubah change order.
+ *   `contract_baseline_lines`— potret BOQ saat award. IMMUTABLE: tidak ada satu
+ *                              pun jalur tulis setelah dibuat. Inilah yang
+ *                              membuat "edit proposal setelah award" tidak bisa
+ *                              menggeser kontrak.
+ *   `change_orders` + lines  — perubahan, masing-masing dengan status dan
+ *                              jejak siapa/kapan.
+ *
+ * Nilai berjalan TIDAK disimpan sebagai kolom. `revised_value` dihitung
+ * `original + SUM(CO approved)` setiap kali dibaca — kolom denormalisasi akan
+ * melenceng dari isinya, dan selisih itu tidak akan bisa dijelaskan siapa pun.
+ */
+const ensureContractLedgerSchema = async (connection: any) => {
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS contracts (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      contract_number VARCHAR(50) NOT NULL,
+      project_id INT NOT NULL,
+      client_id INT NULL,
+      proposal_id INT NULL,
+      proposal_revision VARCHAR(50) NULL,
+      -- Nilai kontrak ASLI. Change order TIDAK PERNAH menyentuh kolom ini.
+      original_value DECIMAL(18,2) NOT NULL DEFAULT 0,
+      currency VARCHAR(10) NOT NULL DEFAULT 'IDR',
+      -- Checksum isi baseline, supaya kesamaan dengan proposal bisa dibuktikan
+      -- tanpa membandingkan baris satu per satu.
+      baseline_checksum CHAR(64) NULL,
+      signed_date DATE NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'active',
+      created_by INT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      -- Satu project = satu kontrak. Ini yang membuat Deal yang diulang tidak
+      -- menghasilkan kontrak kedua, tanpa perlu mengandalkan pemeriksaan di
+      -- kode saja.
+      UNIQUE KEY uq_contract_project (project_id),
+      UNIQUE KEY uq_contract_number (contract_number),
+      KEY idx_contract_client (client_id),
+      -- FK cascade, bukan pembersihan di kode.
+      --
+      -- Pelajaran dari EST-LIFE-R42 dan R47: engineering_inputs tidak punya FK
+      -- ke proposals maupun client_projects, dan akibatnya menghapus salah
+      -- satunya meninggalkan turunan yang tidak bisa dijangkau layar mana pun --
+      -- 20 elemen dan 139 baris yatim terukur di produksi. Kontrak tanpa project
+      -- adalah keadaan yang sama: ia menunjuk pekerjaan yang sudah tidak ada,
+      -- dan tidak ada yang bisa membukanya untuk membersihkannya.
+      CONSTRAINT fk_contract_project FOREIGN KEY (project_id)
+        REFERENCES client_projects(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+  // Instalasi yang tabelnya sudah terbentuk sebelum FK ini ada tetap perlu
+  // ditambahi — `CREATE TABLE IF NOT EXISTS` di atas tidak menyentuhnya.
+  await execSchemaEnsure(connection, `
+    ALTER TABLE contracts ADD CONSTRAINT fk_contract_project
+      FOREIGN KEY (project_id) REFERENCES client_projects(id) ON DELETE CASCADE`);
+
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS contract_baseline_lines (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      contract_id INT NOT NULL,
+      line_no INT NOT NULL,
+      section_label VARCHAR(255) NULL,
+      is_section TINYINT(1) NOT NULL DEFAULT 0,
+      ahsp_code VARCHAR(50) NULL,
+      description VARCHAR(500) NULL,
+      unit VARCHAR(50) NULL,
+      qty DECIMAL(18,4) NOT NULL DEFAULT 0,
+      unit_price DECIMAL(18,2) NOT NULL DEFAULT 0,
+      amount DECIMAL(18,2) NOT NULL DEFAULT 0,
+      source_item_id INT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_baseline_contract (contract_id),
+      CONSTRAINT fk_baseline_contract FOREIGN KEY (contract_id)
+        REFERENCES contracts(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS change_orders (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      co_number VARCHAR(50) NOT NULL,
+      contract_id INT NOT NULL,
+      title VARCHAR(255) NOT NULL,
+      description TEXT NULL,
+      -- Dari mana perubahan ini berasal: permintaan client, kondisi lapangan,
+      -- jawaban RFI, atau kesalahan desain. Dipakai analisis, dan menjaga
+      -- supaya "siapa yang menanggung" tidak hilang jejaknya.
+      source VARCHAR(30) NOT NULL DEFAULT 'client',
+      value_delta DECIMAL(18,2) NOT NULL DEFAULT 0,
+      cost_delta DECIMAL(18,2) NOT NULL DEFAULT 0,
+      schedule_days_delta INT NOT NULL DEFAULT 0,
+      status VARCHAR(20) NOT NULL DEFAULT 'draft',
+      submitted_at TIMESTAMP NULL,
+      submitted_by INT NULL,
+      decided_at TIMESTAMP NULL,
+      decided_by INT NULL,
+      decision_note TEXT NULL,
+      created_by INT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_co_number (co_number),
+      KEY idx_co_contract_status (contract_id, status),
+      CONSTRAINT fk_co_contract FOREIGN KEY (contract_id)
+        REFERENCES contracts(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS change_order_lines (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      change_order_id INT NOT NULL,
+      line_no INT NOT NULL,
+      description VARCHAR(500) NOT NULL,
+      unit VARCHAR(50) NULL,
+      qty DECIMAL(18,4) NOT NULL DEFAULT 0,
+      unit_price DECIMAL(18,2) NOT NULL DEFAULT 0,
+      amount DECIMAL(18,2) NOT NULL DEFAULT 0,
+      cost_amount DECIMAL(18,2) NOT NULL DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_col_co (change_order_id),
+      CONSTRAINT fk_col_co FOREIGN KEY (change_order_id)
+        REFERENCES change_orders(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+  // Jejak setiap perpindahan status — siapa, kapan, dari apa ke apa.
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS change_order_events (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      change_order_id INT NOT NULL,
+      from_status VARCHAR(20) NULL,
+      to_status VARCHAR(20) NOT NULL,
+      note TEXT NULL,
+      actor_id INT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_coe_co (change_order_id),
+      CONSTRAINT fk_coe_co FOREIGN KEY (change_order_id)
+        REFERENCES change_orders(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+};
+
 const ensureRouteModuleSchema = async (connection: any) => {
   const statements = [
     `CREATE TABLE IF NOT EXISTS inbox_notifications (
@@ -2043,6 +2193,7 @@ export async function initializeDatabase() {
     await ensureAssetManagementSchema(connection);
     await ensureRouteModuleSchema(connection);
     await ensureWebauthnChallengeOffice(connection);
+    await ensureContractLedgerSchema(connection);
     await ensureMobilePinSchema(connection);
     await ensureAssetDepreciationSchema(connection);
     await ensureDepreciationLedgerSchema(connection);
