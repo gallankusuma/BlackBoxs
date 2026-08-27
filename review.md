@@ -8216,6 +8216,32 @@ yang mungkin terlewat tidak regresi.
 
 `test:all` 0 gagal, 0 residu.
 
+### Deploy pertama GAGAL dan ter-rollback — bug laten yang perbaikan ini munculkan
+
+Deploy `9232ff33` mati saat boot dengan `MODULE_NOT_FOUND` dari
+`dist/routes/import.routes.js`, dan skrip deploy mengembalikannya ke versi
+sebelumnya. Produksi tidak pernah down — health 200, smoke 30 lulus.
+
+Sebabnya bukan PDF-nya. **`src/routes/import.routes.ts` sudah lama memakai
+`xlsx` saat runtime tanpa pernah mendeklarasikannya di `package.json`** — ia
+jalan selama ini hanya karena kebetulan terpasang di server. Saat saya
+memasangnya untuk membaca workbook AHSP, `npm i -D xlsx` menaruhnya di
+**devDependencies**, dan install produksi memangkasnya.
+
+Yang membuat kelas cacat ini berbahaya: `npx tsc --noEmit` dan seluruh
+`test:all` **LULUS**, karena di mesin dev devDependency memang terpasang.
+Cacatnya hanya muncul di server, setelah rilis diunggah.
+
+Diperbaiki (`xlsx` → `dependencies`) dan dijadikan penjaga tetap:
+**`backend/tests/dependensi-runtime.ts`** — 8 asersi, statis, tanpa backend,
+dijalankan **paling awal** di `test:all`. Ia memindai seluruh `src/` dan
+menggagalkan suite kalau ada paket yang di-import kode runtime tapi hanya
+devDependency, atau tidak dideklarasikan sama sekali.
+
+Terbukti menangkap: `xlsx` dikembalikan ke devDependencies → tes gagal dengan
+`xlsx (dipakai src/routes/import.routes.ts)`. Audit menyeluruh: tidak ada paket
+lain dalam kondisi yang sama.
+
 ---
 
 ## Live Auto Review — 20 Agustus 2026 09:29 WIB
