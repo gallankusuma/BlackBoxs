@@ -904,6 +904,82 @@ const ensureContractLedgerSchema = async (connection: any) => {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
 };
 
+/**
+ * PROP-REV-R52: revision ledger proposal.
+ *
+ * Sebelum ini `proposals.revision` hanyalah TEKS yang bisa diubah, dan seluruh
+ * item menunjuk langsung ke `proposal_id`. Artinya: begitu proposal yang sudah
+ * dikirim ke client dikembalikan ke review lalu di-submit lagi, baris yang sama
+ * ditimpa dan `submitted_at` tertulis ulang. **Versi yang pernah diterima client
+ * tidak bisa direkonstruksi sama sekali** — dan itulah yang dipegang saat terjadi
+ * sengketa lingkup atau harga.
+ *
+ * Bentuknya sama dengan baseline kontrak (CONTRACT-R51), satu tingkat di atasnya:
+ * potret immutable + checksum. Yang membedakan, sebuah proposal bisa punya
+ * banyak revisi sementara sebuah project hanya punya satu kontrak.
+ */
+const ensureProposalRevisionSchema = async (connection: any) => {
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS proposal_revisions (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      proposal_id INT NOT NULL,
+      revision_no INT NOT NULL,
+      -- issued  : sudah dikirim ke client
+      -- accepted: revisi inilah yang menjadi kesepakatan
+      -- superseded: digantikan revisi berikutnya
+      status VARCHAR(20) NOT NULL DEFAULT 'issued',
+      -- Potret header saat diterbitkan. Disimpan, bukan dibaca ulang dari
+      -- proposals: kalau dibaca ulang, revisi lama ikut berubah setiap kali
+      -- headernya disunting, dan potretnya berhenti menjadi potret.
+      project_name VARCHAR(255) NULL,
+      client_name VARCHAR(255) NULL,
+      lokasi VARCHAR(255) NULL,
+      proposal_type VARCHAR(50) NULL,
+      direct_cost DECIMAL(18,2) NOT NULL DEFAULT 0,
+      overhead DECIMAL(18,2) NOT NULL DEFAULT 0,
+      risk_contingency DECIMAL(18,2) NOT NULL DEFAULT 0,
+      total_project DECIMAL(18,2) NOT NULL DEFAULT 0,
+      design_params JSON NULL,
+      lines_checksum CHAR(64) NULL,
+      line_count INT NOT NULL DEFAULT 0,
+      issued_at TIMESTAMP NULL,
+      issued_by INT NULL,
+      accepted_at TIMESTAMP NULL,
+      accepted_by INT NULL,
+      superseded_at TIMESTAMP NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_prop_rev (proposal_id, revision_no),
+      KEY idx_prop_rev_status (proposal_id, status),
+      CONSTRAINT fk_prop_rev_proposal FOREIGN KEY (proposal_id)
+        REFERENCES proposals(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS proposal_revision_lines (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      revision_id INT NOT NULL,
+      line_no INT NOT NULL,
+      is_section TINYINT(1) NOT NULL DEFAULT 0,
+      section_label VARCHAR(255) NULL,
+      ahsp_code VARCHAR(50) NULL,
+      description VARCHAR(500) NULL,
+      unit VARCHAR(50) NULL,
+      qty DECIMAL(18,4) NOT NULL DEFAULT 0,
+      unit_price DECIMAL(18,2) NOT NULL DEFAULT 0,
+      amount DECIMAL(18,2) NOT NULL DEFAULT 0,
+      source_item_id INT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_prl_rev (revision_id),
+      CONSTRAINT fk_prl_rev FOREIGN KEY (revision_id)
+        REFERENCES proposal_revisions(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+  // Revisi yang diterima ditunjuk dari headernya, supaya "mana yang disepakati"
+  // bisa dijawab tanpa menebak dari timestamp.
+  await execSchemaEnsure(connection,
+    'ALTER TABLE proposals ADD COLUMN IF NOT EXISTS accepted_revision_id INT NULL');
+};
+
 const ensureRouteModuleSchema = async (connection: any) => {
   const statements = [
     `CREATE TABLE IF NOT EXISTS inbox_notifications (
@@ -2193,6 +2269,7 @@ export async function initializeDatabase() {
     await ensureAssetManagementSchema(connection);
     await ensureRouteModuleSchema(connection);
     await ensureWebauthnChallengeOffice(connection);
+    await ensureProposalRevisionSchema(connection);
     await ensureContractLedgerSchema(connection);
     await ensureMobilePinSchema(connection);
     await ensureAssetDepreciationSchema(connection);

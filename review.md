@@ -5559,6 +5559,95 @@ menyetujui sendiri; (e) Deal tanpa accepted revision/evidence ditolak dan tidak
 membuat project/PR; (f) seluruh history actor/waktu/perubahan dapat ditelusuri;
 (g) proposal legacy tetap dapat dibuka lewat route lama dengan feature parity.
 
+
+**Status: [DEV] DITERAPKAN — fase 1** — 27 Agustus 2026
+(fase 2 menunggu keputusan; fase 0 sudah selesai lewat butir-butir P1 sebelumnya)
+
+**Keempat bukti diverifikasi dan benar.** Yang paling menentukan: bukti keempat.
+`proposal_audit_logs` memang ada di skema, dan pencarian source menemukan **nol**
+INSERT maupun pembacaan — satu-satunya kemunculan namanya di kode adalah komentar
+yang saya tulis sendiri saat mengerjakan butir lifecycle. Tabel audit yang tidak
+pernah ditulis lebih buruk daripada tidak ada tabel audit, karena keberadaannya
+menyiratkan ada jejak.
+
+### Yang dikerjakan
+
+**`proposal_revisions` + `proposal_revision_lines`** — potret immutable, bentuknya
+sama dengan baseline kontrak (CONTRACT-R51) satu tingkat di atasnya. Header
+revisi **disimpan**, bukan dibaca ulang dari `proposals`: kalau dibaca ulang,
+revisi lama ikut berubah setiap kali headernya disunting dan potretnya berhenti
+menjadi potret.
+
+- Transisi ke `submitted` **membekukan** satu revisi berikut checksum barisnya.
+- Revisi sebelumnya ditandai `superseded` — **tidak diubah, tidak dihapus**.
+- Transisi ke `deal` menandai revisi terakhir `accepted` dan menunjuknya dari
+  `proposals.accepted_revision_id`. Tanpa itu, "versi mana yang disepakati"
+  hanya bisa ditebak dari timestamp — tebakan yang menentukan nilai kontrak.
+- Kontrak yang lahir memakai checksum yang **sama persis** dengan revisi yang
+  diterima; diuji berdampingan.
+
+**Audit trail benar-benar ditulis** sekarang: `status_change`, `revision_issued`,
+`revision_accepted`, dan `revision_backfill`, semuanya **di dalam transaction yang
+sama** dengan perubahannya — jejaknya tidak bisa ada tanpa perubahannya, atau
+sebaliknya.
+
+**Proposal legacy tidak diberi bukti palsu.** Proposal yang sudah `submitted`
+sebelum ledger ini ada tidak punya revisi. Menolaknya akan mengunci pekerjaan
+yang sah, jadi revisinya dibekukan saat Deal dan **ditandai apa adanya**:
+`legacy — bukti penerbitan asli tidak tersedia`. Bukan tanggal penerbitan yang
+dikarang.
+
+**Separation of duties DICATAT, belum ditegakkan** — dan itu keputusan sadar.
+Menegakkannya sekarang akan mengunci alur satu orang yang berjalan di produksi
+hari ini. Yang bisa dilakukan tanpa merusak apa pun adalah membuat keadaannya
+terlihat: `sod_self_approval` dicatat saat penerbit dan penyetuju orang yang
+sama. Kalau nanti diputuskan harus dipisah, buktinya sudah terkumpul.
+
+### Bug yang saya buat sendiri, dan tertangkap saat menguji
+
+Versi pertama menaruh penerimaan revisi **sebelum** gerbang Deal. Itu salah
+dengan cara yang berbahaya: `withTransaction` di jalur status mengembalikan
+`{ error, body }` untuk penolakan — dan **mengembalikan nilai bukan melempar**,
+jadi transactionnya tetap commit.
+
+Akibatnya proposal yang Deal-nya **ditolak 400** karena clientnya tidak cocok
+tetap tercatat punya revisi "diterima", padahal tidak ada project maupun kontrak
+yang lahir: bukti kesepakatan yang tidak menunjuk apa pun. Terlihat langsung saat
+tes dijalankan — `accepted_revision_id` terisi sementara `project_id` null.
+
+Penerimaan revisi dipindah ke jalur sukses, tepat sebelum kontrak dibuat. Bagian
+10 tes menjaganya, dan terbukti: bug-nya dikembalikan dengan sengaja → 2 asersi
+gagal.
+
+### Tes
+
+`backend/tests/proposal-revisi.ts` — **46 asersi**, masuk `test:all`. Yang
+dijaga bukan sekadar "tabelnya terisi": qty diubah 10 → 25 setelah revisi 1
+terbit, lalu **kedua revisi dibaca berdampingan** dan masing-masing tetap
+menunjukkan angkanya sendiri. Checksum dihitung ulang dari isi tersimpan dan
+harus cocok. Urutan lima perpindahan status diperiksa utuh
+(`draft→review→submitted→review→submitted→deal`). Baris revisi diuji **tidak
+punya satu pun jalur tulis**, dan `UPDATE` terhadap header revisi diperiksa hanya
+menyentuh status serta stempel waktunya.
+
+Terhadap acceptance: (a) submit membekukan revision dan checksum — terpenuhi;
+(b) edit setelah issue membuat revisi baru tanpa mengubah yang lama — terpenuhi,
+diuji langsung; (c) dua revisi dapat dirender ulang setara — terpenuhi pada
+tingkat angka dan checksum (render PDF per revisi belum); (d) policy SoD —
+**dicatat, belum ditegakkan**, alasannya di atas; (e) Deal tanpa revisi
+diterima — untuk proposal baru mustahil karena state machine mewajibkan
+`submitted` lebih dulu, dan Deal yang gagal tidak meninggalkan revisi diterima
+(diuji); (f) history actor/waktu dapat ditelusuri — terpenuhi;
+(g) proposal legacy tetap terbuka lewat route lama — terpenuhi, tidak ada
+endpoint lama yang berubah.
+
+**Belum dikerjakan:** state revision yang lebih halus (`internal_review`,
+`expired`), client acceptance/e-sign evidence, dan render ulang PDF per revisi.
+Dua yang pertama butuh keputusan proses; yang ketiga tinggal menyambungkan
+perender penawaran ke `proposal_revision_lines`.
+
+`test:all` 0 gagal, 0 residu.
+
 ### [ARCH-RISK / DESIGN-GAP — prioritas tinggi] Master Schedule dan cash curve proposal tidak reproducible sebagai baseline kontrak
 
 **Kemampuan saat ini:** Proposal Editor sudah dapat menghasilkan WBS/Gantt dari

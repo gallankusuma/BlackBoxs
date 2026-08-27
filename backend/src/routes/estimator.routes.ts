@@ -11,7 +11,7 @@ import multer from 'multer';
 import { callGeminiVision, callGeminiText } from './ai.routes';
 import { dbAll, dbGet, dbRun , withTransaction, TxRunner} from '../config/database';
 import { nextSequentialCode } from './procurement.routes';
-import { buatKontrakDariProposal } from './contract.routes';
+import { buatKontrakDariProposal, checksumBaseline } from './contract.routes';
 import { uang, bulatUang, jumlahUang } from '../utils/money';
 
 const router = Router();
@@ -1460,6 +1460,107 @@ const selaraskanClient = async (
  * **semua** pelanggaran sekaligus — supaya estimator tidak menemukannya satu per
  * satu lewat percobaan berulang.
  */
+/**
+ * PROP-REV-R52: bekukan satu revisi saat proposal diterbitkan.
+ *
+ * Dipanggil pada transisi ke `submitted`, DI DALAM transaction yang sama.
+ * Sebelum ini, mengembalikan proposal ke `review` lalu men-submit-nya lagi
+ * menimpa baris yang sama dan menulis ulang `submitted_at` — versi yang pernah
+ * diterima client tidak bisa direkonstruksi sama sekali, padahal itulah yang
+ * dipegang saat terjadi sengketa lingkup atau harga.
+ *
+ * Revisi lama TIDAK diubah, hanya ditandai `superseded`. Potretnya disimpan,
+ * bukan dibaca ulang dari `proposals`: kalau dibaca ulang, revisi lama ikut
+ * berubah setiap kali headernya disunting dan potretnya berhenti menjadi potret.
+ */
+async function bekukanRevisi(
+  proposalId: any, proposal: any, userId: any, tx: TxRunner
+): Promise<{ id: number; nomor: number; checksum: string }> {
+  const items: any[] = await tx.all(
+    `SELECT id, is_section, section_label, section_order, order_no,
+            ahsp_code_snapshot, ahsp_name_snapshot, description,
+            unit_snapshot, unit_price_snapshot, qty, total_price
+     FROM proposal_items WHERE proposal_id = ?
+     ORDER BY section_order IS NULL, section_order, is_section DESC, order_no, id`,
+    [proposalId]
+  );
+
+  const baris = items.map((it: any, i: number) => ({
+    line_no: i + 1,
+    is_section: Number(it.is_section) === 1 ? 1 : 0,
+    section_label: it.section_label || null,
+    ahsp_code: it.ahsp_code_snapshot || null,
+    description: it.description || it.ahsp_name_snapshot || null,
+    unit: it.unit_snapshot || null,
+    qty: bulatUang(it.qty),
+    unit_price: bulatUang(it.unit_price_snapshot),
+    amount: bulatUang(it.total_price),
+    source_item_id: it.id,
+  }));
+  const checksum = checksumBaseline(baris);
+
+  // Revisi sebelumnya ditandai digantikan — tidak dihapus, tidak diubah isinya.
+  await tx.run(
+    `UPDATE proposal_revisions SET status = 'superseded', superseded_at = NOW()
+     WHERE proposal_id = ? AND status = 'issued'`, [proposalId]);
+
+  const maks: any = await tx.get(
+    'SELECT COALESCE(MAX(revision_no), 0) AS n FROM proposal_revisions WHERE proposal_id = ? FOR UPDATE',
+    [proposalId]);
+  const nomor = Number(maks?.n || 0) + 1;
+
+  const res = await tx.run(
+    `INSERT INTO proposal_revisions
+      (proposal_id, revision_no, status, project_name, client_name, lokasi, proposal_type,
+       direct_cost, overhead, risk_contingency, total_project, design_params,
+       lines_checksum, line_count, issued_at, issued_by)
+     VALUES (?, ?, 'issued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?)`,
+    [proposalId, nomor, proposal.project_name || null, proposal.client || null,
+     proposal.lokasi || null, proposal.proposal_type || null,
+     bulatUang(proposal.direct_cost), bulatUang(proposal.overhead),
+     bulatUang(proposal.risk_contingency), bulatUang(proposal.total_project),
+     typeof proposal.design_params === 'string'
+       ? proposal.design_params
+       : (proposal.design_params ? JSON.stringify(proposal.design_params) : null),
+     checksum, baris.length, userId || null]
+  );
+  const revId = res.insertId;
+
+  for (const b of baris) {
+    await tx.run(
+      `INSERT INTO proposal_revision_lines
+        (revision_id, line_no, is_section, section_label, ahsp_code, description,
+         unit, qty, unit_price, amount, source_item_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [revId, b.line_no, b.is_section, b.section_label, b.ahsp_code, b.description,
+       b.unit, b.qty, b.unit_price, b.amount, b.source_item_id]
+    );
+  }
+
+  return { id: revId, nomor, checksum };
+}
+
+/**
+ * Catat satu peristiwa ke `proposal_audit_logs`.
+ *
+ * Tabelnya sudah lama ada, tapi pencarian source menemukan **nol** INSERT
+ * maupun pembacaan — jadi tidak ada satu pun history bisnis yang bisa
+ * diverifikasi. Ditulis sekarang untuk transisi status dan penerbitan revisi.
+ */
+async function catatAudit(
+  tx: TxRunner, proposalId: any, userId: any,
+  action: string, field: string | null, sebelum: any, sesudah: any
+): Promise<void> {
+  await tx.run(
+    `INSERT INTO proposal_audit_logs
+      (proposal_id, user_id, action, field_name, before_value, after_value)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [proposalId, userId || null, action.slice(0, 50), field ? field.slice(0, 100) : null,
+     sebelum === null || sebelum === undefined ? null : String(sebelum).slice(0, 4000),
+     sesudah === null || sesudah === undefined ? null : String(sesudah).slice(0, 4000)]
+  );
+}
+
 const gerbangKomersial = async (
   proposalId: any, proposal: any, tx: TxRunner
 ): Promise<{ error: string; code: string; pelanggaran: string[] } | null> => {
@@ -3450,6 +3551,64 @@ async function recalculateProposal(proposalId: string | number, tx?: TxRunner) {
  * di kaki halaman sehingga dokumen yang diterima klien bisa dicocokkan dengan
  * yang dikirim tanpa membandingkan angkanya satu per satu.
  */
+/**
+ * Riwayat revisi sebuah proposal.
+ *
+ * Tanpa ini, ledger yang baru dibuat tidak bisa dilihat siapa pun — dan ledger
+ * yang tidak bisa dibaca sama saja tidak ada.
+ */
+router.get('/proposals/:id/revisions', authMiddleware, bolehLihat, async (req: Request, res: Response) => {
+  try {
+    const revisi: any[] = await dbAll(
+      `SELECT r.*, ui.username AS issued_by_name, ua.username AS accepted_by_name
+       FROM proposal_revisions r
+       LEFT JOIN users ui ON ui.id = r.issued_by
+       LEFT JOIN users ua ON ua.id = r.accepted_by
+       WHERE r.proposal_id = ? ORDER BY r.revision_no DESC`, [req.params.id]);
+
+    res.json({
+      items: revisi,
+      total: revisi.length,
+      // Jejak bisnisnya ikut — inilah yang selama ini tabelnya ada tapi kosong.
+      audit: await dbAll(
+        `SELECT a.*, u.username AS user_name FROM proposal_audit_logs a
+         LEFT JOIN users u ON u.id = a.user_id
+         WHERE a.proposal_id = ? ORDER BY a.created_at DESC, a.id DESC LIMIT 200`,
+        [req.params.id]),
+    });
+  } catch (error: any) {
+    console.error('Error fetching proposal revisions:', error);
+    res.status(500).json({ error: 'Gagal memuat riwayat revisi' });
+  }
+});
+
+/** Isi satu revisi — potret BOQ apa adanya saat diterbitkan. */
+router.get('/proposals/:id/revisions/:revId', authMiddleware, bolehLihat, async (req: Request, res: Response) => {
+  try {
+    const rev: any = await dbGet(
+      `SELECT r.*, ui.username AS issued_by_name, ua.username AS accepted_by_name
+       FROM proposal_revisions r
+       LEFT JOIN users ui ON ui.id = r.issued_by
+       LEFT JOIN users ua ON ua.id = r.accepted_by
+       WHERE r.id = ? AND r.proposal_id = ?`, [req.params.revId, req.params.id]);
+    if (!rev) return res.status(404).json({ error: 'Revisi tidak ditemukan pada proposal ini' });
+
+    const lines: any[] = await dbAll(
+      'SELECT * FROM proposal_revision_lines WHERE revision_id = ? ORDER BY line_no', [rev.id]);
+
+    res.json({
+      ...rev,
+      lines,
+      // Dihitung ulang dari isinya: kalau berbeda dengan yang tersimpan, potret
+      // ini pernah disentuh sesuatu — dan itu harus terlihat.
+      lines_checksum_sekarang: checksumBaseline(lines),
+    });
+  } catch (error: any) {
+    console.error('Error fetching revision:', error);
+    res.status(500).json({ error: 'Gagal memuat revisi' });
+  }
+});
+
 router.get('/proposals/:id/penawaran.pdf', authMiddleware, bolehLihat, async (req: Request, res: Response) => {
   try {
     const proposal: any = await dbGet('SELECT * FROM proposals WHERE id = ?', [req.params.id]);
@@ -3977,6 +4136,23 @@ router.put('/proposals/:id/status', authMiddleware, bolehUbah, async (req: Reque
         if (gagal) return { error: 400, body: gagal };
       }
 
+      // PROP-REV-R52: penerbitan membekukan satu revisi.
+      let revisiBaru: { id: number; nomor: number; checksum: string } | null = null;
+      if (newStatus === 'submitted') {
+        revisiBaru = await bekukanRevisi(proposalId, proposal, userId, tx);
+      }
+
+      // Penerimaan revisi TIDAK dilakukan di sini — lihat `terimaRevisi()` yang
+      // dipanggil setelah seluruh gerbang Deal lolos.
+      //
+      // Versi pertama menaruhnya di titik ini, dan itu salah dengan cara yang
+      // berbahaya: `withTransaction` di sini mengembalikan `{ error, body }`
+      // untuk penolakan, dan mengembalikan nilai BUKAN melempar — jadi
+      // transactionnya tetap commit. Proposal yang Deal-nya ditolak 400 karena
+      // clientnya tidak cocok tetap tercatat punya revisi "diterima", padahal
+      // tidak ada project maupun kontrak yang lahir. Terbukti saat menguji.
+      let revisiDiterima: any = null;
+
       const updates: string[] = ['status = ?'];
       const params: any[] = [newStatus];
       if (newStatus === 'submitted') {
@@ -3991,8 +4167,40 @@ router.put('/proposals/:id/status', authMiddleware, bolehUbah, async (req: Reque
 
       const writeStatus = () => tx.run(`UPDATE proposals SET ${updates.join(', ')} WHERE id = ?`, params);
 
+      // PROP-REV-R52: setiap transisi dicatat.
+      //
+      // `proposal_audit_logs` sudah lama ada tapi tidak satu pun kode menulis
+      // ke sana — jadi tidak ada history bisnis yang bisa diverifikasi sama
+      // sekali. Ditulis DI DALAM transaction yang sama supaya jejaknya tidak
+      // bisa ada tanpa perubahannya, atau sebaliknya.
+      const catatTransisi = async () => {
+        await catatAudit(tx, proposalId, userId, 'status_change', 'status',
+          proposal.status, newStatus);
+        if (revisiBaru) {
+          await catatAudit(tx, proposalId, userId, 'revision_issued', 'revision_no',
+            null, `${revisiBaru.nomor} (checksum ${revisiBaru.checksum.slice(0, 12)})`);
+        }
+        if (revisiDiterima) {
+          await catatAudit(tx, proposalId, userId, 'revision_accepted', 'revision_no',
+            null, String(revisiDiterima.revision_no));
+          // Separation of duties DICATAT, belum ditegakkan.
+          //
+          // Menegakkannya sekarang akan mengunci alur satu orang yang berjalan
+          // di produksi hari ini. Yang bisa dilakukan tanpa merusak apa pun
+          // adalah membuat keadaannya terlihat — sehingga kalau nanti
+          // diputuskan harus dipisah, buktinya sudah ada.
+          if (revisiDiterima.issued_by && userId
+              && Number(revisiDiterima.issued_by) === Number(userId)) {
+            await catatAudit(tx, proposalId, userId, 'sod_self_approval', 'approved_by',
+              String(revisiDiterima.issued_by),
+              'Penerbit dan penyetuju adalah orang yang sama');
+          }
+        }
+      };
+
       if (newStatus !== 'deal') {
         await writeStatus();
+        await catatTransisi();
         return { ok: true, projectId: null, projectNumber: null, createdProject: false, proposal };
       }
 
@@ -4000,6 +4208,7 @@ router.put('/proposals/:id/status', authMiddleware, bolehUbah, async (req: Reque
         // Sudah punya project — jangan buat lagi, statusnya saja yang ditulis.
         console.log(`[Proposal ${proposalId}] sudah punya project ${proposal.project_id}, pembuatan project dilewati`);
         await writeStatus();
+        await catatTransisi();
         return { ok: true, projectId: proposal.project_id, projectNumber: null, createdProject: false, proposal };
       }
 
@@ -4070,6 +4279,31 @@ router.put('/proposals/:id/status', authMiddleware, bolehUbah, async (req: Reque
          ORDER BY section_order IS NULL, section_order, is_section DESC, order_no, id`,
         [proposalId]
       );
+      // PROP-REV-R52: revisi diterima HANYA setelah project dan kontraknya
+      // benar-benar lahir. Revisi "diterima" tanpa kontrak adalah bukti
+      // kesepakatan yang tidak menunjuk apa pun.
+      revisiDiterima = await tx.get(
+        `SELECT id, revision_no, lines_checksum, issued_by FROM proposal_revisions
+         WHERE proposal_id = ? AND status = 'issued'
+         ORDER BY revision_no DESC LIMIT 1 FOR UPDATE`, [proposalId]);
+      if (!revisiDiterima) {
+        // Proposal lama yang sudah submitted sebelum ledger ini ada tidak punya
+        // revisi. Menolaknya akan mengunci pekerjaan yang sah, jadi dibekukan
+        // sekarang dan ditandai apa adanya — bukan diberi bukti penerbitan
+        // palsu yang tanggalnya dikarang.
+        const susulan = await bekukanRevisi(proposalId, proposal, userId, tx);
+        await catatAudit(tx, proposalId, userId, 'revision_backfill', 'revision_no',
+          null, `${susulan.nomor} (legacy — bukti penerbitan asli tidak tersedia)`);
+        revisiDiterima = await tx.get(
+          'SELECT id, revision_no, lines_checksum, issued_by FROM proposal_revisions WHERE id = ?',
+          [susulan.id]);
+      }
+      await tx.run(
+        `UPDATE proposal_revisions SET status = 'accepted', accepted_at = NOW(), accepted_by = ?
+         WHERE id = ?`, [userId || null, revisiDiterima.id]);
+      await tx.run('UPDATE proposals SET accepted_revision_id = ? WHERE id = ?',
+        [revisiDiterima.id, proposalId]);
+
       const kontrak = await buatKontrakDariProposal(tx, {
         projectId, proposal, items: barisKontrak as any[], userId,
       });
@@ -4127,6 +4361,7 @@ router.put('/proposals/:id/status', authMiddleware, bolehUbah, async (req: Reque
       }
 
       await writeStatus();
+      await catatTransisi();
 
       // DR-P1-06: pekerjaan handoff dicatat DI DALAM transaction deal.
       //
