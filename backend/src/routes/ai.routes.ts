@@ -127,6 +127,75 @@ async function callGemini(prompt: string, apiKey: string): Promise<string> {
   });
 }
 
+/**
+ * Gemini dengan gambar (vision) — dipakai membaca gambar teknik.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * `callGemini` di atas hanya mengirim teks. Untuk membaca gambar kerja, gambarnya
+ * dikirim sebagai `inline_data` base64 di bagian yang sama.
+ *
+ * `temperature: 0` disengaja: yang diminta adalah pembacaan angka dari gambar,
+ * bukan karangan. Untuk pekerjaan ini variasi jawaban bukan fitur — ia cacat.
+ *
+ * `responseMimeType: application/json` memaksa keluarannya JSON, jadi tidak
+ * perlu menebak-nebak memotong teks pembungkus.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+export async function callGeminiVision(
+  prompt: string, imageBase64: string, mimeType: string, apiKey: string
+): Promise<string> {
+  const body = JSON.stringify({
+    contents: [{
+      parts: [
+        { text: prompt },
+        { inline_data: { mime_type: mimeType, data: imageBase64 } },
+      ],
+    }],
+    generationConfig: {
+      temperature: 0,
+      maxOutputTokens: 8192,
+      responseMimeType: 'application/json',
+      thinkingConfig: { thinkingBudget: 0 },
+    },
+  });
+
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname: 'generativelanguage.googleapis.com',
+      path: `/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => (data += chunk));
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed?.error) {
+            return reject(new Error(parsed.error.message || 'Gemini menolak permintaan'));
+          }
+          const parts = parsed?.candidates?.[0]?.content?.parts || [];
+          const text = parts.filter((p: any) => p.text !== undefined).map((p: any) => p.text).join('');
+          if (!text) {
+            console.error('[Gemini Vision] Balasan kosong:', JSON.stringify(parsed).substring(0, 400));
+            return reject(new Error('Gemini tidak mengembalikan jawaban'));
+          }
+          resolve(text);
+        } catch (e) {
+          console.error('[Gemini Vision] Parse error:', data.substring(0, 400));
+          reject(new Error('Balasan Gemini tidak bisa dibaca'));
+        }
+      });
+    });
+
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
 // Gemini with Google Search grounding — for real-time marketplace price lookup
 async function callGeminiWithSearch(prompt: string, apiKey: string): Promise<{ text: string; sources: any[] }> {
   const body = JSON.stringify({

@@ -8830,3 +8830,53 @@ pada postcondition Deal yang sama.
    satu baseline, satu outbox, tanpa membuat project kedua atau menggandakan PR.
 6. Failure injection saat copy MTO/outbox/budget me-roll back status Deal dan
    seluruh baseline; kemampuan project manual sebelum transaksi tetap utuh.
+
+---
+
+## [DEV] Fitur baru di luar antrean review — Asisten gambar MTO (Tahap 1)
+
+Permintaan user langsung, bukan butir reviewer: *"agent AI yang berfungsi khusus
+sebagai engineer di dalam system MTO — user upload document gambar, qty nya bisa
+terjabarkan."* Kunci Gemini dinyatakan aktif oleh user; Tahap 1 disetujui.
+
+**Keputusan desain yang menentukan bentuknya: AI menghasilkan PARAMETER, bukan
+kuantitas.** Alurnya `gambar → AI → {L, W, H, depth, qty} → kalkulator MTO yang
+sudah ada`. Alasannya bukan kehati-hatian umum:
+
+- Kalau AI mengeluarkan kuantitas langsung, tiap angka jadi tak bisa ditelusuri
+  dan tak bisa direproduksi — dua kali unggah gambar sama bisa beda hasil, dan
+  tidak ada cara memeriksanya selain memercayainya.
+- Dengan parameter, angkanya tetap keluar dari formula yang sama dengan input
+  manual dan sudah diuji. Yang diperiksa manusia adalah **dimensi** — bisa
+  dicocokkan langsung ke gambar — bukan bill of quantity yang panjang.
+- Risiko terbesar membaca gambar teknik adalah satuan: `2200` di gambar berarti
+  2.2 m, bukan 2200 m. Salahnya 1000x. Prompt menegaskannya eksplisit, dan
+  parameter yang salah satuan langsung kelihatan di panel; kuantitas yang salah
+  satuan tidak.
+
+**Tidak ada yang tersimpan otomatis.** Endpoint `POST /proposals/:id/mto/usul-dari-gambar`
+mengembalikan usulan + pratinjau kuantitas dengan `tersimpan: false`. Penyimpanan
+hanya terjadi saat pengguna menekan Terima per zona, dan lewat `POST /mto` yang
+sudah ada — jadi seluruh validasi, penguncian proposal, dan penghitungan yang
+berlaku untuk input manual tetap berlaku sama persis. Tidak ada jalur tulis kedua.
+
+Gambar diproses di memori (`multer.memoryStorage()`), tidak pernah ditulis ke
+disk — sekalian menghindari folder unggahan baru yang harus diklasifikasikan di
+nginx (lihat catatan `/uploads` di CLAUDE.md).
+
+Batas Tahap 1 yang disengaja: satu gambar, satu tipe elemen (pondasi), belum ada
+diskusi bolak-balik.
+
+**Status: [DEV] DITERAPKAN**
+- `backend/src/routes/ai.routes.ts` — `callGeminiVision()`
+- `backend/src/routes/estimator.routes.ts` — endpoint usulan + prompt
+- `frontend/src/components/projects/ProjectMTO.vue` — panel persetujuan per zona
+- `backend/tests/mto-usul-gambar.ts` — 17 asersi, masuk `test:all`
+
+Yang diuji tes: endpoint terjaga auth, berkas non-gambar ditolak, proposal
+terkunci ditolak 409, **tidak ada baris `engineering_inputs` yang bertambah**
+setelah unggah, dan kontrak desainnya terjaga di sumber (pratinjau lewat
+`calculateMto`, prompt melarang AI menghitung volume, gambar tidak ditulis ke
+disk, layar menyimpan lewat endpoint MTO biasa). Tes sengaja tidak memanggil
+Gemini sungguhan — kualitas pembacaan gambar diperiksa manusia lewat panel
+persetujuan, yang memang itu gunanya.

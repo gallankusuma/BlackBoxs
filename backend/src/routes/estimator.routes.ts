@@ -4,6 +4,8 @@ import { checkUnitCompatibility, isProposalEditable } from '../modules/estimator
 import { enrichMtoElement, groupStoredLines } from '../modules/estimator/mto/enrich';
 import { authMiddleware } from '../middleware/auth';
 import { requirePermission, loadUserAccess } from '../middleware/permission';
+import multer from 'multer';
+import { callGeminiVision } from './ai.routes';
 import { dbAll, dbGet, dbRun , withTransaction, TxRunner} from '../config/database';
 import { nextSequentialCode } from './procurement.routes';
 import { uang, bulatUang, jumlahUang } from '../utils/money';
@@ -1586,6 +1588,157 @@ router.get('/proposals/:id/items/incomplete', authMiddleware, bolehLihat, async 
     );
     res.json({ items: rows, count: rows.length });
   } catch (err: any) { res.status(500).json({ error: err.message }); }
+});
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// USULAN MTO DARI GAMBAR KERJA (Tahap 1: pondasi)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Keputusan desain yang menentukan fitur ini berguna atau berbahaya:
+// **AI tidak menghasilkan kuantitas — ia menghasilkan PARAMETER.**
+//
+//   gambar → AI → { L, W, H, depth, qty } → kalkulator MTO yang sudah ada
+//
+// Kalau AI langsung mengeluarkan angka kuantitas, tiap angka menjadi tidak bisa
+// ditelusuri dan tidak bisa direproduksi — persis lawan dari yang dikerjakan
+// sepanjang review ini. Dengan menghasilkan parameter, angkanya tetap lahir dari
+// formula yang sama dengan input manual, yang sudah teruji dan dicocokkan dengan
+// hitungan tangan.
+//
+// Yang diperiksa manusia pun jadi DIMENSI, bukan bill of material. "Footing
+// 2,2 × 2,2 × 0,35, 6 titik" bisa dicocokkan sekilas ke gambar; "besi footing
+// 1.636 kg" tidak.
+//
+// **Tidak ada yang tersimpan di sini.** Endpoint ini hanya mengembalikan usulan;
+// penyimpanannya lewat `POST /mto` biasa setelah manusia menyetujui — dengan
+// seluruh validasi yang sudah ada. Membaca dimensi dari gambar teknik itu sulit
+// (skala, revision cloud, dan terutama satuan mm vs m yang salahnya 1000×), jadi
+// keliru itu pasti terjadi; yang tidak boleh adalah keliru yang tersimpan diam-diam.
+//
+// Gambarnya juga TIDAK disimpan ke disk — diproses di memori lalu dibuang.
+// Tidak ada folder unggahan baru, tidak ada dokumen bisnis tambahan di server.
+const unggahGambar = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024, files: 1 },
+  fileFilter: (_req, file, cb) => {
+    const boleh = ['image/png', 'image/jpeg', 'image/webp'];
+    if (!boleh.includes(file.mimetype)) {
+      return cb(new Error('Hanya PNG, JPEG, atau WebP yang bisa dibaca'));
+    }
+    cb(null, true);
+  },
+});
+
+/** Prompt disusun dari kontrak parameter yang sudah ada, bukan daftar terpisah. */
+const promptPondasi = (catatan: string) => `
+Anda adalah engineer struktur yang membaca gambar kerja pondasi.
+
+TUGAS: baca gambar, lalu keluarkan PARAMETER DIMENSI setiap tipe pondasi yang
+terlihat. JANGAN menghitung volume, berat besi, atau kuantitas apa pun — itu
+dikerjakan sistem.
+
+Keluarkan JSON dengan bentuk PERSIS:
+{
+  "zones": [
+    {
+      "element_name": "nama tipe pondasi di gambar, mis. P1 atau F2",
+      "foundation_type": "footplate",
+      "parameters": {
+        "L": <panjang footing, METER>,
+        "W": <lebar footing, METER>,
+        "H": <tebal footing, METER>,
+        "depth": <kedalaman galian, METER>,
+        "qty": <jumlah titik pondasi bertipe ini>
+      },
+      "keyakinan": "tinggi" | "sedang" | "rendah",
+      "dasar": "sebutkan dari mana angkanya dibaca, mis. 'tabel schedule pondasi baris P1'",
+      "ragu": ["hal yang tidak yakin, kosongkan kalau tidak ada"]
+    }
+  ],
+  "catatan_umum": "hal penting yang perlu diketahui pemeriksa"
+}
+
+ATURAN KERAS:
+1. SEMUA panjang dalam METER. Gambar teknik sering memakai milimeter — kalau
+   angkanya seperti 2200, itu 2.2 meter. Salah satuan di sini berakibat 1000x.
+2. Kalau sebuah angka tidak terbaca jelas, JANGAN menebak: kosongkan fieldnya
+   dan sebutkan di "ragu".
+3. Kalau gambar ini bukan gambar pondasi, kembalikan "zones": [] dan jelaskan
+   di "catatan_umum".
+4. "qty" adalah JUMLAH TITIK pondasi bertipe itu — hitung dari denah atau tabel
+   schedule, bukan mengarang.
+${catatan ? `\nCATATAN DARI PENGGUNA (pakai ini untuk memperjelas):\n${catatan}` : ''}
+`.trim();
+
+router.post('/proposals/:id/mto/usul-dari-gambar', authMiddleware, bolehUbah,
+  unggahGambar.single('gambar'), async (req: Request, res: Response) => {
+  try {
+    const berkas = (req as any).file;
+    if (!berkas) return res.status(400).json({ error: 'Gambar wajib diunggah', code: 'GAMBAR_WAJIB' });
+
+    // Proposal terkunci tidak boleh menerima usulan yang ujungnya akan ditolak.
+    const terkunci = await proposalLock(req.params.id);
+    if (terkunci) return res.status(terkunci.status).json(terkunci.body);
+
+    const kunci = process.env.GEMINI_API_KEY;
+    if (!kunci || kunci.startsWith('your-')) {
+      return res.status(503).json({
+        error: 'Pembaca gambar belum tersedia — GEMINI_API_KEY belum disetel di server.',
+        code: 'AI_BELUM_SIAP',
+      });
+    }
+
+    const jawaban = await callGeminiVision(
+      promptPondasi(String(req.body?.catatan || '').slice(0, 2000)),
+      berkas.buffer.toString('base64'),
+      berkas.mimetype,
+      kunci
+    );
+
+    let hasil: any;
+    try {
+      hasil = JSON.parse(jawaban);
+    } catch {
+      return res.status(502).json({
+        error: 'Pembaca gambar mengembalikan jawaban yang tidak bisa dibaca.',
+        code: 'AI_JAWABAN_TIDAK_TERBACA',
+      });
+    }
+
+    // Tiap usulan dihitung lewat kalkulator yang SAMA dengan input manual, jadi
+    // pratinjaunya benar-benar angka yang akan tersimpan kalau disetujui.
+    const usulan = (Array.isArray(hasil?.zones) ? hasil.zones : []).slice(0, 20).map((z: any) => {
+      const parameters = { ...(z?.parameters || {}) };
+      if (z?.foundation_type) parameters.foundation_type = z.foundation_type;
+
+      const mto = calculateMto('foundation', parameters);
+      return {
+        element_type: 'foundation',
+        element_name: String(z?.element_name || 'Pondasi').slice(0, 80),
+        parameters,
+        keyakinan: ['tinggi', 'sedang', 'rendah'].includes(z?.keyakinan) ? z.keyakinan : 'rendah',
+        dasar: String(z?.dasar || '').slice(0, 300),
+        ragu: Array.isArray(z?.ragu) ? z.ragu.slice(0, 10).map((x: any) => String(x).slice(0, 200)) : [],
+        // Pratinjau — bukan angka tersimpan.
+        pratinjau: mto.lines,
+        variant: mto.variant,
+        missing_required: (mto as any).missing_required || [],
+      };
+    });
+
+    res.json({
+      usulan,
+      jumlah: usulan.length,
+      catatan_umum: String(hasil?.catatan_umum || '').slice(0, 1000),
+      // Dinyatakan tegas supaya tidak ada yang mengira ini sudah tersimpan.
+      tersimpan: false,
+      catatan_sistem: 'Ini usulan, belum tersimpan. Periksa dimensinya terhadap gambar, lalu setujui per zona.',
+    });
+  } catch (err: any) {
+    console.error('Usul MTO dari gambar gagal:', err);
+    res.status(500).json({ error: err?.message || 'Gagal membaca gambar' });
+  }
 });
 
 // ── Override: save manual start/duration for a schedule item

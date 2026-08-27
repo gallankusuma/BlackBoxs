@@ -194,6 +194,28 @@ Butuh 2 karyawan aktif berkode `TEST-A` dan `TEST-B` (bisa ditimpa lewat env `EM
 
 Estimator (AHSP/HSP/RAB/Proposal + MTO kalkulator konstruksi), Projects (Gantt, Kanban, milestone, cost control, timesheet, manpower), Procurement (PR/PO + approval bertingkat), Inventory & Warehouse, Sales/CRM (leads, prospects, clients), Finance (AP/AR, margin, COGS, fund request, kasbon, payment schedule), HR (employee, attendance, payslip, position rates), Production/PPIC, Quality/QC, Asset Management (asset, production line, P&ID, maintenance, depresiasi), Approval engine, Reports, Audit log, AI routes (Gemini).
 
+### Asisten gambar MTO (Gemini)
+
+`POST /api/estimator/proposals/:id/mto/usul-dari-gambar` menerima satu gambar
+kerja dan mengembalikan **usulan parameter** pondasi, bukan kuantitas.
+
+Aturan yang harus dijaga kalau fitur ini dilanjutkan:
+
+1. **AI tidak pernah menghasilkan angka kuantitas.** Ia hanya membaca dimensi;
+   volume/berat dihitung `calculateMto()` — kalkulator yang sama dengan input
+   manual. Begitu kuantitas datang dari AI, angkanya berhenti bisa ditelusuri.
+2. **Endpoint ini tidak menulis apa pun.** Responsnya `tersimpan: false`.
+   Penyimpanan hanya lewat `POST /mto` yang sudah ada, dipicu persetujuan
+   manusia per zona. Jangan menambah jalur tulis kedua.
+3. **Gambar diproses di memori.** Jangan menulisnya ke `backend/uploads/` —
+   itu akan memunculkan pertanyaan klasifikasi nginx (lihat `/uploads` di atas)
+   untuk data yang memang tidak perlu disimpan.
+4. Satuan adalah risiko utamanya: gambar teknik memakai mm, formula memakai m.
+   Prompt menegaskannya; jangan dilonggarkan.
+
+Butuh `GEMINI_API_KEY`. Tanpa itu endpoint membalas 503 `AI_BELUM_SIAP`, bukan
+error samar.
+
 ### Aturan bisnis procurement
 
 **Satu PO = satu GRN aktif.** Ini keputusan pemilik bisnis (Agustus 2026), bukan

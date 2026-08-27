@@ -59,7 +59,77 @@
                 <div class="mod-sub">Input dimensi per zona → kalkulasi MTO otomatis</div>
               </div>
             </div>
-            <button v-if="!readonly" @click="addZone" class="add-zone-btn">＋ Tambah Zona</button>
+            <div style="display:flex;gap:8px;align-items:center">
+              <!-- Tahap 1: usulan MTO dari gambar kerja. AI mengeluarkan
+                   PARAMETER (dimensi), bukan kuantitas — kuantitasnya tetap
+                   dihitung kalkulator yang sama dengan input manual. Tidak ada
+                   yang tersimpan sebelum disetujui per zona. -->
+              <button v-if="!readonly && activeTab === 'foundation'" @click="pilihGambar"
+                class="usul-btn" title="Baca gambar kerja pondasi dan usulkan dimensinya">
+                🖼 Usulkan dari gambar
+              </button>
+              <input ref="inputGambar" type="file" accept="image/png,image/jpeg,image/webp"
+                style="display:none" @change="unggahGambar" />
+              <button v-if="!readonly" @click="addZone" class="add-zone-btn">＋ Tambah Zona</button>
+            </div>
+          </div>
+
+          <!-- ══ Usulan dari gambar ══════════════════════════════════════ -->
+          <div v-if="membacaGambar" class="usul-panel">
+            <span>⏳ Membaca gambar… ini bisa beberapa detik.</span>
+          </div>
+
+          <div v-if="galatUsul" class="usul-panel" style="border-color:#fca5a5;background:#fef2f2;color:#991b1b">
+            ❌ {{ galatUsul }}
+          </div>
+
+          <div v-if="usulan.length" class="usul-panel">
+            <div class="usul-head">
+              <div>
+                <strong>{{ usulan.length }} usulan dari gambar</strong>
+                <div class="usul-sub">
+                  Belum tersimpan. <strong>Periksa dimensinya terhadap gambar</strong> — pembacaan
+                  otomatis bisa keliru, terutama satuan (mm vs m). Setujui satu per satu.
+                </div>
+                <div v-if="catatanUsul" class="usul-sub" style="margin-top:4px">📝 {{ catatanUsul }}</div>
+              </div>
+              <button @click="tolakSemuaUsul" class="usul-tolak-semua">Tolak semua</button>
+            </div>
+
+            <div v-for="(u, i) in usulan" :key="i" class="usul-item">
+              <div class="usul-item-head">
+                <strong>{{ u.element_name }}</strong>
+                <span class="usul-yakin" :class="'yakin-' + u.keyakinan">keyakinan {{ u.keyakinan }}</span>
+              </div>
+
+              <div class="usul-dim">
+                <span v-for="(v, k) in u.parameters" :key="k" class="usul-chip">{{ k }}: {{ v }}</span>
+              </div>
+
+              <div v-if="u.dasar" class="usul-sub">📖 {{ u.dasar }}</div>
+              <div v-if="u.ragu?.length" class="usul-sub" style="color:#b45309">
+                ⚠️ Ragu: {{ u.ragu.join('; ') }}
+              </div>
+              <div v-if="u.missing_required?.length" class="usul-sub" style="color:#b45309">
+                ⚠️ Belum lengkap: {{ u.missing_required.join('; ') }}
+              </div>
+
+              <details class="usul-pratinjau">
+                <summary>Pratinjau kuantitas ({{ u.pratinjau?.length || 0 }} baris)</summary>
+                <ul>
+                  <li v-for="l in u.pratinjau" :key="l.code">
+                    {{ l.label }} — <strong>{{ l.gross_quantity }}</strong> {{ l.unit }}
+                  </li>
+                </ul>
+              </details>
+
+              <div class="usul-aksi">
+                <button @click="terimaUsul(i)" :disabled="menyimpanUsul" class="usul-terima">
+                  ✓ Terima jadi zona
+                </button>
+                <button @click="tolakUsul(i)" class="usul-tolak">✗ Tolak</button>
+              </div>
+            </div>
           </div>
 
           <!-- Zone tabs (horizontal pills) -->
@@ -356,6 +426,78 @@ function addDefaultZone() {
   activeZoneIdx.value = 0;
   // not marking dirty — user must explicitly save
 }
+
+// ── Usulan MTO dari gambar kerja (Tahap 1: pondasi) ────────────────────────
+//
+// Yang datang dari server adalah PARAMETER (dimensi) plus pratinjau kuantitas
+// yang dihitung kalkulator yang sama dengan input manual. Tidak ada yang
+// tersimpan sampai pengguna menekan Terima per zona — dan penyimpanannya lewat
+// endpoint MTO biasa, dengan seluruh validasi yang sudah ada.
+const inputGambar = ref<HTMLInputElement | null>(null);
+const membacaGambar = ref(false);
+const menyimpanUsul = ref(false);
+const usulan = ref<any[]>([]);
+const catatanUsul = ref('');
+const galatUsul = ref('');
+
+const pilihGambar = () => {
+  galatUsul.value = '';
+  inputGambar.value?.click();
+};
+
+const unggahGambar = async (e: Event) => {
+  const berkas = (e.target as HTMLInputElement).files?.[0];
+  if (!berkas) return;
+
+  membacaGambar.value = true;
+  galatUsul.value = '';
+  usulan.value = [];
+  try {
+    const form = new FormData();
+    form.append('gambar', berkas);
+    const { data } = await api.post(`${baseUrl.value}/mto/usul-dari-gambar`, form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    usulan.value = data?.usulan || [];
+    catatanUsul.value = data?.catatan_umum || '';
+    if (!usulan.value.length) {
+      galatUsul.value = catatanUsul.value || 'Tidak ada pondasi yang terbaca dari gambar ini.';
+    }
+  } catch (err: any) {
+    galatUsul.value = err?.response?.data?.error || 'Gagal membaca gambar.';
+  } finally {
+    membacaGambar.value = false;
+    // Supaya berkas yang sama bisa dipilih lagi setelah diperbaiki.
+    if (inputGambar.value) inputGambar.value.value = '';
+  }
+};
+
+/** Terima satu usulan → tersimpan lewat endpoint MTO biasa. */
+const terimaUsul = async (i: number) => {
+  const u = usulan.value[i];
+  if (!u) return;
+  menyimpanUsul.value = true;
+  galatUsul.value = '';
+  try {
+    await api.post(`${baseUrl.value}/mto`, {
+      element_type: u.element_type,
+      element_name: u.element_name,
+      parameters: { ...u.parameters, _zone_name: u.element_name },
+    });
+    usulan.value.splice(i, 1);
+    await fetchAll();
+  } catch (err: any) {
+    const d = err?.response?.data;
+    galatUsul.value = Array.isArray(d?.problems)
+      ? `${u.element_name}: ${d.problems.join('; ')}`
+      : (d?.error || 'Gagal menyimpan usulan.');
+  } finally {
+    menyimpanUsul.value = false;
+  }
+};
+
+const tolakUsul = (i: number) => { usulan.value.splice(i, 1); };
+const tolakSemuaUsul = () => { usulan.value = []; catatanUsul.value = ''; };
 
 function addZone() {
   const mod = activeTab.value;
@@ -783,6 +925,26 @@ const f0 = (v:number) => v.toLocaleString('id-ID',{maximumFractionDigits:0});
 .zone-pill{display:flex;align-items:center;gap:6px;padding:5px 12px;border-radius:20px;border:2px solid #e2e8f0;background:white;cursor:pointer;font-size:.78rem;font-weight:600;color:#475569;transition:all .2s;}
 .zone-pill:hover{border-color:#3b82f6;}
 .zone-pill.active{border-color:#1d4ed8;background:#eff6ff;color:#1d4ed8;}
+.usul-btn{border:1px solid #93c5fd;background:#eff6ff;color:#1d4ed8;border-radius:8px;padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;}
+.usul-btn:hover{background:#dbeafe;}
+.usul-panel{margin:12px 18px;padding:12px 14px;border:1px solid #bfdbfe;background:#f8fafc;border-radius:10px;font-size:13px;}
+.usul-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:10px;}
+.usul-sub{font-size:12px;color:#475569;margin-top:2px;}
+.usul-tolak-semua{border:1px solid #cbd5e1;background:#fff;border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer;white-space:nowrap;}
+.usul-item{border:1px solid #e2e8f0;background:#fff;border-radius:8px;padding:10px 12px;margin-bottom:8px;}
+.usul-item-head{display:flex;align-items:center;gap:8px;margin-bottom:6px;}
+.usul-yakin{font-size:11px;padding:2px 8px;border-radius:999px;font-weight:600;}
+.yakin-tinggi{background:#dcfce7;color:#166534;}
+.yakin-sedang{background:#fef3c7;color:#92400e;}
+.yakin-rendah{background:#fee2e2;color:#991b1b;}
+.usul-dim{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px;}
+.usul-chip{background:#f1f5f9;border:1px solid #e2e8f0;border-radius:6px;padding:2px 8px;font-size:12px;font-family:ui-monospace,monospace;}
+.usul-pratinjau{margin-top:6px;font-size:12px;color:#475569;}
+.usul-pratinjau ul{margin:6px 0 0 18px;}
+.usul-aksi{display:flex;gap:8px;margin-top:10px;}
+.usul-terima{border:none;background:#059669;color:#fff;border-radius:6px;padding:6px 14px;font-size:12px;font-weight:600;cursor:pointer;}
+.usul-terima:disabled{opacity:.5;cursor:not-allowed;}
+.usul-tolak{border:1px solid #cbd5e1;background:#fff;color:#475569;border-radius:6px;padding:6px 14px;font-size:12px;cursor:pointer;}
 .zone-hapus-btn{margin-left:auto;border:1px solid #fca5a5;background:#fef2f2;color:#991b1b;border-radius:6px;padding:4px 10px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;}
 .zone-hapus-btn:hover{background:#fee2e2;}
 .zone-del{font-size:.9rem;color:#94a3b8;line-height:1;cursor:pointer;margin-left:2px;}
