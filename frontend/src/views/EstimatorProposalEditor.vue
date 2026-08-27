@@ -993,13 +993,25 @@
                   {{ ahsp.harga_satuan === 0 ? '—' : formatNumber(ahsp.harga_satuan) }}
                 </td>
                 <td class="px-3 py-2 text-center">
-                  <button @click="toggleAHSP(ahsp)"
-                    class="w-7 h-7 rounded-md border-2 flex items-center justify-center mx-auto transition-all duration-150"
-                    :class="isAhspAdded(ahsp.id) ? 'bg-blue-600 border-blue-600 text-white' : 'border-gray-300 text-transparent hover:border-blue-400'">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
-                    </svg>
-                  </button>
+                  <!-- EST-RAB-R44: tombol TAMBAH, bukan checkbox.
+                       Checkbox menyiratkan keadaan biner "dipakai / tidak",
+                       padahal satu AHSP memang sah dipakai berkali-kali dengan
+                       lokasi, qty, dan deskripsi berbeda. Yang ditampilkan
+                       sekarang adalah BERAPA KALI ia sudah dipakai. -->
+                  <div class="flex items-center justify-center gap-1.5">
+                    <span v-if="jumlahDipakai(ahsp.id) > 0"
+                      class="text-[10px] font-bold text-blue-700 bg-blue-50 border border-blue-200 rounded px-1.5 py-0.5"
+                      :title="`Sudah dipakai ${jumlahDipakai(ahsp.id)} baris di proposal ini`">
+                      {{ jumlahDipakai(ahsp.id) }}×
+                    </span>
+                    <button @click="tambahAhsp(ahsp)" :disabled="menambahAhsp"
+                      class="px-2.5 py-1 rounded-md border-2 border-blue-300 text-blue-700 text-xs font-semibold hover:bg-blue-50 disabled:opacity-50"
+                      :title="jumlahDipakai(ahsp.id) > 0
+                        ? 'Tambah sebagai baris baru — baris yang sudah ada tidak disentuh'
+                        : 'Tambahkan ke RAB'">
+                      + Tambah
+                    </button>
+                  </div>
                 </td>
               </tr>
             </tbody>
@@ -1916,37 +1928,46 @@ const debounceAhspSearch = () => {
 };
 
 
-const isAhspAdded = (ahspId: number) => {
-  return items.value.some(item => item.ahsp_id === ahspId);
-};
+/**
+ * EST-RAB-R44: katalog hanya MENAMBAH. Penghapusan hanya dari baris konkret.
+ *
+ * Versi lama memperlakukan `ahsp_id` sebagai checkbox global: kalau AHSP-nya
+ * sudah dipakai, klik berikutnya menjalankan `items.find(i => i.ahsp_id === id)`
+ * lalu langsung DELETE instance PERTAMA yang ditemukan — tanpa memilih baris,
+ * tanpa konfirmasi, tanpa memberi tahu baris mana yang hilang.
+ *
+ * Padahal backend mengidentifikasi item lewat `proposal_items.id` dan sengaja
+ * tidak punya unique `(proposal_id, ahsp_id)`: satu analisa memang sah dipakai
+ * berkali-kali untuk lokasi, area, atau work package berbeda. Jadi estimator
+ * yang bermaksud menambah scope ketiga untuk Beton K-250 justru menghapus
+ * Pedestal P-01 — dan karena Tie Beam TB-02 masih ada, checkbox-nya tetap
+ * terlihat tercentang setelah reload. Total proposal turun tanpa satu pun error.
+ */
+const menambahAhsp = ref(false);
 
-const toggleAHSP = async (ahsp: AHSP) => {
-  if (isAhspAdded(ahsp.id)) {
-    // Remove item
-    const existing = items.value.find(item => item.ahsp_id === ahsp.id);
-    if (!existing) return;
-    try {
-      await api.delete(`/estimator/proposals/${proposalId}/items/${existing.id}`);
-      await loadItems();
-      await loadSummary();
-    } catch (error) {
-      console.error('Failed to remove AHSP:', error);
-    }
-  } else {
-    // Add item
-    try {
-      await api.post(`/estimator/proposals/${proposalId}/items`, {
-        ahsp_id: ahsp.id,
-        discipline_id: modalSelectedDisciplineId.value,
-        sub_discipline_id: modalSelectedSubDisciplineId.value,
-        qty: 0
-      });
-      await loadItems();
-      await loadSummary();
-    } catch (error) {
-      console.error('Failed to add AHSP:', error);
-      alert('Failed to add item');
-    }
+const jumlahDipakai = (ahspId: number) =>
+  items.value.filter((item: any) => item.ahsp_id === ahspId && !item.is_section).length;
+
+const tambahAhsp = async (ahsp: AHSP) => {
+  menambahAhsp.value = true;
+  try {
+    await api.post(`/estimator/proposals/${proposalId}/items`, {
+      ahsp_id: ahsp.id,
+      discipline_id: modalSelectedDisciplineId.value,
+      sub_discipline_id: modalSelectedSubDisciplineId.value,
+      qty: 0
+    });
+    await loadItems();
+    await loadSummary();
+    await muatBarisBelumLengkap();
+  } catch (error: any) {
+    // Pesan server ditampilkan apa adanya: penolakan seperti AHSP tidak aktif
+    // atau sub-discipline nonaktif punya jalan keluar yang berbeda-beda, dan
+    // "Failed to add item" tidak memberi tahu satu pun di antaranya.
+    console.error('Failed to add AHSP:', error);
+    alert(error?.response?.data?.error || 'Gagal menambahkan pekerjaan ke RAB.');
+  } finally {
+    menambahAhsp.value = false;
   }
 };
 
@@ -2026,7 +2047,19 @@ const applyCalcResult = async (value: number) => {
 const deleteItem = async (itemId: number) => {
   const baris: any = items.value.find((i: any) => i.id === itemId);
 
-  let pesan = 'Hapus baris ini?';
+  // EST-RAB-R44: konfirmasi menyebut baris MANA. Kalau satu analisa dipakai
+  // beberapa kali, "Hapus baris ini?" tidak membedakan Pedestal dari Tie Beam.
+  const namaBaris = baris?.description
+    || baris?.ahsp_name_snapshot
+    || baris?.ahsp_code_snapshot
+    || `Baris #${itemId}`;
+  let pesan = baris
+    ? `Hapus "${namaBaris}"?\n\n`
+      + `Kode  : ${baris.ahsp_code_snapshot || '-'}\n`
+      + `Volume: ${baris.qty ?? 0} ${baris.unit_snapshot || ''}\n`.trim() + '\n'
+      + `Nilai : ${formatNumber(Number(baris.total_price || 0))}\n\n`
+      + 'Tindakan ini tidak bisa dibatalkan.'
+    : 'Hapus baris ini?';
   if (baris?.is_section) {
     const seksi = items.value.filter((i: any) => i.section_order === baris.section_order);
     const anak = seksi.filter((i: any) => !i.is_section);

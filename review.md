@@ -8653,6 +8653,64 @@ yang tetap dapat merepresentasikan pengulangan—bukan checkbox frontend saja.
 6. Submitted/deal tetap read-only; actor tanpa capability delete tidak melihat
    affordance remove sekalipun mempunyai akses baca catalog AHSP.
 
+**Status: [DEV] DITERAPKAN** — 27 Agustus 2026
+
+**Klaimnya benar.** `toggleAHSP()` memang menjalankan
+`items.value.find(item => item.ahsp_id === ahsp.id)` lalu langsung
+`api.delete(...)` — tanpa memilih baris, tanpa konfirmasi, tanpa memberi tahu
+baris mana yang hilang. Dan `isAhspAdded()` memakai `.some()` atas `ahsp_id`,
+jadi visualnya checkbox biner untuk sesuatu yang sama sekali bukan biner.
+
+**Cacatnya sepenuhnya di layar; backend-nya tidak pernah salah.** Backend
+mengidentifikasi item lewat `proposal_items.id` dan sengaja tidak punya unique
+`(proposal_id, ahsp_id)` — satu analisa memang sah dipakai berkali-kali untuk
+lokasi, area, atau work package berbeda. Layar yang menyimpulkan hal yang salah
+dari kontrak yang benar.
+
+Yang membuat kehilangannya senyap: setelah Pedestal P-01 terhapus, Tie Beam
+TB-02 masih memakai `ahsp_id` yang sama — jadi checkbox-nya **tetap terlihat
+tercentang** setelah reload. Tidak ada satu pun tanda ada scope yang hilang,
+selain total yang diam-diam turun.
+
+Yang berubah (`EstimatorProposalEditor.vue`):
+
+1. Katalog hanya **menambah**. `toggleAHSP` diganti `tambahAhsp` yang selalu
+   membuat instance baru pada discipline/sub yang sedang dipilih. Tidak ada
+   penghapusan implisit dari katalog sama sekali.
+2. Checkbox diganti **jumlah pemakaian** (`3×`) plus tombol "+ Tambah". Yang
+   ditampilkan sekarang fakta yang benar — berapa kali analisa itu dipakai —
+   bukan keadaan biner yang tidak pernah ada.
+3. Konfirmasi hapus baris menyebut identitasnya: deskripsi, kode, volume+satuan,
+   dan nilainya. "Hapus baris ini?" tidak membedakan Pedestal dari Tie Beam.
+4. Penambahan yang ditolak menampilkan pesan server apa adanya. `Failed to add
+   item` tidak memberi tahu apakah masalahnya AHSP tidak aktif, sub-discipline
+   nonaktif, atau proposal terkunci — dan ketiganya punya jalan keluar berbeda.
+5. `isAhspAdded()` dihapus karena tidak lagi dipakai.
+
+**Tes: `backend/tests/rab-item-identity.ts` — 28 asersi, masuk `test:all`.**
+Terbukti bisa gagal: **6 dari 28 gagal** di kode lama. Perlu dinyatakan terus
+terang: keenamnya adalah asersi **sumber**, bukan HTTP — dan itu memang
+konsekuensi wajar dari cacat yang seluruhnya ada di layar sementara suite ini
+menembak HTTP. Bagian backend-nya (baris 1–5 tes) lulus di kedua versi, dan itu
+bukan asersi kosong: ia mengunci kontrak yang selama ini disalahbaca layar —
+satu `ahsp_id` menghasilkan tiga baris ber-id, deskripsi, dan qty sendiri;
+menghapus B tidak menyentuh A dan C; `direct_cost` turun **persis** sebesar nilai
+B; dan baris milik proposal lain ditolak 404.
+
+Terhadap acceptance test: (1) beberapa instance dengan deskripsi/qty berbeda
+bertahan setelah reload — terpenuhi; (2) memilih AHSP yang sudah dipakai selalu
+menambah instance baru, tidak pernah DELETE implisit — terpenuhi; (3) delete dari
+row B hanya menghapus B, dengan dialog yang menyebut deskripsi/qty/nilai —
+terpenuhi; (4) total merekonsiliasi tepat ke instance yang berubah, dan kegagalan
+menampilkan pesan server tanpa mengubah baris — terpenuhi; (5) duplikat hasil
+template dapat dihapus per instance tanpa bergantung urutan `find()` — terpenuhi,
+karena `find()` sudah tidak ada lagi di jalur itu; (6) submitted/deal tetap
+read-only — terpenuhi dan diuji (409 untuk tambah maupun hapus). Bagian
+"actor tanpa capability delete tidak melihat affordance" **belum** dikerjakan —
+tombolnya masih digerbangi `isEditable`, bukan permission hapus.
+
+`test:all` 0 gagal.
+
 ---
 
 ## Live Auto Review — 20 Agustus 2026 09:46 WIB
