@@ -2589,7 +2589,7 @@ router.put('/proposals/:proposalId/items/:itemId', authMiddleware, bolehUbah, as
       // EST-MTO-R21: item harus benar-benar milik proposal di URL — tanpa ini
       // cukup menyebut proposal draft lalu menunjuk id milik proposal submitted.
       const item: any = await tx.get(
-        `SELECT id, qty, unit_price_snapshot FROM proposal_items
+        `SELECT id, qty, unit_price_snapshot, mto_link FROM proposal_items
          WHERE id = ? AND proposal_id = ? FOR UPDATE`,
         [itemId, proposalId]
       );
@@ -2597,6 +2597,25 @@ router.put('/proposals/:proposalId/items/:itemId', authMiddleware, bolehUbah, as
         return { error: 404, body: {
           error: 'Item RAB tidak ditemukan pada proposal ini',
           code: 'ITEM_NOT_IN_PROPOSAL',
+        } };
+      }
+
+      // EST-MTO-R39: qty item yang masih tertaut MTO tidak boleh diubah lewat
+      // jalur item generik.
+      //
+      // Kuantitas item tertaut adalah turunan dari baris MTO — bukan isian.
+      // Menerima qty di sini menghasilkan item yang provenance-nya menyatakan
+      // "net 100 dari elemen X" sementara nilainya sesuatu yang lain, dan
+      // kontradiksi itu tidak lagi punya jejak siapa yang membuatnya.
+      //
+      // Ini juga menutup jalur `link → unlink → blur` di layar: input yang
+      // kembali aktif tidak bisa lagi memersistenkan angka gross yang tertinggal
+      // di state sebagai qty manual.
+      if (qtyBaru !== null && item.mto_link) {
+        return { error: 409, body: {
+          error: 'Kuantitas item ini berasal dari tautan MTO. Lepas tautannya dulu '
+            + 'kalau memang mau diisi manual, atau ubah elemen MTO-nya lalu simpan ulang.',
+          code: 'ITEM_TERTAUT_MTO',
         } };
       }
 
@@ -4309,6 +4328,19 @@ router.get('/proposals/:id/mto-quantities', authMiddleware, bolehLihat, async (r
       [req.params.id]
     );
 
+    // EST-MTO-R38/R39: picker harus menawarkan angka yang SAMA dengan yang akan
+    // ditulis saat ditautkan — yaitu baris tersimpan. Menawarkan hasil kalkulator
+    // sementara penautan memakai baris tersimpan berarti estimator memilih satu
+    // angka lalu mendapat angka lain.
+    const semuaBaris: any[] = rows.length
+      ? await dbAll(
+          `SELECT element_id, line_code, label, net_quantity, waste_percent, gross_quantity,
+                  unit, formula_version
+           FROM mto_lines WHERE element_id IN (${rows.map(() => '?').join(',')})`,
+          rows.map(r => r.id))
+      : [];
+    const barisPerElemen = groupStoredLines(semuaBaris);
+
     // Daftar pilihan berasal dari kalkulator, bukan dari peta nama field lama.
     // Peta lama hanya mengenal 13 field generik (`vol_concrete`, `rebar_weight_kg`,
     // dst) sehingga pekerjaan seperti lantai kerja, urugan kembali, atau sengkang
@@ -4317,14 +4349,31 @@ router.get('/proposals/:id/mto-quantities', authMiddleware, bolehLihat, async (r
       const params = typeof row.parameters === 'string' ? JSON.parse(row.parameters || '{}') : (row.parameters || {});
       const mto = calculateMto(row.element_type, params);
 
+      const tersimpan = barisPerElemen.get(Number(row.id)) || [];
+      const drift = adaDrift(tersimpan, mto);
+
+      // Baris tersimpan yang ditawarkan kalau ada; kalkulator hanya untuk elemen
+      // lama yang belum punya proyeksi tersimpan sama sekali.
+      const pilihan = tersimpan.length > 0
+        ? tersimpan.map((l: any) => ({
+            code: l.line_code, label: l.label, unit: l.unit,
+            net_quantity: Number(l.net_quantity),
+            gross_quantity: Number(l.gross_quantity),
+            waste_percent: Number(l.waste_percent),
+          }))
+        : mto.lines;
+
       return {
         element_id: row.id,
         element_type: row.element_type,
         element_name: row.element_name,
         variant: mto.variant,
-        available: mto.lines
-          .filter(l => l.gross_quantity > 0)
-          .map(l => ({
+        // Ditandai supaya layar bisa memberi tahu SEBELUM user menekan pilihan
+        // yang akan ditolak 409 FORMULA_DRIFT.
+        formula_drift: drift,
+        available: pilihan
+          .filter((l: any) => l.gross_quantity > 0)
+          .map((l: any) => ({
             line_code: l.code,
             label: l.label,
             unit: l.unit,
@@ -4531,14 +4580,29 @@ router.put('/proposals/:id/items/:itemId/mto-link', authMiddleware, bolehUbah, a
       );
 
       await recalculateProposal(proposalId as string, tx);
-      return { ok: true as const, mtoLink, line };
+
+      // EST-MTO-R39: baris final ikut dikembalikan supaya layar tidak perlu
+      // menebak. Sebelumnya respons hanya membawa `mto_link`, dan layar
+      // menyimpan payload-nya sendiri — termasuk `value` yang berisi GROSS —
+      // sehingga baris menampilkan angka yang tidak pernah tersimpan.
+      const barisFinal = await tx.get(
+        `SELECT id, qty, total_price, unit_snapshot, unit_price_snapshot, mto_link
+         FROM proposal_items WHERE id = ? AND proposal_id = ?`,
+        [itemId, proposalId]
+      );
+      return { ok: true as const, mtoLink, line, item: barisFinal };
     });
 
     if ('error' in linkOutcome) {
       return res.status(linkOutcome.error).json(linkOutcome.body);
     }
 
-    res.json({ message: 'MTO link saved', mto_link: linkOutcome.mtoLink, line: linkOutcome.line });
+    res.json({
+      message: 'MTO link saved',
+      mto_link: linkOutcome.mtoLink,
+      line: linkOutcome.line,
+      item: linkOutcome.item,
+    });
   } catch (err: any) {
     if (err?.lock) return res.status(err.lock.status).json(err.lock.body);
     res.status(500).json({ error: err.message });
@@ -4558,7 +4622,7 @@ router.delete('/proposals/:id/items/:itemId/mto-link', authMiddleware, bolehHapu
     // Versi sebelumnya membaca, meng-UPDATE, lalu memanggil recalculate sebagai
     // tiga langkah terpisah — kalau yang terakhir gagal, item sudah terlepas
     // sementara header masih memakai angka lama.
-    await withTransaction(async tx => {
+    const barisSetelahLepas = await withTransaction(async tx => {
       const raceLock = await proposalLockTx(req.params.id, tx);
       if (raceLock) throw Object.assign(new Error('PROPOSAL_LOCKED'), { lock: raceLock });
 
@@ -4583,9 +4647,19 @@ router.delete('/proposals/:id/items/:itemId/mto-link', authMiddleware, bolehHapu
         [restoreQty, restoreQty, req.params.itemId, req.params.id]
       );
       await recalculateProposal(req.params.id as string, tx);
+
+      // EST-MTO-R39: baris final ikut dikembalikan. Sebelumnya respons hanya
+      // berisi pesan, sehingga layar hanya menghapus badge tautan dan
+      // meninggalkan qty/total lama di baris — input yang kembali aktif berisi
+      // angka yang bukan lagi isi database.
+      return tx.get(
+        `SELECT id, qty, total_price, unit_snapshot, unit_price_snapshot, mto_link
+         FROM proposal_items WHERE id = ? AND proposal_id = ?`,
+        [req.params.itemId, req.params.id]
+      );
     });
 
-    res.json({ message: 'MTO link removed' });
+    res.json({ message: 'MTO link removed', item: barisSetelahLepas });
   } catch (err: any) {
     // EST-MTO-R34b: transaction di atas melempar error ber-`lock` untuk kondisi
     // yang punya arti HTTP sendiri — proposal terkunci (409) dan item tidak ada

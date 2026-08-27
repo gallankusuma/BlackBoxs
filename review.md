@@ -8813,6 +8813,73 @@ boleh melalui sync/relink transactional.
 6. Regression component/API test mencakup link, reload, unlink, blur, network
    failure, dan net≠gross; frontend build lulus.
 
+**Status: [DEV] DITERAPKAN** — 27 Agustus 2026
+
+**Klaimnya diverifikasi dan benar seluruhnya.** `applyMTOLink` menulis
+`item.mto_link = payload` — payload buatan layar sendiri — lalu `item.qty =
+q.value`, dan `q.value` memang gross (`estimator.routes.ts` mengisi
+`value: l.gross_quantity`). Server menyimpan net. Tidak ada `loadSummary()`.
+`unlinkMTO` hanya menjalankan `item.mto_link = null`. `PUT /items/:itemId`
+membaca `id, qty, unit_price_snapshot` — `mto_link` tidak pernah ikut dibaca,
+jadi qty item tertaut memang bisa diubah. `isCurrentLink` membandingkan
+`link.field` sementara bentuk canonical server `line_code`.
+
+Yang membuat rantai `link → unlink → blur` berbahaya bukan salah satu langkahnya,
+melainkan gabungannya: baris menampilkan gross, unlink membuat input aktif kembali
+tanpa memulihkan angkanya, dan handler blur menembak `PUT` pada **setiap** blur —
+termasuk blur tanpa edit. Nilai penawaran bergeser sebesar waste tanpa satu angka
+pun diketik.
+
+Yang berubah:
+
+**Backend** (`estimator.routes.ts`)
+1. `PUT /items/:itemId` menolak perubahan qty saat `mto_link` masih terpasang —
+   **409 `ITEM_TERTAUT_MTO`**. Kuantitas item tertaut adalah turunan baris MTO,
+   bukan isian. Deskripsi dan AHSP tetap boleh diubah.
+2. `PUT /mto-link` dan `DELETE /mto-link` mengembalikan **baris final**
+   (`qty`, `total_price`, `unit_snapshot`, `mto_link`), diambil di dalam
+   transaction yang sama. Layar tidak perlu menebak apa pun.
+3. `GET /mto-quantities` menawarkan **baris tersimpan** kalau ada, bukan hasil
+   kalkulator, dan membawa `formula_drift`. Menawarkan angka A lalu menulis
+   angka B saat dipilih adalah bentuk cacat yang sama, satu lapis lebih awal.
+
+**Frontend** (`EstimatorProposalEditor.vue`)
+4. `applyMTOLink` menerapkan baris dari respons server (`terapkanBarisServer`),
+   memanggil `loadSummary()`, dan **tidak menyentuh baris lokal saat gagal** —
+   baris harus selalu memperlihatkan isi database, bukan angka yang gagal
+   disimpan.
+5. `unlinkMTO` menerapkan baris final yang dipulihkan server, lalu
+   `loadSummary()`.
+6. Blur tanpa edit tidak mengirim apa pun: `@focus` mengingat nilainya,
+   `simpanQtyKalauBerubah` membandingkannya dulu.
+7. `isCurrentLink` memakai `line_code` dengan fallback `field`.
+8. Picker menampilkan **net** sebagai angka utama; gross tetap terlihat, tapi
+   ditandai sebagai informasi procurement.
+
+**Tes: `backend/tests/mto-link-authority.ts` — 37 asersi, masuk `test:all`.**
+
+**Terbukti bisa gagal:** kedua file dikembalikan ke versi sebelum perbaikan lewat
+`git stash`, dan **16 dari 37 asersi gagal** — yang paling telak
+`qty database TIDAK berubah → dapat 999`: qty sembarang tersimpan pada item yang
+provenance-nya menyatakan berasal dari baris MTO.
+
+Dua koreksi pada tes saya sendiri, dicatat karena mengubah arti buktinya:
+`FND-EXCV` ternyata **tidak** punya waste (net = gross), jadi baris itu tidak
+bisa membuktikan apa pun tentang net vs gross — diganti `FND-CONC` (net 3.6,
+gross 3.78). Dan `unit_price_snapshot` AHSP sudah termasuk overhead & profit,
+jadi harga satuannya dibaca dari baris, bukan diasumsikan.
+
+Terhadap acceptance test: (1) row/database/total/summary basis net tanpa reload
+manual — terpenuhi; (2) respons server selalu menang, kegagalan tidak mengubah
+row — terpenuhi; (3) unlink memulihkan row+total+summary, blur tanpa edit nol
+request — terpenuhi; (4) `PUT /items/:itemId` qty pada item linked ditolak 409 —
+terpenuhi; (5) picker menandai pilihan lewat `element_id + line_code` — terpenuhi;
+(6) cakupan link/reload/unlink/blur/net≠gross + `npm run build` lulus — terpenuhi.
+Bagian "network failure" diuji lewat asersi sumber (jalur catch tidak menyentuh
+baris lokal), bukan dengan mensimulasikan putus jaringan.
+
+`test:all` 0 gagal.
+
 ---
 
 ## Live Auto Review — 20 Agustus 2026 09:59 WIB

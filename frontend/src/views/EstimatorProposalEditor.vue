@@ -314,7 +314,8 @@
                     <span v-if="item.mto_link" class="shrink-0 px-1 py-0.5 text-[9px] bg-green-100 text-green-700 rounded font-bold cursor-pointer" @click="unlinkMTO(item)" title="Linked ke MTO — klik untuk unlink">🔗MTO</span>
                     <input 
                       v-model.number="item.qty" 
-                      @blur="updateItemQty(item)"
+                      @focus="ingatQtySaatFokus(item)"
+                      @blur="simpanQtyKalauBerubah(item)"
                       type="number"
                       step="0.001"
                       min="0"
@@ -878,8 +879,17 @@
               class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border-2 text-sm font-medium transition-all hover:scale-105"
               :class="isCurrentLink(el, q) ? 'border-teal-500 bg-teal-50 text-teal-800' : 'border-gray-200 bg-gray-50 text-gray-700 hover:border-teal-300 hover:bg-teal-50'">
               <span>{{ q.label }}</span>
-              <span class="font-bold text-teal-700">{{ q.value.toLocaleString('id-ID', {maximumFractionDigits: 2}) }}</span>
+              <!-- Yang ditautkan ke RAB adalah NET. `q.value` adalah gross
+                   (kompatibilitas layar lama) dan menampilkannya sebagai angka
+                   utama membuat estimator melihat nilai yang tidak pernah
+                   tersimpan. Gross tetap ditampilkan, tapi sebagai informasi
+                   procurement — bukan sebagai angka penawaran. -->
+              <span class="font-bold text-teal-700">{{ Number(q.net_quantity ?? q.value).toLocaleString('id-ID', {maximumFractionDigits: 2}) }}</span>
               <span class="text-xs text-gray-500">{{ q.unit }}</span>
+              <span v-if="q.gross_quantity != null && Number(q.gross_quantity) !== Number(q.net_quantity ?? q.value)"
+                class="text-[10px] text-gray-400">
+                (gross {{ Number(q.gross_quantity).toLocaleString('id-ID', {maximumFractionDigits: 2}) }})
+              </span>
               <span v-if="isCurrentLink(el, q)" class="text-teal-500">✓</span>
             </button>
           </div>
@@ -1468,9 +1478,35 @@ const openMTOPicker = async (item: any) => {
   }
 };
 
+// Bentuk canonical server adalah `line_code`; `field` hanya sisa kompatibilitas.
+// Membandingkan `field` saja membuat pilihan aktif tidak pernah tertandai
+// setelah reload, karena baris yang datang dari database memakai `line_code`.
 const isCurrentLink = (el: any, q: any) => {
-  const link = mtoPickerItem.value?.mto_link;
-  return link && link.element_id === el.element_id && link.field === q.field;
+  const link: any = mtoPickerItem.value?.mto_link;
+  if (!link || Number(link.element_id) !== Number(el.element_id)) return false;
+  const kodeTautan = link.line_code ?? link.field;
+  const kodeOpsi = q.line_code ?? q.field;
+  return String(kodeTautan) === String(kodeOpsi);
+};
+
+/**
+ * Terapkan baris final dari server ke item di layar.
+ *
+ * EST-MTO-R39: sebelumnya layar menyimpan payload-nya SENDIRI ke state — termasuk
+ * `value` yang berisi gross — lalu menghitung total dari angka itu. Server
+ * menyimpan net. Hasilnya tiga keadaan berbeda pada satu layar: baris lokal
+ * gross, database net, dan kartu ringkasan angka sebelum penautan. Estimator
+ * menyetujui angka yang tidak pernah ada di database.
+ */
+const terapkanBarisServer = (item: any, baris: any) => {
+  if (!item || !baris) return false;
+  item.qty = Number(baris.qty);
+  item.total_price = Number(baris.total_price);
+  item.mto_link = typeof baris.mto_link === 'string'
+    ? JSON.parse(baris.mto_link || 'null')
+    : (baris.mto_link ?? null);
+  if (baris.unit_snapshot !== undefined) item.unit_snapshot = baris.unit_snapshot;
+  return true;
 };
 
 const applyMTOLink = async (el: any, q: any) => {
@@ -1485,14 +1521,22 @@ const applyMTOLink = async (el: any, q: any) => {
       value: q.value,
       unit: q.unit
     };
-    await api.put(`/estimator/proposals/${proposalId}/items/${item.id}/mto-link`, payload);
-    // Update item locally
-    item.mto_link = payload;
-    item.qty = q.value;
-    item.total_price = item.qty * (item.unit_price_snapshot || 0);
+    const { data } = await api.put(
+      `/estimator/proposals/${proposalId}/items/${item.id}/mto-link`, payload);
+
+    // Yang berlaku adalah baris yang dikembalikan server, bukan payload yang
+    // dikirim layar. Kalau server (versi lama) tidak mengirimkannya, muat ulang
+    // — jangan menebak.
+    if (!terapkanBarisServer(item, data?.item)) await loadItems();
+    // Kartu ringkasan ikut berubah saat qty berubah; tanpa ini layar
+    // menampilkan total lama di sebelah baris yang sudah baru.
+    await loadSummary();
     showMTOPicker.value = false;
-  } catch (e) {
-    alert('Gagal menyimpan link MTO');
+  } catch (e: any) {
+    // Kegagalan TIDAK boleh menyentuh baris lokal — baris harus tetap
+    // memperlihatkan isi database, bukan angka yang gagal disimpan.
+    const d = e?.response?.data;
+    alert(d?.error || 'Gagal menyimpan link MTO');
     console.error(e);
   }
 };
@@ -1500,10 +1544,20 @@ const applyMTOLink = async (el: any, q: any) => {
 const unlinkMTO = async (item: any) => {
   if (!item) return;
   try {
-    await api.delete(`/estimator/proposals/${proposalId}/items/${item.id}/mto-link`);
-    item.mto_link = null;
-  } catch (e) {
+    const { data } = await api.delete(
+      `/estimator/proposals/${proposalId}/items/${item.id}/mto-link`);
+    // Server memulihkan qty manual sebelum penautan (`previous_qty`). Tanpa
+    // menerapkannya, baris tetap memperlihatkan angka hasil MTO sementara
+    // input-nya kembali aktif — dan blur berikutnya memersistenkan angka itu
+    // seolah isian manual user.
+    if (!terapkanBarisServer(item, data?.item)) await loadItems();
+    await loadSummary();
+  } catch (e: any) {
+    const d = e?.response?.data;
+    alert(d?.error || 'Gagal melepas tautan MTO.');
     console.error('Unlink MTO failed', e);
+    await loadItems();
+    await loadSummary();
   }
 };
 
@@ -1899,6 +1953,25 @@ const updateItemDescription = async (item: ProposalItem) => {
   } catch (error) {
     console.error('Failed to update description:', error);
   }
+};
+
+/**
+ * Blur tanpa edit tidak boleh mengirim apa pun.
+ *
+ * EST-MTO-R39: handler blur dulu selalu menembak `PUT /items/:id`. Itu berarti
+ * sekadar meng-klik lalu keluar dari sebuah input menulis ulang qty — dan
+ * setelah unlink, angka yang tertulis ulang adalah angka yang tertinggal di
+ * state, bukan yang dipulihkan server. Satu klik tak sengaja mengubah nilai
+ * penawaran sebesar waste.
+ */
+let qtySaatFokus: number | null = null;
+const ingatQtySaatFokus = (item: ProposalItem) => { qtySaatFokus = Number(item.qty); };
+
+const simpanQtyKalauBerubah = async (item: ProposalItem) => {
+  const sebelum = qtySaatFokus;
+  qtySaatFokus = null;
+  if (sebelum !== null && Number(item.qty) === sebelum) return;
+  await updateItemQty(item);
 };
 
 const updateItemQty = async (item: ProposalItem) => {
