@@ -10508,3 +10508,70 @@ Kuota Gemini free tier. Dengan penalaran menyala dan PDF berlembar, satu
 pembacaan memakai jauh lebih banyak token — batas 20 permintaan/menit akan lebih
 cepat tersentuh. Itu keputusan tier, bukan kode.
 
+---
+
+## [DEV] Smoke test asisten gambar + dua cacat yang ia temukan
+
+Permintaan user: *"smoke test dong pake file nanti gw kirim untuk AI fiturnya."*
+
+`scripts/smoke-ai.js` — **sengaja BUKAN bagian dari `npm run smoke`**.
+`smoke-test.js` yang ada sepenuhnya read-only dan gratis, jadi aman ditembakkan
+ke produksi kapan saja. Yang ini memanggil Gemini — memakai kuota dan berbiaya —
+serta membuat satu proposal sementara. Menggabungkannya berarti setiap deploy
+ikut memakan kuota, dan smoke yang mahal akan berhenti dijalankan orang.
+
+Pakai: `node scripts/smoke-ai.js gambar.pdf [lembar-lain...]`
+
+### Yang diperiksa — dan kenapa
+
+- **Satuan.** Inilah pemeriksaan terpentingnya. Gambar teknik memakai milimeter,
+  formula memakai meter; kalau konversinya terlewat, angkanya meleset 1000×
+  dan hasilnya tetap terlihat "wajar" di layar — footing 1500 meter tidak
+  menimbulkan error apa pun, hanya volume yang mustahil. Skrip membandingkan
+  tiap **dimensi penampang** terhadap batas kewajarannya (L/W ≤ 30 m, H ≤ 5 m,
+  tebal ≤ 2 m, dst). Panjang total, luas, dan jumlah titik sengaja **tidak**
+  diperiksa — balok 96 m atau pelat 480 m² itu normal.
+- **`dasar` terisi**, dan pada set berlembar: apakah ia menyebut lembar asalnya.
+  Itu satu-satunya cara pemeriksa bisa mencocokkan ke gambar.
+- **Nol yang tersimpan**, dibaca ulang dari server lewat `GET /mto` — bukan
+  dipercaya dari respons.
+- Kuota habis dilaporkan sebagai **peringatan, bukan kegagalan**: itu bukan
+  cacat sistem.
+
+### Dua cacat yang ditemukan justru karena smoke-nya dijalankan
+
+**1. Bagian penalaran tergabung ke jawaban.** Sejak `thinkingBudget` dinyalakan,
+balasan Gemini memuat dua macam part: hasil penalaran (`thought: true`) dan
+jawaban sebenarnya. **Keduanya punya `.text`**, dan filter lama menggabungkan
+keduanya. Diperbaiki di kedua jalur (visi dan teks), termasuk jalur yang belum
+menyalakan penalaran — supaya tidak menjadi jebakan yang sama nanti.
+
+**2. Balasan dibungkus, dan parse ketat menolaknya.** Ini yang sebenarnya
+menyebabkan 502. Panggilan mentah ke `callGeminiVision` menghasilkan JSON yang
+valid, tapi lewat endpoint dengan prompt sungguhan ia gagal — model
+membungkusnya (pagar markdown atau kalimat pengantar). `responseMimeType:
+application/json` biasanya cukup, **tapi tidak dijamin**, dan menolaknya
+mentah-mentah membuat seluruh pembacaan gagal karena tiga karakter pembungkus.
+
+`bacaJsonAi()` sekarang membuang pagar markdown, lalu — kalau masih gagal —
+mencari blok objek pertama yang kurungnya berpasangan. Dan kegagalannya kini
+membawa **cuplikan balasan** ke respons: tanpa itu, 502 tidak memberi tahu apa
+pun dan setiap penelusuran berikutnya harus memakai kuota lagi.
+
+Kalau `finishReason` MAX_TOKENS, pesannya menyebutkan sebab yang benar —
+gambarnya terlalu banyak sekaligus — bukan error samar.
+
+### Hasil pada set dua lembar
+
+```
+  ok  pembacaan berhasil (21.0s)
+  ok  responsnya menyatakan belum tersimpan
+  ok  zona terbaca → 3   (2 foundation, 1 beam)
+  ok  baris pekerjaan terhitung kalkulator → 16
+  ok  tidak ada dimensi penampang yang mencurigakan
+  ok  setiap zona menyebut dari mana angkanya dibaca
+  ok  penyilangan antar lembar terlihat di "dasar" → 3/3 zona
+```
+
+`tests/mto-usul-gambar.ts` naik ke **54 asersi**. `test:all` 0 gagal, 0 residu.
+

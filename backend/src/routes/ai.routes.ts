@@ -175,7 +175,12 @@ export async function callGeminiText(prompt: string, apiKey: string): Promise<st
           const parsed = JSON.parse(data);
           if (parsed?.error) return reject(new Error(parsed.error.message || 'Gemini menolak permintaan'));
           const parts = parsed?.candidates?.[0]?.content?.parts || [];
-          const text = parts.filter((p: any) => p.text !== undefined).map((p: any) => p.text).join('');
+          // Bagian penalaran dibuang di sini juga — jalur ini belum
+          // menyalakannya, tapi menyamakan perlakuannya mencegahnya menjadi
+          // jebakan yang sama kalau suatu saat dinyalakan.
+          const text = parts
+            .filter((p: any) => p.text !== undefined && p.thought !== true)
+            .map((p: any) => p.text).join('');
           if (!text) {
             console.error('[Gemini Text] Balasan kosong:', JSON.stringify(parsed).substring(0, 400));
             return reject(new Error('Gemini tidak mengembalikan teks'));
@@ -263,11 +268,31 @@ export async function callGeminiVision(
           if (parsed?.error) {
             return reject(new Error(parsed.error.message || 'Gemini menolak permintaan'));
           }
-          const parts = parsed?.candidates?.[0]?.content?.parts || [];
-          const text = parts.filter((p: any) => p.text !== undefined).map((p: any) => p.text).join('');
+          const kandidat = parsed?.candidates?.[0];
+          const parts = kandidat?.content?.parts || [];
+
+          // Bagian PENALARAN dibuang.
+          //
+          // Sejak `thinkingBudget` dinyalakan, balasan memuat dua macam part:
+          // hasil penalaran (`thought: true`) dan jawaban sebenarnya. Keduanya
+          // sama-sama punya `.text`, jadi filter lama menggabungkan keduanya —
+          // dan teks penalaran yang menempel di depan JSON membuatnya gagal
+          // di-parse. Terlihat langsung saat smoke AI dijalankan: HTTP 502
+          // "jawaban tidak bisa dibaca" pada berkas yang sebelumnya terbaca
+          // baik-baik saja.
+          const text = parts
+            .filter((p: any) => p.text !== undefined && p.thought !== true)
+            .map((p: any) => p.text).join('');
+
           if (!text) {
             console.error('[Gemini Vision] Balasan kosong:', JSON.stringify(parsed).substring(0, 400));
-            return reject(new Error('Gemini tidak mengembalikan jawaban'));
+            const sebab = kandidat?.finishReason;
+            return reject(new Error(
+              sebab === 'MAX_TOKENS'
+                // Penalaran ikut memakan jatah keluaran. Kalau habis di sana,
+                // jawabannya tidak pernah sempat ditulis.
+                ? 'Gemini kehabisan jatah keluaran sebelum menjawab — gambarnya terlalu banyak sekaligus. Coba kirim lebih sedikit lembar.'
+                : `Gemini tidak mengembalikan jawaban${sebab ? ` (${sebab})` : ''}`));
           }
           resolve(text);
         } catch (e) {

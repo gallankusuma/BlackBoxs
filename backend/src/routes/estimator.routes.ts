@@ -2002,6 +2002,53 @@ function galatAi(err: any): { status: number; body: any } {
  * bisa menghasilkan bentuk yang sedikit berbeda dan layar akan menampilkan
  * usulan yang tidak setara dengan yang dari gambar.
  */
+/**
+ * Baca JSON dari balasan AI, tahan terhadap pembungkus.
+ *
+ * `responseMimeType: 'application/json'` biasanya cukup, tapi tidak dijamin:
+ * model kadang membungkusnya dengan pagar markdown, atau menambahkan satu
+ * kalimat pengantar. Menolaknya mentah-mentah membuat seluruh pembacaan gagal
+ * karena tiga karakter pembungkus — dan pesan errornya tidak memberi tahu apa
+ * pun tentang apa yang sebenarnya diterima.
+ *
+ * Kalau tetap gagal, potongan awal balasannya ikut dikembalikan supaya masalah
+ * berikutnya bisa didiagnosis tanpa menebak dan tanpa memakai kuota lagi.
+ */
+// Satu bentuk objek, bukan union: `strictNullChecks` mati di project ini,
+// sehingga penyempitan discriminated union tidak bekerja (lihat `validasiQty`
+// dan `selaraskanKlasifikasi` yang kena hal yang sama).
+interface HasilBacaJson { ok: boolean; data: any; cuplikan: string; panjang: number }
+
+function bacaJsonAi(teks: string): HasilBacaJson {
+  const bersih = String(teks || '').trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/, '');
+
+  try { return { ok: true, data: JSON.parse(bersih), cuplikan: '', panjang: bersih.length }; } catch { /* coba cara kedua */ }
+
+  // Ambil blok objek pertama yang kurungnya berpasangan — menangani kasus
+  // model menambahkan kalimat sebelum atau sesudah JSON-nya.
+  const mulai = bersih.indexOf('{');
+  if (mulai >= 0) {
+    let dalam = 0, diString = false, escape = false;
+    for (let i = mulai; i < bersih.length; i++) {
+      const c = bersih[i];
+      if (escape) { escape = false; continue; }
+      if (c === '\\') { escape = true; continue; }
+      if (c === '"') { diString = !diString; continue; }
+      if (diString) continue;
+      if (c === '{') dalam++;
+      else if (c === '}') {
+        dalam--;
+        if (dalam === 0) {
+          try { return { ok: true, data: JSON.parse(bersih.slice(mulai, i + 1)), cuplikan: '', panjang: bersih.length }; } catch { break; }
+        }
+      }
+    }
+  }
+  return { ok: false, data: null, cuplikan: bersih.slice(0, 300), panjang: bersih.length };
+}
+
 const TIPE_ELEMEN_SAH = new Set(katalogElemen().map(t => t.element_type));
 
 function bentukUsulan(zones: any): any[] {
@@ -2208,14 +2255,17 @@ router.post('/proposals/:id/mto/diskusi', authMiddleware, bolehUbah, async (req:
 
     const jawaban = await callGeminiText(promptDiskusi(zonaMasuk, pesan, riwayat), kunci);
 
-    let hasil: any;
-    try { hasil = JSON.parse(jawaban); }
-    catch {
+    const dibacaDiskusi = bacaJsonAi(jawaban);
+    if (!dibacaDiskusi.ok) {
+      console.error('[diskusi] JSON tidak terbaca:', dibacaDiskusi.cuplikan);
       return res.status(502).json({
         error: 'Asisten mengembalikan jawaban yang tidak bisa dibaca.',
         code: 'AI_JAWABAN_TIDAK_TERBACA',
+        panjang_balasan: dibacaDiskusi.panjang,
+        cuplikan: dibacaDiskusi.cuplikan,
       });
     }
+    const hasil: any = dibacaDiskusi.data;
 
     const usulan = bentukUsulan(hasil?.zones);
     res.json({
@@ -2262,15 +2312,19 @@ router.post('/proposals/:id/mto/usul-dari-gambar', authMiddleware, bolehUbah,
       kunci
     );
 
-    let hasil: any;
-    try {
-      hasil = JSON.parse(jawaban);
-    } catch {
+    const dibaca = bacaJsonAi(jawaban);
+    if (!dibaca.ok) {
+      console.error('[usul-dari-gambar] JSON tidak terbaca:', dibaca.cuplikan);
       return res.status(502).json({
         error: 'Pembaca gambar mengembalikan jawaban yang tidak bisa dibaca.',
         code: 'AI_JAWABAN_TIDAK_TERBACA',
+        // Diagnosa ikut dikirim: tanpa ini, 502 tidak memberi tahu apa pun dan
+        // setiap penelusuran berikutnya harus memakai kuota lagi.
+        panjang_balasan: dibaca.panjang,
+        cuplikan: dibaca.cuplikan,
       });
     }
+    const hasil: any = dibaca.data;
 
     // Tiap usulan dihitung lewat kalkulator yang SAMA dengan input manual, jadi
     // pratinjaunya benar-benar angka yang akan tersimpan kalau disetujui.

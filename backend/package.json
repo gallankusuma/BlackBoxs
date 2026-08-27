@@ -49,7 +49,8 @@
     "test:diskusi": "tsx tests/mto-diskusi.ts",
     "test:office": "tsx tests/webauthn-office.ts",
     "test:kontrak": "tsx tests/contract-ledger.ts",
-    "test:revisi": "tsx tests/proposal-revisi.ts"
+    "test:revisi": "tsx tests/proposal-revisi.ts",
+    "smoke:ai": "node ../scripts/smoke-ai.js"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

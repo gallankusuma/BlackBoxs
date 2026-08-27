@@ -239,6 +239,21 @@ async function main() {
     chk('keluarannya diberi ruang cukup supaya tidak terpotong',
       /maxOutputTokens:\s*(1638[4-9]|[2-9]\d{4,})/.test(blokVisi), true);
 
+    console.log('\n5c-2. Balasan AI dibaca tahan pembungkus');
+    // Terlihat saat smoke AI pertama dijalankan: HTTP 502 "tidak bisa dibaca"
+    // pada berkas yang panggilan mentahnya justru menghasilkan JSON valid.
+    // Sebabnya model membungkus jawabannya — `responseMimeType: application/json`
+    // biasanya cukup, tapi tidak dijamin. Menolaknya mentah-mentah membuat
+    // seluruh pembacaan gagal karena tiga karakter pembungkus.
+    chk('ada pembaca JSON yang toleran', rute.includes('function bacaJsonAi'), true);
+    chk('pagar markdown dibuang', rute.includes('```'), true);
+    chk('dan blok objek dicari kalau ada teks pengantar',
+      rute.includes("bersih.indexOf('{')"), true);
+    chk('kegagalan membawa cuplikan untuk didiagnosis',
+      rute.includes('cuplikan: dibaca.cuplikan'), true);
+    chk('bagian penalaran dibuang dari jawaban',
+      ai.includes('p.thought !== true'), true);
+
     console.log('\n5d. Field OPSIONAL ikut dikenalkan — bukan hanya yang wajib');
     // Terlihat saat menguji dengan gambar dua lembar: tabel schedule jelas
     // mencantumkan KEDALAMAN 1800 mm, tapi `depth` tidak pernah dikembalikan
