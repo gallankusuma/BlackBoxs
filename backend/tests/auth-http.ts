@@ -70,6 +70,7 @@ async function seedCredential(employeeId: number): Promise<number | null> {
        VALUES (?, ?, ?, 0, 'UJI-OTOMATIS', -6.0280380, 106.0674439, 100, 'Uji')`,
       [employeeId, `uji-${Date.now()}`, 'uji']
     );
+    if (r?.insertId) disemai.credential.push(r.insertId);
     return r?.insertId || null;
   } catch { return null; }
 }
@@ -78,6 +79,17 @@ async function credentialRow(id: number): Promise<any> {
   const { dbGet } = await import('../src/config/database');
   return dbGet('SELECT registered_lat, registered_lng, registered_radius FROM employee_webauthn_credentials WHERE id = ?', [id]);
 }
+
+/**
+ * Fixture yang DIBUAT tes ini — bukan yang sudah ada sebelumnya.
+ *
+ * Dipisahkan tegas: kantor yang memang sudah ada di database tidak boleh ikut
+ * terhapus, dan itu sebabnya `firstActiveOffice()` hanya mencatat baris yang
+ * benar-benar ia sisipkan sendiri.
+ */
+const disemai: { office: number[]; user: number[]; credential: number[] } = {
+  office: [], user: [], credential: [],
+};
 
 async function firstActiveOffice(): Promise<any> {
   const { dbGet, dbRun } = await import('../src/config/database');
@@ -89,7 +101,47 @@ async function firstActiveOffice(): Promise<any> {
     `INSERT INTO office_locations (name, latitude, longitude, radius_m, is_active)
      VALUES ('Kantor Uji Otomatis', -6.0280380, 106.0674439, 100, 1)`
   );
+  // Dicatat supaya benar-benar dihapus di `finally`. Versi lama menyemainya
+  // lalu meninggalkannya: master lokasi dev bertambah satu baris palsu setiap
+  // kali suite dijalankan pada database yang belum punya kantor, dan baris itu
+  // TERLIHAT pengguna di layar pemilihan lokasi.
+  disemai.office.push(r?.insertId);
   return { id: r?.insertId, name: 'Kantor Uji Otomatis', _seeded: true };
+}
+
+/** Akun nonaktif terkontrol — dibuat langsung di database, dihapus di `finally`. */
+async function semaiUserNonaktif(email: string, sandi: string): Promise<number | null> {
+  try {
+    const { dbRun } = await import('../src/config/database');
+    const bcrypt = (await import('bcrypt')).default;
+    const hash = await bcrypt.hash(sandi, 10);
+    const r: any = await dbRun(
+      `INSERT INTO users (username, email, password, full_name, user_level, is_active)
+       VALUES (?, ?, ?, 'Akun Nonaktif Uji', 1, 0)`,
+      [email.split('@')[0], email, hash]
+    );
+    if (r?.insertId) disemai.user.push(r.insertId);
+    return r?.insertId || null;
+  } catch (e: any) {
+    console.log('  ––   gagal menyemai akun nonaktif:', e.message?.slice(0, 90));
+    return null;
+  }
+}
+
+/** Hapus SELURUH fixture yang tes ini buat. Dipanggil di `finally`. */
+async function bersihkanSemaian(): Promise<number> {
+  const { dbRun } = await import('../src/config/database');
+  let gagal = 0;
+  for (const id of disemai.credential) {
+    try { await dbRun('DELETE FROM employee_webauthn_credentials WHERE id = ?', [id]); } catch { gagal++; }
+  }
+  for (const id of disemai.user) {
+    try { await dbRun('DELETE FROM users WHERE id = ?', [id]); } catch { gagal++; }
+  }
+  for (const id of disemai.office) {
+    try { await dbRun('DELETE FROM office_locations WHERE id = ?', [id]); } catch { gagal++; }
+  }
+  return gagal;
 }
 
 async function cleanupCredential(id: number): Promise<void> {
@@ -98,6 +150,37 @@ async function cleanupCredential(id: number): Promise<void> {
 }
 
 async function main() {
+  // Snapshot jumlah baris SEBELUM apa pun disemai.
+  //
+  // Diminta reviewer, dan alasannya kuat: cleanup yang "kelihatan jalan" tetap
+  // bisa meninggalkan baris kalau ada jalur yang terlewat. Membandingkan
+  // jumlahnya membuktikan, bukan mengasumsikan.
+  const { dbGet } = await import('../src/config/database');
+  const hitung = async () => ({
+    user: Number(((await dbGet('SELECT COUNT(*) n FROM users')) as any)?.n),
+    office: Number(((await dbGet('SELECT COUNT(*) n FROM office_locations')) as any)?.n),
+    credential: Number(((await dbGet('SELECT COUNT(*) n FROM employee_webauthn_credentials')) as any)?.n),
+  });
+  const sebelum = await hitung();
+
+  try {
+    await jalankan();
+  } finally {
+    // `finally`: kegagalan asersi memanggil `process.exit` di akhir `jalankan`,
+    // tapi exception di tengah jalan TIDAK boleh meninggalkan fixture.
+    const gagalBersih = await bersihkanSemaian();
+    chk('seluruh fixture yang disemai terhapus', gagalBersih, 0);
+    const sesudah = await hitung();
+    chk('jumlah users kembali seperti semula', sesudah.user, sebelum.user);
+    chk('jumlah office_locations kembali seperti semula', sesudah.office, sebelum.office);
+    chk('jumlah kredensial kembali seperti semula', sesudah.credential, sebelum.credential);
+  }
+
+  console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
+  process.exit(fail ? 1 : 0);
+}
+
+async function jalankan() {
   console.log('0. Persiapan');
   const adm = await call('POST', '/auth/login', { email: ADMIN_EMAIL, password: ADMIN_PASS });
   const adminToken: string = adm.json?.token;
@@ -303,6 +386,31 @@ async function main() {
   chk('keduanya tidak bisa dibedakan', tidakAda.status === adaTapiSalah.status, true);
   chk('pesannya pun sama', tidakAda.json?.error === adaTapiSalah.json?.error, true);
 
+  // Kasus yang SEBENARNYA dijaga — dan yang versi lama tes ini lewatkan.
+  //
+  // Membandingkan email tak dikenal dengan akun AKTIF berpassword salah tidak
+  // membuktikan apa pun: implementasi yang kembali memeriksa `is_active` sebelum
+  // password akan tetap menjawab 401 untuk keduanya, dan tesnya tetap hijau
+  // sementara oracle-nya terbuka lagi. Yang membedakan hanya akun NONAKTIF.
+  const emailMati = `nonaktif-${Date.now()}@uji.local`;
+  const sandiMati = 'RahasiaUji#2026';
+  const idMati = await semaiUserNonaktif(emailMati, sandiMati);
+  if (!idMati) {
+    chk('akun nonaktif terkontrol tersemai', false, true);
+  } else {
+    const matiSalah = await call('POST', '/auth/login', { email: emailMati, password: 'pasti-salah-sekali' });
+    chk('akun NONAKTIF + password salah → sama dengan email tak dikenal',
+      matiSalah.status, tidakAda.status);
+    chk('dan pesannya pun sama, bukan bocor lewat teks',
+      matiSalah.json?.error === tidakAda.json?.error, true);
+
+    // Password BENAR baru boleh membedakannya — di titik itu penyerang sudah
+    // memegang kredensialnya, jadi tidak ada lagi yang bocor.
+    const matiBenar = await call('POST', '/auth/login', { email: emailMati, password: sandiMati });
+    chk('akun NONAKTIF + password benar → 403, bukan 401', matiBenar.status, 403);
+    chk('dan tidak menerbitkan token', !matiBenar.json?.token, true);
+  }
+
   console.log('\n11. Registrasi publik & JWT di query string');
   chk('register tanpa token', await status('POST', '/auth/register', { email: 'x@y.com', password: 'secret123', name: 'X' }), 401);
   // AST-007: JWT tidak lagi diterima dari URL di endpoint mana pun, termasuk
@@ -311,9 +419,6 @@ async function main() {
   chk('?token= ditolak di route unduhan', (await fetch(`${API}/projects/files/999999/download?token=${adminToken}`)).status, 401);
   chk('?token= ditolak di unduhan dokumen aset', (await fetch(`${API}/assets/documents/1/download?token=${adminToken}`)).status, 401);
   chk('unduhan dengan header tetap jalan', (await call('GET', '/projects/files/999999/download', undefined, adminToken)).status, 404);
-
-  console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
-  process.exit(fail ? 1 : 0);
 }
 
 main().catch(err => { console.error('Tes gagal dijalankan:', err.message); process.exit(1); });

@@ -733,6 +733,27 @@ const ensureAssetManagementSchema = async (connection: any) => {
 // Di database kosong, inbox_notifications gagal karena foreign key-nya menunjuk
 // `users` yang belum ada, dan rejection-nya mematikan proses. Dipindah ke sini
 // supaya urutannya dijamin dan konsisten dengan konvensi ensure*Schema.
+/**
+ * DR-P0-06b: office kerja diikat ke CHALLENGE registrasi, bukan dikirim ulang
+ * di body saat verify.
+ *
+ * Urutan sebenarnya di browser adalah
+ * `register/options → navigator.credentials.create() → register/verify`.
+ * Jadi memeriksa office di handler verify — sekalipun sebelum
+ * `verifyRegistrationResponse()` — tetap TERLAMBAT: passkey sudah dibuat
+ * authenticator sebelum permintaan verify dikirim. Karyawan yang memilih lokasi
+ * nonaktif menyelesaikan prompt sidik jari, lalu ditolak 400; authenticator
+ * menyimpan credential sementara server tidak, dan percobaan ulang membingungkan
+ * OS-nya.
+ *
+ * Dengan kolom ini, office divalidasi di `register/options` — sebelum browser
+ * pernah memanggil authenticator — lalu ikatannya diperiksa ulang saat verify.
+ */
+const ensureWebauthnChallengeOffice = async (connection: any) => {
+  await execSchemaEnsure(connection,
+    'ALTER TABLE webauthn_challenges ADD COLUMN IF NOT EXISTS office_location_id INT NULL');
+};
+
 const ensureRouteModuleSchema = async (connection: any) => {
   const statements = [
     `CREATE TABLE IF NOT EXISTS inbox_notifications (
@@ -2021,6 +2042,7 @@ export async function initializeDatabase() {
     await ensureApprovalPermissions(connection);
     await ensureAssetManagementSchema(connection);
     await ensureRouteModuleSchema(connection);
+    await ensureWebauthnChallengeOffice(connection);
     await ensureMobilePinSchema(connection);
     await ensureAssetDepreciationSchema(connection);
     await ensureDepreciationLedgerSchema(connection);

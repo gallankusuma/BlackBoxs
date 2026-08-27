@@ -1773,6 +1773,50 @@ terikat ke challenge milik employee; deaktivasi di antara options dan verify
 fail-closed dengan pesan re-enroll yang eksplisit; happy path active office tetap
 menyimpan satu credential.
 
+
+**Status: [DEV] DITERAPKAN** — 27 Agustus 2026
+
+**Klaimnya benar seluruhnya, termasuk bagian yang paling halus.** `GET /offices`
+memang `SELECT ... FROM office_locations` tanpa satu pun filter status, dan
+`MobileSettings.vue` menyalin responsnya apa adanya
+(`offices.value = res.data?.data || res.data || []`). Onboarding memang sudah
+menyaring — jadi hanya Settings yang bocor, persis seperti yang ditulis.
+
+Dan pengamatan intinya tepat: memindahkan `resolveOfficeLocation()` ke sebelum
+`verifyRegistrationResponse()` **bukan** validasi sebelum pembuatan credential.
+Urutan sebenarnya di browser adalah
+`register/options → navigator.credentials.create() → register/verify`, jadi
+passkey sudah ada di perangkat sebelum permintaan verify dikirim. Komentar di
+kode lama bahkan menyatakan sebaliknya — dan itu keliru.
+
+Yang berubah, mengikuti rekomendasi:
+
+1. **`office_location_id` dikirim pada `register/options`** dan divalidasi
+   **di sana** — sebelum browser pernah memanggil authenticator. Ditolak
+   **400 `OFFICE_LOCATION_REQUIRED`**, dan **challenge tidak dibuat sama sekali**
+   (diuji).
+2. **Office diikat ke challenge** lewat kolom baru
+   `webauthn_challenges.office_location_id` (`ensureWebauthnChallengeOffice`).
+3. **`register/verify` memakai ikatan itu, bukan body.** `office_location_id`
+   tidak lagi didestruktur dari `req.body` sama sekali — menerimanya berarti
+   pemeriksaan di options bisa dilewati hanya dengan mengganti body pada
+   permintaan kedua.
+4. **Deaktivasi di antara options dan verify fail-closed**:
+   **409 `OFFICE_LOCATION_NONAKTIF`** dengan pesan yang menyuruh mendaftar ulang
+   — pada titik itu passkey sudah ada di perangkat, jadi pesannya harus
+   memberi tahu apa yang harus dilakukan, bukan sekadar menolak.
+5. **`GET /offices` menyaring untuk token mobile**; admin desktop tetap melihat
+   semuanya, karena di sanalah kantor dikelola.
+6. Settings ikut menyaring di sisi klien — daftar bisa dimuat sebelum admin
+   menonaktifkan sebuah kantor.
+
+**Tes: `backend/tests/webauthn-office.ts` — 27 asersi, masuk `test:all`.**
+Terbukti bisa gagal: **15 dari 27** gagal di kode lama, termasuk
+`kantor NONAKTIF tidak ditawarkan → dapat true` dan
+`ditolak 400 → dapat 200` (options menerima kantor nonaktif **dan membuat
+challenge**). Seluruh acceptance yang diminta terpenuhi, termasuk happy path
+kantor aktif dan nol kredensial yatim setelah penolakan.
+
 ### [P2 / TEST-INTEGRITY] Test baru belum melindungi kasus oracle dan meninggalkan master office fixture
 
 **Bukti 1 — blind spot:** regression test login membandingkan email tidak ada
@@ -1800,6 +1844,39 @@ saat satu call sengaja dibuat throw; jangan pernah menghapus office yang sudah
 ada sebelum test.
 
 ---
+
+
+**Status: [DEV] DITERAPKAN** — 27 Agustus 2026
+
+**Kedua bukti benar, dan yang pertama adalah kritik yang tepat sasaran terhadap
+tes saya sendiri.** Regression test membandingkan email tak dikenal dengan
+**ADMIN_EMAIL** — akun aktif. Implementasi yang kembali memeriksa `is_active`
+sebelum password akan tetap menjawab 401 untuk keduanya, dan tesnya tetap hijau
+sementara oracle-nya terbuka lagi. Tes yang tidak bisa gagal untuk cacat yang ia
+klaim jaga lebih buruk daripada tidak ada tes, karena ia memberi keyakinan.
+
+Yang berubah (`backend/tests/auth-http.ts`):
+
+1. **Akun NONAKTIF terkontrol disemai** lalu diuji: password salah harus
+   menghasilkan status **dan body** yang sama persis dengan email tak dikenal.
+   Password **benar** baru boleh 403 — di titik itu penyerang sudah memegang
+   kredensialnya, jadi tidak ada lagi yang bocor.
+2. **Setiap fixture dicatat dan dihapus di `finally`** — kredensial, akun, dan
+   `Kantor Uji Otomatis`. Yang terakhir dulu disemai lalu ditinggalkan, dan
+   baris itu **terlihat pengguna** di layar pemilihan lokasi. Hanya baris yang
+   tes ini benar-benar sisipkan yang dihapus; kantor yang sudah ada tidak
+   disentuh.
+3. **Snapshot jumlah baris sebelum/sesudah** untuk `users`, `office_locations`,
+   dan `employee_webauthn_credentials`, diasersi sama. Cleanup yang "kelihatan
+   jalan" tetap bisa meninggalkan baris lewat jalur yang terlewat —
+   membandingkan jumlahnya membuktikan, bukan mengasumsikan.
+
+**Terbukti menangkap cacatnya:** urutan pemeriksaan di `auth.routes.ts` sengaja
+dibalik (is_active sebelum password), dan tes **gagal** dengan
+`akun NONAKTIF + password salah → dapat 403, harusnya 401`. Versi lama tes ini
+tetap hijau pada regresi yang sama.
+
+`test:all` 0 gagal, 0 residu.
 
 ## [DEV] Tanggapan atas Live Auto Review 16 Agustus 2026 — 14:48 & 14:56 WIB
 

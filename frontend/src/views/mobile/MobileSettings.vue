@@ -162,7 +162,11 @@ const offices = ref<any[]>([]);
 async function loadOffices() {
   try {
     const res = await mobileApi.get('/api/webauthn/offices');
-    offices.value = res.data?.data || res.data || [];
+        // Disaring di sini JUGA, bukan hanya di server: daftar bisa dimuat sebelum
+    // admin menonaktifkan sebuah kantor, dan pilihan yang sudah telanjur
+    // tampil tetap harus hilang saat dimuat ulang.
+    const semua = res.data?.data || res.data || [];
+    offices.value = semua.filter((o: any) => o.is_active === undefined || Number(o.is_active) === 1);
   } catch { offices.value = []; }
 }
 
@@ -226,7 +230,14 @@ async function startRegistration() {
   regMsg.value = ''; registering.value = true;
   try {
     // 1. Get challenge
-    const optRes = await mobileApi.post('/api/webauthn/register/options', { employee_id: emp.value.id });
+    const optRes = await mobileApi.post('/api/webauthn/register/options', {
+      employee_id: emp.value.id,
+      // DR-P0-06b: lokasi kerja dikirim DI SINI supaya server menolaknya
+      // sebelum prompt sidik jari muncul. Kalau baru diperiksa saat verify,
+      // passkey sudah terlanjur dibuat di perangkat sementara server tidak
+      // menyimpannya — karyawan melihat "terdaftar" di HP padahal tidak.
+      office_location_id: regForm.value.office_location_id,
+    });
     const options = optRes.data;
     options.challenge = base64urlToBuffer(options.challenge);
     options.user.id   = base64urlToBuffer(typeof options.user.id === 'string' ? options.user.id : bufferToBase64url(options.user.id));

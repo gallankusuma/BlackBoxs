@@ -219,7 +219,14 @@ async function doRegister() {
   regError.value = ''; registering.value = true;
   try {
     // 1. Get challenge
-    const optRes = await mobileApi.post('/api/webauthn/register/options', { employee_id: emp.value.id });
+    const optRes = await mobileApi.post('/api/webauthn/register/options', {
+      employee_id: emp.value.id,
+      // DR-P0-06b: lokasi kerja dikirim DI SINI supaya server menolaknya
+      // sebelum prompt sidik jari muncul. Kalau baru diperiksa saat verify,
+      // passkey sudah terlanjur dibuat di perangkat sementara server tidak
+      // menyimpannya — karyawan melihat "terdaftar" di HP padahal tidak.
+      office_location_id: gpsForm.value.selected_location_id,
+    });
     const options = optRes.data;
     options.challenge = base64urlToBuffer(options.challenge);
     options.user.id   = base64urlToBuffer(typeof options.user.id === 'string'

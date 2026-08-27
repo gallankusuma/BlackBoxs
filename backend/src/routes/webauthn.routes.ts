@@ -38,52 +38,6 @@ function validateGPSAgainstCredential(
 // ─── REGISTRATION ─────────────────────────────────────────────────────────────
 
 // POST /webauthn/register/options
-router.post('/register/options', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Response) => {
-  try {
-    const employee_id = req.employeeId; // dari token — hanya boleh mendaftar untuk diri sendiri
-    const emp: any = await dbGet(
-      'SELECT id, code, name FROM employees WHERE id = ? AND status = ?',
-      [employee_id, 'ACTIVE']
-    );
-    if (!emp) return res.status(404).json({ error: 'Karyawan tidak ditemukan' });
-
-    const existingCreds = await dbAll(
-      'SELECT credential_id FROM employee_webauthn_credentials WHERE employee_id = ?',
-      [employee_id]
-    ) as any[];
-
-    const options = await generateRegistrationOptions({
-      rpName: RP_NAME,
-      rpID: RP_ID,
-      userID: Buffer.from(String(emp.id)),
-      userName: emp.code,
-      userDisplayName: emp.name,
-      attestationType: 'none',
-      excludeCredentials: existingCreds.map(c => ({
-        id: c.credential_id as string,
-        type: 'public-key' as const,
-      })),
-      authenticatorSelection: {
-        authenticatorAttachment: 'platform',
-        userVerification: 'required',
-        residentKey: 'preferred',
-      },
-    });
-
-    // Store challenge (5 min TTL)
-    await dbRun('DELETE FROM webauthn_challenges WHERE employee_id = ? AND type = ?', [employee_id, 'registration']);
-    await dbRun(
-      'INSERT INTO webauthn_challenges (employee_id, challenge, type, expires_at) VALUES (?, ?, ?, DATE_ADD(NOW(), INTERVAL 5 MINUTE))',
-      [employee_id, options.challenge, 'registration']
-    );
-
-    res.json(options);
-  } catch (error: any) {
-    console.error('register/options error:', error);
-    res.status(500).json({ error: 'Gagal: ' + error.message });
-  }
-});
-
 /**
  * Lokasi kerja yang sah untuk sebuah kredensial (DR-P0-06).
  *
@@ -112,10 +66,78 @@ const resolveOfficeLocation = async (officeLocationId: any) => {
   };
 };
 
+router.post('/register/options', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Response) => {
+  try {
+    const employee_id = req.employeeId; // dari token — hanya boleh mendaftar untuk diri sendiri
+    const emp: any = await dbGet(
+      'SELECT id, code, name FROM employees WHERE id = ? AND status = ?',
+      [employee_id, 'ACTIVE']
+    );
+    if (!emp) return res.status(404).json({ error: 'Karyawan tidak ditemukan' });
+
+    // DR-P0-06b: lokasi kerja divalidasi DI SINI — sebelum browser pernah
+    // memanggil authenticator.
+    //
+    // Urutan sebenarnya adalah
+    // `register/options → navigator.credentials.create() → register/verify`.
+    // Memeriksanya di handler verify, sekalipun sebelum
+    // `verifyRegistrationResponse()`, tetap terlambat: passkey sudah dibuat di
+    // perangkat sebelum permintaan verify dikirim. Karyawan yang memilih lokasi
+    // nonaktif menyelesaikan prompt sidik jari lalu ditolak — authenticator
+    // menyimpan credential, server tidak, dan percobaan ulang membingungkan OS.
+    const office = await resolveOfficeLocation(req.body?.office_location_id);
+    if (!office) {
+      return res.status(400).json({
+        error: 'Pilih lokasi kerja yang terdaftar dan masih aktif terlebih dahulu.',
+        code: 'OFFICE_LOCATION_REQUIRED',
+      });
+    }
+
+    const existingCreds = await dbAll(
+      'SELECT credential_id FROM employee_webauthn_credentials WHERE employee_id = ?',
+      [employee_id]
+    ) as any[];
+
+    const options = await generateRegistrationOptions({
+      rpName: RP_NAME,
+      rpID: RP_ID,
+      userID: Buffer.from(String(emp.id)),
+      userName: emp.code,
+      userDisplayName: emp.name,
+      attestationType: 'none',
+      excludeCredentials: existingCreds.map(c => ({
+        id: c.credential_id as string,
+        type: 'public-key' as const,
+      })),
+      authenticatorSelection: {
+        authenticatorAttachment: 'platform',
+        userVerification: 'required',
+        residentKey: 'preferred',
+      },
+    });
+
+    // Store challenge (5 min TTL)
+    await dbRun('DELETE FROM webauthn_challenges WHERE employee_id = ? AND type = ?', [employee_id, 'registration']);
+    // Office diikat ke challenge. Verify memakai ikatan ini, BUKAN nilai yang
+    // dikirim ulang klien — kalau tidak, pemeriksaan di atas bisa dilewati
+    // hanya dengan mengganti body pada permintaan kedua.
+    await dbRun(
+      `INSERT INTO webauthn_challenges (employee_id, challenge, type, office_location_id, expires_at)
+       VALUES (?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL 5 MINUTE))`,
+      [employee_id, options.challenge, 'registration', office.id]
+    );
+
+    res.json(options);
+  } catch (error: any) {
+    console.error('register/options error:', error);
+    res.status(500).json({ error: 'Gagal: ' + error.message });
+  }
+});
+
 // POST /webauthn/register/verify — save credential + GPS location
 router.post('/register/verify', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Response) => {
   try {
-    const { registration_response, device_name, office_location_id } = req.body;
+    const { registration_response, device_name } = req.body;
     const employee_id = req.employeeId; // dari token
 
     const challengeRow: any = await dbGet(
@@ -124,18 +146,20 @@ router.post('/register/verify', mobileAuthMiddleware, async (req: MobileAuthRequ
     );
     if (!challengeRow) return res.status(400).json({ error: 'Challenge expired, coba daftarkan ulang' });
 
-    // Lokasi kerja diambil dari daftar kantor yang dikelola admin, bukan dari
-    // koordinat yang dikirim karyawan.
+    // Office diambil dari IKATAN CHALLENGE, bukan dari body.
     //
-    // Diperiksa SEBELUM verifikasi biometrik: kalau ditolak sesudahnya,
-    // authenticator sudah terlanjur membuat credential di perangkat sementara
-    // server tidak menyimpannya — karyawan melihat "sidik jari terdaftar" di HP
-    // padahal tidak.
-    const office = await resolveOfficeLocation(office_location_id);
+    // Nilai di body diabaikan sepenuhnya: menerimanya berarti pemeriksaan di
+    // `register/options` bisa dilewati hanya dengan mengganti body pada
+    // permintaan kedua.
+    const office = await resolveOfficeLocation(challengeRow.office_location_id);
     if (!office) {
-      return res.status(400).json({
-        error: 'Pilih lokasi kerja yang terdaftar terlebih dahulu.',
-        code: 'OFFICE_LOCATION_REQUIRED',
+      // Fail-closed: kantornya dinonaktifkan di antara options dan verify.
+      // Pesannya menyebut apa yang harus dilakukan, bukan sekadar menolak —
+      // pada titik ini passkey sudah ada di perangkat karyawan.
+      return res.status(409).json({
+        error: 'Lokasi kerja yang dipilih sudah tidak aktif. Ulangi pendaftaran '
+          + 'sidik jari dan pilih lokasi yang masih aktif.',
+        code: 'OFFICE_LOCATION_NONAKTIF',
       });
     }
 
@@ -501,11 +525,19 @@ router.put('/credentials/:id/location', mobileAuthMiddleware, async (req: Mobile
 // ─── OFFICE LOCATIONS (Admin managed) ────────────────────────────────────────
 
 // GET /webauthn/offices — dibaca onboarding mobile & admin desktop
-router.get('/offices', anyAuthMiddleware, async (_req: Request, res: Response) => {
+router.get('/offices', anyAuthMiddleware, async (req: Request, res: Response) => {
   try {
+    // Token mobile hanya melihat kantor AKTIF.
+    //
+    // Daftar ini dipakai layar pendaftaran sidik jari. Menawarkan kantor
+    // nonaktif berarti menawarkan pilihan yang pasti ditolak — dan karyawan
+    // baru mengetahuinya setelah menyelesaikan prompt sidik jari. Admin desktop
+    // tetap melihat semuanya, karena di sanalah kantor dikelola.
+    const mobile = !!(req as any).employeeId;
     const rows = await dbAll(
       `SELECT id, name, latitude, longitude, radius_m, project_name, is_active, created_at
-       FROM office_locations ORDER BY is_active DESC, name ASC`
+       FROM office_locations ${mobile ? 'WHERE is_active = 1' : ''}
+       ORDER BY is_active DESC, name ASC`
     );
     res.json({ data: rows });
   } catch (error: any) {
