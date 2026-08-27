@@ -1598,7 +1598,31 @@ Syarat & Ketentuan pada PDF penawaran. Rekonsiliasi dua tabel invoice
 (`invoices`/`client_invoices`) juga belum disentuh, dan review sendiri
 menempatkannya sebagai prasyarat fase 3.
 
-`test:all` 0 gagal, 0 residu.
+### Satu cacat lagi yang muncul saat mengerjakannya
+
+Setelah suite dijalankan, **21 kontrak yatim** menumpuk di database dev:
+menghapus project meninggalkan kontraknya. Itu **cacat yang sama persis** dengan
+EST-LIFE-R42/R47 yang baru saja ditutup untuk proposal dan project — dan saya
+mengulanginya pada tabel yang baru saya buat sendiri.
+
+Diperbaiki secara struktural, bukan dengan kode pembersih: `contracts.project_id`
+diberi **FK `ON DELETE CASCADE`** ke `client_projects`, sehingga change order,
+baseline, dan event ikut lewat cascade berantai. Tes kebersihan sekarang juga
+menggagalkan suite kalau ada kontrak tanpa project atau change order tanpa
+kontrak.
+
+FK-nya sempat gagal dibuat pada percobaan pertama — MySQL menolak menambahkan
+constraint selama 21 baris yatim itu masih ada. Baru berhasil setelah dibersihkan,
+dan itu memang urutan yang benar.
+
+Catatan teknis yang sempat menghambat: komentar SQL di dalam template literal
+JavaScript **tidak boleh memuat backtick**. Menulis nama tabel dengan backtick di
+komentar `--` memutus literalnya, dan error parse-nya menunjuk baris yang sama
+sekali lain.
+
+`test:all` 0 gagal, 0 residu — diverifikasi dengan menjalankan suite dari keadaan
+nol dan memastikan seluruh pencacah (proposals, contracts, change_orders,
+client_projects) tetap nol sesudahnya.
 
 ## Live Auto Review — 16 Agustus 2026 14:48 WIB
 
