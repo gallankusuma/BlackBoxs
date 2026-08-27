@@ -9629,3 +9629,102 @@ setelah unggah, dan kontrak desainnya terjaga di sumber (pratinjau lewat
 disk, layar menyimpan lewat endpoint MTO biasa). Tes sengaja tidak memanggil
 Gemini sungguhan — kualitas pembacaan gambar diperiksa manusia lewat panel
 persetujuan, yang memang itu gunanya.
+
+---
+
+## [DEV] AHSP_Gap_Official_2026_vs_EPC_DB — hasilnya: yang bisa diimpor sudah masuk
+
+Permintaan user: *"ambil file AHSP_Gap_Official_2026_vs_EPC_DB, ada review dari
+tim terkait database AHSP kita, tolong ditambahkan ke database kita."*
+Dikerjakan 27 Agustus 2026, setelah antrean review habis.
+
+### Yang ditemukan
+
+Angka besarnya menggoda: katalog resmi memuat **5.760 baris**, dan **3.332**
+ditandai "safe missing candidate". Tapi angka itu bukan jumlah yang bisa
+diimpor.
+
+Tim reviewer hanya menjalankan dry-run struktural pada **159 header**, dan hanya
+**121** lolos seluruh gerbangnya. Penyebab sisanya satu dan sama: **sumber
+dayanya belum ada di master kita.** Dari 2.096 celah resource yang dianalisis,
+**1.854 berstatus `NEW_MASTER_CANDIDATE`**, dan 208 lagi ditandai reviewer
+sendiri perlu keputusan manusia (konflik kode, varian spesifikasi, konversi
+satuan). Hanya 34 yang aman dipetakan sebagai alias.
+
+**Ke-121 itu ternyata sudah masuk produksi pada 24 Agustus 2026.** Diverifikasi
+tiga arah: jumlahnya cocok (3.348 → 3.469 = tepat 121), seluruhnya `active` dan
+punya item, dan `harga_satuan` tersimpan **cocok sampai sen** dengan kolom hasil
+di workbook.
+
+### Yang dibangun
+
+`scripts/import-ahsp-katalog.js` — idempoten, simulasi secara default,
+`--apply` untuk menulis, `--snapshot` untuk mensimulasikan terhadap keadaan
+server tanpa menyentuhnya sama sekali.
+
+Skrip ini **tidak** membaca sheet `Dry Run` (sampel 159). Ia membaca staging
+penuh (`AHSP Header Stage` 3.332 + `AHSP Item Stage` 18.739) lalu menerapkan
+lima gerbang sendiri, sehingga ia otomatis mengambil kandidat baru begitu master
+sumber dayanya dilengkapi — tanpa perlu workbook baru.
+
+Gerbangnya: (1) setiap sumber daya cocok PASTI ke master (`FUZZY_NAME_UNIT` dan
+`CODE_CONFLICT` **tidak** cukup — harga penawaran berdiri di atasnya);
+(2) masternya benar-benar ada di database saat skrip dijalankan, dengan tabel
+yang benar menurut `resource_type` (`master_labor`/`master_materials`/
+`master_equipment` — bukan satu tabel); (3) harga master bukan **Rp 1**, penanda
+"belum diisi"; (4) koefisien ≤ 4 desimal, karena kolomnya `decimal(10,4)` dan
+kelebihannya akan **dipotong diam-diam**; (5) untuk header yang reviewer juga
+hitung, hasil skrip harus SAMA — selisih berarti salah satu keliru, dan itu
+alasan berhenti, bukan alasan memilih.
+
+Alias aman dari sheet `Resource Resolution` diterapkan (260 item) karena
+`AHSP Item Stage` dibuat sebelum tahap resolusi; tanpa itu, item yang sebenarnya
+sudah dipetakan masih terbaca `UNMATCHED` berharga 0.
+
+### Dua kekeliruan saya sendiri yang tertangkap gerbang kelima
+
+1. **Urutan pembulatan.** Saya menjumlahkan hasil kali mentah lalu membulatkan
+   per seksi. Yang benar: bulatkan **tiap item** ke 2 desimal dulu, baru
+   dijumlahkan — karena `ahsp_items.jumlah_harga` memang `decimal(15,2)`. Cara
+   saya membuat header tidak sama dengan jumlah baris di bawahnya.
+2. **Galat representasi float.** `Math.round(v * 100) / 100` salah untuk
+   `0.237 × 125685 = 29787.345`: dikali 100 ia menjadi `2978734.4999999996`
+   dalam biner lalu membulat ke bawah. Satu sen per baris, pada 18.739 baris
+   katalog harga.
+
+Setelah keduanya dibetulkan: **516 item dan 121 header cocok persis** dengan
+hitungan reviewer, nol selisih. Itu validasi silang yang berarti — dua
+perhitungan independen sampai di angka yang sama.
+
+### Keadaan sekarang
+
+```
+Header staged    : 3332  (item 18739)
+Akan ditambahkan : 0
+Dilewati         : 121 (sudah ada di produksi)
+Tertahan gerbang : 3211
+    2445  sumber daya belum tentu cocok
+     738  tidak punya item
+      27  harga master masih placeholder (Rp 1)
+       1  koefisien lebih dari 4 desimal
+```
+
+**Tidak ada yang bisa diimpor sekarang, dan itu kesimpulan — bukan kegagalan.**
+Analisis saya berdiri sendiri dari sheet staging penuh dan sampai di angka yang
+sama dengan reviewer.
+
+### Yang butuh keputusan pemilik sistem
+
+Membuka sisanya berarti menjawab dua hal yang tidak boleh ditebak:
+
+1. **1.854 master sumber daya baru** — katalog resmi membawa koefisien, bukan
+   harga. Harganya harus datang dari daftar harga perusahaan. Tanpa itu, AHSP
+   yang dibangun di atasnya akan tampak berharga padahal tidak.
+2. **27 header tertahan harga placeholder Rp 1** — sumber dayanya sudah ada di
+   master kita, harganya yang belum pernah diisi.
+
+AHSP adalah katalog yang dipakai estimator menetapkan harga penawaran.
+Memasukkan 3.200 analisa yang harganya berdiri di atas master karangan bukan
+memperkaya katalog — itu mencemarinya, dan cemarannya tidak bisa dibedakan dari
+data yang sah begitu tersimpan.
+
