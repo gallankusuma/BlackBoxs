@@ -50,6 +50,23 @@
             <p class="text-gray-600 mt-2">{{ proposal?.projectName }}</p>
           </div>
           <div class="flex gap-3">
+            <!-- Penawaran PDF dihasilkan SERVER, bukan `window.print()`.
+                 Hasil print browser bergantung pada mesin, versi browser,
+                 ukuran kertas, dan pengaturan margin pengguna — dokumen yang
+                 menjadi dasar harga kontrak tidak boleh berbeda antarperangkat.
+                 Tombol Print dipertahankan karena masih dipakai untuk cetak
+                 cepat internal. -->
+            <button
+              @click="unduhPenawaran"
+              :disabled="!dokumenSiap || membuatPdf"
+              class="flex items-center gap-2 px-4 py-2 bg-slate-900 text-white rounded-lg hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                  d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+              </svg>
+              {{ membuatPdf ? 'Menyiapkan…' : 'Penawaran PDF' }}
+            </button>
             <button
               @click="printRAB"
               :disabled="!dokumenSiap"
@@ -271,6 +288,44 @@ import { formatCurrency } from '../utils/format';
 const route = useRoute();
 const router = useRouter();
 const proposalId = route.params.id;
+
+/**
+ * Unduh penawaran PDF dari server.
+ *
+ * Diambil sebagai blob lewat `api` ber-token, bukan dibuka sebagai tautan:
+ * endpoint-nya ber-autentikasi, dan `<a href>` tidak bisa membawa header
+ * Authorization.
+ */
+const membuatPdf = ref(false);
+
+const unduhPenawaran = async () => {
+  membuatPdf.value = true;
+  let url = '';
+  try {
+    const res = await api.get(`/estimator/proposals/${proposalId}/penawaran.pdf`,
+      { responseType: 'blob' });
+    url = URL.createObjectURL(res.data as Blob);
+    const w = window.open(url, '_blank');
+    if (!w) {
+      const a = document.createElement('a');
+      a.href = url; a.download = `Penawaran ${proposalId}.pdf`;
+      document.body.appendChild(a); a.click(); a.remove();
+    }
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  } catch (e: any) {
+    if (url) URL.revokeObjectURL(url);
+    // Errornya datang sebagai blob karena responseType blob — harus dibaca
+    // dulu, kalau tidak yang tampil hanya "[object Blob]".
+    let pesan = 'Gagal membuat PDF penawaran.';
+    const d = e?.response?.data;
+    if (d instanceof Blob) {
+      try { pesan = JSON.parse(await d.text())?.error || pesan; } catch { /* biarkan */ }
+    } else if (d?.error) { pesan = d.error; }
+    alert(pesan);
+  } finally {
+    membuatPdf.value = false;
+  }
+};
 
 const proposal = ref<any>(null);
 const sections = ref<any[]>([]);

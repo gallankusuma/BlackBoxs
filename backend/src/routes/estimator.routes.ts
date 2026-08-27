@@ -2,6 +2,8 @@ import { Router, Request, Response } from 'express';
 import { calculateMto, toLegacyQuantities, FORMULA_VERSION, MtoResult } from '../modules/estimator/mto/calculator';
 import { checkUnitCompatibility, isProposalEditable } from '../modules/estimator/mto/units';
 import { enrichMtoElement, groupStoredLines } from '../modules/estimator/mto/enrich';
+import { rakitDokumen } from '../modules/estimator/penawaran/dokumen';
+import { renderPenawaran } from '../modules/estimator/penawaran/pdf';
 import { authMiddleware } from '../middleware/auth';
 import { requirePermission, loadUserAccess } from '../middleware/permission';
 import multer from 'multer';
@@ -3238,6 +3240,57 @@ async function recalculateProposal(proposalId: string | number, tx?: TxRunner) {
 // ============================================
 
 // Get RAB Report Data (grouped by discipline and sub-discipline with calculations)
+/**
+ * PDF penawaran — dihasilkan SERVER, deterministik.
+ *
+ * Sebelumnya satu-satunya cara mencetak adalah `window.print()` dari layar RAB.
+ * Hasilnya bergantung pada mesin, versi browser, ukuran kertas, dan pengaturan
+ * margin pengguna — dokumen yang menjadi dasar harga kontrak tidak boleh
+ * berbeda antarperangkat, dan tidak boleh berubah diam-diam saat browser
+ * diperbarui.
+ *
+ * Proposal yang sama menghasilkan byte yang sama, dan checksum isinya dicetak
+ * di kaki halaman sehingga dokumen yang diterima klien bisa dicocokkan dengan
+ * yang dikirim tanpa membandingkan angkanya satu per satu.
+ */
+router.get('/proposals/:id/penawaran.pdf', authMiddleware, bolehLihat, async (req: Request, res: Response) => {
+  try {
+    const proposal: any = await dbGet('SELECT * FROM proposals WHERE id = ?', [req.params.id]);
+    if (!proposal) return res.status(404).json({ error: 'Proposal tidak ditemukan' });
+
+    const items: any[] = await dbAll(
+      `SELECT id, is_section, section_label, section_order, order_no,
+              ahsp_code_snapshot, ahsp_name_snapshot, description,
+              unit_snapshot, unit_price_snapshot, qty, total_price
+       FROM proposal_items WHERE proposal_id = ?
+       ORDER BY section_order IS NULL, section_order, is_section DESC, order_no, id`,
+      [req.params.id]
+    );
+
+    const dok = rakitDokumen(proposal, items);
+    if (dok.jumlah_baris === 0) {
+      // Menerbitkan dokumen kosong lebih buruk daripada menolak: ia terlihat
+      // seperti penawaran yang sah tapi tidak menawarkan apa pun.
+      return res.status(422).json({
+        error: 'Proposal ini belum punya satu pun item pekerjaan, jadi belum bisa dijadikan penawaran.',
+        code: 'PENAWARAN_KOSONG',
+      });
+    }
+
+    const pdf = await renderPenawaran(dok);
+    const namaBerkas = `Penawaran ${dok.nomor.replace(/[\\/:*?"<>|]/g, '-')}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Penawaran-Checksum', dok.checksum);
+    res.setHeader('Content-Disposition',
+      `inline; filename="${encodeURIComponent(namaBerkas)}"`);
+    res.send(pdf);
+  } catch (error: any) {
+    console.error('Error rendering penawaran PDF:', error);
+    res.status(500).json({ error: 'Gagal membuat PDF penawaran' });
+  }
+});
+
 router.get('/proposals/:id/rab', authMiddleware, bolehLihat, async (req: Request, res: Response) => {
   try {
     const proposalId = req.params.id;

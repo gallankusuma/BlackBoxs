@@ -25,7 +25,7 @@
     "test:deploy-gate": "bash ../scripts/test-deploy-gate.sh",
     "test:client-proposals": "tsx tests/client-proposals.ts",
     "test:proposal-commercial": "tsx tests/proposal-commercial.ts",
-    "test:all": "npm test && npm run test:mto && npm run test:mto-link && npm run test:http && npm run test:pin && npm run test:rbac && npm run test:asset && npm run test:depreciation && npm run test:procurement && npm run test:prospects && npm run test:rab && npm run test:payment-schedule && npm run test:schedule-ownership && npm run test:client-proposals && npm run test:proposal-commercial && npm run test:qto-summary && npm run test:estimator-rbac && npm run test:drift && npm run test:link-authority && npm run test:ahsp-active && npm run test:klasifikasi && npm run test:lifecycle && npm run test:template-prov && npm run test:item-identity && npm run test:durability && npm run test:mto-usul && npm run test:deploy-gate && npm run test:register && npm run test:register-list && npm run test:uploads && npm run test:kebersihan",
+    "test:all": "npm test && npm run test:mto && npm run test:mto-link && npm run test:http && npm run test:pin && npm run test:rbac && npm run test:asset && npm run test:depreciation && npm run test:procurement && npm run test:prospects && npm run test:rab && npm run test:payment-schedule && npm run test:schedule-ownership && npm run test:client-proposals && npm run test:proposal-commercial && npm run test:qto-summary && npm run test:estimator-rbac && npm run test:drift && npm run test:link-authority && npm run test:ahsp-active && npm run test:klasifikasi && npm run test:lifecycle && npm run test:template-prov && npm run test:item-identity && npm run test:durability && npm run test:mto-usul && npm run test:deploy-gate && npm run test:register && npm run test:register-list && npm run test:penawaran && npm run test:uploads && npm run test:kebersihan",
     "test:mto": "tsx tests/mto-calculator.ts",
     "test:mto-link": "tsx tests/mto-link.ts",
     "smoke": "node ../scripts/smoke-test.js",
@@ -43,7 +43,8 @@
     "test:kebersihan": "tsx tests/kebersihan-fixture.ts",
     "test:uploads": "tsx tests/uploads-berauth.ts",
     "test:register": "tsx tests/register-aksi.ts",
-    "test:register-list": "tsx tests/register-proposal.ts"
+    "test:register-list": "tsx tests/register-proposal.ts",
+    "test:penawaran": "tsx tests/penawaran-pdf.ts"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
@@ -64,6 +65,7 @@
     "morgan": "^1.10.1",
     "multer": "^1.4.5-lts.1",
     "mysql2": "^3.22.3",
+    "pdfkit": "^0.20.1",
     "pg": "^8.18.0"
   },
   "devDependencies": {
@@ -74,6 +76,7 @@
     "@types/jsonwebtoken": "^9.0.10",
     "@types/morgan": "^1.9.10",
     "@types/node": "^22.19.1",
+    "@types/pdfkit": "^0.17.6",
     "@typescript-eslint/eslint-plugin": "^8.48.1",
     "@typescript-eslint/parser": "^8.48.1",
     "eslint": "^9.39.1",

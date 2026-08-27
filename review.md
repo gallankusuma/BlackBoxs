@@ -9728,3 +9728,87 @@ Memasukkan 3.200 analisa yang harganya berdiri di atas master karangan bukan
 memperkaya katalog — itu mencemarinya, dan cemarannya tidak bisa dibedakan dari
 data yang sah begitu tersimpan.
 
+---
+
+## [DEV] Penawaran PDF — fase 2 dikerjakan lebih dulu atas keputusan user
+
+Butir DESIGN-GAP "Submit to Client" berfase tiga. User memutuskan
+27 Agustus 2026: *"bikin penawaran PDF nya dulu bro, terms nya nyusul."*
+Jadi **fase 2** (artefak deterministik) dikerjakan mendahului **fase 1**
+(model commercial terms) — urutan yang berbeda dari usulan review, dan itu
+keputusan pemilik sistem.
+
+**Konsekuensinya harus dijaga, bukan disiasati.** Dokumen komersial yang
+mengarang masa berlaku atau termin pembayaran jauh lebih berbahaya daripada
+dokumen yang belum punya keduanya — ia menjanjikan hal yang tidak pernah
+disetujui siapa pun. Jadi bagian Syarat dan Ketentuan **dinyatakan terbuka**
+("akan dilampirkan terpisah dan menjadi bagian tidak terpisahkan"), bukan
+dihilangkan diam-diam sehingga pembaca menyimpulkan tidak ada syarat sama
+sekali. Dua asersi menjaga ini secara khusus: menuliskan "berlaku N hari" atau
+"uang muka N%" akan **menggagalkan `test:all`**.
+
+**Yang dibangun:**
+
+- `backend/src/modules/estimator/penawaran/dokumen.ts` — model dokumen +
+  checksum. Dipisahkan dari perendernya supaya angka yang dicetak dan angka yang
+  di-checksum berasal dari objek yang sama; checksum yang tidak mengikat isi
+  lebih buruk daripada tidak ada checksum.
+- `backend/src/modules/estimator/penawaran/pdf.ts` — perender `pdfkit`. Tanpa
+  Chromium, jadi tidak menambah beban VPS.
+- `GET /estimator/proposals/:id/penawaran.pdf` — `authMiddleware` + `bolehLihat`,
+  `inline` + `nosniff`, checksum di header `X-Penawaran-Checksum`.
+- `EstimatorRAB.vue` — tombol **Penawaran PDF**, diambil sebagai blob ber-token.
+  Tombol Print lama **dipertahankan** untuk cetak cepat internal.
+
+**Deterministik, dan itu inti perkaranya.** `window.print()` menghasilkan dokumen
+yang bergantung pada mesin, versi browser, ukuran kertas, dan pengaturan margin
+pengguna. `CreationDate`/`ModDate` PDF diisi tetap, bukan waktu sekarang — jadi
+proposal yang sama menghasilkan **byte yang sama**, dan checksum di kaki halaman
+bisa dipakai membuktikan dokumen yang diterima klien memang yang dikirim.
+
+Format angka ditulis sendiri, **tidak memakai `toLocaleString('id-ID')`** — itu
+bergantung pada data ICU yang tersedia di runtime, dan Node tanpa full-icu akan
+diam-diam mencetak format lain. Memakainya berarti mengulang persis cacat
+"dokumen berbeda antarperangkat" yang fitur ini dimaksudkan menutupnya.
+
+Proposal `draft`/`review` diberi tanda **"DRAF — BELUM DITERBITKAN"**. Tanpa itu,
+draft yang tercetak tidak bisa dibedakan dari penawaran yang benar-benar
+berlaku — dan itu perbedaan yang mengikat secara komersial. Proposal tanpa item
+ditolak **422 `PENAWARAN_KOSONG`**: menerbitkan dokumen kosong lebih buruk
+daripada menolak, karena ia terlihat sah tapi tidak menawarkan apa pun.
+
+**Tiga kekeliruan saya sendiri, ditemukan dengan memeriksa hasilnya:**
+
+1. **Halaman pertama keluar kosong.** pdfkit menambah halaman baru otomatis
+   begitu teks mulai di bawah `height - margins.bottom`, dan kaki halaman memang
+   digambar di bawah margin itu — sehingga menggambar kaki di awal halaman
+   langsung mendorong seluruh isi ke halaman berikutnya. 4 halaman, 3 di
+   antaranya hanya berisi kaki.
+2. **Kolom Jumlah terpotong keluar halaman** — angka paling penting di dokumen
+   ini. Lebar kolom saya berjumlah 595 pt untuk ruang 515 pt. Sekarang ada
+   pemeriksaan yang **melempar error saat modul dimuat** kalau jumlah lebar
+   kolom tidak sama dengan lebar isi, supaya penyesuaian berikutnya tidak bisa
+   diam-diam melewati batas lagi.
+3. **Label dan angka Subtotal tercetak bertumpuk** — lebar labelnya tumpang
+   tindih dengan kolom Jumlah.
+
+Ketiganya hanya ketahuan karena PDF-nya benar-benar dirender dan dilihat, bukan
+karena tesnya lulus.
+
+**Tes: `backend/tests/penawaran-pdf.ts` — 34 asersi, masuk `test:all`.**
+Terbukti diskriminatif: penjagaan dilemahkan dengan sengaja (tanggal PDF
+dikembalikan ke `new Date()`, penanda draf dimatikan, dan syarat dikarang
+menjadi "berlaku 30 hari, uang muka 20%") → **6 asersi gagal**, termasuk kedua
+penjaga anti-karang.
+
+Yang diuji bukan "endpointnya 200": byte dua unduhan dibandingkan, angka yang
+tercetak dicocokkan dengan `proposal_items` di database, penanda draf hilang
+setelah submit sementara checksum berubah, dan formatter angka diuji terpisah
+(`1.234.567,50`, `-1.500,00`, `124,5`, `6.420`).
+
+**Belum dikerjakan (fase 1 & 3):** model commercial terms, payment milestone,
+attachment per revisi, `issued_artifact_id`, dan transmittal evidence. Semuanya
+menunggu keputusan terms dari pemilik sistem.
+
+`test:all` 0 gagal, 0 residu.
+
