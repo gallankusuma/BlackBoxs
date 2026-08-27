@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { calculateMto, toLegacyQuantities, FORMULA_VERSION, MtoResult } from '../modules/estimator/mto/calculator';
 import { checkUnitCompatibility, isProposalEditable } from '../modules/estimator/mto/units';
-import { spesifikasiField, spesifikasiOpsional } from '../modules/estimator/mto/contract';
+import { spesifikasiField, spesifikasiOpsional, katalogElemen } from '../modules/estimator/mto/contract';
 import { enrichMtoElement, groupStoredLines } from '../modules/estimator/mto/enrich';
 import { rakitDokumen } from '../modules/estimator/penawaran/dokumen';
 import { renderPenawaran } from '../modules/estimator/penawaran/pdf';
@@ -1860,28 +1860,44 @@ const unggahGambar = multer({
 });
 
 /** Prompt disusun dari kontrak parameter yang sudah ada, bukan daftar terpisah. */
-const promptPondasi = (catatan: string) => `
-Anda adalah engineer struktur yang membaca gambar kerja pondasi.
+/**
+ * EST-MTO-R53: prompt asisten gambar mencakup SELURUH tipe elemen.
+ *
+ * Tahap 1 sengaja dibatasi ke pondasi. Batas itu batas saya, bukan batas
+ * sistem: kalkulator sudah mendukung 6 tipe elemen dengan 21 varian yang
+ * benar-benar menghasilkan baris — 58 baris pekerjaan kalau semuanya dipakai.
+ * Membatasi asisten ke pondasi berarti 48 baris di antaranya tidak pernah bisa
+ * datang dari gambar.
+ *
+ * Katalog tipe/varian/field-nya DIBANGKITKAN dari `katalogElemen()`, bukan
+ * ditulis tangan. Prompt yang ditulis tangan akan melenceng diam-diam setiap
+ * kali varian baru ditambahkan ke kalkulator, dan AI akan terus mengusulkan
+ * bentuk yang sudah tidak berlaku.
+ */
+const promptGambar = (catatan: string) => {
+  // Varian yang belum punya formula tidak ditawarkan — mengusulkannya hanya
+  // menghasilkan zona berkuantitas nol yang membingungkan.
+  const katalog = katalogRingkas();
 
-TUGAS: baca gambar, lalu keluarkan PARAMETER DIMENSI setiap tipe pondasi yang
-terlihat. JANGAN menghitung volume, berat besi, atau kuantitas apa pun — itu
-dikerjakan sistem.
+  return `
+Anda engineer struktur yang membaca gambar kerja dan menyusun daftar pekerjaan.
+
+TUGAS: baca gambar, lalu keluarkan PARAMETER DIMENSI setiap elemen yang terlihat.
+JANGAN menghitung volume, berat besi, luas, atau kuantitas apa pun — sistem yang
+menghitungnya dari parameter Anda.
+
+TIPE ELEMEN DAN PARAMETER WAJIBNYA:
+${katalog}
 
 Keluarkan JSON dengan bentuk PERSIS:
 {
   "zones": [
     {
-      "element_name": "nama tipe pondasi di gambar, mis. P1 atau F2",
-      "foundation_type": "footplate",
-      "parameters": {
-        "L": <panjang footing, METER>,
-        "W": <lebar footing, METER>,
-        "H": <tebal footing, METER>,
-        "depth": <kedalaman galian, METER>,
-        "qty": <jumlah titik pondasi bertipe ini>
-      },
+      "element_type": "salah satu dari: ${katalogElemen().map(t => t.element_type).join(', ')}",
+      "element_name": "nama elemen di gambar, mis. P1, K1, B2, atau 'Pelat Lantai 2'",
+      "parameters": { "<field varian>": "<nilai varian>", "<field dimensi>": <angka METER> },
       "keyakinan": "tinggi" | "sedang" | "rendah",
-      "dasar": "sebutkan dari mana angkanya dibaca, mis. 'tabel schedule pondasi baris P1'",
+      "dasar": "dari mana angkanya dibaca, mis. 'tabel schedule kolom baris K1'",
       "ragu": ["hal yang tidak yakin, kosongkan kalau tidak ada"]
     }
   ],
@@ -1891,14 +1907,21 @@ Keluarkan JSON dengan bentuk PERSIS:
 ATURAN KERAS:
 1. SEMUA panjang dalam METER. Gambar teknik sering memakai milimeter — kalau
    angkanya seperti 2200, itu 2.2 meter. Salah satuan di sini berakibat 1000x.
+   Kecuali yang labelnya jelas menyebut satuan lain (mis. tebal screed dalam cm).
 2. Kalau sebuah angka tidak terbaca jelas, JANGAN menebak: kosongkan fieldnya
-   dan sebutkan di "ragu".
-3. Kalau gambar ini bukan gambar pondasi, kembalikan "zones": [] dan jelaskan
-   di "catatan_umum".
-4. "qty" adalah JUMLAH TITIK pondasi bertipe itu — hitung dari denah atau tabel
-   schedule, bukan mengarang.
+   dan sebutkan di "ragu". Field kosong bisa dilengkapi pemeriksa; angka karangan
+   tidak bisa dibedakan dari angka benar.
+3. Setiap zona WAJIB memuat field varian (mis. "col_type") dengan salah satu
+   nilai di daftar di atas. Jangan mengarang nilai varian baru.
+4. Pisahkan zona per TIPE dan per UKURAN. Kolom 40x40 dan kolom 30x30 adalah dua
+   zona, bukan satu.
+5. Kuantitas seperti jumlah titik pondasi atau jumlah kolom per lantai memang
+   parameter — hitung dari denah atau tabel schedule, jangan mengarang.
+6. Kalau gambar ini bukan gambar kerja konstruksi, kembalikan "zones": [] dan
+   jelaskan di "catatan_umum".
 ${catatan ? `\nCATATAN DARI PENGGUNA (pakai ini untuk memperjelas):\n${catatan}` : ''}
 `.trim();
+};
 
 /**
  * Prompt lanjutan: MEREVISI usulan yang sudah ada, bukan membaca gambar lagi.
@@ -1953,20 +1976,38 @@ function galatAi(err: any): { status: number; body: any } {
  * bisa menghasilkan bentuk yang sedikit berbeda dan layar akan menampilkan
  * usulan yang tidak setara dengan yang dari gambar.
  */
+const TIPE_ELEMEN_SAH = new Set(katalogElemen().map(t => t.element_type));
+
 function bentukUsulan(zones: any): any[] {
-  return (Array.isArray(zones) ? zones : []).slice(0, 20).map((z: any) => {
+  return (Array.isArray(zones) ? zones : []).slice(0, 60).map((z: any) => {
     const parameters = { ...(z?.parameters || {}) };
-    if (z?.foundation_type) parameters.foundation_type = z.foundation_type;
+    // EST-MTO-R53: tipe elemen tidak lagi dipaku ke 'foundation'.
+    //
+    // Tipe yang tidak dikenal TIDAK dibuang diam-diam — ia tetap dikembalikan
+    // sebagai usulan dan `calculateMto` menandainya `invalid`, sehingga
+    // pemeriksa melihat bahwa AI membaca sesuatu yang sistemnya belum dukung.
+    // Membuangnya berarti zona itu hilang tanpa jejak.
+    const tipe = TIPE_ELEMEN_SAH.has(String(z?.element_type))
+      ? String(z.element_type) : 'foundation';
+
+    // Kompatibilitas: jawaban lama menaruh varian di luar `parameters`.
+    for (const t of katalogElemen()) {
+      const f = t.variant_field;
+      if (z?.[f] && parameters[f] === undefined) parameters[f] = z[f];
+    }
+    if (z?.foundation_type && parameters.foundation_type === undefined) {
+      parameters.foundation_type = z.foundation_type;
+    }
     // Field kosong dibuang, bukan dikirim sebagai null — `isFilled` menganggap
     // null belum diisi, tapi menyimpannya membuat formulir menampilkan "null".
     for (const [k, v] of Object.entries(parameters)) {
       if (v === null || v === undefined || String(v).trim() === '') delete (parameters as any)[k];
     }
 
-    const mto = calculateMto('foundation', parameters);
+    const mto = calculateMto(tipe, parameters);
     return {
-      element_type: 'foundation',
-      element_name: String(z?.element_name || 'Pondasi').slice(0, 80),
+      element_type: tipe,
+      element_name: String(z?.element_name || tipe).slice(0, 80),
       parameters,
       keyakinan: ['tinggi', 'sedang', 'rendah'].includes(z?.keyakinan) ? z.keyakinan : 'rendah',
       dasar: String(z?.dasar || '').slice(0, 300),
@@ -1975,15 +2016,47 @@ function bentukUsulan(zones: any): any[] {
       pratinjau: mto.lines,
       variant: mto.variant,
       missing_required: (mto as any).missing_required || [],
-      field_wajib: spesifikasiField('foundation', mto.variant),
-      field_opsional: spesifikasiOpsional('foundation'),
+      field_wajib: spesifikasiField(tipe, mto.variant),
+      field_opsional: spesifikasiOpsional(tipe),
+      // Ditandai supaya layar bisa mengatakan apa adanya, bukan menampilkan
+      // zona kosong tanpa penjelasan.
+      tipe_dikenal: TIPE_ELEMEN_SAH.has(String(z?.element_type)),
+      notes: mto.notes,
     };
   });
 }
 
+/**
+ * Katalog tipe/varian/field dalam bentuk ringkas untuk disisipkan ke prompt.
+ *
+ * EST-MTO-R53b: prompt diskusi SEBELUMNYA tidak memuat katalog ini — hanya
+ * prompt gambar yang memuatnya. Akibatnya, saat estimator meminta asisten
+ * menyusun zona dari nol lewat percakapan, AI tidak tahu nama field yang
+ * dipakai kalkulator dan mengembalikan parameter bernama lain. Zonanya tetap
+ * terbentuk, pratinjaunya tetap ada — tapi seluruh dimensinya terhitung "belum
+ * diisi" dan angkanya berdiri di atas asumsi kalkulator.
+ *
+ * Terlihat saat mencoba: enam zona lintas tipe terbentuk rapi, tapi setiap
+ * zonanya melaporkan 1–4 dimensi wajib yang kurang padahal semuanya disebutkan
+ * jelas dalam permintaan.
+ */
+const katalogRingkas = () => katalogElemen()
+  .map(t => {
+    const varian = t.variants
+      .filter(v => v.wajib.length > 0)
+      .map(v => `    - ${t.variant_field}="${v.variant}" wajib: ${v.wajib.map(w => `${w.field} (${w.label})`).join(', ')}`)
+      .join('\n');
+    return varian ? `  ${t.element_type}:\n${varian}` : '';
+  })
+  .filter(Boolean).join('\n');
+
 const promptDiskusi = (zona: any[], pesan: string, riwayat: any[]) => `
-Anda engineer struktur yang sedang MEREVISI daftar parameter pondasi bersama
-seorang estimator. Anda TIDAK sedang membaca gambar baru.
+Anda engineer struktur yang sedang MEREVISI daftar parameter elemen konstruksi
+bersama seorang estimator. Anda TIDAK sedang membaca gambar baru.
+
+TIPE ELEMEN DAN PARAMETER WAJIBNYA — pakai NAMA FIELD PERSIS seperti di bawah,
+jangan menerjemahkannya:
+${katalogRingkas()}
 
 KEADAAN SEKARANG (JSON):
 ${JSON.stringify(zona, null, 1).slice(0, 6000)}
@@ -1995,8 +2068,9 @@ ${pesan}
 
 Keluarkan JSON dengan bentuk PERSIS:
 {
-  "zones": [ { "element_name": "...", "foundation_type": "footplate",
-               "parameters": { "L": <m>, "W": <m>, "H": <m>, "depth": <m>, "qty": <angka> },
+  "zones": [ { "element_type": "foundation|column|beam|slab|wall|roof",
+               "element_name": "...",
+               "parameters": { "<field varian>": "<nilai>", "<field dimensi>": <angka METER> },
                "keyakinan": "tinggi"|"sedang"|"rendah",
                "dasar": "dari mana angka ini — sebut 'diberikan estimator' kalau dari permintaan di atas",
                "ragu": ["..."] } ],
@@ -2009,11 +2083,15 @@ ATURAN KERAS:
    menghitung. Anda hanya menetapkan dimensi.
 2. SEMUA panjang dalam METER. Kalau estimator menyebut "2200", itu 2.2 meter —
    tapi tanyakan dulu di "balasan" kalau maksudnya ambigu.
-3. KEMBALIKAN SELURUH zona, bukan hanya yang berubah. Zona yang tidak disinggung
+3. Pertahankan "element_type" dan field varian tiap zona apa adanya kecuali
+   estimator memang memintanya diubah. Kalau estimator meminta zona BARU,
+   pakai nama field persis dari daftar di atas — parameter bernama lain akan
+   terbaca sistem sebagai "belum diisi" dan angkanya jatuh ke asumsi.
+4. KEMBALIKAN SELURUH zona, bukan hanya yang berubah. Zona yang tidak disinggung
    estimator dikembalikan APA ADANYA, termasuk dasar dan ragunya.
-4. Nilai yang DIBERIKAN estimator dipakai apa adanya — jangan ditimpa hasil
+5. Nilai yang DIBERIKAN estimator dipakai apa adanya — jangan ditimpa hasil
    pembacaan Anda sendiri, dan tandai "dasar" dengan 'diberikan estimator'.
-5. Kalau permintaan estimator tidak bisa dipenuhi dari data yang ada, katakan di
+6. Kalau permintaan estimator tidak bisa dipenuhi dari data yang ada, katakan di
    "balasan" dan biarkan parameternya kosong. Jangan menebak.
 `.trim();
 
@@ -2130,7 +2208,7 @@ router.post('/proposals/:id/mto/usul-dari-gambar', authMiddleware, bolehUbah,
     }
 
     const jawaban = await callGeminiVision(
-      promptPondasi(String(req.body?.catatan || '').slice(0, 2000)),
+      promptGambar(String(req.body?.catatan || '').slice(0, 2000)),
       berkas.buffer.toString('base64'),
       berkas.mimetype,
       kunci

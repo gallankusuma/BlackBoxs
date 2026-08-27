@@ -139,12 +139,56 @@ async function main() {
     const iBentuk = rute.indexOf('function bentukUsulan');
     chk('ada satu pembentuk usulan bersama', iBentuk > 0, true);
     const blokBentuk = rute.slice(iBentuk, rute.indexOf('\n}', iBentuk));
+    // Sejak EST-MTO-R53 tipenya tidak lagi dipaku ke pondasi, jadi yang
+    // diperiksa keberadaan panggilan kalkulatornya — bukan tipe tertentu.
     chk('pratinjau dihitung kalkulator, bukan dari AI',
-      blokBentuk.includes("calculateMto('foundation'"), true);
+      /calculateMto\(\s*tipe\s*,\s*parameters\s*\)/.test(blokBentuk), true);
     chk('dan usulan tidak pernah membawa kuantitas dari AI',
       !/quantit|volume\s*:/i.test(blokBentuk.replace(/\/\/.*$/gm, '')), true);
     chk('promptnya melarang AI menghitung kuantitas',
       rute.includes('JANGAN menghitung volume'), true);
+
+    console.log('\n5b. Cakupan: SELURUH tipe elemen, bukan pondasi saja (EST-MTO-R53)');
+    const { katalogElemen } = await import('../src/modules/estimator/mto/contract');
+    const { calculateMto } = await import('../src/modules/estimator/mto/calculator');
+    const katalog = katalogElemen();
+    chk('katalog memuat enam tipe elemen', katalog.length, 6);
+
+    // Prompt DIBANGKITKAN dari katalog, bukan ditulis tangan — kalau ditulis
+    // tangan ia melenceng diam-diam tiap kali varian baru ditambahkan.
+    chk('prompt dibangkitkan dari katalog, bukan hardcode',
+      rute.includes('katalogElemen()') && rute.includes('const promptGambar'), true);
+    chk('tidak ada lagi prompt khusus pondasi', rute.includes('const promptPondasi'), false);
+    chk('pembentuk usulan tidak lagi memaku tipe ke foundation',
+      rute.includes("calculateMto('foundation', parameters)"), false);
+
+    // Berapa banyak baris pekerjaan yang sebenarnya bisa dihasilkan kalkulator.
+    // Angka ini yang menentukan seberapa rinci BOQ dari sebuah gambar.
+    const contoh: Array<[string, any]> = [
+      ['foundation', { foundation_type: 'footplate', L: 1.2, W: 1.2, H: 0.3, depth: 1.5, qty: 8, tb_length: 120, tb_w: 0.25, tb_h: 0.4 }],
+      ['column', { col_type: 'concrete', B: 0.4, H: 0.4, qty_per_floor: 12, height_per_floor: 4 }],
+      ['column', { col_type: 'wf', wf_profile: 'WF 300x150', qty_per_floor: 8, height_per_floor: 6 }],
+      ['beam', { beam_type: 'concrete', total_length: 180, B: 0.25, H: 0.5 }],
+      ['slab', { slab_type: 'concrete', area: 600, thickness: 0.12 }],
+      ['wall', { wall_type: 'bata_ringan', area: 450, thickness_cm: 15 }],
+      ['roof', { roof_type: 'dak', floor_area: 400, slope_deg: 0, dak_thick: 0.12 }],
+    ];
+    let totalBaris = 0;
+    const kosong: string[] = [];
+    for (const [tipe, param] of contoh) {
+      const m: any = calculateMto(tipe, param);
+      totalBaris += m.lines.length;
+      if (!m.lines.length) kosong.push(`${tipe}/${m.variant}`);
+    }
+    chk('tujuh contoh elemen menghasilkan ≥30 baris pekerjaan', totalBaris >= 30, true);
+    // `chk` di berkas ini membandingkan dengan `===`, jadi array dibandingkan
+    // sebagai teks — dua array kosong tidak pernah `===` satu sama lain.
+    chk('tidak ada contoh yang menghasilkan nol baris', kosong.join(', '), '');
+
+    // Varian yang belum punya formula tidak boleh ditawarkan ke AI —
+    // mengusulkannya hanya menghasilkan zona berkuantitas nol.
+    chk('varian tanpa field wajib disaring dari prompt',
+      rute.includes('.filter(v => v.wajib.length > 0)'), true);
     chk('promptnya menegaskan satuan meter', rute.includes('SEMUA panjang dalam METER'), true);
     // Gambar tidak boleh disimpan ke disk.
     chk('gambar diproses di memori, tidak ditulis ke disk',
@@ -154,6 +198,12 @@ async function main() {
       new URL('../../frontend/src/components/projects/ProjectMTO.vue', import.meta.url), 'utf8');
     chk('layar menyimpan lewat endpoint MTO biasa saat disetujui',
       vue.includes('await api.post(`${baseUrl.value}/mto`,'), true);
+    chk('tombol usul tidak lagi terkunci di tab Pondasi',
+      vue.includes(`activeTab === 'foundation'`), false);
+    chk('usulan yang disetujui berpindah ke tab tipenya',
+      vue.includes('activeTab.value = u.element_type'), true);
+    chk('tipe yang belum didukung ditandai, bukan dibuang',
+      vue.includes('tipe_dikenal === false'), true);
     chk('layar menyatakan usulan belum tersimpan',
       vue.includes('Belum tersimpan.'), true);
 

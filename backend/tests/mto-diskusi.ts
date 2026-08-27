@@ -181,6 +181,23 @@ async function main() {
       { element_type: 'foundation', parameters: { foundation_type: 'footplate', L: 1, W: 1, H: 0.3, qty: 1 } }, master);
     chk('pratinjau tetap boleh dibaca', pratinjauTerkunci.status, 200);
 
+    console.log('\n9b. Prompt diskusi memuat KATALOG FIELD — bukan hanya prompt gambar');
+    // Tanpa katalog, AI yang diminta menyusun zona dari nol tidak tahu nama
+    // field yang dipakai kalkulator dan mengembalikan parameter bernama lain.
+    // Zonanya tetap terbentuk dan pratinjaunya tetap ada — tapi seluruh
+    // dimensinya terhitung "belum diisi" dan angkanya berdiri di atas asumsi.
+    // Terlihat saat mencoba: enam zona lintas tipe terbentuk rapi, tapi tiap
+    // zonanya melaporkan 1–4 dimensi wajib kurang padahal semuanya disebutkan.
+    const { readFileSync: baca } = await import('node:fs');
+    const rute = baca(new URL('../src/routes/estimator.routes.ts', import.meta.url), 'utf8');
+    chk('kedua prompt memakai katalog yang sama',
+      /const promptGambar[\s\S]{0,400}katalogRingkas\(\)/.test(rute)
+      && /const promptDiskusi[\s\S]{0,900}katalogRingkas\(\)/.test(rute), true);
+    chk('katalognya dibangkitkan dari kontrak, bukan ditulis tangan',
+      rute.includes('const katalogRingkas = () => katalogElemen()'), true);
+    chk('prompt diskusi menegaskan memakai nama field persis',
+      rute.includes('pakai NAMA FIELD PERSIS'), true);
+
     console.log('\n10. Layar benar-benar memakai jalur ini');
     const { readFileSync } = await import('node:fs');
     const vue = readFileSync(

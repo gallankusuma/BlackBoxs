@@ -98,6 +98,34 @@ const VARIANTS: Record<string, Record<string, string>> = {
  * Nama field pemilih tipe di tiap layar, berikut varian defaultnya kalau kosong.
  * Nilainya harus sama persis dengan yang dipakai masing-masing kalkulator.
  */
+/**
+ * Katalog tipe elemen + varian + field wajibnya, sebagai DATA.
+ *
+ * EST-MTO-R53: dipakai membangun prompt asisten gambar. Dibangkitkan dari peta
+ * yang sama dengan yang dipakai kalkulator dan validator — kalau prompt-nya
+ * ditulis tangan, ia akan melenceng diam-diam setiap kali varian baru
+ * ditambahkan, dan AI akan terus mengusulkan bentuk yang sudah tidak berlaku.
+ */
+export const katalogElemen = (): Array<{
+  element_type: string;
+  variant_field: string;
+  variants: Array<{ variant: string; aliases: string[]; wajib: Array<{ field: string; label: string }> }>;
+}> => Object.keys(VARIANT_FIELD).map(tipe => {
+  const [field] = VARIANT_FIELD[tipe];
+  const perVarian: Record<string, string[]> = {};
+  for (const [alias, varian] of Object.entries(VARIANTS[tipe] || {})) {
+    (perVarian[varian] = perVarian[varian] || []).push(alias);
+  }
+  return {
+    element_type: tipe,
+    variant_field: field,
+    variants: Object.entries(perVarian).map(([variant, aliases]) => ({
+      variant, aliases,
+      wajib: spesifikasiField(tipe, variant).map(f => ({ field: f.field, label: f.label })),
+    })),
+  };
+});
+
 export const VARIANT_FIELD: Record<string, [field: string, fallback: string]> = {
   foundation: ['foundation_type', 'footplate'],
   column: ['col_type', 'concrete'],

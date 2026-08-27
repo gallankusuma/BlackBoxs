@@ -10223,3 +10223,122 @@ berkas.
 
 `test:all` 0 gagal, 0 residu.
 
+---
+
+## [DEV] Asisten gambar MTO — Tahap 3: cakupan seluruh tipe elemen
+
+Permintaan user 27 Agustus 2026, dengan pembanding konkret: sebuah BOQ
+preliminary yang dihasilkan ChatGPT dari gambar PDF hanya dalam 4 prompt.
+*"besar harapan saya system kita bisa cover minimal seperti ini, kalau bisa lebih
+baik justru lebih bagus, karena semakin detail yang bisa dihasilkan nanti akan
+semakin mudah membuat master schedule-nya."*
+
+Alasannya tepat dan mengubah prioritas: makin rinci BOQ-nya, makin banyak baris
+yang bisa menjadi aktivitas berdurasi di master schedule.
+
+### Yang diukur dulu, bukan diperkirakan
+
+Kalkulator disurvei dengan 21 kombinasi tipe+varian:
+
+```
+foundation footplate 10 baris   column concrete 4   beam concrete 4   slab concrete 3
+           bored_pile 0                wf       4        wf       2        ceramic  4
+           precast_pile 0              cfs      2        channel  1        plate    1
+                                       wood     1        purlin   1
+wall masonry 4   roof sheet 4
+     cladding 1       tile  4
+     grc      2       deck  5
+     glass    1
+---- 58 baris pekerjaan dari 21 kombinasi
+```
+
+Jadi **kalkulatornya sudah luas; yang sempit asistennya** — Tahap 1 saya batasi
+ke pondasi saja. Batas itu batas saya, bukan batas sistem: 48 dari 58 baris tidak
+pernah bisa datang dari gambar.
+
+Catatan kejujuran: survei pertama saya melaporkan lima varian "rusak". Tiga di
+antaranya salah kunci dari saya sendiri — field variannya `col_type` bukan
+`column_type`, dan nilainya `bata_ringan`/`dak` bukan `masonry`/`deck`. Setelah
+dibetulkan, hanya `bored_pile` dan `precast_pile` yang memang belum punya
+formula.
+
+### Yang dikerjakan
+
+**Prompt DIBANGKITKAN dari kontrak, bukan ditulis tangan.** `katalogElemen()` di
+`mto/contract.ts` menghasilkan daftar tipe → varian → field wajib dari peta yang
+sama dengan yang dipakai kalkulator dan validator. Prompt yang ditulis tangan
+akan melenceng diam-diam setiap kali varian baru ditambahkan, dan AI akan terus
+mengusulkan bentuk yang sudah tidak berlaku.
+
+Varian yang belum punya formula (`bored_pile`, `precast_pile`, `mini_pile`)
+**disaring dari prompt** — mengusulkannya hanya menghasilkan zona berkuantitas
+nol yang membingungkan.
+
+`bentukUsulan()` tidak lagi memaku `element_type` ke `'foundation'`. Tipe yang
+tidak dikenal **tidak dibuang diam-diam**: ia tetap muncul sebagai usulan
+bertanda "tipe belum didukung", sehingga pemeriksa melihat AI membaca sesuatu
+yang sistemnya belum tangani. Membuangnya berarti zona itu hilang tanpa jejak.
+
+Layar: tombol tidak lagi terkunci di tab Pondasi, kartu usulan menampilkan tipe
+elemennya, kepala panel meringkas sebarannya, dan **usulan yang disetujui
+memindahkan layar ke tab tipenya** — tanpa itu, menyetujui zona Kolom dari tab
+Pondasi membuat zonanya seolah menghilang.
+
+### Diuji sungguhan, dan menemukan satu cacat lagi
+
+Diskusi teks dengan satu deskripsi bangunan incinerator menghasilkan:
+
+```
+foundation  footplate            6 baris
+column      kolom beton          4 baris
+beam        balok beton          4 baris
+slab        pelat lantai beton   3 baris
+wall        dinding bata ringan  4 baris
+roof        atap zincalume       3 baris
+---- 6 zona lintas 6 tipe, 24 baris pekerjaan
+```
+
+Cakupannya bekerja. **Tapi setiap zona melaporkan 1–4 dimensi wajib "kurang"**
+padahal semuanya disebutkan jelas dalam permintaan.
+
+Sebabnya tertelusur tanpa perlu memanggil AI lagi: **prompt diskusi tidak memuat
+katalog field** — hanya prompt gambar yang memuatnya. Saat diminta menyusun zona
+dari nol lewat percakapan, AI tidak tahu nama field yang dipakai kalkulator dan
+mengembalikan parameter bernama lain. Zonanya tetap terbentuk dan pratinjaunya
+tetap ada, tapi **angkanya berdiri di atas asumsi kalkulator** — persis keadaan
+yang paling berbahaya, karena hasilnya terlihat wajar.
+
+Katalognya kini dipakai kedua prompt lewat satu fungsi `katalogRingkas()`, dan
+tes menjaganya. **Perbaikan ini belum saya verifikasi ulang lewat AI** — kuota
+harian Gemini habis lagi selama sesi ini. Yang terbukti: cakupan enam tipe
+bekerja, dan kedua prompt sekarang membawa katalog field yang sama dengan
+kontrak.
+
+### Tes
+
+`tests/mto-usul-gambar.ts` naik ke **28 asersi**, `tests/mto-diskusi.ts` ke
+**39**. Yang dijaga: katalog memuat enam tipe, prompt dibangkitkan dari katalog
+(bukan hardcode), tidak ada lagi `promptPondasi`, pembentuk usulan tidak memaku
+tipe, tujuh contoh elemen menghasilkan ≥30 baris dan tidak satu pun nol, varian
+tanpa formula disaring, tombol tidak terkunci di tab Pondasi, dan kedua prompt
+memakai katalog yang sama.
+
+Satu asersi lama ikut dibetulkan: ia mencari `calculateMto('foundation'` yang
+memang sudah tidak ada, dan satu lagi membandingkan dua array kosong dengan
+`===` — yang tidak pernah sama.
+
+`test:all` 0 gagal, 0 residu.
+
+### Jawaban atas pertanyaan pembandingnya
+
+Sistem kita **bisa** mencapai kedalaman itu, dan sekarang jalurnya terbuka.
+Bedanya bukan pada rincian, melainkan pada **asal angkanya**: BOQ dari ChatGPT
+angkanya ditulis AI — berguna untuk gambaran cepat, tapi tidak bisa ditelusuri
+dan tidak reproducible. Di sistem kita AI hanya membaca DIMENSI; kuantitasnya
+dihitung `calculateMto()` dan harganya dari AHSP yang dikendalikan perusahaan.
+Itu yang membuat angkanya bisa dipertanggungjawabkan saat ditanya klien.
+
+**Yang masih menahan kedalaman:** dua varian pondasi tanpa formula
+(`bored_pile`, `precast_pile`) — keduanya lazim di proyek B3/incinerator, dan
+menambah formulanya adalah pekerjaan kalkulator biasa, bukan pekerjaan AI.
+

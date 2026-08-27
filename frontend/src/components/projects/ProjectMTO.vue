@@ -64,7 +64,11 @@
                    PARAMETER (dimensi), bukan kuantitas — kuantitasnya tetap
                    dihitung kalkulator yang sama dengan input manual. Tidak ada
                    yang tersimpan sebelum disetujui per zona. -->
-              <button v-if="!readonly && activeTab === 'foundation'" @click="pilihGambar"
+              <!-- EST-MTO-R53: tidak lagi terkunci di tab Pondasi. Satu gambar
+                   kerja memuat banyak tipe elemen sekaligus, dan asisten kini
+                   mengusulkan keenamnya — usulannya masuk ke tab masing-masing
+                   saat disetujui. -->
+              <button v-if="!readonly" @click="pilihGambar"
                 class="usul-btn" title="Baca gambar kerja pondasi dan usulkan dimensinya">
                 🖼 Usulkan dari gambar
               </button>
@@ -87,6 +91,7 @@
             <div class="usul-head">
               <div>
                 <strong>{{ usulan.length }} usulan dari gambar</strong>
+                <span v-if="sebaranTipe" class="usul-sub" style="display:inline"> — {{ sebaranTipe }}</span>
                 <div class="usul-sub">
                   Belum tersimpan. <strong>Periksa dimensinya terhadap gambar</strong> — pembacaan
                   otomatis bisa keliru, terutama satuan (mm vs m). Setujui satu per satu.
@@ -98,8 +103,12 @@
 
             <div v-for="(u, i) in usulan" :key="i" class="usul-item">
               <div class="usul-item-head">
+                <span class="usul-tipe">{{ labelModul(u.element_type) }}</span>
                 <strong>{{ u.element_name }}</strong>
                 <span class="usul-yakin" :class="'yakin-' + u.keyakinan">keyakinan {{ u.keyakinan }}</span>
+                <span v-if="u.tipe_dikenal === false" class="usul-yakin yakin-rendah">
+                  tipe belum didukung
+                </span>
               </div>
 
               <!-- EST-MTO-R50: dimensinya BISA DISUNTING.
@@ -558,7 +567,21 @@ const unggahGambar = async (e: Event) => {
   }
 };
 
-/** Terima satu usulan → tersimpan lewat endpoint MTO biasa. */
+/** Sebaran tipe elemen pada usulan — supaya sekilas terlihat apa saja yang terbaca. */
+const sebaranTipe = computed(() => {
+  const n: Record<string, number> = {};
+  for (const u of usulan.value) n[u.element_type] = (n[u.element_type] || 0) + 1;
+  return Object.entries(n).map(([t, c]) => `${c} ${labelModul(t)}`).join(', ');
+});
+
+/**
+ * Terima satu usulan → tersimpan lewat endpoint MTO biasa.
+ *
+ * EST-MTO-R53: usulan bisa bertipe apa pun, jadi setelah tersimpan layar
+ * berpindah ke tab tipe itu. Tanpa itu, menyetujui zona Kolom dari tab Pondasi
+ * membuat zonanya seolah menghilang — ia tersimpan, tapi di tab yang tidak
+ * sedang dibuka.
+ */
 const terimaUsul = async (i: number) => {
   const u = usulan.value[i];
   if (!u) return;
@@ -570,6 +593,10 @@ const terimaUsul = async (i: number) => {
       element_name: u.element_name,
       parameters: { ...u.parameters, _zone_name: u.element_name },
     });
+    if (u.element_type && u.element_type !== activeTab.value
+        && MODULES.some(m => m.id === u.element_type)) {
+      activeTab.value = u.element_type;
+    }
     usulan.value.splice(i, 1);
     await fetchAll();
   } catch (err: any) {
@@ -1172,6 +1199,7 @@ const f0 = (v:number) => v.toLocaleString('id-ID',{maximumFractionDigits:0});
 .zs-baru{background:#fef3c7;color:#92400e;}
 .zs-ubah{background:#e0f2fe;color:#075985;}
 .zs-gagal{background:#fee2e2;color:#991b1b;}
+.usul-tipe{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;background:#1e293b;color:#fff;border-radius:4px;padding:2px 6px;}
 .usul-form{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;margin:8px 0;}
 .usul-field{display:flex;flex-direction:column;gap:2px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:5px 7px;}
 .usul-field.field-kurang{border-color:#fbbf24;background:#fffbeb;}
