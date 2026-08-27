@@ -318,6 +318,21 @@ export const spesifikasiField = (elementType: string, variant: string): Spesifik
  * Dipisahkan dari yang wajib supaya formulir bisa menampilkan keduanya tanpa
  * menyamakan "belum diisi sehingga memakai asumsi" dengan "boleh dikosongkan".
  */
+/**
+ * Field yang berpengaruh pada hasil tapi TIDAK wajib.
+ *
+ * EST-MTO-R55b: daftar ini juga dipakai membangun prompt asisten gambar, dan
+ * itu mengubah taruhannya. Sebelumnya hanya pondasi yang punya isi, sehingga
+ * model tidak pernah tahu bahwa — misalnya — jumlah lantai kolom, bukaan pintu
+ * dan jendela pada dinding, atau overstek atap bisa dibaca dari gambar.
+ * Akibatnya kalkulator jatuh ke asumsi untuk angka yang sebenarnya tertulis
+ * jelas di sana.
+ *
+ * Yang dimasukkan hanya field yang BISA DIBACA dari gambar kerja. Parameter
+ * yang sifatnya kebijakan perusahaan — susut, diameter tulangan default,
+ * jarak sengkang standar — sengaja TIDAK dimasukkan: itu bukan yang dibaca
+ * dari gambar, dan menawarkannya ke AI hanya mengundang angka karangan.
+ */
 const OPSIONAL: Record<string, Req[]> = {
   foundation: [
     ['depth', 'Kedalaman galian'],
@@ -330,6 +345,46 @@ const OPSIONAL: Record<string, Req[]> = {
     ['spiral_dia', 'Diameter spiral (mm)'],
     ['head_cut', 'Bobokan kepala tiang'],
     ['casing_length', 'Panjang casing sementara'],
+  ],
+  column: [
+    ['floors', 'Jumlah lantai'],
+    ['sloof_length', 'Panjang sloof kolom'],
+    ['sloof_w', 'Lebar sloof'],
+    ['sloof_h', 'Tinggi sloof'],
+    ['bp_p', 'Panjang base plate'],
+    ['bp_l', 'Lebar base plate'],
+    ['bp_t', 'Tebal base plate'],
+    ['angkur_qty', 'Jumlah angkur per kolom'],
+  ],
+  beam: [
+    ['rb_length', 'Panjang ring balok'],
+    ['purlin_length', 'Panjang gording'],
+    ['bolt_joints', 'Jumlah sambungan baut'],
+  ],
+  slab: [
+    ['area', 'Luas'],
+    ['thickness', 'Tebal pelat'],
+    ['subbase_t', 'Tebal urugan bawah pelat'],
+    ['lean_t', 'Tebal lantai kerja'],
+    ['spacing_x', 'Jarak tulangan arah X'],
+    ['spacing_y', 'Jarak tulangan arah Y'],
+  ],
+  wall: [
+    ['opening_pct', 'Persentase bukaan (%)'],
+    ['door_qty', 'Jumlah pintu'],
+    ['door_w', 'Lebar pintu'],
+    ['door_h', 'Tinggi pintu'],
+    ['window_qty', 'Jumlah jendela'],
+    ['window_w', 'Lebar jendela'],
+    ['window_h', 'Tinggi jendela'],
+  ],
+  roof: [
+    ['overhang', 'Overstek atap'],
+    ['perimeter', 'Keliling atap'],
+    ['ridge_length', 'Panjang nok'],
+    ['gutter_length', 'Panjang talang'],
+    ['purlin_spacing', 'Jarak gording'],
+    ['dak_thick', 'Tebal dak beton'],
   ],
 };
 

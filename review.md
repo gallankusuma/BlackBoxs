@@ -10421,3 +10421,90 @@ menghasilkan `BP-DRILL`, bukan sekadar tidak menghasilkan pekerjaan footplate.
 
 `tests/mto-calculator.ts` naik ke **178 asersi**. `test:all` 0 gagal, 0 residu.
 
+---
+
+## [DEV] Asisten gambar MTO — Tahap 4: PDF berlembar, penalaran, dan field opsional
+
+Permintaan user 27 Agustus 2026: *"bisa gak bro dibuat powerful lagi untuk fitur
+AI nya."* Tiga batasan nyata ditemukan di kode, dan ketiganya diangkat.
+
+### 1. Satu berkas gambar → PDF berlembar
+
+`multer` dibatasi `files: 1` dan hanya menerima PNG/JPEG/WebP. Gambar kerja
+sungguhan beredar sebagai **PDF berlembar-lembar**: denah pondasi di satu
+lembar, tabel schedule di lembar lain, potongan di lembar ketiga. Membacanya satu
+per satu berarti model tidak pernah bisa menyilangkan denah dengan tabelnya —
+padahal itu pekerjaan intinya. Tanda "P1" di denah baru berarti sesuatu kalau
+barisnya di tabel schedule ikut terbaca.
+
+Sekarang: **PDF diterima, sampai 10 berkas, 20 MB per berkas.** Prompt diberi
+tahu ada berapa lembar dan diminta menyilangkan antar lembar, menyebutkan
+**lembar mana** angkanya dibaca, dan — kalau denah bertentangan dengan tabel —
+memakai tabel serta **menyebutkan pertentangannya**, bukan diam-diam memilih.
+
+### 2. `thinkingBudget: 0` — penalaran model dimatikan
+
+Ini yang paling saya sesali karena hanya satu baris. Untuk mengekstrak satu angka
+dari teks, mematikan penalaran itu wajar dan hemat. Untuk **membaca gambar
+teknik** — mencocokkan tanda di denah dengan barisnya di tabel, lalu mengonversi
+2200 mm menjadi 2,2 m — penalaran itu justru pekerjaannya. Mematikannya menghemat
+token dengan menukar hal yang paling ingin kita dapatkan.
+
+Dinyalakan dengan batas (`8192`) supaya biayanya tetap terduga, dan
+`maxOutputTokens` dinaikkan ke 32768 — satu set gambar bisa memuat puluhan
+elemen, dan keluaran terpotong menghasilkan JSON rusak, bukan daftar pendek.
+
+### 3. Field opsional tidak pernah dikenalkan ke AI
+
+Ditemukan dengan **menguji sungguhan**, bukan dari membaca kode. Dua lembar PDF
+dibuat: denah yang hanya memuat tanda P1/P2 tanpa dimensi, dan tabel schedule
+berisi dimensinya dalam **milimeter**.
+
+Hasil percobaan pertama: konversi satuan benar semua (1500 → 1,5 m; 96000 → 96 m),
+sloof diklasifikasi `beam` bukan pondasi, luas lantai kerja yang memang tidak ada
+di gambar **tidak dikarang** melainkan ditandai ragu, dan `dasar` menyebut lembar
+asalnya. **Tapi `depth` tidak pernah terbaca** padahal tabelnya jelas
+mencantumkan KEDALAMAN 1800 mm.
+
+Sebabnya: prompt hanya memuat field **wajib**, dan `depth` terdaftar opsional.
+Model tidak tahu field itu ada. Dan tanpa `depth`, kalkulator jatuh ke tebal
+footing sebagai perkiraan — **galiannya meleset 5,14×** (47,628 m³ menjadi
+9,261 m³).
+
+Daftar opsional kini dikenalkan ke AI, dan dilengkapi untuk keenam tipe: dari 9
+field (hanya pondasi) menjadi **39 field**. Yang dimasukkan hanya yang **bisa
+dibaca dari gambar** — jumlah lantai, bukaan pintu/jendela, overstek atap,
+panjang talang. Parameter yang sifatnya kebijakan perusahaan — susut, diameter
+tulangan default, jarak sengkang standar — **sengaja tidak dimasukkan**: itu
+bukan yang dibaca dari gambar, dan menawarkannya ke AI hanya mengundang angka
+karangan.
+
+Uji ulang dengan dua lembar yang sama: `depth: 1.8` dan `depth: 2` terbaca benar
+dari tabel.
+
+### Catatan yang layak dicatat
+
+Percobaan kedua menghasilkan 3 zona, bukan 4 — model tidak lagi mengusulkan
+"Lantai Kerja" sebagai zona `slab` terpisah, melainkan menyebutkannya di
+`catatan_umum`. Itu justru **lebih benar**: lantai kerja sudah menjadi baris
+`FND-LEAN` di dalam perhitungan pondasi, jadi zona terpisah akan menggandakannya.
+
+### Tes
+
+`tests/mto-usul-gambar.ts` naik ke **49 asersi**. Yang dijaga: PDF diterima
+sementara berkas teks tetap ditolak, tiga lembar sekaligus diterima, prompt
+menyilangkan antar lembar dan menuntut menyebut lembar asal, pertentangan denah
+vs tabel tidak dipilih diam-diam, **penalaran benar-benar menyala** (regex
+menolak `thinkingBudget: 0`), keluaran diberi ruang cukup, keenam tipe punya
+field opsional dengan total ≥30, dan — yang paling langsung — **galian dengan
+`depth` diuji lebih dari 4× galian tanpanya**, dengan peringatan kalkulator yang
+ikut diperiksa.
+
+`test:all` 0 gagal, 0 residu.
+
+### Yang masih membatasi
+
+Kuota Gemini free tier. Dengan penalaran menyala dan PDF berlembar, satu
+pembacaan memakai jauh lebih banyak token — batas 20 permintaan/menit akan lebih
+cepat tersentuh. Itu keputusan tier, bukan kode.
+

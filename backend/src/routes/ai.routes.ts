@@ -192,21 +192,57 @@ export async function callGeminiText(prompt: string, apiKey: string): Promise<st
   });
 }
 
+export interface BerkasVisi {
+  base64: string;
+  mimeType: string;
+}
+
+/**
+ * EST-MTO-R55: baca BANYAK berkas sekaligus, dan biarkan model BERPIKIR.
+ *
+ * Dua batasan yang sebelumnya dipasang tanpa alasan kuat, dan keduanya
+ * menentukan kualitas pembacaan gambar teknik:
+ *
+ * 1. **Satu berkas gambar saja.** Gambar kerja sungguhan datang sebagai PDF
+ *    berlembar-lembar — denah pondasi di satu lembar, tabel schedule di lembar
+ *    lain, potongan di lembar ketiga. Membacanya satu per satu berarti model
+ *    tidak pernah bisa menyilangkan denah dengan tabelnya, dan itu justru
+ *    pekerjaan intinya.
+ * 2. **`thinkingBudget: 0`** — penalaran dimatikan. Untuk mengekstrak satu
+ *    angka dari teks itu wajar dan hemat. Untuk membaca gambar teknik —
+ *    mencocokkan tanda P1 di denah dengan barisnya di tabel, lalu mengonversi
+ *    2200 mm menjadi 2.2 m — penalaran itu justru pekerjaannya. Mematikannya
+ *    menghemat token dengan menukar hal yang paling ingin kita dapatkan.
+ */
 export async function callGeminiVision(
-  prompt: string, imageBase64: string, mimeType: string, apiKey: string
+  prompt: string,
+  berkas: BerkasVisi[] | string,
+  mimeTypeAtauApiKey: string,
+  apiKeyOpsional?: string,
 ): Promise<string> {
+  // Bentuk lama `(prompt, base64, mimeType, apiKey)` tetap diterima supaya
+  // pemanggil yang belum diperbarui tidak patah.
+  const daftar: BerkasVisi[] = Array.isArray(berkas)
+    ? berkas
+    : [{ base64: berkas, mimeType: mimeTypeAtauApiKey }];
+  const apiKey = Array.isArray(berkas) ? mimeTypeAtauApiKey : (apiKeyOpsional as string);
+
   const body = JSON.stringify({
     contents: [{
       parts: [
         { text: prompt },
-        { inline_data: { mime_type: mimeType, data: imageBase64 } },
+        ...daftar.map(b => ({ inline_data: { mime_type: b.mimeType, data: b.base64 } })),
       ],
     }],
     generationConfig: {
       temperature: 0,
-      maxOutputTokens: 8192,
+      // Dinaikkan: satu set gambar kerja bisa memuat puluhan elemen, dan
+      // keluaran yang terpotong menghasilkan JSON rusak — bukan daftar pendek.
+      maxOutputTokens: 32768,
       responseMimeType: 'application/json',
-      thinkingConfig: { thinkingBudget: 0 },
+      // Penalaran DINYALAKAN untuk pembacaan gambar. Angkanya bukan tak
+      // terbatas: dibatasi supaya biayanya tetap terduga.
+      thinkingConfig: { thinkingBudget: 8192 },
     },
   });
 

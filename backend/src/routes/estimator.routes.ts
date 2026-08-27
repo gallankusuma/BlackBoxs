@@ -1847,13 +1847,29 @@ router.get('/proposals/:id/items/incomplete', authMiddleware, bolehLihat, async 
 //
 // Gambarnya juga TIDAK disimpan ke disk — diproses di memori lalu dibuang.
 // Tidak ada folder unggahan baru, tidak ada dokumen bisnis tambahan di server.
+/**
+ * EST-MTO-R55: menerima PDF dan banyak lembar sekaligus.
+ *
+ * Batas satu berkas gambar sebelumnya tidak punya alasan kuat, dan ia
+ * bertabrakan dengan cara gambar kerja benar-benar beredar: satu PDF berisi
+ * denah pondasi, tabel schedule kolom, potongan, dan detail penulangan — di
+ * lembar-lembar yang berbeda. Membacanya satu per satu berarti model tidak
+ * pernah bisa menyilangkan denah dengan tabelnya, padahal itu pekerjaan
+ * intinya: tanda "P1" di denah hanya berarti sesuatu kalau barisnya di tabel
+ * schedule ikut terbaca.
+ *
+ * Batas ukurannya dinaikkan ke 20 MB per berkas dan maksimal 10 berkas.
+ * Angkanya bukan sembarangan: itu masih jauh di bawah batas payload Gemini,
+ * dan berkas diproses di memori — tidak ada yang ditulis ke disk (lihat aturan
+ * `/uploads` di CLAUDE.md).
+ */
 const unggahGambar = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 8 * 1024 * 1024, files: 1 },
+  limits: { fileSize: 20 * 1024 * 1024, files: 10 },
   fileFilter: (_req, file, cb) => {
-    const boleh = ['image/png', 'image/jpeg', 'image/webp'];
+    const boleh = ['image/png', 'image/jpeg', 'image/webp', 'application/pdf'];
     if (!boleh.includes(file.mimetype)) {
-      return cb(new Error('Hanya PNG, JPEG, atau WebP yang bisa dibaca'));
+      return cb(new Error('Hanya PDF, PNG, JPEG, atau WebP yang bisa dibaca'));
     }
     cb(null, true);
   },
@@ -1874,13 +1890,19 @@ const unggahGambar = multer({
  * kali varian baru ditambahkan ke kalkulator, dan AI akan terus mengusulkan
  * bentuk yang sudah tidak berlaku.
  */
-const promptGambar = (catatan: string) => {
+const promptGambar = (catatan: string, jumlahBerkas = 1) => {
   // Varian yang belum punya formula tidak ditawarkan — mengusulkannya hanya
   // menghasilkan zona berkuantitas nol yang membingungkan.
   const katalog = katalogRingkas();
 
   return `
 Anda engineer struktur yang membaca gambar kerja dan menyusun daftar pekerjaan.
+${jumlahBerkas > 1
+  ? `Ada ${jumlahBerkas} berkas/lembar. BACA SEMUANYA sebagai satu set gambar yang
+saling melengkapi — denah, tabel schedule, potongan, dan detail penulangan
+biasanya berada di lembar yang berbeda. SILANGKAN antar lembar: tanda "P1" di
+denah baru berarti sesuatu kalau barisnya di tabel schedule ikut dibaca.`
+  : ''}
 
 TUGAS: baca gambar, lalu keluarkan PARAMETER DIMENSI setiap elemen yang terlihat.
 JANGAN menghitung volume, berat besi, luas, atau kuantitas apa pun — sistem yang
@@ -1919,6 +1941,10 @@ ATURAN KERAS:
    parameter — hitung dari denah atau tabel schedule, jangan mengarang.
 6. Kalau gambar ini bukan gambar kerja konstruksi, kembalikan "zones": [] dan
    jelaskan di "catatan_umum".
+7. Sebutkan di "dasar" LEMBAR MANA angkanya dibaca kalau berkasnya lebih dari
+   satu — pemeriksa harus bisa membuka lembar itu untuk mencocokkan.
+8. Kalau denah dan tabel schedule saling BERTENTANGAN, pakai tabel schedule dan
+   sebutkan pertentangannya di "ragu". Jangan diam-diam memilih salah satu.
 ${catatan ? `\nCATATAN DARI PENGGUNA (pakai ini untuk memperjelas):\n${catatan}` : ''}
 `.trim();
 };
@@ -2046,7 +2072,24 @@ const katalogRingkas = () => katalogElemen()
       .filter(v => v.wajib.length > 0)
       .map(v => `    - ${t.variant_field}="${v.variant}" wajib: ${v.wajib.map(w => `${w.field} (${w.label})`).join(', ')}`)
       .join('\n');
-    return varian ? `  ${t.element_type}:\n${varian}` : '';
+    if (!varian) return '';
+
+    // EST-MTO-R55b: field OPSIONAL ikut disebutkan.
+    //
+    // Sebelumnya prompt hanya memuat field wajib, dan akibatnya terlihat saat
+    // menguji dengan gambar dua lembar: tabel schedule jelas mencantumkan
+    // KEDALAMAN 1800 mm, tapi `depth` tidak pernah dikembalikan — model tidak
+    // tahu field itu ada. Padahal `depth` menentukan volume galian; tanpa itu
+    // kalkulator jatuh ke tebal footing sebagai perkiraan, dan galiannya
+    // meleset jauh.
+    //
+    // "Opsional" di sini berarti boleh kosong kalau memang tidak ada di gambar,
+    // BUKAN berarti tidak penting.
+    const opsional = spesifikasiOpsional(t.element_type);
+    const barisOpsional = opsional.length
+      ? `\n    opsional (isi kalau ada di gambar): ${opsional.map(o => `${o.field} (${o.label})`).join(', ')}`
+      : '';
+    return `  ${t.element_type}:\n${varian}${barisOpsional}`;
   })
   .filter(Boolean).join('\n');
 
@@ -2190,10 +2233,16 @@ router.post('/proposals/:id/mto/diskusi', authMiddleware, bolehUbah, async (req:
 });
 
 router.post('/proposals/:id/mto/usul-dari-gambar', authMiddleware, bolehUbah,
-  unggahGambar.single('gambar'), async (req: Request, res: Response) => {
+  unggahGambar.array('gambar', 10), async (req: Request, res: Response) => {
   try {
-    const berkas = (req as any).file;
-    if (!berkas) return res.status(400).json({ error: 'Gambar wajib diunggah', code: 'GAMBAR_WAJIB' });
+    // `.array()` selalu menghasilkan daftar; `.single()` lama diterima juga
+    // supaya klien yang belum diperbarui tidak patah.
+    const daftarBerkas: any[] = (req as any).files?.length
+      ? (req as any).files
+      : ((req as any).file ? [(req as any).file] : []);
+    if (!daftarBerkas.length) {
+      return res.status(400).json({ error: 'Gambar wajib diunggah', code: 'GAMBAR_WAJIB' });
+    }
 
     // Proposal terkunci tidak boleh menerima usulan yang ujungnya akan ditolak.
     const terkunci = await proposalLock(req.params.id);
@@ -2208,9 +2257,8 @@ router.post('/proposals/:id/mto/usul-dari-gambar', authMiddleware, bolehUbah,
     }
 
     const jawaban = await callGeminiVision(
-      promptGambar(String(req.body?.catatan || '').slice(0, 2000)),
-      berkas.buffer.toString('base64'),
-      berkas.mimetype,
+      promptGambar(String(req.body?.catatan || '').slice(0, 2000), daftarBerkas.length),
+      daftarBerkas.map(b => ({ base64: b.buffer.toString('base64'), mimeType: b.mimetype })),
       kunci
     );
 

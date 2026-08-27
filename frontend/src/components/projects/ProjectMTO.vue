@@ -72,7 +72,11 @@
                 class="usul-btn" title="Baca gambar kerja pondasi dan usulkan dimensinya">
                 🖼 Usulkan dari gambar
               </button>
-              <input ref="inputGambar" type="file" accept="image/png,image/jpeg,image/webp"
+              <!-- EST-MTO-R55: PDF dan banyak lembar sekaligus. Gambar kerja
+                   sungguhan datang berlembar-lembar, dan denah baru berarti
+                   sesuatu kalau tabel schedule-nya ikut terbaca. -->
+              <input ref="inputGambar" type="file" multiple
+                accept="application/pdf,image/png,image/jpeg,image/webp"
                 style="display:none" @change="unggahGambar" />
               <button v-if="!readonly" @click="addZone" class="add-zone-btn">＋ Tambah Zona</button>
             </div>
@@ -80,7 +84,11 @@
 
           <!-- ══ Usulan dari gambar ══════════════════════════════════════ -->
           <div v-if="membacaGambar" class="usul-panel">
-            <span>⏳ Membaca gambar… ini bisa beberapa detik.</span>
+            <span>
+              ⏳ Membaca {{ jumlahBerkas > 1 ? jumlahBerkas + ' lembar' : 'gambar' }}…
+              <template v-if="jumlahBerkas > 1">menyilangkan denah dengan tabel schedule, </template>
+              ini bisa sampai satu menit.
+            </span>
           </div>
 
           <div v-if="galatUsul" class="usul-panel" style="border-color:#fca5a5;background:#fef2f2;color:#991b1b">
@@ -537,16 +545,33 @@ const pilihGambar = () => {
   inputGambar.value?.click();
 };
 
-const unggahGambar = async (e: Event) => {
-  const berkas = (e.target as HTMLInputElement).files?.[0];
-  if (!berkas) return;
+const jumlahBerkas = ref(0);
 
+const unggahGambar = async (e: Event) => {
+  const dipilih = Array.from((e.target as HTMLInputElement).files || []);
+  if (!dipilih.length) return;
+
+  // Batasnya sama dengan server supaya penolakan terjadi di sini, bukan setelah
+  // pengguna menunggu unggahan 100 MB selesai.
+  if (dipilih.length > 10) {
+    galatUsul.value = `Maksimal 10 lembar sekali baca — dipilih ${dipilih.length}.`;
+    if (inputGambar.value) inputGambar.value.value = '';
+    return;
+  }
+  const terlaluBesar = dipilih.find(f => f.size > 20 * 1024 * 1024);
+  if (terlaluBesar) {
+    galatUsul.value = `"${terlaluBesar.name}" lebih dari 20 MB. Perkecil dulu atau pisah per lembar.`;
+    if (inputGambar.value) inputGambar.value.value = '';
+    return;
+  }
+
+  jumlahBerkas.value = dipilih.length;
   membacaGambar.value = true;
   galatUsul.value = '';
   usulan.value = [];
   try {
     const form = new FormData();
-    form.append('gambar', berkas);
+    for (const f of dipilih) form.append('gambar', f);
     const { data } = await api.post(`${baseUrl.value}/mto/usul-dari-gambar`, form, {
       headers: { 'Content-Type': 'multipart/form-data' },
     });

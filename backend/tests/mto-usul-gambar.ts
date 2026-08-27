@@ -41,22 +41,38 @@ async function call(method: string, path: string, body?: unknown, token?: string
   return { status: res.status, json, text };
 }
 
-/** Kirim multipart tanpa pustaka tambahan. */
-async function kirimGambar(path: string, token: string, isi: Buffer, mime: string, namaBerkas: string) {
+/** Kirim multipart tanpa pustaka tambahan — satu atau banyak berkas. */
+async function kirimGambar(
+  path: string, token: string,
+  berkas: Buffer | Array<{ isi: Buffer; mime: string; nama: string }>,
+  mime?: string, namaBerkas?: string,
+) {
+  const daftar = Array.isArray(berkas)
+    ? berkas
+    : [{ isi: berkas, mime: mime as string, nama: namaBerkas as string }];
   const batas = '----uji' + Date.now();
-  const kepala = Buffer.from(
-    `--${batas}\r\nContent-Disposition: form-data; name="gambar"; filename="${namaBerkas}"\r\n` +
-    `Content-Type: ${mime}\r\n\r\n`);
-  const ekor = Buffer.from(`\r\n--${batas}--\r\n`);
+  const bagian: Buffer[] = [];
+  for (const b of daftar) {
+    bagian.push(Buffer.from(
+      `--${batas}\r\nContent-Disposition: form-data; name="gambar"; filename="${b.nama}"\r\n` +
+      `Content-Type: ${b.mime}\r\n\r\n`));
+    bagian.push(b.isi);
+    bagian.push(Buffer.from('\r\n'));
+  }
+  bagian.push(Buffer.from(`--${batas}--\r\n`));
   const res = await fetch(`${API}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': `multipart/form-data; boundary=${batas}`, Authorization: `Bearer ${token}` },
-    body: Buffer.concat([kepala, isi, ekor]),
+    body: Buffer.concat(bagian),
   });
   const text = await res.text();
   let json: any = null; try { json = JSON.parse(text); } catch {}
   return { status: res.status, json, text };
 }
+
+// PDF minimal yang sah — cukup untuk menguji kontrak unggahan.
+const PDF_KECIL = Buffer.from(
+  '%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n');
 
 // PNG 1x1 yang sah — cukup untuk menguji kontrak, bukan kualitas pembacaan.
 const PNG_KECIL = Buffer.from(
@@ -87,10 +103,22 @@ async function main() {
     chk('tanpa gambar ditolak 400',
       (await call('POST', `/estimator/proposals/${pid}/mto/usul-dari-gambar`, {}, master)).status, 400);
 
-    console.log('\n2. Berkas non-gambar ditolak');
+    console.log('\n2. PDF kini DITERIMA — gambar kerja memang beredar sebagai PDF (EST-MTO-R55)');
+    const pdf = await kirimGambar(`/estimator/proposals/${pid}/mto/usul-dari-gambar`,
+      master, PDF_KECIL, 'application/pdf', 'gambar-kerja.pdf');
+    chk('PDF tidak lagi ditolak sebagai tipe berkas', pdf.status !== 400, true);
+
     const bukanGambar = await kirimGambar(`/estimator/proposals/${pid}/mto/usul-dari-gambar`,
-      master, Buffer.from('ini bukan gambar'), 'application/pdf', 'gambar.pdf');
-    chk('PDF ditolak, bukan diteruskan ke AI', bukanGambar.status >= 400, true);
+      master, Buffer.from('ini bukan gambar'), 'text/plain', 'catatan.txt');
+    chk('berkas teks tetap ditolak', bukanGambar.status >= 400, true);
+
+    console.log('\n2b. Banyak lembar sekaligus');
+    const banyak = await kirimGambar(`/estimator/proposals/${pid}/mto/usul-dari-gambar`, master, [
+      { isi: PNG_KECIL, mime: 'image/png', nama: 'denah-pondasi.png' },
+      { isi: PNG_KECIL, mime: 'image/png', nama: 'tabel-schedule.png' },
+      { isi: PDF_KECIL, mime: 'application/pdf', nama: 'potongan.pdf' },
+    ]);
+    chk('tiga lembar diterima tanpa ditolak batas berkas', banyak.status !== 400, true);
 
     console.log('\n3. Tidak ada yang tersimpan dari endpoint usulan');
     const sebelum = await dbAll(
@@ -193,6 +221,50 @@ async function main() {
     // Gambar tidak boleh disimpan ke disk.
     chk('gambar diproses di memori, tidak ditulis ke disk',
       rute.includes('multer.memoryStorage()'), true);
+
+    console.log('\n5c. Kekuatan pembacaan (EST-MTO-R55)');
+    chk('menerima PDF', rute.includes("'application/pdf'"), true);
+    chk('menerima banyak lembar', rute.includes("unggahGambar.array('gambar', 10)"), true);
+    chk('prompt menyilangkan antar lembar',
+      rute.includes('SILANGKAN antar lembar'), true);
+    chk('dan menuntut menyebut lembar asal angkanya',
+      rute.includes('LEMBAR MANA angkanya dibaca'), true);
+    chk('pertentangan denah vs tabel tidak dipilih diam-diam',
+      rute.includes('pakai tabel schedule dan'), true);
+
+    const ai = readFileSync(new URL('../src/routes/ai.routes.ts', import.meta.url), 'utf8');
+    const blokVisi = ai.slice(ai.indexOf('export async function callGeminiVision'));
+    chk('penalaran DINYALAKAN untuk pembacaan gambar',
+      /thinkingConfig:\s*\{\s*thinkingBudget:\s*(?!0\b)\d+/.test(blokVisi), true);
+    chk('keluarannya diberi ruang cukup supaya tidak terpotong',
+      /maxOutputTokens:\s*(1638[4-9]|[2-9]\d{4,})/.test(blokVisi), true);
+
+    console.log('\n5d. Field OPSIONAL ikut dikenalkan — bukan hanya yang wajib');
+    // Terlihat saat menguji dengan gambar dua lembar: tabel schedule jelas
+    // mencantumkan KEDALAMAN 1800 mm, tapi `depth` tidak pernah dikembalikan
+    // karena model tidak tahu field itu ada. Padahal tanpa `depth` kalkulator
+    // jatuh ke tebal footing sebagai perkiraan — dan galiannya meleset 5x.
+    const { spesifikasiOpsional: opsi } = await import('../src/modules/estimator/mto/contract');
+    chk('prompt menyebut field opsional', rute.includes('opsional (isi kalau ada di gambar)'), true);
+    chk('pondasi menawarkan depth', opsi('foundation').some(f => f.field === 'depth'), true);
+    let totalOpsional = 0;
+    for (const t of ['foundation', 'column', 'beam', 'slab', 'wall', 'roof']) {
+      const n = opsi(t).length;
+      chk(`${t} punya field opsional`, n > 0, true);
+      totalOpsional += n;
+    }
+    chk('seluruhnya ≥30 field opsional dikenalkan', totalOpsional >= 30, true);
+
+    // Bukti bahwa `depth` memang menentukan, bukan sekadar pelengkap.
+    const dgnDepth: any = calculateMto('foundation',
+      { foundation_type: 'footplate', L: 1.5, W: 1.5, H: 0.35, qty: 6, depth: 1.8 });
+    const tanpaDepth: any = calculateMto('foundation',
+      { foundation_type: 'footplate', L: 1.5, W: 1.5, H: 0.35, qty: 6 });
+    const galian = (m: any) => m.lines.find((l: any) => l.code === 'FND-EXCV').net_quantity;
+    chk('galian dengan depth jauh lebih besar daripada tanpa',
+      galian(dgnDepth) > galian(tanpaDepth) * 4, true);
+    chk('dan tanpa depth kalkulator memperingatkan',
+      tanpaDepth.notes.some((n: string) => n.includes('Kedalaman galian tidak diisi')), true);
 
     const vue = readFileSync(
       new URL('../../frontend/src/components/projects/ProjectMTO.vue', import.meta.url), 'utf8');
