@@ -254,6 +254,32 @@ async function main() {
     chk('bagian penalaran dibuang dari jawaban',
       ai.includes('p.thought !== true'), true);
 
+    console.log('\n5c-3. Penyedia AI bisa lebih dari satu, dengan cadangan otomatis');
+    // Satu penyedia berarti satu titik gagal yang menghentikan seluruh fitur.
+    // Kuota free tier Gemini berkali-kali habis selama fitur ini dikembangkan —
+    // termasuk saat mencoba membaca gambar sungguhan milik user.
+    chk('ada lapisan pemilih penyedia', ai.includes('export async function bacaGambarAi'), true);
+    chk('jalur OpenAI ada', ai.includes('export async function callOpenAiVision'), true);
+    chk('memakai Responses API supaya PDF bisa dibaca',
+      ai.includes("path: '/v1/responses'") && ai.includes("type: 'input_file'"), true);
+    chk('endpoint memakai pemilih, bukan memanggil satu penyedia langsung',
+      rute.includes('await bacaGambarAi(') && !rute.includes('await callGeminiVision('), true);
+
+    // Kegagalan SELAIN kuota tidak boleh di-fallback: kalau gambarnya memang
+    // tidak terbaca, mencoba penyedia kedua hanya menghabiskan kuota kedua
+    // untuk jawaban yang sama.
+    chk('hanya kegagalan kuota yang di-fallback', ai.includes('if (!galatKuota(e)) throw e;'), true);
+
+    // Penyedia yang gagal ditempelkan ke errornya. Tanpa ini pesannya
+    // menyesatkan — terjadi sungguhan saat menguji: Gemini kehabisan kuota,
+    // cadangan OpenAI menolak kunci, dan yang sampai ke pengguna adalah
+    // "kunci ditolak Google" padahal kunci Google baik-baik saja.
+    chk('penyedia yang gagal ikut dicatat di error', ai.includes('e.penyediaGagal = p'), true);
+    chk('pesan error menunjuk penyedia yang benar',
+      rute.includes("err?.penyediaGagal === 'openai' ? 'OpenAI'"), true);
+    chk('penyedia yang dipakai dilaporkan ke pemanggil',
+      rute.includes('penyedia: penyediaDipakai'), true);
+
     console.log('\n5d. Field OPSIONAL ikut dikenalkan — bukan hanya yang wajib');
     // Terlihat saat menguji dengan gambar dua lembar: tabel schedule jelas
     // mencantumkan KEDALAMAN 1800 mm, tapi `depth` tidak pernah dikembalikan

@@ -8,7 +8,7 @@ import { renderPenawaran } from '../modules/estimator/penawaran/pdf';
 import { authMiddleware } from '../middleware/auth';
 import { requirePermission, loadUserAccess } from '../middleware/permission';
 import multer from 'multer';
-import { callGeminiVision, callGeminiText } from './ai.routes';
+import { callGeminiText, bacaGambarAi } from './ai.routes';
 import { dbAll, dbGet, dbRun , withTransaction, TxRunner} from '../config/database';
 import { nextSequentialCode } from './procurement.routes';
 import { buatKontrakDariProposal, checksumBaseline } from './contract.routes';
@@ -1973,23 +1973,30 @@ ${catatan ? `\nCATATAN DARI PENGGUNA (pakai ini untuk memperjelas):\n${catatan}`
  */
 function galatAi(err: any): { status: number; body: any } {
   const pesan = String(err?.message || '');
+  // Nama penyedia yang benar-benar gagal — bukan tebakan dari isi pesannya.
+  const siapa = err?.penyediaGagal === 'openai' ? 'OpenAI'
+    : err?.penyediaGagal === 'gemini' ? 'Gemini' : 'AI';
   if (/quota|rate limit|RESOURCE_EXHAUSTED|429/i.test(pesan)) {
     const detik = pesan.match(/retry in ([\d.]+)s/i)?.[1];
     return {
       status: 429,
       body: {
-        error: 'Kuota asisten AI sedang habis'
+        error: `Kuota ${siapa} sedang habis`
           + (detik ? `, coba lagi sekitar ${Math.ceil(Number(detik))} detik lagi.` : ', coba lagi sebentar lagi.')
-          + ' Batas gratis Gemini terpakai cepat kalau usulan disunting berkali-kali.',
+          + ' Batas gratis terpakai cepat kalau usulan disunting berkali-kali.',
         code: 'AI_KUOTA_HABIS',
         ...(detik ? { coba_lagi_detik: Math.ceil(Number(detik)) } : {}),
       },
     };
   }
-  if (/API key|PERMISSION_DENIED|API_KEY_INVALID/i.test(pesan)) {
+  if (/API key|PERMISSION_DENIED|API_KEY_INVALID|Incorrect API key/i.test(pesan)) {
     return {
       status: 503,
-      body: { error: 'Kunci API asisten ditolak Google. Perlu diperiksa di server.', code: 'AI_KUNCI_DITOLAK' },
+      body: {
+        error: `Kunci API ${siapa} ditolak. Perlu diperbarui di server.`,
+        code: 'AI_KUNCI_DITOLAK',
+        penyedia: err?.penyediaGagal || null,
+      },
     };
   }
   return { status: 500, body: { error: pesan || 'Gagal menghubungi asisten AI', code: 'AI_GAGAL' } };
@@ -2298,19 +2305,28 @@ router.post('/proposals/:id/mto/usul-dari-gambar', authMiddleware, bolehUbah,
     const terkunci = await proposalLock(req.params.id);
     if (terkunci) return res.status(terkunci.status).json(terkunci.body);
 
-    const kunci = process.env.GEMINI_API_KEY;
-    if (!kunci || kunci.startsWith('your-')) {
-      return res.status(503).json({
-        error: 'Pembaca gambar belum tersedia — GEMINI_API_KEY belum disetel di server.',
-        code: 'AI_BELUM_SIAP',
-      });
+    // EST-MTO-R56: penyedia dipilih lapisan `bacaGambarAi`, dengan cadangan
+    // otomatis saat yang pertama kehabisan kuota. Satu penyedia berarti satu
+    // titik gagal yang menghentikan seluruh fitur — dan kuota free tier Gemini
+    // berkali-kali habis selama fitur ini dikembangkan.
+    let jawaban: string;
+    let penyediaDipakai = '';
+    try {
+      const hasilBaca = await bacaGambarAi(
+        promptGambar(String(req.body?.catatan || '').slice(0, 2000), daftarBerkas.length),
+        daftarBerkas.map(b => ({ base64: b.buffer.toString('base64'), mimeType: b.mimetype })),
+      );
+      jawaban = hasilBaca.teks;
+      penyediaDipakai = hasilBaca.penyedia;
+    } catch (e: any) {
+      if (e?.kodeAi === 'AI_BELUM_SIAP') {
+        return res.status(503).json({
+          error: 'Pembaca gambar belum tersedia — belum ada kunci API AI yang disetel di server.',
+          code: 'AI_BELUM_SIAP',
+        });
+      }
+      throw e;
     }
-
-    const jawaban = await callGeminiVision(
-      promptGambar(String(req.body?.catatan || '').slice(0, 2000), daftarBerkas.length),
-      daftarBerkas.map(b => ({ base64: b.buffer.toString('base64'), mimeType: b.mimetype })),
-      kunci
-    );
 
     const dibaca = bacaJsonAi(jawaban);
     if (!dibaca.ok) {
@@ -2336,6 +2352,9 @@ router.post('/proposals/:id/mto/usul-dari-gambar', authMiddleware, bolehUbah,
       catatan_umum: String(hasil?.catatan_umum || '').slice(0, 1000),
       // Dinyatakan tegas supaya tidak ada yang mengira ini sudah tersimpan.
       tersimpan: false,
+      // Penyedia disebutkan: kalau nanti hasilnya terasa berbeda dari biasanya,
+      // hal pertama yang perlu diketahui adalah siapa yang membacanya.
+      penyedia: penyediaDipakai,
       catatan_sistem: 'Ini usulan, belum tersimpan. Periksa dimensinya terhadap gambar, lalu setujui per zona.',
     });
   } catch (err: any) {

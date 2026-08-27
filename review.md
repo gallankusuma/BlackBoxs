@@ -10575,3 +10575,68 @@ gambarnya terlalu banyak sekaligus — bukan error samar.
 
 `tests/mto-usul-gambar.ts` naik ke **54 asersi**. `test:all` 0 gagal, 0 residu.
 
+---
+
+## [DEV] Penyedia AI kedua (OpenAI) + hasil smoke pada gambar sungguhan
+
+Permintaan user: *"bisa gak di masukan pakai chat gpt juga."* Latarnya jelas —
+kuota free tier Gemini berkali-kali habis selama fitur ini dikembangkan, dan
+sejak penalaran dinyalakan tiap pembacaan memakan token jauh lebih banyak.
+
+### Yang dibangun
+
+`callOpenAiVision()` + lapisan `bacaGambarAi()` yang memilih penyedia dengan
+**cadangan otomatis**. Empat keputusan di dalamnya:
+
+1. **Responses API (`/v1/responses`), bukan Chat Completions.** Hanya yang
+   pertama menerima PDF lewat `input_file`. Chat Completions hanya menerima
+   gambar, sementara gambar kerja beredar sebagai PDF.
+2. **Hanya kegagalan KUOTA yang di-fallback.** Kalau gambarnya memang tidak
+   terbaca, mencoba penyedia kedua hanya menghabiskan kuota kedua untuk jawaban
+   yang sama.
+3. **Penyedia yang dipakai dilaporkan ke pemanggil.** Kalau suatu saat hasilnya
+   terasa berbeda dari biasanya, hal pertama yang perlu diketahui adalah siapa
+   yang membacanya.
+4. **Aturan intinya tidak berubah:** AI tetap hanya mengeluarkan PARAMETER,
+   kuantitas tetap dihitung `calculateMto()`. Berlaku untuk penyedia mana pun —
+   dan itulah sebabnya berganti penyedia tidak menggeser satu angka pun yang
+   sudah tersimpan.
+
+### Hasil smoke pada gambar sungguhan
+
+User mengirim 6 lembar gambar IMB proyek incinerator TPSL (18 MB, PDF hasil
+scan). Smoke dijalankan pada lembar denah lantai — lembar paling kaya kuantitas,
+memuat luasan tertulis (AREA PACKING 314 m², FG & RM WH 324 m², RM MATERIAL WH
+252 m²).
+
+**Pembacaannya belum berhasil, dan bukan karena kodenya:**
+
+- **Gemini: kuota harian habis.** Terverifikasi dari pesan aslinya
+  (`generate_content_free_tier_requests, limit: 20`).
+- **OpenAI: kunci di `.env` ditolak** — `Incorrect API key provided`. Kuncinya
+  ada di lokal maupun produksi, tapi tidak berlaku.
+
+Yang **terbukti bekerja**: cadangannya benar-benar dipakai. Gemini kehabisan
+kuota → sistem beralih ke OpenAI → OpenAI yang menolak. Tanpa lapisan ini,
+pembacaan berhenti di penyedia pertama.
+
+### Satu cacat yang ditemukan justru karena keduanya gagal
+
+Pesan yang sampai ke pengguna berbunyi **"Kunci API asisten ditolak Google"** —
+padahal kunci Google baik-baik saja, dan yang perlu diperbaiki kunci OpenAI.
+Sebabnya `galatAi` menebak penyedia dari isi pesan errornya, bukan dari fakta
+siapa yang gagal.
+
+Penyedia yang gagal kini ditempelkan ke errornya (`e.penyediaGagal`), dan
+pesannya menunjuk yang benar: *"Kunci API OpenAI ditolak. Perlu diperbarui di
+server."* Diagnosa yang salah alamat lebih mahal daripada tidak ada diagnosa —
+ia mengirim orang memeriksa hal yang benar-benar tidak rusak.
+
+### Menunggu keputusan user
+
+Untuk membaca gambar sungguhan, salah satu dari dua ini perlu dibereskan:
+**kunci OpenAI diganti dengan yang berlaku**, atau **Gemini dinaikkan dari free
+tier**. Keduanya urusan akun, bukan kode. Saya tidak menyentuh kredensial.
+
+`tests/mto-usul-gambar.ts` naik ke **61 asersi**. `test:all` 0 gagal, 0 residu.
+

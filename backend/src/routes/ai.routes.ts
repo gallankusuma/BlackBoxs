@@ -197,6 +197,159 @@ export async function callGeminiText(prompt: string, apiKey: string): Promise<st
   });
 }
 
+/**
+ * EST-MTO-R56: pembacaan gambar bisa memakai OpenAI, bukan hanya Gemini.
+ *
+ * Alasannya praktis dan terukur: kuota free tier Gemini (20 permintaan/menit)
+ * berkali-kali habis selama pengembangan fitur ini, dan sejak penalaran
+ * dinyalakan tiap pembacaan memakan token jauh lebih banyak. Satu penyedia
+ * berarti satu titik gagal yang menghentikan seluruh fitur.
+ *
+ * Yang TIDAK berubah, dan tidak boleh berubah: AI hanya mengeluarkan
+ * PARAMETER. Kuantitasnya tetap dihitung `calculateMto()` — kalkulator yang
+ * sama dengan input manual. Aturan itu berlaku untuk penyedia mana pun, dan
+ * itulah sebabnya berganti penyedia tidak mengubah angka yang tersimpan.
+ *
+ * Memakai Responses API (`/v1/responses`), bukan Chat Completions: hanya yang
+ * pertama menerima PDF lewat `input_file`. Chat Completions hanya menerima
+ * gambar, dan gambar kerja beredar sebagai PDF.
+ */
+export async function callOpenAiVision(
+  prompt: string, berkas: BerkasVisi[], apiKey: string,
+): Promise<string> {
+  const isi: any[] = [{ type: 'input_text', text: prompt }];
+  for (const [i, b] of berkas.entries()) {
+    if (b.mimeType === 'application/pdf') {
+      isi.push({
+        type: 'input_file',
+        filename: `lembar-${i + 1}.pdf`,
+        file_data: `data:application/pdf;base64,${b.base64}`,
+      });
+    } else {
+      isi.push({ type: 'input_image', image_url: `data:${b.mimeType};base64,${b.base64}` });
+    }
+  }
+
+  const body = JSON.stringify({
+    model: process.env.OPENAI_VISION_MODEL || 'gpt-4.1',
+    input: [{ role: 'user', content: isi }],
+    // Keluarannya dipaksa JSON, sama seperti jalur Gemini — supaya tidak perlu
+    // menebak-nebak memotong teks pembungkus.
+    text: { format: { type: 'json_object' } },
+    temperature: 0,
+    max_output_tokens: 32768,
+  });
+
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: 'api.openai.com',
+      path: '/v1/responses',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Length': Buffer.byteLength(body),
+      },
+    }, (res) => {
+      let data = '';
+      res.on('data', c => (data += c));
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed?.error) {
+            return reject(new Error(parsed.error.message || 'OpenAI menolak permintaan'));
+          }
+          // Responses API menaruh teksnya di `output[].content[].text`.
+          // `output_text` disediakan sebagai jalan pintas, tapi tidak selalu ada.
+          let teks = String(parsed?.output_text || '');
+          if (!teks) {
+            for (const o of parsed?.output || []) {
+              for (const c of o?.content || []) {
+                if (typeof c?.text === 'string') teks += c.text;
+              }
+            }
+          }
+          if (!teks) {
+            console.error('[OpenAI Vision] Balasan kosong:', JSON.stringify(parsed).slice(0, 400));
+            const sebab = parsed?.incomplete_details?.reason;
+            return reject(new Error(
+              sebab === 'max_output_tokens'
+                ? 'OpenAI kehabisan jatah keluaran sebelum menjawab — gambarnya terlalu banyak sekaligus. Coba kirim lebih sedikit lembar.'
+                : 'OpenAI tidak mengembalikan jawaban'));
+          }
+          resolve(teks);
+        } catch (e: any) {
+          console.error('[OpenAI Vision] Parse error:', data.slice(0, 400));
+          reject(new Error('Balasan OpenAI tidak bisa dibaca'));
+        }
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+/** Kuota/rate limit dari sisi penyedia — bukan cacat sistem, dan bisa dicoba lagi. */
+export function galatKuota(err: any): boolean {
+  return /quota|rate limit|RESOURCE_EXHAUSTED|429|insufficient_quota/i.test(String(err?.message || ''));
+}
+
+/**
+ * Baca gambar lewat penyedia yang tersedia, dengan cadangan otomatis.
+ *
+ * Urutannya diatur `AI_VISION_PROVIDER`: `gemini` (default), `openai`, atau
+ * `auto`. Apa pun urutannya, **kehabisan kuota pada yang pertama otomatis
+ * mencoba yang kedua** — itu justru alasan utama lapisan ini ada.
+ *
+ * Kegagalan selain kuota TIDAK di-fallback: kalau gambarnya memang tidak
+ * terbaca, mencoba penyedia kedua hanya menghabiskan kuota kedua untuk
+ * mendapat jawaban yang sama.
+ */
+export async function bacaGambarAi(
+  prompt: string, berkas: BerkasVisi[],
+): Promise<{ teks: string; penyedia: string; dicoba: string[] }> {
+  const gemini = process.env.GEMINI_API_KEY;
+  const openai = process.env.OPENAI_API_KEY;
+  const siap = (k?: string) => !!k && !k.startsWith('your-');
+
+  const urutan: Array<'gemini' | 'openai'> =
+    String(process.env.AI_VISION_PROVIDER || 'gemini').toLowerCase() === 'openai'
+      ? ['openai', 'gemini'] : ['gemini', 'openai'];
+
+  const dicoba: string[] = [];
+  let terakhir: any = null;
+
+  for (const p of urutan) {
+    const kunci = p === 'gemini' ? gemini : openai;
+    if (!siap(kunci)) continue;
+    dicoba.push(p);
+    try {
+      const teks = p === 'gemini'
+        ? await callGeminiVision(prompt, berkas, kunci as string)
+        : await callOpenAiVision(prompt, berkas, kunci as string);
+      return { teks, penyedia: p, dicoba };
+    } catch (e: any) {
+      // Penyedia yang gagal DITEMPELKAN ke errornya.
+      //
+      // Tanpa ini pesan akhirnya menyesatkan: saat Gemini kehabisan kuota lalu
+      // cadangan OpenAI menolak kunci, yang sampai ke pengguna adalah "kunci
+      // ditolak Google" — padahal kunci Google baik-baik saja dan yang perlu
+      // diperbaiki kunci OpenAI. Terjadi sungguhan saat menguji.
+      e.penyediaGagal = p;
+      terakhir = e;
+      if (!galatKuota(e)) throw e;   // bukan soal kuota — jangan buang kuota kedua
+      console.error(`[AI Visi] ${p} kehabisan kuota, mencoba penyedia berikutnya:`, e.message?.slice(0, 100));
+    }
+  }
+
+  if (!dicoba.length) {
+    throw Object.assign(new Error('Tidak ada penyedia AI yang siap — GEMINI_API_KEY maupun OPENAI_API_KEY belum disetel.'),
+      { kodeAi: 'AI_BELUM_SIAP' });
+  }
+  throw terakhir || new Error('Semua penyedia AI gagal');
+}
+
 export interface BerkasVisi {
   base64: string;
   mimeType: string;
