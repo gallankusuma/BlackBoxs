@@ -488,6 +488,15 @@ const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true },
   },
   {
+    // CONTRACT-R51: `SalesContracts.vue` sebelumnya YATIM — file-nya ada, tapi
+    // tidak ada route, tidak ada menu, dan tidak ada satu pun yang meng-import.
+    // Itu sebabnya ia tidak pernah muncul di mana pun.
+    path: '/contracts',
+    name: 'Contracts',
+    component: () => import('../views/SalesContracts.vue'),
+    meta: { requiresAuth: true, title: 'Contracts' },
+  },
+  {
     path: '/sales-invoices',
     name: 'SalesInvoicesReal',
     component: () => import('../views/SalesInvoices.vue'),

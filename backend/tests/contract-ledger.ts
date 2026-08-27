@@ -263,6 +263,19 @@ async function main() {
     chk('format rupiah tidak bergantung locale runtime',
       vue.includes('.toLocaleString('), false);
 
+    // Layar yang tidak punya route adalah layar yang tidak ada. `SalesContracts.vue`
+    // sebelumnya YATIM: file-nya ada, tapi tidak ada route, tidak ada menu, dan
+    // tidak satu pun yang meng-import — itu sebabnya ia tidak pernah muncul.
+    const router = readFileSync(
+      new URL('../../frontend/src/router/index.ts', import.meta.url), 'utf8');
+    chk('layarnya punya route', router.includes("import('../views/SalesContracts.vue')"), true);
+    const layout = readFileSync(
+      new URL('../../frontend/src/components/Layout.vue', import.meta.url), 'utf8');
+    chk('dan bisa dicapai dari menu', layout.includes("route: '/contracts'"), true);
+    // permKey wajib sudah ada di tabel `permissions` — dijaga juga oleh test:rbac.
+    const m = layout.match(/route: '\/contracts'[^}]*permKey: '([^']+)'/);
+    chk('memakai permKey yang sudah ada, bukan karangan', m?.[1], 'projects.projects');
+
   } finally {
     console.log('\n16. Bersih-bersih');
     if (contractId) await dbRun('DELETE FROM contracts WHERE id = ?', [contractId]).catch(() => {});

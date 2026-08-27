@@ -1598,6 +1598,23 @@ Syarat & Ketentuan pada PDF penawaran. Rekonsiliasi dua tabel invoice
 (`invoices`/`client_invoices`) juga belum disentuh, dan review sendiri
 menempatkannya sebagai prasyarat fase 3.
 
+### Layarnya ternyata YATIM sejak awal
+
+Setelah `SalesContracts.vue` ditulis ulang dan di-deploy, ia **tetap tidak muncul
+di produksi**. Sebabnya bukan build: berkas itu tidak punya route, tidak ada di
+menu, dan **tidak satu pun berkas meng-import-nya**. Bundle chunk-nya tidak
+pernah terbentuk. Jadi "placeholder coming soon" yang dilaporkan reviewer
+sebenarnya lebih dalam dari itu — halamannya tidak bisa dicapai sama sekali.
+
+Ditambahkan route `/contracts` dan entri menu di grup **Project**.
+`permKey`-nya sengaja memakai `projects.projects` yang **sudah ada**, bukan nama
+baru: `test:rbac` mewajibkan tiap `permKey` di `Layout.vue` ada di tabel
+`permissions`, dan mengarang yang baru berarti tidak satu pun role produksi
+memilikinya — menunya akan hilang untuk semua orang kecuali master. Kontrak
+adalah dokumen komersial sebuah project, jadi audiensnya memang sama.
+
+Tes sekarang menjaganya: layar tanpa route adalah layar yang tidak ada.
+
 ### Satu cacat lagi yang muncul saat mengerjakannya
 
 Setelah suite dijalankan, **21 kontrak yatim** menumpuk di database dev:

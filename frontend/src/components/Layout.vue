@@ -355,6 +355,12 @@ const mainMenus: MenuItem[] = [
       { id: 'dashboard', label: 'Dashboard', route: '/dashboard', permKey: 'projects.dashboard' },
       { id: 'clients', label: 'Clients', route: '/customers', permKey: 'projects.clients' },
       { id: 'projects', label: 'Projects', route: '/projects', permKey: 'projects.projects' },
+      // Kontrak adalah dokumen komersial sebuah project, jadi audiensnya sama.
+      // Sengaja TIDAK memakai permKey baru: nama permission harus sudah ada di
+      // tabel `permissions` (dijaga `test:rbac`), dan mengarang yang baru berarti
+      // tidak satu pun role produksi memilikinya — menunya hilang untuk semua
+      // orang kecuali master.
+      { id: 'contracts', label: 'Contracts', route: '/contracts', permKey: 'projects.projects' },
       { id: 'tasks', label: 'Tasks', route: '/project/tasks', permKey: 'projects.tasks' },
       { id: 'leads', label: 'Leads', route: '/leads', permKey: 'projects.leads' },
       // 'Prospects' (/project/prospects) dan 'Notes' (/project/notes) dicabut dari
