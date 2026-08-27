@@ -1323,6 +1323,57 @@ benar; thumbnail payment proof dibuat dari authenticated blob URL; build
 frontend lulus; regression test mencakup setiap private upload directory tanpa
 membaca atau mengubah data produksi.
 
+
+**Status: [DEV] DITERAPKAN** — 27 Agustus 2026
+
+**Butir ini keburu ditemukan pengguna lebih dulu.** 27 Agustus 2026 user membuka
+lampiran fund request di produksi dan mendapat halaman JSON
+`{"error":"Dokumen ini hanya bisa diakses lewat endpoint ber-autentikasi.",
+"code":"UPLOADS_NOT_PUBLIC"}` — bukan dokumennya. Analisis reviewer tepat
+seluruhnya, termasuk bagian thumbnail Payment Schedule.
+
+Penjagaan `/uploads/*` **tidak** dilonggarkan, dan itu disengaja: dokumen
+keuangan memang tidak boleh terbuka tanpa token, dan menambahkannya ke allowlist
+akan mengulang persis cacat DR-P0-05. Yang kurang adalah jalur penggantinya.
+
+Ditambahkan dua endpoint, mengikuti pola yang sudah dipakai dokumen bid:
+
+- `GET /finance/fund-requests/:frId/documents/:docId/download`
+- `GET /finance/payment-schedule/proofs/:proofId/download`
+
+Keduanya `authMiddleware`, memakai **hanya `path.basename()`** dari `file_path`
+supaya `../` pada data lama tidak bisa keluar dari folder uploads, memasang
+`X-Content-Type-Options: nosniff`, dan `Content-Disposition: inline` — supaya PDF
+tetap terbuka di tab seperti sebelum penjagaan, bukan berubah jadi unduhan paksa
+yang akan terasa seperti kemunduran lain.
+
+Sisi layar: `FinanceFundRequests.vue` dan `FinancePaymentSchedule.vue` mengambil
+berkasnya sebagai blob lewat `api` ber-token. Thumbnail bukti pembayaran perlu
+perlakuan khusus — `<img>` tidak bisa membawa header Authorization sama sekali,
+jadi tidak ada cara memperbaikinya dari sisi tautan; blob URL disiapkan lebih
+dulu, dan **dicabut saat panel ditutup** supaya tidak menahan gambar di memori
+sepanjang sesi. Respons error dibaca dari blob dulu, kalau tidak yang tampil ke
+pengguna hanya `[object Blob]`.
+
+**Audit permukaan penuh, bukan hanya yang dilaporkan.** Folder unggahan di
+produksi: `bids` 125 berkas, `product-images` 1.885, `project_files` 44,
+`fund-requests` 27, `mr-photos` 1, sisanya kosong. Dari situ: bid sudah punya
+endpoint ber-auth (`procurement.routes.ts`), project file juga
+(`project.routes.ts`), `product-images` dan `mr-photos` memang di allowlist
+karena dipakai `<img>` PWA mobile. Yang putus hanya dua yang diperbaiki di sini.
+
+**Tes: `backend/tests/uploads-berauth.ts` — 21 asersi, masuk `test:all`.**
+Yang dijaga bukan sekadar "endpointnya menjawab 200": **isi berkas yang keluar
+dibandingkan byte-per-byte dengan yang diunggah**, jalur publik lama diuji
+**tetap** 403 `UPLOADS_NOT_PUBLIC` (perbaikan ini tidak boleh membuka kembali apa
+yang DR-P0-05 tutup), dokumen milik fund request lain ditolak 404, dan header
+`inline` + `nosniff` diperiksa.
+
+Terverifikasi di produksi setelah deploy: endpoint download menjawab **401** tanpa
+token (ada dan terjaga), jalur `/uploads/fund-requests/...` tetap **403**, dan
+bundle frontend memuat pemanggil barunya. Smoke 30 lulus, 1 gagal (temuan
+kredensial lama).
+
 ### Verifikasi run ini
 
 | Pemeriksaan | Hasil |
