@@ -8310,6 +8310,60 @@ laporkan/quarantine dahulu dan jangan purge issued evidence secara buta.
    dapat merekonstruksi parent, MTO, formula version, dan actor/reason deletion;
    ID/scope tidak dapat dipakai ulang untuk Proposal lain.
 
+**Status: [DEV] DITERAPKAN** (kode) + **PERLU KETUKAN USER** (pembersihan data lama)
+— 27 Agustus 2026
+
+**Klaimnya benar, dan cacatnya sudah benar-benar terjadi di produksi.** Endpoint
+delete hanya menjalankan `DELETE FROM proposals WHERE id = ?`.
+
+Saya audit seluruh permukaannya, bukan hanya tabel yang disebut review. Dari
+tabel yang membawa `proposal_id`: `proposal_items` dan `proposal_audit_logs`
+punya FK CASCADE (ikut hilang sendiri), `client_projects` punya FK SET NULL, dan
+**dua tabel tanpa FK sama sekali** — `engineering_inputs` dan `deal_pr_jobs`.
+
+Yang membuat ini tidak pernah ketahuan: seluruh pembacaan MTO menyaring lewat
+proposal yang masih hidup, jadi data tertinggal tidak bisa dilihat **maupun**
+dibersihkan lewat layar atau API mana pun. Ia hanya muncul di query langsung.
+
+Yang berubah (`estimator.routes.ts`): di dalam transaction yang sama, sebelum
+menghapus proposal — `mto_lines` untuk elemen-elemennya, lalu
+`engineering_inputs` scope proposal, lalu `deal_pr_jobs`. `mto_lines` dihapus
+eksplisit meski FK-nya CASCADE dari `engineering_inputs`, sama seperti jalur
+hapus elemen tunggal: tidak bergantung pada FK yang mungkin absen di instalasi
+lama. Respons melaporkan berapa elemen yang ikut terhapus.
+
+**Tes: `backend/tests/proposal-lifecycle-cleanup.ts` — 20 asersi, masuk `test:all`.**
+Terbukti bisa gagal: **4 dari 20 gagal** di kode lama —
+`tidak ada engineering_inputs yatim → dapat 2` dan
+`tidak ada mto_lines yatim → dapat 10`. Tes juga menjaga dua arah sebaliknya:
+penghapusan yang **ditolak** tidak boleh menyentuh turunan, dan elemen milik
+proposal tetangga tidak boleh ikut terbawa.
+
+### Data lama di produksi — menunggu keputusan user
+
+Audit read-only menemukan sisa nyata dari cacat ini:
+
+| proposal id (sudah hilang) | elemen | dibuat | terakhir diubah | tipe |
+|---|---|---|---|---|
+| 12 | 1 | 2026-07-21 | 2026-08-14 | foundation |
+| 13 | 4 | 2026-07-21 | 2026-08-14 | beam, column, foundation, slab |
+| 14 | 2 | 2026-07-21 | 2026-08-14 | column, foundation |
+| 15 | 6 | 2026-07-21 | 2026-08-14 | column, foundation, roof, slab |
+| 16 | 6 | 2026-07-22 | 2026-08-14 | beam, column, foundation, roof, slab, wall |
+| 17 | 1 | 2026-07-22 | 2026-08-14 | foundation |
+
+**Total 20 elemen dan 139 baris MTO**, seluruhnya menunjuk proposal yang sudah
+tidak ada. `deal_pr_jobs` yatim: 0.
+
+Perbaikan kode menghentikan yatim BARU; ia tidak menyentuh yang sudah ada.
+Pembersihannya adalah penghapusan data produksi, jadi **tidak saya jalankan
+tanpa ketukan user**. Catatan untuk keputusan itu: keenam id tersebut tidak lagi
+punya proposal, jadi tidak ada dokumen komersial yang kehilangan sumbernya kalau
+dihapus — tapi kalau ada niat merekonstruksi proposal lama, inilah satu-satunya
+sisa kuantitasnya.
+
+`test:all` 0 gagal.
+
 ---
 
 ## Live Auto Review — 20 Agustus 2026 09:36 WIB

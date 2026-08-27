@@ -2451,12 +2451,50 @@ router.delete('/proposals/:id', authMiddleware, bolehHapus, async (req: Request,
         };
       }
 
+      // EST-LIFE-R42: turunan yang TIDAK punya FK ke `proposals` harus dihapus
+      // eksplisit di sini.
+      //
+      // `proposal_items` dan `proposal_audit_logs` punya FK CASCADE, jadi ikut
+      // hilang sendiri. `engineering_inputs` tidak — ia polymorphic
+      // (`scope_type` proposal/project) dan hanya ber-index, tanpa FK. Sebelum
+      // ini, menghapus proposal draft yang sudah punya MTO meninggalkan seluruh
+      // elemen dan barisnya utuh di database, menunjuk id proposal yang sudah
+      // tidak ada. Tidak ada satu pun layar atau endpoint yang bisa
+      // menjangkaunya, karena semua pembacaan MTO menyaring lewat proposal yang
+      // masih hidup — jadi data itu tidak bisa dilihat maupun dibersihkan
+      // pengguna.
+      //
+      // `mto_lines` dihapus lebih dulu secara eksplisit meski FK-nya CASCADE
+      // dari `engineering_inputs`: jalur hapus elemen tunggal juga melakukannya
+      // begitu, dan tidak bergantung pada FK yang mungkin absen di instalasi
+      // lama membuat pembersihannya pasti.
+      const elemen: any[] = await tx.all(
+        `SELECT id FROM engineering_inputs WHERE scope_type = 'proposal' AND scope_id = ?`,
+        [req.params.id]
+      );
+      if (elemen.length > 0) {
+        await tx.run(
+          `DELETE FROM mto_lines WHERE element_id IN (${elemen.map(() => '?').join(',')})`,
+          elemen.map(e => e.id)
+        );
+      }
+      await tx.run(
+        `DELETE FROM engineering_inputs WHERE scope_type = 'proposal' AND scope_id = ?`,
+        [req.params.id]
+      );
+
+      // Outbox handoff procurement juga tanpa FK. Proposal draft/review
+      // semestinya belum punya baris di sini — tapi "semestinya" bukan jaminan,
+      // dan baris tertinggal di outbox berarti pekerjaan yang menunggu sumber
+      // yang sudah lenyap.
+      await tx.run('DELETE FROM deal_pr_jobs WHERE proposal_id = ?', [req.params.id]);
+
       await tx.run('DELETE FROM proposals WHERE id = ?', [req.params.id]);
-      return { ok: true as const };
+      return { ok: true as const, elemen_terhapus: elemen.length };
     });
 
     if ('error' in hasil) return res.status(hasil.error).json(hasil.body);
-    res.json({ message: 'Proposal deleted' });
+    res.json({ message: 'Proposal deleted', elemen_mto_terhapus: hasil.elemen_terhapus });
   } catch (error) {
     console.error('Error deleting proposal:', error);
     res.status(500).json({ error: 'Failed to delete proposal' });
