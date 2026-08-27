@@ -10342,3 +10342,82 @@ Itu yang membuat angkanya bisa dipertanggungjawabkan saat ditanya klien.
 (`bored_pile`, `precast_pile`) — keduanya lazim di proyek B3/incinerator, dan
 menambah formulanya adalah pekerjaan kalkulator biasa, bukan pekerjaan AI.
 
+---
+
+## [DEV] Formula pile cap & bored pile (EST-MTO-R54)
+
+Permintaan user 27 Agustus 2026, langsung setelah cakupan asisten gambar
+diperluas: *"tambahin formula pile cap dan bored pile nya bro."* Keduanya lazim
+di proyek B3/incinerator, dan `bored_pile` memang tercatat sebagai satu-satunya
+sisa varian pondasi tanpa formula.
+
+### Kenapa keduanya bukan footplate
+
+**Pile cap** menyerupai footplate, dan itu justru jebakannya: **pile cap
+bertulang DUA LAPIS** (atas dan bawah), footplate umumnya satu lapis di bawah.
+Menyamakan keduanya membuat berat besi meleset kira-kira setengahnya — pada
+elemen yang besinya justru paling berat. Diuji langsung: pile cap 2×2×0.8
+menghasilkan besi **1,98×** footplate seukuran. Bukan tepat 2× karena selimut
+betonnya memang lebih tebal (5 cm vs 4 cm) — pile cap dicor langsung ke tanah.
+
+**Bored pile** sama sekali berbeda: tidak ada galian terbuka, tidak ada
+bekisting, tidak ada urugan kembali. Dua hal yang mudah salah dan sengaja
+dipisah barisnya:
+
+1. **Beton dicor lebih panjang daripada tiang terpakai.** Coran diisi sampai di
+   atas level potong lalu kepalanya dibobok, jadi volumenya
+   `pile_length + head_cut` — bukan `pile_length` saja. Diuji: beton 31,416 m³
+   sementara lubangnya 30,159 m³.
+2. **Tanah bor keluar sebanyak lubangnya**, dan itu pekerjaan angkut tersendiri
+   — bukan bagian dari harga pengeboran.
+
+Pengeboran diukur **per meter**, bukan m³. Casing bukan default: tidak semua
+kondisi tanah memerlukannya, jadi barisnya hanya muncul kalau
+`casing_length` diisi.
+
+### Hasilnya
+
+```
+footplate    10 baris  FND-EXCV FND-LEAN FND-CONC FND-BACKFILL FND-FORM FND-REBAR
+                       TB-CONC TB-FORM TB-REBAR TB-STIRRUP
+pile_cap      6 baris  PC-EXCV PC-LEAN PC-CONC PC-BACKFILL PC-FORM PC-REBAR
+bored_pile    7 baris  BP-DRILL BP-CONC BP-SPOIL BP-REBAR BP-SPIRAL BP-CASING BP-HEADCUT
+---- pondasi kini 23 baris dari 3 varian (sebelumnya 10 dari 1)
+```
+
+Blok tie beam diangkat jadi helper karena pile cap juga memakainya. Menyalinnya
+berarti dua tempat menghitung sloof yang sama, dan perbaikan di satu tempat
+tidak akan sampai ke tempat lain. Diuji: hasil tie beam **identik** untuk kedua
+varian.
+
+`precast_pile` dan `mini_pile` **tetap tidak dihitung**, dan itu disengaja:
+tiang pancang dipancang bukan dibor, jadi memakai formula bored pile untuknya
+akan menghasilkan pengeboran serta buangan tanah yang tidak pernah ada.
+
+### Verifikasi
+
+Setiap angka dicocokkan dengan hitungan tangan sebelum ditulis jadi tes:
+pengeboran 240 m, beton 31,4159 m³, buangan 30,1593 m³, bobokan 1,2566 m³, besi
+utama 3232,43 kg; pile cap galian 81,12 m³, beton 19,2 m³, bekisting 38,4 m².
+Semuanya cocok.
+
+Tes juga menjaga hal yang **tidak boleh muncul**: `FND-EXCV`, `FND-FORM`,
+`FND-BACKFILL`, dan `FND-LEAN` diuji **tidak ada** pada tiang bor — kalau muncul,
+berarti formulanya tercampur footplate dan angkanya mengarang pekerjaan yang
+tidak dilakukan.
+
+**Dampak ke data lama: nol, dan dibuktikan.** Refactor tie beam berpotensi
+menggeser angka footplate yang sudah tersimpan, jadi ketujuh elemen footplate di
+produksi dihitung ulang dan dibandingkan baris per baris dengan `mto_lines`
+tersimpannya: **7 dari 7 sama persis**, nol selisih. Satu elemen `precast_pile`
+tetap nol baris seperti sebelumnya. `FORMULA_VERSION` karena itu **tidak
+dinaikkan** — menaikkannya hanya akan menandai seluruh elemen lama sebagai
+berbeda versi tanpa satu pun angkanya berubah.
+
+Satu asersi lama ikut diperbarui: ia menguji bahwa `bored_pile` memberi
+peringatan "belum didukung". Sekarang ia **didukung**, jadi asersinya diarahkan
+ke `mini_pile` yang memang masih belum — dan ditambah asersi baru bahwa tiang bor
+menghasilkan `BP-DRILL`, bukan sekadar tidak menghasilkan pekerjaan footplate.
+
+`tests/mto-calculator.ts` naik ke **178 asersi**. `test:all` 0 gagal, 0 residu.
+

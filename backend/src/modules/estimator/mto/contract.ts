@@ -57,8 +57,12 @@ export const meters = (params: any, field: string, fallbackMeters = 0): number =
 /** Nilai enum dari tiap `*TypePicker.vue`, dipetakan ke varian kalkulator. */
 const VARIANTS: Record<string, Record<string, string>> = {
   foundation: {
-    footplate: 'footplate', footplat: 'footplate',
-    bored_pile: 'bored_pile',
+    footplate: 'footplate', footplat: 'footplate', telapak: 'footplate',
+    // EST-MTO-R54: pile cap adalah poer di atas kelompok tiang — pekerjaannya
+    // mirip footplate tapi bukan hal yang sama, dan menyamakannya membuat
+    // besinya salah (pile cap bertulang dua lapis, atas dan bawah).
+    pile_cap: 'pile_cap', pilecap: 'pile_cap', poer: 'pile_cap',
+    bored_pile: 'bored_pile', borepile: 'bored_pile', bor: 'bored_pile',
     precast_pile: 'precast_pile',
     mini_pile: 'mini_pile',
   },
@@ -202,6 +206,10 @@ const REQUIRED_VARIANT: Record<string, Record<string, Req[]>> = {
   foundation: {
     footplate: [['L', 'Panjang footing'], ['W', 'Lebar footing'],
       ['H', 'Tebal footing'], ['qty', 'Jumlah titik pondasi']],
+    pile_cap: [['L', 'Panjang pile cap'], ['W', 'Lebar pile cap'],
+      ['H', 'Tebal pile cap'], ['qty', 'Jumlah pile cap']],
+    bored_pile: [['pile_dia', 'Diameter tiang bor'], ['pile_length', 'Kedalaman tiang'],
+      ['qty', 'Jumlah titik tiang']],
   },
   column: {
     concrete: [['B', 'Lebar kolom'], ['H', 'Tinggi penampang kolom']],
@@ -317,6 +325,11 @@ const OPSIONAL: Record<string, Req[]> = {
     ['tb_length', 'Panjang tie beam'],
     ['tb_w', 'Lebar tie beam'],
     ['tb_h', 'Tinggi tie beam'],
+    // Bored pile
+    ['rebar_count', 'Jumlah besi utama per tiang'],
+    ['spiral_dia', 'Diameter spiral (mm)'],
+    ['head_cut', 'Bobokan kepala tiang'],
+    ['casing_length', 'Panjang casing sementara'],
   ],
 };
 

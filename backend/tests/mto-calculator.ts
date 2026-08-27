@@ -132,10 +132,18 @@ chk('tidak menghasilkan baris apa pun', bogus.lines.length, 0);
 chk('memberi peringatan', bogus.notes.length > 0, true);
 
 console.log('\n14. Pondasi non-footplate tidak dihitung sebagai footplate (EST-MTO-R01)');
-const pile = calculateMto('foundation', { foundation_type: 'bored_pile', L: 1, W: 1, H: 0.3, depth: 1.2, qty: 12 });
+// `bored_pile` KINI DIDUKUNG (EST-MTO-R54), jadi ia tidak lagi memberi
+// peringatan — tapi yang dijaga butir ini tetap berlaku dan justru lebih tajam:
+// ia tidak boleh menghasilkan pekerjaan footplate.
+const pile = calculateMto('foundation', { foundation_type: 'bored_pile', pile_dia: 0.4, pile_length: 12, qty: 12 });
 chk('tidak ada galian footplate', !!lineOf(pile, 'FND-EXCV'), false);
 chk('tidak ada beton footing', !!lineOf(pile, 'FND-CONC'), false);
-chk('diberi peringatan eksplisit', pile.notes.some(n => n.includes('belum didukung')), true);
+chk('yang keluar pekerjaan tiang bor', !!lineOf(pile, 'BP-DRILL'), true);
+
+// Tipe yang MEMANG belum didukung tetap harus menyatakannya, bukan diam.
+const pancangLama = calculateMto('foundation', { foundation_type: 'mini_pile', pile_length: 8, qty: 12 });
+chk('mini pile tidak menghasilkan baris', pancangLama.lines.length, 0);
+chk('diberi peringatan eksplisit', pancangLama.notes.some(n => n.includes('belum didukung')), true);
 const footplate = calculateMto('foundation', { foundation_type: 'footplate', L: 1, W: 1, H: 0.3, depth: 1.2, qty: 12 });
 near('footplate tetap dihitung', lineOf(footplate, 'FND-EXCV').net_quantity, 36.864);
 
@@ -357,6 +365,95 @@ import('../src/modules/estimator/mto/profiles').then(({ lookupProfileWeight }) =
 
   // Kode betulan tak dikenal tetap dikenali sebagai tak dikenal.
   chk('profil karangan → null', lookupProfileWeight('WF999x999'), null);
+
+  console.log('\nA. PILE CAP — poer di atas kelompok tiang (EST-MTO-R54)');
+  // Sebelumnya `pile_cap` tidak dikenal sama sekali dan jatuh ke `invalid`.
+  const pc: any = calculateMto('foundation',
+    { foundation_type: 'pile_cap', L: 2, W: 2, H: 0.8, qty: 6, depth: 2 });
+  chk('varian dikenali', pc.variant, 'pile_cap');
+  chk('menghasilkan baris', pc.lines.length > 0, true);
+  near('galian = (2+0.6)² × 2 × 6', lineOf(pc, 'PC-EXCV').net_quantity, 81.12);
+  near('beton = 2×2×0.8×6', lineOf(pc, 'PC-CONC').net_quantity, 19.2);
+  near('bekisting = 2×(2+2)×0.8×6', lineOf(pc, 'PC-FORM').net_quantity, 38.4);
+  near('urugan = galian − beton − lantai kerja',
+    lineOf(pc, 'PC-BACKFILL').net_quantity, 81.12 - 19.2 - 2.028);
+  chk('urugan tidak dikenai susut', lineOf(pc, 'PC-BACKFILL').waste_percent, 0);
+
+  // Ini yang membedakannya dari footplate, dan yang paling mudah salah kalau
+  // keduanya disamakan: pile cap bertulang DUA LAPIS (atas dan bawah).
+  const fpBanding: any = calculateMto('foundation',
+    { foundation_type: 'footplate', L: 2, W: 2, H: 0.8, qty: 6, depth: 2 });
+  const besiPc = lineOf(pc, 'PC-REBAR').net_quantity;
+  const besiFp = lineOf(fpBanding, 'FND-REBAR').net_quantity;
+  chk('besi pile cap jauh lebih berat daripada footplate seukuran', besiPc > besiFp * 1.8, true);
+  // Bukan tepat 2× karena selimut betonnya memang lebih tebal (5 cm vs 4 cm) —
+  // pile cap dicor langsung ke tanah.
+  chk('dan rasionya wajar, bukan tepat dua kali', besiPc < besiFp * 2, true);
+  chk('labelnya menyebut jumlah lapis',
+    String(lineOf(pc, 'PC-REBAR').label).includes('2 lapis'), true);
+
+  // Tie beam dipakai bersama footplate — satu formula, dua pemakai.
+  const pcTb: any = calculateMto('foundation',
+    { foundation_type: 'pile_cap', L: 2, W: 2, H: 0.8, qty: 6, depth: 2,
+      tb_length: 120, tb_w: 0.25, tb_h: 0.4 });
+  near('tie beam pile cap = 0.25×0.4×120', lineOf(pcTb, 'TB-CONC').net_quantity, 12);
+  const fpTb: any = calculateMto('foundation',
+    { foundation_type: 'footplate', L: 2, W: 2, H: 0.8, qty: 6, depth: 2,
+      tb_length: 120, tb_w: 0.25, tb_h: 0.4 });
+  chk('hasil tie beam identik untuk kedua varian',
+    lineOf(pcTb, 'TB-CONC').net_quantity, lineOf(fpTb, 'TB-CONC').net_quantity);
+  chk('tanpa dimensi sloof, tie beam tidak muncul', !!lineOf(pc, 'TB-CONC'), false);
+
+  console.log('\nB. BORED PILE — tiang bor di tempat (EST-MTO-R54)');
+  const bp: any = calculateMto('foundation',
+    { foundation_type: 'bored_pile', pile_dia: 0.4, pile_length: 12, qty: 20 });
+  chk('varian dikenali', bp.variant, 'bored_pile');
+  const luas = Math.PI * 0.2 ** 2;
+  near('pengeboran = 12 × 20 (per meter, bukan m³)', lineOf(bp, 'BP-DRILL').net_quantity, 240);
+  chk('satuannya meter', lineOf(bp, 'BP-DRILL').unit, 'm');
+
+  // Beton dicor melebihi level potong lalu kepalanya dibobok — volumenya
+  // karena itu memakai (panjang + bobokan), bukan panjang saja.
+  near('beton = π·0.2² × (12 + 0.5) × 20', lineOf(bp, 'BP-CONC').net_quantity, luas * 12.5 * 20);
+  near('buangan tanah = π·0.2² × 12 × 20', lineOf(bp, 'BP-SPOIL').net_quantity, luas * 12 * 20);
+  chk('beton lebih banyak daripada lubangnya',
+    lineOf(bp, 'BP-CONC').net_quantity > lineOf(bp, 'BP-SPOIL').net_quantity, true);
+  near('bobokan = π·0.2² × 0.5 × 20', lineOf(bp, 'BP-HEADCUT').net_quantity, luas * 0.5 * 20);
+
+  const areaD16 = Math.PI * (0.016 / 2) ** 2;
+  near('besi utama = 8 btg × (12 + 0.8 penyaluran) × A(D16) × 7850 × 20',
+    lineOf(bp, 'BP-REBAR').net_quantity, 8 * 12.8 * areaD16 * 7850 * 20, 0.5);
+  chk('spiral dihitung terpisah dari besi utama', !!lineOf(bp, 'BP-SPIRAL'), true);
+
+  // Bored pile TIDAK punya pekerjaan pondasi terbuka — kalau muncul, berarti
+  // formulanya tercampur footplate dan angkanya mengarang pekerjaan.
+  for (const kode of ['FND-EXCV', 'FND-FORM', 'FND-BACKFILL', 'FND-LEAN']) {
+    chk(`tidak ada ${kode} pada tiang bor`, !!lineOf(bp, kode), false);
+  }
+
+  // Casing bukan default: tidak semua kondisi tanah memerlukannya.
+  chk('tanpa casing_length, barisnya tidak muncul', !!lineOf(bp, 'BP-CASING'), false);
+  const bpCasing: any = calculateMto('foundation',
+    { foundation_type: 'bored_pile', pile_dia: 0.4, pile_length: 12, qty: 20, casing_length: 4 });
+  near('dengan casing 4 m × 20 titik', lineOf(bpCasing, 'BP-CASING').net_quantity, 80);
+
+  console.log('\nC. Tipe pancang TETAP tidak dihitung — dan itu disengaja');
+  // Tiang pancang dipancang, bukan dibor. Memakai formula bored pile untuknya
+  // akan menghasilkan pengeboran dan buangan tanah yang tidak pernah ada.
+  const pancang: any = calculateMto('foundation',
+    { foundation_type: 'precast_pile', pile_length: 12, qty: 20 });
+  chk('precast pile masih nol baris', pancang.lines.length, 0);
+  chk('dan alasannya dinyatakan', pancang.notes.length > 0, true);
+  chk('catatannya menyebut bored pile sebagai yang sudah didukung',
+    pancang.notes.join(' ').includes('bored pile'), true);
+
+  console.log('\nD. Alias nama varian dari layar dan AI');
+  for (const [alias, varian] of [['poer', 'pile_cap'], ['pilecap', 'pile_cap'],
+                                 ['borepile', 'bored_pile'], ['bor', 'bored_pile']] as const) {
+    const r: any = calculateMto('foundation',
+      { foundation_type: alias, L: 2, W: 2, H: 0.8, qty: 2, pile_dia: 0.4, pile_length: 10 });
+    chk(`"${alias}" → ${varian}`, r.variant, varian);
+  }
 
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
   process.exit(fail ? 1 : 0);
