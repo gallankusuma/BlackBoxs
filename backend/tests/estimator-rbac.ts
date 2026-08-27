@@ -93,8 +93,15 @@ async function main() {
     if (!rbacHidup) {
       console.log('\n  ––   ESTIMATOR_RBAC MATI — celah masih terbuka, ini yang diverifikasi:');
       chk('tanpa hak estimator, daftar proposal MASIH terbuka', sondir.status, 200);
+      // EST-REG-R49: register sekarang membalas amplop `{ items, faset, … }`,
+      // bukan array polos. Yang dijaga asersi ini tetap sama — bahwa harga
+      // penawaran benar-benar terbaca — jadi yang diperiksa keberadaan barisnya
+      // DAN kolom nilainya, bukan bentuk pembungkusnya.
+      const barisSondir = Array.isArray(sondir.json?.items)
+        ? sondir.json.items
+        : (sondir.json?.data ?? sondir.json);
       chk('artinya harga penawaran memang masih terbaca semua token',
-        Array.isArray(sondir.json?.data ?? sondir.json), true);
+        Array.isArray(barisSondir) && (barisSondir.length === 0 || 'total_project' in barisSondir[0]), true);
       console.log('       Bagian penegakan dilewati sampai sakelarnya dinyalakan.');
     } else {
 

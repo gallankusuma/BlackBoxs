@@ -12,27 +12,50 @@
     </div>
 
     <!-- Summary Cards -->
-    <div class="grid grid-cols-1 md:grid-cols-5 gap-4 mb-6">
+    <!-- EST-REG-R49: angkanya dari faset server atas SELURUH scope, bukan
+         dihitung di browser dari halaman yang sedang dimuat. `no_deal` dulu
+         tidak punya kartu sama sekali, jadi Total tidak pernah harus sama
+         dengan jumlah kartu status. Kartu juga berfungsi sebagai filter. -->
+    <div class="grid grid-cols-2 md:grid-cols-6 gap-4 mb-6">
       <div class="bg-white p-4 rounded-lg shadow">
         <p class="text-sm text-gray-600">Total Proposals</p>
-        <p class="text-2xl font-bold text-gray-800">{{ proposals.length }}</p>
+        <p class="text-2xl font-bold text-gray-800">{{ totalScope }}</p>
+        <p v-if="faset.lainnya" class="text-[10px] text-gray-400 mt-0.5">
+          termasuk {{ faset.lainnya }} status lain
+        </p>
       </div>
-      <div class="bg-white p-4 rounded-lg shadow">
-        <p class="text-sm text-gray-600">Draft</p>
-        <p class="text-2xl font-bold text-yellow-600">{{ proposals.filter(p => p.status === 'draft').length }}</p>
+      <button v-for="k in KARTU_STATUS" :key="k.id" @click="toggleStatus(k.id)"
+        class="bg-white p-4 rounded-lg shadow text-left transition hover:shadow-md"
+        :class="filterStatus.includes(k.id) ? 'ring-2 ring-offset-1 ring-blue-400' : ''">
+        <p class="text-sm text-gray-600">{{ k.label }}</p>
+        <p class="text-2xl font-bold" :class="k.warna">{{ faset[k.id] || 0 }}</p>
+      </button>
+    </div>
+
+    <!-- Pencarian & keadaan filter -->
+    <div class="flex flex-wrap items-center gap-3 mb-4">
+      <div class="relative flex-1 min-w-[220px]">
+        <input v-model="cari" @input="cariBerubah" type="search"
+          placeholder="Cari nomor, project, client, atau lokasi…"
+          class="w-full border border-gray-300 rounded-lg pl-9 pr-3 py-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500" />
+        <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">🔍</span>
       </div>
-      <div class="bg-white p-4 rounded-lg shadow">
-        <p class="text-sm text-gray-600">In Review</p>
-        <p class="text-2xl font-bold text-blue-600">{{ proposals.filter(p => p.status === 'review').length }}</p>
-      </div>
-      <div class="bg-white p-4 rounded-lg shadow">
-        <p class="text-sm text-gray-600">Submitted</p>
-        <p class="text-2xl font-bold text-purple-600">{{ proposals.filter(p => p.status === 'submitted').length }}</p>
-      </div>
-      <div class="bg-white p-4 rounded-lg shadow">
-        <p class="text-sm text-gray-600">Deal</p>
-        <p class="text-2xl font-bold text-green-600">{{ proposals.filter(p => p.status === 'deal').length }}</p>
-      </div>
+      <span v-if="memuat" class="text-xs text-gray-500">Memuat…</span>
+      <span v-else class="text-xs text-gray-500">
+        {{ totalTerfilter }} hasil<span v-if="filterStatus.length || cari"> (tersaring)</span>
+      </span>
+      <button v-if="filterStatus.length || cari"
+        @click="cari = ''; filterStatus = []; halaman = 0; loadProposals()"
+        class="text-xs text-blue-600 hover:underline">Bersihkan filter</button>
+    </div>
+
+    <!-- Kegagalan memuat TIDAK boleh menyamar sebagai register kosong -->
+    <div v-if="galatMuat" class="mb-4 border border-red-200 bg-red-50 rounded-lg px-4 py-3">
+      <p class="text-sm font-semibold text-red-800">❌ {{ galatMuat }}</p>
+      <p class="text-xs text-red-600 mt-1">
+        Daftar di bawah tidak menggambarkan isi sebenarnya.
+        <button @click="loadProposals()" class="underline font-medium">Coba muat lagi</button>
+      </p>
     </div>
 
     <!-- Proposals Table -->
@@ -104,8 +127,22 @@
         </tbody>
       </table>
       
+      <div v-if="proposals.length && (halaman > 0 || adaLagi)"
+        class="flex items-center justify-between px-4 py-3 border-t bg-gray-50 text-sm">
+        <button @click="gantiHalaman(-1)" :disabled="halaman === 0 || memuat"
+          class="px-3 py-1 rounded border border-gray-300 bg-white disabled:opacity-40">← Sebelumnya</button>
+        <span class="text-gray-600">
+          {{ halaman * UKURAN_HALAMAN + 1 }}–{{ halaman * UKURAN_HALAMAN + proposals.length }}
+          dari {{ totalTerfilter }}
+        </span>
+        <button @click="gantiHalaman(1)" :disabled="!adaLagi || memuat"
+          class="px-3 py-1 rounded border border-gray-300 bg-white disabled:opacity-40">Berikutnya →</button>
+      </div>
+
       <div v-if="proposals.length === 0" class="text-center py-12 text-gray-500">
-        <p class="text-lg">No proposals yet</p>
+        <p v-if="galatMuat" class="text-lg">Daftar tidak bisa dimuat</p>
+        <p v-else-if="cari || filterStatus.length" class="text-lg">Tidak ada proposal yang cocok dengan filter ini</p>
+        <p v-else class="text-lg">No proposals yet</p>
         <p class="text-sm mt-2">Create your first proposal to get started</p>
       </div>
     </div>
@@ -691,13 +728,103 @@ const handleClickOutside = (e: MouseEvent) => {
   }
 };
 
+/**
+ * EST-REG-R49: register dimuat berparameter dari server.
+ *
+ * Dua hal yang berubah bentuknya:
+ *
+ * - KPI dulu dihitung di browser dari array yang sedang dimuat. Sekarang
+ *   fasetnya datang dari server, dihitung atas seluruh scope — jadi Total
+ *   benar-benar sama dengan jumlah kartu status, termasuk `no_deal` yang dulu
+ *   tidak punya kartu sama sekali.
+ * - Kegagalan memuat dulu hanya masuk console, array tetap kosong, dan layar
+ *   menampilkan "No proposals yet". Register yang gagal dibaca jadi tidak bisa
+ *   dibedakan dari register yang memang kosong — itu keadaan paling berbahaya
+ *   dari keduanya, karena tidak ada yang tampak salah.
+ */
+const KARTU_STATUS = [
+  { id: 'draft',     label: 'Draft',     warna: 'text-yellow-600' },
+  { id: 'review',    label: 'In Review', warna: 'text-blue-600' },
+  { id: 'submitted', label: 'Submitted', warna: 'text-purple-600' },
+  { id: 'deal',      label: 'Deal',      warna: 'text-green-600' },
+  // `no_deal` dulu tidak punya kartu sama sekali, jadi Total tidak pernah
+  // rekonsiliasi ke jumlah kartu status.
+  { id: 'no_deal',   label: 'No Deal',   warna: 'text-gray-500' },
+];
+
+const memuat = ref(false);
+const galatMuat = ref('');
+const cari = ref('');
+const filterStatus = ref<string[]>([]);
+const halaman = ref(0);
+const UKURAN_HALAMAN = 50;
+const totalTerfilter = ref(0);
+const adaLagi = ref(false);
+const faset = ref<Record<string, number>>({});
+
+const totalScope = computed(() =>
+  Object.values(faset.value).reduce((a, b) => a + Number(b || 0), 0));
+
+let permintaanKe = 0;
+
 const loadProposals = async () => {
+  // Permintaan yang sudah usang tidak boleh menimpa hasil yang lebih baru —
+  // pencarian yang diketik cepat bisa membuat respons datang tidak berurutan.
+  const seq = ++permintaanKe;
+  memuat.value = true;
+  galatMuat.value = '';
   try {
-    const { data } = await api.get('/estimator/proposals');
-    proposals.value = data;
-  } catch (error) {
+    const { data } = await api.get('/estimator/proposals', {
+      params: {
+        q: cari.value || undefined,
+        status: filterStatus.value.length ? filterStatus.value.join(',') : undefined,
+        limit: UKURAN_HALAMAN,
+        offset: halaman.value * UKURAN_HALAMAN,
+      },
+    });
+    if (seq !== permintaanKe) return;
+    // Bentuk lama (array polos) tetap diterima, supaya konsumen lain tidak
+    // regresi kalau ada yang terlewat.
+    if (Array.isArray(data)) {
+      proposals.value = data;
+      totalTerfilter.value = data.length;
+      adaLagi.value = false;
+      faset.value = {};
+    } else {
+      proposals.value = data?.items || [];
+      totalTerfilter.value = Number(data?.total || 0);
+      adaLagi.value = !!data?.has_more;
+      faset.value = data?.faset || {};
+    }
+  } catch (error: any) {
+    if (seq !== permintaanKe) return;
     console.error('Failed to load proposals:', error);
+    galatMuat.value = error?.response?.data?.error || 'Gagal memuat daftar proposal.';
+    proposals.value = [];
+  } finally {
+    if (seq === permintaanKe) memuat.value = false;
   }
+};
+
+let timerCari: ReturnType<typeof setTimeout> | null = null;
+const cariBerubah = () => {
+  if (timerCari) clearTimeout(timerCari);
+  timerCari = setTimeout(() => { halaman.value = 0; loadProposals(); }, 300);
+};
+
+const toggleStatus = (st: string) => {
+  const i = filterStatus.value.indexOf(st);
+  if (i >= 0) filterStatus.value.splice(i, 1);
+  else filterStatus.value.push(st);
+  halaman.value = 0;
+  loadProposals();
+};
+
+const gantiHalaman = (delta: number) => {
+  const baru = halaman.value + delta;
+  if (baru < 0) return;
+  halaman.value = baru;
+  loadProposals();
 };
 
 /**

@@ -805,15 +805,134 @@ router.post('/ahsp/:id/calculate', authMiddleware, async (req: Request, res: Res
 // ============================================
 
 // Get all proposals
-router.get('/proposals', authMiddleware, bolehLihat, async (_req: Request, res: Response) => {
+/**
+ * EST-REG-R49: register proposal dengan pencarian, filter, dan halaman.
+ *
+ * Sebelumnya `SELECT p.*` mengembalikan SELURUH proposal tanpa parameter apa
+ * pun, dan layar menghitung KPI-nya di browser dari array itu. Tiga akibat:
+ *
+ *   1. Tidak ada cara mencari nomor, project, client, atau lokasi. Operator
+ *      harus memindai seluruh daftar dengan mata.
+ *   2. `p.*` mengirimkan `design_params` dan seluruh kolom komersial ke layar
+ *      daftar yang hanya memerlukan sebagian — payload dan permukaan datanya
+ *      lebih besar daripada yang dibutuhkan.
+ *   3. KPI dihitung dari halaman yang sedang dimuat, dan `no_deal` tidak punya
+ *      kartu sama sekali — jadi **Total tidak harus sama dengan jumlah kartu
+ *      status**. Angka yang tidak rekonsiliasi lebih buruk daripada tidak ada
+ *      angka.
+ *
+ * Faset sekarang dihitung SERVER dari scope+filter yang sama, bukan dari
+ * halaman, sehingga jumlahnya selalu rekonsiliasi ke Total. Status di luar enum
+ * masuk bucket `lainnya` dan tetap terhitung — data lama tidak disembunyikan.
+ */
+const STATUS_PROPOSAL = ['draft', 'review', 'submitted', 'deal', 'no_deal'];
+const URUTAN_REGISTER: Record<string, string> = {
+  created_at: 'p.created_at',
+  total_project: 'p.total_project',
+  proposal_number: 'p.proposal_number',
+  project_name: 'p.project_name',
+  status: 'p.status',
+};
+
+router.get('/proposals', authMiddleware, bolehLihat, async (req: Request, res: Response) => {
   try {
-    const proposals = await dbAll(
-      `SELECT p.*, u.username as created_by_name
+    const q = String(req.query.q || '').trim();
+    const statusMinta = String(req.query.status || '').split(',').map(x => x.trim()).filter(Boolean);
+    // Hanya status yang dikenal yang diterima — nilai karangan akan diam-diam
+    // menghasilkan daftar kosong dan terlihat seperti register yang memang kosong.
+    const status = statusMinta.filter(x => STATUS_PROPOSAL.includes(x));
+    const statusDitolak = statusMinta.filter(x => !STATUS_PROPOSAL.includes(x));
+    if (statusDitolak.length) {
+      return res.status(400).json({
+        error: `Status tidak dikenal: ${statusDitolak.join(', ')}`,
+        code: 'STATUS_TIDAK_DIKENAL',
+        status_dikenal: STATUS_PROPOSAL,
+      });
+    }
+
+    const kolomUrut = URUTAN_REGISTER[String(req.query.sort || 'created_at')];
+    if (!kolomUrut) {
+      return res.status(400).json({
+        error: `Pengurutan "${req.query.sort}" tidak didukung.`,
+        code: 'SORT_TIDAK_DIDUKUNG',
+        sort_didukung: Object.keys(URUTAN_REGISTER),
+      });
+    }
+    const arah = String(req.query.dir || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+
+    const limitMinta = Number(req.query.limit);
+    const limit = Number.isFinite(limitMinta) && limitMinta > 0 ? Math.min(Math.floor(limitMinta), 200) : 50;
+    const offsetMinta = Number(req.query.offset);
+    const offset = Number.isFinite(offsetMinta) && offsetMinta > 0 ? Math.floor(offsetMinta) : 0;
+
+    const syarat: string[] = [];
+    const nilai: any[] = [];
+    if (q) {
+      syarat.push(`(p.proposal_number LIKE ? OR p.project_name LIKE ? OR p.client LIKE ? OR p.lokasi LIKE ?)`);
+      const pola = `%${q}%`;
+      nilai.push(pola, pola, pola, pola);
+    }
+    if (status.length) {
+      syarat.push(`p.status IN (${status.map(() => '?').join(',')})`);
+      nilai.push(...status);
+    }
+    const where = syarat.length ? `WHERE ${syarat.join(' AND ')}` : '';
+
+    // Faset dihitung dari scope+filter pencarian, TAPI tanpa filter status —
+    // supaya kartu status tetap memperlihatkan seluruh sebaran saat satu status
+    // sedang dipilih, dan Total tetap bisa direkonsiliasi.
+    const syaratFaset = q ? `WHERE (p.proposal_number LIKE ? OR p.project_name LIKE ? OR p.client LIKE ? OR p.lokasi LIKE ?)` : '';
+    const nilaiFaset = q ? [`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`] : [];
+    const faseRows: any[] = await dbAll(
+      `SELECT COALESCE(p.status, 'lainnya') AS status, COUNT(*) AS n
+       FROM proposals p ${syaratFaset} GROUP BY COALESCE(p.status, 'lainnya')`, nilaiFaset);
+
+    const faset: Record<string, number> = {};
+    for (const st of STATUS_PROPOSAL) faset[st] = 0;
+    faset.lainnya = 0;
+    for (const r of faseRows) {
+      const st = String(r.status);
+      if (st in faset) faset[st] += Number(r.n);
+      else faset.lainnya += Number(r.n);   // status legacy di luar enum tetap terhitung
+    }
+    const totalScope = Object.values(faset).reduce((a, b) => a + b, 0);
+
+    const jml: any = await dbGet(
+      `SELECT COUNT(*) AS n FROM proposals p ${where}`, nilai);
+
+    // DTO daftar: hanya kolom yang benar-benar dirender tabel. `design_params`
+    // dan rincian komersial lain hanya lewat endpoint detail.
+    //
+    // `LIMIT`/`OFFSET` disisipkan sebagai angka, bukan sebagai parameter:
+    // MySQL menolak `LIMIT ?` pada prepared statement
+    // (`Incorrect arguments to mysqld_stmt_execute`). Aman karena keduanya
+    // sudah dipaksa menjadi integer non-negatif di atas — nilai dari klien
+    // tidak pernah sampai ke SQL apa adanya. `kolomUrut` juga berasal dari
+    // allowlist, bukan dari input.
+    const items = await dbAll(
+      `SELECT p.id, p.proposal_number, p.project_name, p.client, p.client_id, p.lokasi,
+              p.revision, p.status, p.proposal_type, p.total_project, p.project_id,
+              p.created_at, p.updated_at, p.submitted_at, p.deal_at,
+              u.username AS created_by_name
        FROM proposals p
        LEFT JOIN users u ON p.created_by = u.id
-       ORDER BY p.created_at DESC`
+       ${where}
+       ORDER BY ${kolomUrut} ${arah}, p.id ${arah}
+       LIMIT ${limit} OFFSET ${offset}`,
+      nilai
     );
-    res.json(proposals);
+
+    res.json({
+      items,
+      total: Number(jml?.n || 0),
+      total_scope: totalScope,
+      faset,
+      limit,
+      offset,
+      // Tanpa ini layar harus menebak apakah masih ada halaman berikutnya.
+      has_more: offset + items.length < Number(jml?.n || 0),
+      filter: { q, status, sort: String(req.query.sort || 'created_at'), dir: arah.toLowerCase() },
+    });
   } catch (error) {
     console.error('Error fetching proposals:', error);
     res.status(500).json({ error: 'Failed to fetch proposals' });

@@ -8146,6 +8146,76 @@ statusnya terdokumentasi.
 7. Export/saved view menyimpan filter, sort, permission scope, timezone, as-of,
    actor, serta checksum/manifest sehingga hasil dapat direproduksi untuk audit.
 
+**Status: [DEV] DITERAPKAN SEBAGIAN** — 27 Agustus 2026
+
+**Klaimnya benar.** `GET /estimator/proposals` memang `SELECT p.*` seluruh baris
+tanpa satu pun parameter, dan layar menghitung KPI di browser dari array itu.
+
+**Yang saya kerjakan, dan yang sengaja saya tunda.** Target penuh review —
+cursor pagination, faset ber-scope RBAC, saved view, query manifest — bergantung
+pada RBAC/ownership Proposal, counterparty ID kanonik, dan revision lineage yang
+**belum ada**. Membangunnya sekarang berarti menebak bentuk yang belum
+diputuskan. Yang saya kerjakan adalah bagian yang berdiri sendiri dan tidak akan
+perlu dibongkar saat dependensinya datang.
+
+Dikerjakan (`estimator.routes.ts` + `EstimatorProposalList.vue`):
+
+1. **Pencarian server-side** atas nomor, project, client, dan lokasi.
+2. **Filter status multi-select**, dengan status di luar enum ditolak
+   **400 `STATUS_TIDAK_DIKENAL`** — bukan diam-diam menghasilkan daftar kosong
+   yang terlihat seperti register yang memang kosong.
+3. **Pagination offset** dengan `limit` dibatasi 200 dan tie-break `p.id`,
+   sehingga satu permintaan tidak bisa menarik seluruh tabel dan urutan halaman
+   stabil. Cursor ditunda; pada volume ini offset memadai, dan cursor yang benar
+   perlu sort key yang stabil terhadap revision lineage.
+4. **Pengurutan dari allowlist** — `sort` di luar daftar ditolak
+   **400 `SORT_TIDAK_DIDUKUNG`**; kolomnya tidak pernah berasal dari input.
+5. **DTO daftar ramping** — `design_params` dan rincian komersial tidak lagi
+   dikirim ke layar daftar; keduanya tetap ada di endpoint detail. Diuji dua
+   arah.
+6. **Faset dihitung server dan REKONSILIASI.** `no_deal` dulu tidak punya kartu
+   sama sekali, jadi Total tidak pernah harus sama dengan jumlah kartu status.
+   Sekarang faset dihitung atas seluruh scope pencarian (bukan atas halaman, dan
+   bukan atas filter status — supaya sebarannya tetap terlihat saat satu status
+   dipilih), status legacy di luar enum masuk bucket `lainnya` dan **tetap
+   terhitung**, dan jumlah seluruh faset diuji sama dengan `total_scope`.
+7. **Gagal-muat dibedakan dari register kosong.** Kegagalan dulu hanya masuk
+   console, array tetap kosong, dan layar menulis "No proposals yet" — register
+   yang gagal dibaca tidak bisa dibedakan dari yang memang kosong, dan itu
+   keadaan paling berbahaya dari keduanya karena tidak ada yang tampak salah.
+   Sekarang ada panel merah yang menyatakan daftarnya tidak menggambarkan isi
+   sebenarnya, plus tombol muat ulang.
+8. Pencarian di-debounce, dan **respons usang tidak menimpa hasil yang lebih
+   baru** (nomor urut permintaan) — mengetik cepat bisa membuat respons datang
+   tidak berurutan.
+
+**Belum dikerjakan, dan alasannya:** filter owner/team, revision family,
+validity/expiry, dan rentang nilai — ketiganya butuh kolom atau lineage yang
+belum ada. Saved view dan export bermanifest — fase berikutnya. Faset ber-scope
+RBAC — menunggu RBAC Proposal ditegakkan penuh; sekarang scope-nya sama untuk
+semua pembaca daftar. Index tambahan **tidak** saya buat: produksi berisi
+**3 proposal**, dan index spekulatif tanpa query plan nyata justru yang review
+sendiri peringatkan.
+
+**Tes: `backend/tests/register-proposal.ts` — 40 asersi, masuk `test:all`.**
+Terbukti bisa gagal: **23 gagal** di kode lama.
+
+Dua koreksi pada pekerjaan saya sendiri yang layak dicatat:
+
+- Versi pertama memakai `LIMIT ? OFFSET ?` sebagai parameter dan **selalu 500**:
+  MySQL menolaknya pada prepared statement
+  (`Incorrect arguments to mysqld_stmt_execute`). Angkanya disisipkan langsung —
+  aman karena keduanya sudah dipaksa integer non-negatif sebelum menyentuh SQL.
+- Tes RBAC yang sudah ada membaca bentuk array polos. Asersinya disesuaikan ke
+  amplop baru **tanpa melemahkan apa yang dijaga**: yang diperiksa tetap bahwa
+  baris dan kolom `total_project` benar-benar terbaca, bukan sekadar bentuk
+  pembungkusnya.
+
+Bentuk lama (array polos) tetap diterima layar sebagai adapter, supaya konsumen
+yang mungkin terlewat tidak regresi.
+
+`test:all` 0 gagal, 0 residu.
+
 ---
 
 ## Live Auto Review — 20 Agustus 2026 09:29 WIB
