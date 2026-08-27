@@ -58,6 +58,27 @@ export async function sapuFixture(stamp: string | number, kodeAhsp: string[] = [
     await dbRun(`DELETE FROM proposal_items WHERE proposal_id IN (${tanda})`, ids).catch(() => {});
     // `client_projects.proposal_id` ber-FK SET NULL, jadi project uji yang lahir
     // dari fixture Deal tidak ikut terhapus — dibersihkan eksplisit di sini.
+    //
+    // Urutannya menentukan: MTO milik project harus dihapus SEBELUM projectnya.
+    // Versi pertama penyapu ini menghapus `client_projects` lebih dulu, lalu
+    // baru mencari project berdasarkan nama — yang saat itu sudah tidak ada.
+    // Hasilnya penyapu itu sendiri yang menciptakan elemen yatim; 18 per run,
+    // dan justru tes kebersihan yang menangkapnya.
+    const proyekDariProposal: any[] = await dbAll(
+      `SELECT id FROM client_projects WHERE proposal_id IN (${tanda})`, ids);
+    if (proyekDariProposal.length) {
+      const tpp = proyekDariProposal.map(() => '?').join(',');
+      const pids0 = proyekDariProposal.map(p => p.id);
+      const elP0: any[] = await dbAll(
+        `SELECT id FROM engineering_inputs WHERE scope_type = 'project' AND scope_id IN (${tpp})`, pids0);
+      if (elP0.length) {
+        const t4 = elP0.map(() => '?').join(',');
+        const rb0 = await dbRun(`DELETE FROM mto_lines WHERE element_id IN (${t4})`, elP0.map(e => e.id));
+        hasil.baris += rb0?.affectedRows ?? 0;
+        const re0 = await dbRun(`DELETE FROM engineering_inputs WHERE id IN (${t4})`, elP0.map(e => e.id));
+        hasil.elemen += re0?.affectedRows ?? 0;
+      }
+    }
     await dbRun(`DELETE FROM client_projects WHERE proposal_id IN (${tanda})`, ids).catch(() => {});
     const rp = await dbRun(`DELETE FROM proposals WHERE id IN (${tanda})`, ids);
     hasil.proposal = rp?.affectedRows ?? 0;

@@ -8976,6 +8976,84 @@ status setiap DELETE dan jangan mengandalkan `process.exit` langsung.
 5. Regression test hard-delete membuktikan scope project/MTO lain tidak ikut
    terhapus dan repeated cleanup aman/idempoten.
 
+**Status: [DEV] DITERAPKAN** — 27 Agustus 2026
+
+**Klaimnya benar, dan skalanya jauh lebih besar daripada yang terlihat.** Saya
+ukur database dev sebelum menyentuh apa pun: **8.959 proposal, 5.238 item RAB,
+3.564 elemen MTO (152 yatim), 2.983 client_project, dan 2.354 AHSP fixture.**
+Seluruh tabel `proposals` di dev ternyata isinya fixture — tidak ada satu baris
+pun kerja nyata.
+
+Penyebabnya dua, dan yang pertama tidak disebut review:
+
+1. `DELETE /estimator/proposals/:id` **menolak** proposal `submitted`/`deal` —
+   dan itu benar, penawaran yang sudah dikirim tidak boleh dihapus lewat API.
+   Tapi hampir setiap suite membuat fixture submitted untuk menguji penguncian,
+   lalu menelan 409-nya dengan `catch {}`. Fixture itu menetap selamanya.
+   Ini bukan bug aplikasi; jalur pembersihan tes yang salah alat.
+2. Suite memanggil `process.exit()` saat asersi gagal, sehingga `finally` tidak
+   selalu tercapai.
+
+Yang dikerjakan:
+
+- **`backend/tests/_bersih.ts`** — penyapu bersama. Menembak database langsung,
+  bukan API, justru karena yang perlu dibersihkan termasuk yang API-nya sengaja
+  menolak. Mencakup proposal, item, `engineering_inputs` scope proposal **dan**
+  scope project, `mto_lines`, `deal_pr_jobs`, `client_projects`, dan AHSP
+  fixture.
+- Dipasang di **17 suite** yang membuat proposal; 9 suite lain tidak
+  membuatnya dan tidak disentuh.
+- **`backend/tests/kebersihan-fixture.ts`** — 20 asersi, dijalankan **paling
+  akhir** di `test:all` karena ia memeriksa keadaan seluruh database setelah
+  semua suite membersihkan diri. Ia membuat fixture yang paling sulit dibersihkan
+  (proposal submitted, yang API-nya menolak dihapus), membuktikan API memang
+  menolak, lalu membuktikan penyapu menghabiskannya sampai nol per tabel. Bagian
+  terakhirnya memindai seluruh berkas tes: **suite yang membuat proposal tanpa
+  memanggil penyapu akan menggagalkan `test:all`** — tanpa ini, perbaikan hari
+  ini akan luruh diam-diam pada suite berikutnya.
+
+### Dua cacat yang justru ditemukan oleh penjaganya
+
+**Penyapu versi pertama saya sendiri yang membuat yatim.** Ia menghapus
+`client_projects` lewat `proposal_id` **sebelum** blok project sempat
+membersihkan elemennya — 18 elemen yatim per run. Tes kebersihan yang
+menangkapnya, bukan saya. Urutannya dibetulkan: MTO milik project dihapus
+sebelum projectnya.
+
+**`DELETE /projects/:id` meninggalkan MTO project yatim — cacat produk, bukan
+tes.** Handler itu meng-cascade `project_activities`, `project_files`,
+`project_members`, `project_tasks`, `project_milestones`, dan `project_expenses`,
+tapi **tidak** `engineering_inputs`/`mto_lines`. Persis cacat yang sama dengan
+temuan 09:33 WIB untuk proposal, di modul yang berbeda, dan tidak pernah
+dilaporkan siapa pun. Terlihat sebagai satu elemen `slab` yatim yang muncul tiap
+kali `test:all` dijalankan. Diperbaiki di `project.routes.ts` (EST-LIFE-R47).
+Produksi diaudit: **0 elemen project yatim** — pencegahan murni.
+
+### Bukti
+
+Tumpukan lama dibersihkan berpola fixture, dengan hitungan diverifikasi:
+8.959 proposal, 5.238 item, 15.094 baris MTO, 3.412 + 637 elemen, 2.983 project,
+2.354 AHSP.
+
+Lalu `test:all` dijalankan **tiga kali berturut-turut** dari keadaan nol:
+
+```
+awal:  proposals=0 elemen=0 project=0 baris=0
+run1:  proposals=0 elemen=0 project=0 baris=0   (0 gagal)
+run2:  proposals=0 elemen=0 project=0 baris=0   (0 gagal)
+run3:  proposals=0 elemen=0 project=0 baris=0   (0 gagal)
+```
+
+Sebelum perbaikan, angka yang sama bertambah **6 elemen dan 30 baris per run**
+— dan proposal bertambah puluhan.
+
+Terhadap acceptance test: cleanup ownership aplikasi sudah diperbaiki di temuan
+09:33 dan tes ini menjadi regression-nya; elemen dan baris dibuktikan nol setelah
+penghapusan; seluruh fixture kini tersapu walau `process.exit()` memotong jalur
+`finally`, karena penyapu berjalan sebelum baris ringkasan.
+
+`test:all` 0 gagal (27 suite).
+
 ---
 
 ## Live Auto Review — 20 Agustus 2026 09:52 WIB

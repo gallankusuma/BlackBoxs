@@ -287,6 +287,27 @@ router.delete('/:id', authMiddleware, async (req: Request, res: Response) => {
     };
 
     // Cascade delete child records (order matters for FK)
+    // EST-LIFE-R47: MTO project ikut dihapus.
+    //
+    // Cacat yang sama persis dengan penghapusan proposal (temuan 20 Agustus
+    // 09:33): `engineering_inputs` polymorphic dan tidak punya FK ke
+    // `client_projects`, jadi cascade tidak menjangkaunya. Menghapus project
+    // meninggalkan seluruh baseline MTO-nya utuh, menunjuk id project yang sudah
+    // tidak ada — dan tidak ada satu pun layar yang bisa menjangkaunya, karena
+    // pembacaan MTO project selalu menyaring lewat project yang masih hidup.
+    //
+    // Ditemukan lewat tes kebersihan fixture: satu elemen `slab` yatim muncul
+    // pada setiap kali `test:all` dijalankan.
+    const elemenMto = await dbAll(
+      `SELECT id FROM engineering_inputs WHERE scope_type = 'project' AND scope_id = ?`,
+      [projectId]
+    ) as any[];
+    if (elemenMto.length > 0) {
+      const tanda = elemenMto.map(() => '?').join(',');
+      await safeDelete(`DELETE FROM mto_lines WHERE element_id IN (${tanda})`, elemenMto.map(e => e.id));
+    }
+    await safeDelete(`DELETE FROM engineering_inputs WHERE scope_type = 'project' AND scope_id = ?`, [projectId]);
+
     await safeDelete('DELETE FROM project_activities WHERE project_id = ?', [projectId]);
     await safeDelete('DELETE FROM project_files WHERE project_id = ?', [projectId]);
     await safeDelete('DELETE FROM project_members WHERE project_id = ?', [projectId]);
