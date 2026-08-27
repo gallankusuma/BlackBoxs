@@ -74,7 +74,7 @@ async function main() {
 
     // Proposal nyata milik master, untuk diintip user tanpa hak.
     const ah = await call('POST', '/estimator/ahsp', {
-      kode: `TEST-RBAC-${stamp}`, name: `AHSP RBAC ${stamp}`, satuan: 'm3',
+      kode: `TEST-RBAC-${stamp}`, name: `AHSP RBAC ${stamp}`, satuan: 'm3', status: 'active',
       items: [{ section: 'B', resource_type: 'material', resource_name: 'Bahan',
                 resource_satuan: 'm3', koefisien: 1, resource_harga: 750000 }],
     }, master);

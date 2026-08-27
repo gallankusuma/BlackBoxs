@@ -59,7 +59,7 @@ async function main() {
 
   try {
     const ahsp = await call('POST', '/estimator/ahsp', {
-      kode: `TEST-KOM-${stamp}`, name: `AHSP Komersial ${stamp}`, satuan: 'm3',
+      kode: `TEST-KOM-${stamp}`, name: `AHSP Komersial ${stamp}`, satuan: 'm3', status: 'active',
       items: [{ section: 'B', resource_type: 'material', resource_name: 'Beton',
                 resource_satuan: 'm3', koefisien: 1, resource_harga: 1000000 }],
     }, master);
@@ -418,7 +418,7 @@ async function main() {
     console.log('\n13. Dua edit paralel tetap meninggalkan baris yang konsisten');
 
     const ahspMahal = await call('POST', '/estimator/ahsp', {
-      kode: `TEST-PAR-${stamp}`, name: `AHSP Paralel ${stamp}`, satuan: 'm3',
+      kode: `TEST-PAR-${stamp}`, name: `AHSP Paralel ${stamp}`, satuan: 'm3', status: 'active',
       items: [{ section: 'B', resource_type: 'material', resource_name: 'Bahan',
                 resource_satuan: 'm3', koefisien: 1, resource_harga: 7000000 }],
     }, master);

@@ -7527,6 +7527,59 @@ bukan celah ID generik.
 5. Override retired (bila diputuskan perlu) hanya dapat dilakukan permission yang
    tepat, wajib alasan/approval, dan tercatat di issued revision/audit trail.
 
+**Status: [DEV] DITERAPKAN** — 27 Agustus 2026
+
+**Klaimnya benar.** `POST /proposals/:proposalId/items` membaca
+`SELECT kode, name, satuan, harga_satuan FROM ahsp_headers WHERE id = ?` — tanpa
+predikat status — dan membacanya **di luar** transaction. Sementara katalog
+`GET /ahsp` menyaring `status='active'`, "delete" AHSP sebenarnya menonaktifkan,
+dan jalur assign sudah mensyaratkan aktif. Kontrak jalur tulis memang lebih
+longgar daripada katalog untuk operasi bisnis yang sama.
+
+Yang berubah (`estimator.routes.ts`): snapshot diambil **di dalam** transaction
+yang sudah mengunci proposal, dari baris yang ditahan `FOR SHARE`, dan status
+diperiksa di sana. Balasannya dibedakan: **404 `AHSP_TIDAK_DITEMUKAN`** untuk
+yang tidak ada, **409 `AHSP_TIDAK_AKTIF`** untuk yang sudah ditarik — dua
+keadaan berbeda, dan yang kedua bisa diperbaiki pengguna. Jalur assign ikut
+diberi `FOR SHARE` dan pesan 409 yang sama.
+
+Snapshot item yang sudah sah dipilih **tidak** divalidasi ulang — diuji
+eksplisit di bagian 6. Perbaikan ini menjaga pintu masuk, bukan menulis ulang
+sejarah.
+
+**Satu temuan tambahan yang muncul saat mengerjakannya, dan ini penting.**
+Perubahan tersebut memecahkan tujuh suite tes. Sebabnya bukan perbaikannya:
+`POST /ahsp` mem-default `status` ke **`'draft'`**, dan tujuh fixture membuat
+AHSP tanpa menyebut status. Jadi selama ini tes-tes itu membangun proposal di
+atas AHSP `draft` — yang **tidak pernah muncul di katalog** dan **sudah ditolak
+jalur assign**. Dengan kata lain, mereka menempuh jalur yang tidak bisa ditempuh
+satu pun pengguna lewat UI. Fixture-nya dibetulkan menjadi `status: 'active'`,
+yang justru membuatnya menyerupai keadaan sebenarnya.
+
+Layar pembuatan AHSP (`EstimatorAHSP.vue`) memang mengirim `status: 'active'`,
+jadi default `'draft'` hanya bisa dicapai lewat panggilan API yang menghilangkan
+field itu.
+
+**Dampak produksi diperiksa sebelum deploy:** **3469 AHSP di produksi, seluruhnya
+`active`** — nol `draft`, nol `inactive`. Dan 56 item RAB yang merujuk AHSP
+semuanya menunjuk yang aktif. Penegakan ini karena itu tidak menolak satu pun
+pekerjaan yang sedang berjalan.
+
+**Tes: `backend/tests/ahsp-active-contract.ts` — 21 asersi, masuk `test:all`.**
+Terbukti bisa gagal: kode dikembalikan ke versi lama, **9 dari 21 gagal** —
+termasuk `tambah item dengan AHSP inactive ditolak 409 → dapat 201` dan
+`tidak ada item yang tercipta → dapat 2`. Item benar-benar tercipta dari AHSP
+yang sudah ditarik.
+
+Terhadap acceptance test: (1) id inactive ditolak pada add-item dan assign,
+tidak ada item/total yang berubah — terpenuhi. (2) Serialisasi add vs deactivate
+— ditegakkan lewat `FOR SHARE` di dalam transaction, sehingga penonaktifan yang
+berlomba menunggu; **tidak** saya klaim terbukti lewat reproduksi lomba, yang
+dibuktikan tes adalah letak pembacaannya (setelah transaction dibuka) dan
+keberadaan `FOR SHARE`.
+
+`test:all` 0 gagal.
+
 ---
 
 ## Live Auto Review — 20 Agustus 2026 09:13 WIB

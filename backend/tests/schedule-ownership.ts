@@ -52,7 +52,7 @@ async function main() {
 
   try {
     const ahsp = await call('POST', '/estimator/ahsp', {
-      kode: `TEST-SCH-${stamp}`, name: `AHSP Jadwal ${stamp}`, satuan: 'm3',
+      kode: `TEST-SCH-${stamp}`, name: `AHSP Jadwal ${stamp}`, satuan: 'm3', status: 'active',
       items: [{ section: 'A', resource_type: 'labor', resource_name: 'Tukang',
                 resource_satuan: 'OH', koefisien: 4, resource_harga: 150000 }],
     }, master);

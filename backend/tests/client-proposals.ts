@@ -80,7 +80,7 @@ async function main() {
 
     // Nilai kontraknya diisi lewat recalculate yang dipicu penambahan item.
     const ahsp = await call('POST', '/estimator/ahsp', {
-      kode: `TEST-CP-${stamp}`, name: `AHSP CP ${stamp}`, satuan: 'ls',
+      kode: `TEST-CP-${stamp}`, name: `AHSP CP ${stamp}`, satuan: 'ls', status: 'active',
       items: [{ section: 'B', resource_type: 'material', resource_name: 'Paket',
                 resource_satuan: 'ls', koefisien: 1, resource_harga: 2000000 }],
     }, master);

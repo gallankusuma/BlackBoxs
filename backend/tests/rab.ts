@@ -93,7 +93,7 @@ async function main() {
     // kembali dari server, bukan ditebak di sini.
     const buatAhsp = async (nama: string, harga: number) => {
       const r = await call('POST', '/estimator/ahsp', {
-        kode: `TEST-RAB-${stamp}-${nama}`, name: `AHSP Uji ${nama} ${stamp}`, satuan: 'm3',
+        kode: `TEST-RAB-${stamp}-${nama}`, name: `AHSP Uji ${nama} ${stamp}`, satuan: 'm3', status: 'active',
         items: [{ section: 'B', resource_type: 'material', resource_name: 'Bahan Uji',
                   resource_satuan: 'm3', koefisien: 1, resource_harga: harga }],
       }, master);

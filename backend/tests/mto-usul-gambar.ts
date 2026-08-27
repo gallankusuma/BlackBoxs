@@ -113,7 +113,7 @@ async function main() {
     console.log('\n4. Proposal terkunci tidak menerima usulan');
     await call('POST', `/estimator/proposals/${pid}/items`, {}, master);
     const ah = await call('POST', '/estimator/ahsp', {
-      kode: `TUG-${stamp}`, name: `AHSP usul ${stamp}`, satuan: 'm3',
+      kode: `TUG-${stamp}`, name: `AHSP usul ${stamp}`, satuan: 'm3', status: 'active',
       items: [{ section: 'B', resource_type: 'material', resource_name: 'B',
                 resource_satuan: 'm3', koefisien: 1, resource_harga: 500000 }],
     }, master);

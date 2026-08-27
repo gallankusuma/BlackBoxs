@@ -58,7 +58,7 @@ async function main() {
     bersihkan.push(() => call('DELETE', `/clients/${clientId}`, undefined, master));
 
     const ah = await call('POST', '/estimator/ahsp', {
-      kode: `TEST-QTO-${stamp}`, name: `AHSP QTO ${stamp}`, satuan: 'm3',
+      kode: `TEST-QTO-${stamp}`, name: `AHSP QTO ${stamp}`, satuan: 'm3', status: 'active',
       items: [{ section: 'B', resource_type: 'material', resource_name: 'Beton',
                 resource_satuan: 'm3', koefisien: 1, resource_harga: 1500000 }],
     }, master);

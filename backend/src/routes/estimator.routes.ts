@@ -2483,22 +2483,10 @@ router.post('/proposals/:proposalId/items', authMiddleware, bolehUbah, async (re
       return res.status(400).json({ error: 'ahsp_id is required' });
     }
     
-    // Get AHSP data for snapshot
-    const ahsp = await dbGet(
-      `SELECT kode, name, satuan, harga_satuan FROM ahsp_headers WHERE id = ?`,
-      [ahsp_id]
-    );
-    
-    if (!ahsp) {
-      return res.status(404).json({ error: 'AHSP not found' });
-    }
-    
     const qtyCek = validasiQty(qty);
     if (!qtyCek.ok) return res.status(400).json({ error: qtyCek.pesan, code: 'QTY_TIDAK_VALID' });
 
     const qtyValue = qtyCek.qty;
-    const unitPrice = parseFloat(ahsp.harga_satuan as any) || 0;
-    const totalPrice = bulatUang(qtyValue * unitPrice);
     
     // EST-MTO-R29: mutasi item dan penghitungan ulang ringkasan adalah SATU unit.
     //
@@ -2518,6 +2506,43 @@ router.post('/proposals/:proposalId/items', authMiddleware, bolehUbah, async (re
       // bersamaan sama-sama membaca angka lama dan memakai urutan yang sama.
       // Sama pola dengan pembacaan harga/qty pada PUT item: yang dikunci harus
       // state yang dipakai menghitung, bukan hanya penulisannya.
+      // EST-AHSP-R40: snapshot diambil DI DALAM transaction, dari AHSP yang
+      // masih aktif, dengan barisnya ditahan `FOR SHARE`.
+      //
+      // Dua cacat sekaligus di versi lama. Pertama, tidak ada predikat status
+      // sama sekali — padahal katalog `GET /ahsp` hanya menyajikan yang aktif,
+      // "delete" AHSP sebenarnya menonaktifkan, dan jalur assign sudah
+      // mensyaratkan aktif. Kontrak jalur tulis lebih longgar daripada katalog
+      // untuk operasi bisnis yang sama, jadi id lama dari tab, cache, atau retry
+      // bisa membekukan harga yang sudah ditarik sebagai scope baru.
+      //
+      // Kedua, pembacaannya di LUAR transaction: status master bisa berubah di
+      // sela baca→insert tanpa diperiksa lagi. `FOR SHARE` membuat penonaktifan
+      // yang berlomba menunggu, sehingga hasilnya selalu satu dari dua keadaan
+      // yang jelas — snapshot dibuat saat AHSP masih aktif, atau penambahannya
+      // ditolak.
+      const ahsp: any = await tx.get(
+        `SELECT kode, name, satuan, harga_satuan, status FROM ahsp_headers WHERE id = ? FOR SHARE`,
+        [ahsp_id]
+      );
+      if (!ahsp) {
+        return { error: 404, body: { error: 'AHSP not found', code: 'AHSP_TIDAK_DITEMUKAN' } };
+      }
+      if (ahsp.status !== 'active') {
+        // Sengaja dibedakan dari 404: "tidak ada" dan "ada tapi sudah ditarik"
+        // adalah dua keadaan berbeda, dan yang kedua bisa diperbaiki pengguna.
+        return { error: 409, body: {
+          error: `AHSP "${ahsp.kode} — ${ahsp.name}" sudah tidak aktif dan tidak bisa dipakai `
+            + 'sebagai lingkup baru. Pilih AHSP lain dari katalog.',
+          code: 'AHSP_TIDAK_AKTIF',
+          ahsp_status: ahsp.status,
+        } };
+      }
+
+      const unitPrice = parseFloat(ahsp.harga_satuan as any) || 0;
+      const totalPrice = bulatUang(qtyValue * unitPrice);
+
+      // `order_no` dihitung DI DALAM transaction yang sudah mengunci proposal.
       const urutan: any = await tx.get(
         'SELECT COALESCE(MAX(order_no), 0) AS maks FROM proposal_items WHERE proposal_id = ?',
         [proposalId]
@@ -2535,10 +2560,11 @@ router.post('/proposals/:proposalId/items', authMiddleware, bolehUbah, async (re
          qtyValue, totalPrice, orderNo]
       );
       await recalculateProposal(proposalId as string, tx);
-      return r.insertId;
+      return { ok: true as const, id: r.insertId };
     });
 
-    res.status(201).json({ message: 'Item added', id: insertedId });
+    if ('error' in insertedId) return res.status(insertedId.error).json(insertedId.body);
+    res.status(201).json({ message: 'Item added', id: insertedId.id });
   } catch (error: any) {
     if (error?.lock) return res.status(error.lock.status).json(error.lock.body);
     console.error('Error adding proposal item:', error);
@@ -2627,12 +2653,21 @@ router.put('/proposals/:proposalId/items/:itemId', authMiddleware, bolehUbah, as
       let qtyEfektif = uang(item.qty);
 
       if (ahsp_id !== undefined) {
+        // EST-AHSP-R40: ditahan `FOR SHARE` seperti jalur tambah item, supaya
+        // penonaktifan yang berlomba tidak bisa menyelinap di sela baca→tulis.
         const ahsp: any = await tx.get(
           `SELECT id, kode, name, satuan, harga_satuan FROM ahsp_headers
-           WHERE id = ? AND status = 'active'`,
+           WHERE id = ? AND status = 'active' FOR SHARE`,
           [ahsp_id]
         );
-        if (!ahsp) return { error: 404, body: { error: 'AHSP not found' } };
+        if (!ahsp) {
+          const ada: any = await tx.get('SELECT kode, name, status FROM ahsp_headers WHERE id = ?', [ahsp_id]);
+          if (ada) return { error: 409, body: {
+            error: `AHSP "${ada.kode} — ${ada.name}" sudah tidak aktif dan tidak bisa dipasang ke item.`,
+            code: 'AHSP_TIDAK_AKTIF', ahsp_status: ada.status,
+          } };
+          return { error: 404, body: { error: 'AHSP not found', code: 'AHSP_TIDAK_DITEMUKAN' } };
+        }
         updates.push('ahsp_id = ?', 'ahsp_code_snapshot = ?', 'ahsp_name_snapshot = ?',
                      'unit_snapshot = ?', 'unit_price_snapshot = ?');
         values.push(ahsp.id, ahsp.kode, ahsp.name, ahsp.satuan, ahsp.harga_satuan);

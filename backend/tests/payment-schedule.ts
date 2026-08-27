@@ -70,7 +70,7 @@ async function main() {
                      resource_satuan: 'OH', koefisien: 8, resource_harga: 0 });
       }
       const r = await call('POST', '/estimator/ahsp', {
-        kode: `TEST-PS-${stamp}-${nama}`, name: `AHSP PS ${nama} ${stamp}`, satuan: 'm3', items,
+        kode: `TEST-PS-${stamp}-${nama}`, name: `AHSP PS ${nama} ${stamp}`, satuan: 'm3', status: 'active', items,
       }, master);
       chk(`AHSP ${nama} dibuat`, r.status, 201);
       return r.json?.id;
