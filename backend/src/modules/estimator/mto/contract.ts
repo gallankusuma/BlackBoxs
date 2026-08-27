@@ -229,6 +229,77 @@ const isFilled = (params: any, field: string): boolean => {
 };
 
 /**
+ * Spesifikasi field wajib untuk satu tipe+varian, sebagai DATA.
+ *
+ * EST-MTO-R50: layar usulan AI perlu tahu field apa yang harus diisi supaya bisa
+ * menampilkan isian yang tepat. Sebelumnya daftar ini hanya hidup sebagai pesan
+ * teks ("Panjang footing (L) wajib diisi") — bisa dibaca manusia, tapi tidak
+ * bisa dipakai membangun formulir. Akibatnya usulan yang kurang lengkap jadi
+ * buntu total: penggunanya melihat apa yang kurang, tapi tidak punya tempat
+ * untuk mengisinya.
+ *
+ * Dikembalikan sebagai data supaya layar dan validator memakai daftar yang SAMA
+ * — kalau layar punya daftarnya sendiri, field yang ditambahkan di sini tidak
+ * akan pernah muncul di formulir.
+ */
+export interface SpesifikasiField {
+  field: string;
+  label: string;
+  wajib: boolean;
+  /** `angka` untuk dimensi, `teks` untuk nama profil. */
+  jenis: 'angka' | 'teks';
+  /** Benar kalau nol adalah nilai yang sah (mis. atap datar). */
+  boleh_nol: boolean;
+  /** Field alternatif yang sama-sama memenuhi syarat, kalau ada. */
+  alternatif?: string[];
+}
+
+const FIELD_TEKS = new Set([
+  'wf_profile', 'wf_profile_beam', 'kanal_profile', 'purlin_profile',
+  'foundation_type', 'column_type', 'beam_type', 'slab_type', 'wall_type', 'roof_type',
+]);
+
+export const spesifikasiField = (elementType: string, variant: string): SpesifikasiField[] => {
+  const buat = (field: string, label: string, alternatif?: string[]): SpesifikasiField => ({
+    field, label, wajib: true,
+    jenis: FIELD_TEKS.has(field) ? 'teks' : 'angka',
+    boleh_nol: ALLOW_ZERO.has(field),
+    ...(alternatif ? { alternatif } : {}),
+  });
+
+  const out: SpesifikasiField[] = [];
+  for (const [f, l] of REQUIRED_COMMON[elementType] || []) out.push(buat(f, l));
+  for (const [f, l] of (REQUIRED_VARIANT[elementType] || {})[variant] || []) out.push(buat(f, l));
+  for (const [fields, l] of (REQUIRED_EITHER[elementType] || {})[variant] || []) {
+    out.push(buat(fields[0], l, fields));
+  }
+  return out;
+};
+
+/**
+ * Field yang berpengaruh pada hasil tapi TIDAK wajib.
+ *
+ * Dipisahkan dari yang wajib supaya formulir bisa menampilkan keduanya tanpa
+ * menyamakan "belum diisi sehingga memakai asumsi" dengan "boleh dikosongkan".
+ */
+const OPSIONAL: Record<string, Req[]> = {
+  foundation: [
+    ['depth', 'Kedalaman galian'],
+    ['waste_pct', 'Susut (%)'],
+    ['tb_length', 'Panjang tie beam'],
+    ['tb_w', 'Lebar tie beam'],
+    ['tb_h', 'Tinggi tie beam'],
+  ],
+};
+
+export const spesifikasiOpsional = (elementType: string): SpesifikasiField[] =>
+  (OPSIONAL[elementType] || []).map(([field, label]) => ({
+    field, label, wajib: false,
+    jenis: FIELD_TEKS.has(field) ? 'teks' as const : 'angka' as const,
+    boleh_nol: true,
+  }));
+
+/**
  * Daftar field wajib yang belum diisi, sudah dalam bahasa manusia.
  * Kosong berarti lengkap.
  */

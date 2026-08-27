@@ -130,10 +130,19 @@ async function main() {
     console.log('\n5. Kontrak desain terjaga di sumbernya');
     const { readFileSync } = await import('node:fs');
     const rute = readFileSync(new URL('../src/routes/estimator.routes.ts', import.meta.url), 'utf8');
-    const iBlok = rute.indexOf('usul-dari-gambar');
-    const blok = rute.slice(Math.max(0, iBlok - 6000), iBlok + 4000);
     // Kuantitas WAJIB lewat kalkulator, bukan diambil dari jawaban AI.
-    chk('pratinjau dihitung kalkulator, bukan dari AI', blok.includes("calculateMto('foundation'"), true);
+    //
+    // Diperiksa lewat KONTRAKNYA, bukan posisinya di berkas: pembentuk usulan
+    // kini dipakai dua jalur (gambar dan diskusi), jadi mencarinya dalam
+    // jendela di sekitar endpoint akan patah setiap kali kodenya dirapikan —
+    // padahal invariannya tidak berubah.
+    const iBentuk = rute.indexOf('function bentukUsulan');
+    chk('ada satu pembentuk usulan bersama', iBentuk > 0, true);
+    const blokBentuk = rute.slice(iBentuk, rute.indexOf('\n}', iBentuk));
+    chk('pratinjau dihitung kalkulator, bukan dari AI',
+      blokBentuk.includes("calculateMto('foundation'"), true);
+    chk('dan usulan tidak pernah membawa kuantitas dari AI',
+      !/quantit|volume\s*:/i.test(blokBentuk.replace(/\/\/.*$/gm, '')), true);
     chk('promptnya melarang AI menghitung kuantitas',
       rute.includes('JANGAN menghitung volume'), true);
     chk('promptnya menegaskan satuan meter', rute.includes('SEMUA panjang dalam METER'), true);

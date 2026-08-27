@@ -1,13 +1,14 @@
 import { Router, Request, Response } from 'express';
 import { calculateMto, toLegacyQuantities, FORMULA_VERSION, MtoResult } from '../modules/estimator/mto/calculator';
 import { checkUnitCompatibility, isProposalEditable } from '../modules/estimator/mto/units';
+import { spesifikasiField, spesifikasiOpsional } from '../modules/estimator/mto/contract';
 import { enrichMtoElement, groupStoredLines } from '../modules/estimator/mto/enrich';
 import { rakitDokumen } from '../modules/estimator/penawaran/dokumen';
 import { renderPenawaran } from '../modules/estimator/penawaran/pdf';
 import { authMiddleware } from '../middleware/auth';
 import { requirePermission, loadUserAccess } from '../middleware/permission';
 import multer from 'multer';
-import { callGeminiVision } from './ai.routes';
+import { callGeminiVision, callGeminiText } from './ai.routes';
 import { dbAll, dbGet, dbRun , withTransaction, TxRunner} from '../config/database';
 import { nextSequentialCode } from './procurement.routes';
 import { uang, bulatUang, jumlahUang } from '../utils/money';
@@ -1797,6 +1798,217 @@ ATURAN KERAS:
 ${catatan ? `\nCATATAN DARI PENGGUNA (pakai ini untuk memperjelas):\n${catatan}` : ''}
 `.trim();
 
+/**
+ * Prompt lanjutan: MEREVISI usulan yang sudah ada, bukan membaca gambar lagi.
+ *
+ * EST-MTO-R50 — Tahap 2. Tahap 1 sengaja satu arah, dan konsekuensinya nyata:
+ * usulan yang beberapa dimensinya tidak terbaca dari gambar menjadi buntu total.
+ * Penggunanya melihat apa yang kurang tapi tidak punya cara menambahkannya, dan
+ * "Terima" pun ditolak karena dimensinya belum lengkap.
+ *
+ * Aturan yang TIDAK berubah dari Tahap 1: AI tetap hanya mengeluarkan
+ * PARAMETER. Kuantitasnya dihitung `calculateMto()` — kalkulator yang sama
+ * dengan input manual. Begitu kuantitas datang dari AI, angkanya berhenti bisa
+ * ditelusuri, dan itu berlaku sama saja untuk giliran keseratus seperti giliran
+ * pertama.
+ */
+/**
+ * Terjemahkan kegagalan dari sisi Gemini menjadi respons yang bisa ditindaklanjuti.
+ *
+ * Kuota habis dan rate limit adalah keadaan yang WAJAR pada free tier — 20
+ * permintaan per menit habis hanya dengan beberapa kali menyunting. Membalasnya
+ * 500 dengan pesan mentah membuatnya tidak bisa dibedakan dari sistem rusak,
+ * dan pengguna tidak tahu bahwa yang perlu dilakukan hanyalah menunggu sebentar.
+ */
+function galatAi(err: any): { status: number; body: any } {
+  const pesan = String(err?.message || '');
+  if (/quota|rate limit|RESOURCE_EXHAUSTED|429/i.test(pesan)) {
+    const detik = pesan.match(/retry in ([\d.]+)s/i)?.[1];
+    return {
+      status: 429,
+      body: {
+        error: 'Kuota asisten AI sedang habis'
+          + (detik ? `, coba lagi sekitar ${Math.ceil(Number(detik))} detik lagi.` : ', coba lagi sebentar lagi.')
+          + ' Batas gratis Gemini terpakai cepat kalau usulan disunting berkali-kali.',
+        code: 'AI_KUOTA_HABIS',
+        ...(detik ? { coba_lagi_detik: Math.ceil(Number(detik)) } : {}),
+      },
+    };
+  }
+  if (/API key|PERMISSION_DENIED|API_KEY_INVALID/i.test(pesan)) {
+    return {
+      status: 503,
+      body: { error: 'Kunci API asisten ditolak Google. Perlu diperiksa di server.', code: 'AI_KUNCI_DITOLAK' },
+    };
+  }
+  return { status: 500, body: { error: pesan || 'Gagal menghubungi asisten AI', code: 'AI_GAGAL' } };
+}
+
+/**
+ * Bentuk usulan yang sama untuk jalur gambar maupun diskusi.
+ *
+ * Satu tempat: kalau dua jalur membentuknya sendiri-sendiri, giliran diskusi
+ * bisa menghasilkan bentuk yang sedikit berbeda dan layar akan menampilkan
+ * usulan yang tidak setara dengan yang dari gambar.
+ */
+function bentukUsulan(zones: any): any[] {
+  return (Array.isArray(zones) ? zones : []).slice(0, 20).map((z: any) => {
+    const parameters = { ...(z?.parameters || {}) };
+    if (z?.foundation_type) parameters.foundation_type = z.foundation_type;
+    // Field kosong dibuang, bukan dikirim sebagai null — `isFilled` menganggap
+    // null belum diisi, tapi menyimpannya membuat formulir menampilkan "null".
+    for (const [k, v] of Object.entries(parameters)) {
+      if (v === null || v === undefined || String(v).trim() === '') delete (parameters as any)[k];
+    }
+
+    const mto = calculateMto('foundation', parameters);
+    return {
+      element_type: 'foundation',
+      element_name: String(z?.element_name || 'Pondasi').slice(0, 80),
+      parameters,
+      keyakinan: ['tinggi', 'sedang', 'rendah'].includes(z?.keyakinan) ? z.keyakinan : 'rendah',
+      dasar: String(z?.dasar || '').slice(0, 300),
+      ragu: Array.isArray(z?.ragu) ? z.ragu.slice(0, 10).map((x: any) => String(x).slice(0, 200)) : [],
+      // Pratinjau — bukan angka tersimpan.
+      pratinjau: mto.lines,
+      variant: mto.variant,
+      missing_required: (mto as any).missing_required || [],
+      field_wajib: spesifikasiField('foundation', mto.variant),
+      field_opsional: spesifikasiOpsional('foundation'),
+    };
+  });
+}
+
+const promptDiskusi = (zona: any[], pesan: string, riwayat: any[]) => `
+Anda engineer struktur yang sedang MEREVISI daftar parameter pondasi bersama
+seorang estimator. Anda TIDAK sedang membaca gambar baru.
+
+KEADAAN SEKARANG (JSON):
+${JSON.stringify(zona, null, 1).slice(0, 6000)}
+
+${riwayat.length ? `PERCAKAPAN SEBELUMNYA:\n${riwayat.slice(-8).map((r: any) =>
+  `${r.peran === 'pengguna' ? 'Estimator' : 'Anda'}: ${String(r.teks || '').slice(0, 500)}`).join('\n')}\n` : ''}
+PERMINTAAN ESTIMATOR SEKARANG:
+${pesan}
+
+Keluarkan JSON dengan bentuk PERSIS:
+{
+  "zones": [ { "element_name": "...", "foundation_type": "footplate",
+               "parameters": { "L": <m>, "W": <m>, "H": <m>, "depth": <m>, "qty": <angka> },
+               "keyakinan": "tinggi"|"sedang"|"rendah",
+               "dasar": "dari mana angka ini — sebut 'diberikan estimator' kalau dari permintaan di atas",
+               "ragu": ["..."] } ],
+  "balasan": "jawaban singkat untuk estimator, dalam Bahasa Indonesia",
+  "catatan_umum": "..."
+}
+
+ATURAN KERAS:
+1. JANGAN menghitung volume, berat besi, atau kuantitas apa pun. Sistem yang
+   menghitung. Anda hanya menetapkan dimensi.
+2. SEMUA panjang dalam METER. Kalau estimator menyebut "2200", itu 2.2 meter —
+   tapi tanyakan dulu di "balasan" kalau maksudnya ambigu.
+3. KEMBALIKAN SELURUH zona, bukan hanya yang berubah. Zona yang tidak disinggung
+   estimator dikembalikan APA ADANYA, termasuk dasar dan ragunya.
+4. Nilai yang DIBERIKAN estimator dipakai apa adanya — jangan ditimpa hasil
+   pembacaan Anda sendiri, dan tandai "dasar" dengan 'diberikan estimator'.
+5. Kalau permintaan estimator tidak bisa dipenuhi dari data yang ada, katakan di
+   "balasan" dan biarkan parameternya kosong. Jangan menebak.
+`.trim();
+
+/**
+ * Hitung ulang pratinjau untuk parameter apa pun — TANPA menyimpan.
+ *
+ * Ini yang membuat layar bisa menampilkan akibat suntingan pengguna secara
+ * langsung tanpa menduplikasi kalkulator ke browser. Menduplikasinya akan
+ * membuat angka di layar dan angka yang tersimpan berasal dari dua sumber
+ * berbeda — persis kelas cacat yang sudah beberapa kali ditutup di modul ini.
+ */
+router.post('/proposals/:id/mto/pratinjau', authMiddleware, bolehLihat, async (req: Request, res: Response) => {
+  try {
+    const tipe = String(req.body?.element_type || 'foundation');
+    const parameters = req.body?.parameters && typeof req.body.parameters === 'object'
+      ? req.body.parameters : {};
+
+    const mto = calculateMto(tipe, parameters);
+    if (mto.variant === 'invalid') {
+      return res.status(422).json({
+        error: mto.notes[0] || 'Parameter tidak valid.',
+        code: 'PARAMETER_TIDAK_VALID',
+        notes: mto.notes,
+      });
+    }
+
+    res.json({
+      element_type: tipe,
+      variant: mto.variant,
+      pratinjau: mto.lines,
+      missing_required: (mto as any).missing_required || [],
+      notes: mto.notes,
+      // Spesifikasi field dikirim bersama hasilnya supaya formulir di layar
+      // selalu mengikuti kontrak yang sama dengan validatornya.
+      field_wajib: spesifikasiField(tipe, mto.variant),
+      field_opsional: spesifikasiOpsional(tipe),
+      tersimpan: false,
+    });
+  } catch (err: any) {
+    console.error('Pratinjau MTO gagal:', err);
+    res.status(500).json({ error: err?.message || 'Gagal menghitung pratinjau' });
+  }
+});
+
+/**
+ * Diskusi dua arah untuk merevisi usulan MTO.
+ *
+ * Stateless: seluruh keadaan (zona + riwayat percakapan) dikirim klien tiap
+ * giliran. Tidak ada tabel baru, dan yang lebih penting — TIDAK ADA yang
+ * tersimpan. Penyimpanan tetap hanya lewat `POST /mto` saat pengguna menekan
+ * Terima per zona, sama seperti Tahap 1.
+ */
+router.post('/proposals/:id/mto/diskusi', authMiddleware, bolehUbah, async (req: Request, res: Response) => {
+  try {
+    const pesan = String(req.body?.pesan || '').trim().slice(0, 2000);
+    if (!pesan) return res.status(400).json({ error: 'Pesan wajib diisi', code: 'PESAN_WAJIB' });
+
+    const terkunci = await proposalLock(req.params.id);
+    if (terkunci) return res.status(terkunci.status).json(terkunci.body);
+
+    const kunci = process.env.GEMINI_API_KEY;
+    if (!kunci || kunci.startsWith('your-')) {
+      return res.status(503).json({
+        error: 'Asisten belum tersedia — GEMINI_API_KEY belum disetel di server.',
+        code: 'AI_BELUM_SIAP',
+      });
+    }
+
+    const zonaMasuk = Array.isArray(req.body?.zona) ? req.body.zona.slice(0, 20) : [];
+    const riwayat = Array.isArray(req.body?.riwayat) ? req.body.riwayat.slice(-12) : [];
+
+    const jawaban = await callGeminiText(promptDiskusi(zonaMasuk, pesan, riwayat), kunci);
+
+    let hasil: any;
+    try { hasil = JSON.parse(jawaban); }
+    catch {
+      return res.status(502).json({
+        error: 'Asisten mengembalikan jawaban yang tidak bisa dibaca.',
+        code: 'AI_JAWABAN_TIDAK_TERBACA',
+      });
+    }
+
+    const usulan = bentukUsulan(hasil?.zones);
+    res.json({
+      usulan,
+      jumlah: usulan.length,
+      balasan: String(hasil?.balasan || '').slice(0, 2000),
+      catatan_umum: String(hasil?.catatan_umum || '').slice(0, 1000),
+      tersimpan: false,
+    });
+  } catch (err: any) {
+    console.error('Diskusi MTO gagal:', err?.message);
+    const g = galatAi(err);
+    res.status(g.status).json(g.body);
+  }
+});
+
 router.post('/proposals/:id/mto/usul-dari-gambar', authMiddleware, bolehUbah,
   unggahGambar.single('gambar'), async (req: Request, res: Response) => {
   try {
@@ -1834,24 +2046,7 @@ router.post('/proposals/:id/mto/usul-dari-gambar', authMiddleware, bolehUbah,
 
     // Tiap usulan dihitung lewat kalkulator yang SAMA dengan input manual, jadi
     // pratinjaunya benar-benar angka yang akan tersimpan kalau disetujui.
-    const usulan = (Array.isArray(hasil?.zones) ? hasil.zones : []).slice(0, 20).map((z: any) => {
-      const parameters = { ...(z?.parameters || {}) };
-      if (z?.foundation_type) parameters.foundation_type = z.foundation_type;
-
-      const mto = calculateMto('foundation', parameters);
-      return {
-        element_type: 'foundation',
-        element_name: String(z?.element_name || 'Pondasi').slice(0, 80),
-        parameters,
-        keyakinan: ['tinggi', 'sedang', 'rendah'].includes(z?.keyakinan) ? z.keyakinan : 'rendah',
-        dasar: String(z?.dasar || '').slice(0, 300),
-        ragu: Array.isArray(z?.ragu) ? z.ragu.slice(0, 10).map((x: any) => String(x).slice(0, 200)) : [],
-        // Pratinjau — bukan angka tersimpan.
-        pratinjau: mto.lines,
-        variant: mto.variant,
-        missing_required: (mto as any).missing_required || [],
-      };
-    });
+    const usulan = bentukUsulan(hasil?.zones);
 
     res.json({
       usulan,
@@ -1862,8 +2057,9 @@ router.post('/proposals/:id/mto/usul-dari-gambar', authMiddleware, bolehUbah,
       catatan_sistem: 'Ini usulan, belum tersimpan. Periksa dimensinya terhadap gambar, lalu setujui per zona.',
     });
   } catch (err: any) {
-    console.error('Usul MTO dari gambar gagal:', err);
-    res.status(500).json({ error: err?.message || 'Gagal membaca gambar' });
+    console.error('Usul MTO dari gambar gagal:', err?.message);
+    const g = galatAi(err);
+    res.status(g.status).json(g.body);
   }
 });
 

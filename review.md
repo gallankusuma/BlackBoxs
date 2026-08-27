@@ -9838,3 +9838,87 @@ menunggu keputusan terms dari pemilik sistem.
 
 `test:all` 0 gagal, 0 residu.
 
+---
+
+## [DEV] Asisten gambar MTO — Tahap 2: interaksi dua arah
+
+Dilaporkan pengguna 27 Agustus 2026: *"ketika gw masukan document dia memberikan
+resume dan ketika ada yang kurang dan gw mau tambahkan tidak bisa, bahkan ketika
+gw apply juga jadinya tidak bisa karena belum lengkap."*
+
+**Keluhannya tepat, dan sebabnya keputusan desain saya sendiri.** Tahap 1 sengaja
+satu arah: usulan hanya bisa Diterima atau Ditolak. Yang tidak saya
+perhitungkan — gambar kerja **sering tidak memuat semua dimensi**. Kedalaman
+galian, misalnya, kerap hanya ada di spesifikasi terpisah. Jadi usulan yang
+kurang satu field bukan kasus tepi melainkan kejadian normal, dan tanpa jalan
+menambahkannya seluruh fiturnya berhenti di situ: pengguna melihat apa yang
+kurang, tidak punya tempat mengisinya, lalu "Terima" ditolak 422 karena belum
+lengkap.
+
+### Yang dikerjakan
+
+**1. Dimensinya bisa disunting langsung di kartu usulan.** Ini perbaikan
+utamanya, dan sengaja **tidak memerlukan AI sama sekali**.
+
+**2. `POST /mto/pratinjau`** — hitung ulang kuantitas untuk parameter apa pun,
+tanpa menyimpan. Ini yang membuat suntingan langsung terlihat akibatnya. Sengaja
+**tidak** menduplikasi kalkulator ke browser: itu akan membuat angka di layar
+dan angka yang tersimpan berasal dari dua sumber berbeda — kelas cacat yang
+sudah beberapa kali ditutup di modul ini (lihat EST-MTO-R38, R39).
+
+**3. Spesifikasi field dikirim server** (`spesifikasiField` / `spesifikasiOpsional`
+di `contract.ts`). Sebelumnya daftar field wajib hanya hidup sebagai pesan teks
+("Panjang footing (L) wajib diisi") — bisa dibaca manusia, tapi tidak bisa
+dipakai membangun formulir. Kini dikembalikan sebagai data, dan **layar memakai
+daftar yang sama dengan validatornya** — kalau layar punya daftarnya sendiri,
+field yang ditambahkan di kontrak tidak akan pernah muncul di formulir.
+
+**4. `POST /mto/diskusi`** — revisi lewat percakapan ("kedalaman galian P1 1,5
+meter"). Stateless: zona dan riwayat dikirim klien tiap giliran, jadi tidak ada
+tabel percakapan baru dan **tidak ada yang tersimpan**. Penyimpanan tetap hanya
+lewat `POST /mto` saat pengguna menekan Terima per zona — sama seperti Tahap 1.
+
+**5. Terima dinonaktifkan dengan alasan yang terbaca**, bukan dibiarkan aktif
+lalu gagal di server.
+
+Aturan Tahap 1 yang **tidak berubah**: AI hanya mengeluarkan parameter, tidak
+pernah kuantitas. Itu berlaku sama untuk giliran keseratus seperti giliran
+pertama. Prompt diskusi menegaskannya, dan asersi menjaganya di sumber.
+
+### Kuota Gemini habis — dan itu memunculkan perbaikan lain
+
+Saat menguji, panggilan Gemini gagal karena **kuota free tier habis**. Endpoint
+membalas **500 dengan pesan mentah** — tidak bisa dibedakan dari sistem rusak,
+dan pengguna tidak tahu bahwa yang perlu dilakukan hanyalah menunggu.
+
+Sekarang dipetakan: **429 `AI_KUOTA_HABIS`** dengan perkiraan detik tunggu, dan
+**503 `AI_KUNCI_DITOLAK`** kalau kuncinya yang bermasalah. Layar menambahkan
+kalimat yang penting: *"dimensinya tetap bisa Anda isi langsung di kartu usulan —
+kuantitasnya tetap dihitung server."* Tanpa itu, kuota habis terbaca sebagai
+seluruh fitur mati, padahal jalur utamanya justru tidak menyentuh AI.
+
+**Terus terang soal yang belum terbukti:** kuota harian kunci itu habis selama
+sesi ini, jadi **giliran diskusi belum saya buktikan berjalan ujung ke ujung**.
+Enam kali percobaan berjarak 30 detik semuanya 429. Yang sudah terbukti: kontrak,
+penjagaan, penolakan, dan **seluruh jalur penyuntingan + pratinjau** — dan justru
+itu yang menutup jalan buntu yang dilaporkan.
+
+### Tes
+
+`backend/tests/mto-diskusi.ts` — **36 asersi**, masuk `test:all`. Yang dijaga
+antara lain: pratinjau menyebut field yang kurang alih-alih menolak, spesifikasi
+field memuat keempat dimensi footplate dengan label manusia, angka pratinjau
+**sama persis dengan `calculateMto()`** (galian 38.88 dibandingkan langsung),
+pratinjau maupun diskusi **tidak menambah satu baris pun** di `engineering_inputs`,
+parameter negatif ditolak 422, dan proposal terkunci menolak diskusi (409)
+sementara **pratinjau tetap boleh dibaca** — melarangnya akan membuat layar
+proposal terkunci berhenti menampilkan angka.
+
+Satu asersi Tahap 1 ikut diperbaiki: ia mencari `calculateMto` dalam jendela di
+sekitar endpoint, dan patah ketika pembentuk usulan diekstrak menjadi fungsi
+bersama. Diubah memeriksa **kontraknya** — bahwa `bentukUsulan()` memanggil
+kalkulator dan tidak pernah membawa kuantitas dari AI — bukan posisinya di
+berkas.
+
+`test:all` 0 gagal, 0 residu.
+

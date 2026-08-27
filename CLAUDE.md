@@ -213,8 +213,24 @@ Aturan yang harus dijaga kalau fitur ini dilanjutkan:
 4. Satuan adalah risiko utamanya: gambar teknik memakai mm, formula memakai m.
    Prompt menegaskannya; jangan dilonggarkan.
 
+Tahap 2 (27 Agustus 2026) menambah interaksi dua arah, dengan aturan 1–4 di atas
+tetap berlaku penuh:
+
+- `POST /mto/pratinjau` menghitung ulang kuantitas untuk parameter apa pun tanpa
+  menyimpan. **Jangan menduplikasi kalkulator ke browser** untuk ini — angka di
+  layar dan angka tersimpan harus dari satu sumber.
+- `POST /mto/diskusi` merevisi usulan lewat percakapan. Stateless: zona dan
+  riwayat dikirim klien tiap giliran, tidak ada tabel percakapan.
+- Daftar field wajib diekspor sebagai DATA lewat `spesifikasiField()` di
+  `mto/contract.ts`. Layar usulan membangun formulirnya dari situ — jangan
+  membuat daftar field terpisah di frontend, karena field baru tidak akan
+  pernah muncul di sana.
+
 Butuh `GEMINI_API_KEY`. Tanpa itu endpoint membalas 503 `AI_BELUM_SIAP`, bukan
-error samar.
+error samar. Kegagalan dari sisi Google dipetakan: **429 `AI_KUOTA_HABIS`**
+(free tier 20 permintaan/menit habis cepat kalau usulan disunting berkali-kali)
+dan **503 `AI_KUNCI_DITOLAK`**. Keduanya bukan jalan buntu — penyuntingan dimensi
+dan pratinjau tidak menyentuh AI sama sekali, dan layar mengatakannya.
 
 ### Aturan bisnis procurement
 

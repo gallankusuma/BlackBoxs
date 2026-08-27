@@ -141,6 +141,57 @@ async function callGemini(prompt: string, apiKey: string): Promise<string> {
  * perlu menebak-nebak memotong teks pembungkus.
  * ─────────────────────────────────────────────────────────────────────────────
  */
+/**
+ * Panggilan teks-saja untuk giliran diskusi lanjutan.
+ *
+ * Tidak memakai `callGeminiVision` dengan gambar kosong: giliran lanjutan
+ * memang tidak membaca gambar lagi, dan mengirim ulang berkas 8 MB tiap kali
+ * pengguna mengetik satu kalimat itu pemborosan yang terasa lambat di layar.
+ * Yang direvisi adalah parameter yang sudah terbaca, bukan gambarnya.
+ */
+export async function callGeminiText(prompt: string, apiKey: string): Promise<string> {
+  const body = JSON.stringify({
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: {
+      temperature: 0,
+      maxOutputTokens: 8192,
+      responseMimeType: 'application/json',
+      thinkingConfig: { thinkingBudget: 0 },
+    },
+  });
+
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname: 'generativelanguage.googleapis.com',
+      path: `/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+    };
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => (data += chunk));
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed?.error) return reject(new Error(parsed.error.message || 'Gemini menolak permintaan'));
+          const parts = parsed?.candidates?.[0]?.content?.parts || [];
+          const text = parts.filter((p: any) => p.text !== undefined).map((p: any) => p.text).join('');
+          if (!text) {
+            console.error('[Gemini Text] Balasan kosong:', JSON.stringify(parsed).substring(0, 400));
+            return reject(new Error('Gemini tidak mengembalikan teks'));
+          }
+          resolve(text);
+        } catch (e: any) {
+          reject(new Error(`Balasan Gemini tidak bisa dibaca: ${e.message}`));
+        }
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
 export async function callGeminiVision(
   prompt: string, imageBase64: string, mimeType: string, apiKey: string
 ): Promise<string> {

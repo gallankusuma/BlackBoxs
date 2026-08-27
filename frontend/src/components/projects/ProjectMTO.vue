@@ -102,8 +102,26 @@
                 <span class="usul-yakin" :class="'yakin-' + u.keyakinan">keyakinan {{ u.keyakinan }}</span>
               </div>
 
-              <div class="usul-dim">
-                <span v-for="(v, k) in u.parameters" :key="k" class="usul-chip">{{ k }}: {{ v }}</span>
+              <!-- EST-MTO-R50: dimensinya BISA DISUNTING.
+                   Sebelumnya usulan hanya bisa dilihat, jadi yang dimensinya
+                   tidak terbaca dari gambar menjadi buntu total: penggunanya
+                   melihat apa yang kurang, tapi tidak punya tempat mengisinya —
+                   dan "Terima" pun ditolak karena belum lengkap. -->
+              <div class="usul-form">
+                <label v-for="f in fieldTampil(u)" :key="f.field" class="usul-field"
+                  :class="{ 'field-kurang': kurang(u, f.field) }">
+                  <span class="usul-field-label">
+                    {{ f.label }}
+                    <em v-if="f.wajib" class="usul-wajib">wajib</em>
+                  </span>
+                  <input
+                    :type="f.jenis === 'angka' ? 'number' : 'text'"
+                    step="any"
+                    :value="u.parameters[f.field] ?? ''"
+                    :placeholder="f.jenis === 'angka' ? '—' : 'mis. WF 200x100'"
+                    @input="ubahParameter(i, f.field, ($event.target as HTMLInputElement).value)" />
+                  <span class="usul-field-kode">{{ f.field }}</span>
+                </label>
               </div>
 
               <div v-if="u.dasar" class="usul-sub">📖 {{ u.dasar }}</div>
@@ -113,6 +131,7 @@
               <div v-if="u.missing_required?.length" class="usul-sub" style="color:#b45309">
                 ⚠️ Belum lengkap: {{ u.missing_required.join('; ') }}
               </div>
+              <div v-if="menghitungUlang === i" class="usul-sub">⏳ Menghitung ulang…</div>
 
               <details class="usul-pratinjau">
                 <summary>Pratinjau kuantitas ({{ u.pratinjau?.length || 0 }} baris)</summary>
@@ -124,10 +143,44 @@
               </details>
 
               <div class="usul-aksi">
-                <button @click="terimaUsul(i)" :disabled="menyimpanUsul" class="usul-terima">
+                <!-- Tombolnya dinonaktifkan DENGAN alasan yang terbaca, bukan
+                     dibiarkan aktif lalu gagal di server. -->
+                <button @click="terimaUsul(i)"
+                  :disabled="menyimpanUsul || (u.missing_required?.length || 0) > 0"
+                  :title="(u.missing_required?.length || 0) > 0
+                    ? 'Lengkapi dulu: ' + u.missing_required.join('; ')
+                    : 'Simpan sebagai zona MTO'"
+                  class="usul-terima">
                   ✓ Terima jadi zona
                 </button>
                 <button @click="tolakUsul(i)" class="usul-tolak">✗ Tolak</button>
+                <span v-if="(u.missing_required?.length || 0) > 0" class="usul-sub"
+                  style="color:#b45309;align-self:center">
+                  Isi {{ u.missing_required.length }} dimensi di atas untuk mengaktifkan
+                </span>
+              </div>
+            </div>
+
+            <!-- Diskusi dua arah -->
+            <div class="usul-diskusi">
+              <div v-if="riwayat.length" class="usul-riwayat">
+                <div v-for="(r, i) in riwayat" :key="i" class="usul-bubble" :class="'bubble-' + r.peran">
+                  <strong>{{ r.peran === 'pengguna' ? 'Anda' : 'Asisten' }}:</strong> {{ r.teks }}
+                </div>
+              </div>
+              <div class="usul-kirim">
+                <input v-model="pesanDiskusi" :disabled="berdiskusi"
+                  @keyup.enter="kirimDiskusi"
+                  placeholder="Mis. kedalaman galian P1 1,5 m — atau tanya kalau ada yang janggal" />
+                <button @click="kirimDiskusi" :disabled="berdiskusi || !pesanDiskusi.trim()"
+                  class="usul-terima">
+                  {{ berdiskusi ? 'Memproses…' : 'Kirim' }}
+                </button>
+              </div>
+              <div class="usul-sub" style="margin-top:6px">
+                Asisten hanya merevisi <strong>dimensi</strong>. Kuantitasnya tetap dihitung
+                kalkulator yang sama dengan input manual — itu sebabnya angkanya bisa ditelusuri.
+                Perlu baca ulang gambarnya? Unggah lagi lewat tombol di atas.
               </div>
             </div>
           </div>
@@ -494,7 +547,10 @@ const unggahGambar = async (e: Event) => {
       galatUsul.value = catatanUsul.value || 'Tidak ada pondasi yang terbaca dari gambar ini.';
     }
   } catch (err: any) {
-    galatUsul.value = err?.response?.data?.error || 'Gagal membaca gambar.';
+    const d = err?.response?.data;
+    galatUsul.value = (d?.error || 'Gagal membaca gambar.')
+      + (d?.code === 'AI_KUOTA_HABIS'
+        ? ' Zona MTO tetap bisa diisi manual seperti biasa.' : '');
   } finally {
     membacaGambar.value = false;
     // Supaya berkas yang sama bisa dipilih lagi setelah diperbaiki.
@@ -526,8 +582,128 @@ const terimaUsul = async (i: number) => {
   }
 };
 
+/**
+ * EST-MTO-R50 — Tahap 2: interaksi dua arah.
+ *
+ * Tahap 1 sengaja satu arah, dan akibatnya nyata: usulan yang sebagian
+ * dimensinya tidak terbaca dari gambar menjadi buntu total. Penggunanya melihat
+ * apa yang kurang, tapi tidak punya tempat mengisinya — dan "Terima" pun
+ * ditolak server karena dimensinya belum lengkap.
+ *
+ * Dua jalan keluar sekaligus:
+ *   1. dimensinya bisa disunting langsung di kartu usulan, dan
+ *   2. bisa didiskusikan dengan asisten ("kedalaman P1 1,5 m").
+ *
+ * Yang TIDAK berubah: pratinjau kuantitas selalu datang dari `calculateMto()`
+ * di server. Menghitungnya di browser akan membuat angka di layar dan angka
+ * yang tersimpan berasal dari dua sumber berbeda.
+ */
+const menghitungUlang = ref<number | null>(null);
+const pesanDiskusi = ref('');
+const berdiskusi = ref(false);
+const riwayat = ref<Array<{ peran: 'pengguna' | 'asisten'; teks: string }>>([]);
+
+/** Field wajib dulu, lalu opsional — yang kurang selalu terlihat lebih dulu. */
+const fieldTampil = (u: any) => {
+  const wajib = u.field_wajib || [];
+  const opsional = u.field_opsional || [];
+  const sudah = new Set(wajib.map((f: any) => f.field));
+  return [...wajib, ...opsional.filter((f: any) => !sudah.has(f.field))];
+};
+
+/** Apakah field ini termasuk yang dilaporkan server belum lengkap? */
+const kurang = (u: any, field: string) =>
+  (u.missing_required || []).some((m: string) => m.includes(`(${field})`));
+
+let timerHitung: ReturnType<typeof setTimeout> | null = null;
+
+const ubahParameter = (i: number, field: string, nilai: string) => {
+  const u = usulan.value[i];
+  if (!u) return;
+  const teks = String(nilai).trim();
+  if (teks === '') delete u.parameters[field];
+  else {
+    const angka = Number(teks.replace(',', '.'));
+    // Field profil baja bernilai teks; sisanya angka. Nilai yang bukan angka
+    // pada field angka disimpan apa adanya supaya server yang menolaknya —
+    // bukan dibuang diam-diam sehingga pengguna mengira sudah terisi.
+    u.parameters[field] = Number.isFinite(angka) && teks !== '' ? angka : teks;
+  }
+  // Debounce: mengetik "1250" tidak perlu empat kali hitung ulang.
+  if (timerHitung) clearTimeout(timerHitung);
+  timerHitung = setTimeout(() => hitungUlang(i), 400);
+};
+
+/** Pratinjau dihitung ULANG DI SERVER, dengan kalkulator yang sama. */
+const hitungUlang = async (i: number) => {
+  const u = usulan.value[i];
+  if (!u) return;
+  menghitungUlang.value = i;
+  try {
+    const { data } = await api.post(`${baseUrl.value}/mto/pratinjau`, {
+      element_type: u.element_type,
+      parameters: u.parameters,
+    });
+    u.pratinjau = data?.pratinjau || [];
+    u.variant = data?.variant;
+    u.missing_required = data?.missing_required || [];
+    if (data?.field_wajib) u.field_wajib = data.field_wajib;
+    if (data?.field_opsional) u.field_opsional = data.field_opsional;
+  } catch (e: any) {
+    // Parameter yang ditolak kalkulator (mis. negatif) dilaporkan apa adanya —
+    // pratinjau lama TIDAK dipertahankan seolah masih berlaku.
+    u.pratinjau = [];
+    u.missing_required = [e?.response?.data?.error || 'Parameter tidak valid.'];
+  } finally {
+    menghitungUlang.value = null;
+  }
+};
+
+const kirimDiskusi = async () => {
+  const pesan = pesanDiskusi.value.trim();
+  if (!pesan || berdiskusi.value) return;
+  berdiskusi.value = true;
+  riwayat.value.push({ peran: 'pengguna', teks: pesan });
+  pesanDiskusi.value = '';
+  galatUsul.value = '';
+  try {
+    const { data } = await api.post(`${baseUrl.value}/mto/diskusi`, {
+      pesan,
+      // Keadaan dikirim tiap giliran: endpointnya stateless dan tidak menyimpan
+      // apa pun, jadi tidak ada tabel percakapan yang perlu dibersihkan.
+      zona: usulan.value.map((u: any) => ({
+        element_name: u.element_name,
+        foundation_type: u.parameters?.foundation_type,
+        parameters: u.parameters,
+        dasar: u.dasar,
+        ragu: u.ragu,
+      })),
+      riwayat: riwayat.value,
+    });
+    if (Array.isArray(data?.usulan) && data.usulan.length) usulan.value = data.usulan;
+    riwayat.value.push({
+      peran: 'asisten',
+      teks: data?.balasan || 'Usulan diperbarui.',
+    });
+    if (data?.catatan_umum) catatanUsul.value = data.catatan_umum;
+  } catch (e: any) {
+    const d = e?.response?.data;
+    let pesanGagal = d?.error || 'Gagal memproses diskusi.';
+    // Kuota AI habis bukan jalan buntu: dimensinya tetap bisa diisi langsung di
+    // kartu, dan pratinjaunya dihitung server tanpa menyentuh AI sama sekali.
+    // Tanpa kalimat ini, pengguna menyimpulkan seluruh fiturnya mati.
+    if (d?.code === 'AI_KUOTA_HABIS') {
+      pesanGagal += ' Sementara itu, dimensinya tetap bisa Anda isi langsung di kartu '
+        + 'usulan di atas — kuantitasnya tetap dihitung server.';
+    }
+    riwayat.value.push({ peran: 'asisten', teks: `⚠️ ${pesanGagal}` });
+  } finally {
+    berdiskusi.value = false;
+  }
+};
+
 const tolakUsul = (i: number) => { usulan.value.splice(i, 1); };
-const tolakSemuaUsul = () => { usulan.value = []; catatanUsul.value = ''; };
+const tolakSemuaUsul = () => { usulan.value = []; catatanUsul.value = ''; riwayat.value = []; };
 
 function addZone() {
   const mod = activeTab.value;
@@ -996,6 +1172,22 @@ const f0 = (v:number) => v.toLocaleString('id-ID',{maximumFractionDigits:0});
 .zs-baru{background:#fef3c7;color:#92400e;}
 .zs-ubah{background:#e0f2fe;color:#075985;}
 .zs-gagal{background:#fee2e2;color:#991b1b;}
+.usul-form{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;margin:8px 0;}
+.usul-field{display:flex;flex-direction:column;gap:2px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:5px 7px;}
+.usul-field.field-kurang{border-color:#fbbf24;background:#fffbeb;}
+.usul-field-label{font-size:10px;color:#475569;display:flex;justify-content:space-between;align-items:center;gap:4px;}
+.usul-wajib{font-style:normal;font-size:9px;color:#b45309;background:#fef3c7;border-radius:3px;padding:0 4px;}
+.usul-field input{border:none;background:transparent;font-size:13px;font-weight:600;color:#0f172a;width:100%;outline:none;padding:1px 0;}
+.usul-field input:focus{border-bottom:1px solid #60a5fa;}
+.usul-field-kode{font-size:9px;color:#94a3b8;font-family:ui-monospace,monospace;}
+.usul-diskusi{margin-top:10px;padding-top:10px;border-top:1px solid #cbd5e1;}
+.usul-riwayat{max-height:180px;overflow-y:auto;margin-bottom:8px;display:flex;flex-direction:column;gap:5px;}
+.usul-bubble{font-size:12px;padding:6px 9px;border-radius:8px;line-height:1.45;}
+.bubble-pengguna{background:#e0f2fe;color:#0c4a6e;align-self:flex-end;max-width:88%;}
+.bubble-asisten{background:#fff;border:1px solid #e2e8f0;color:#334155;align-self:flex-start;max-width:92%;}
+.usul-kirim{display:flex;gap:8px;}
+.usul-kirim input{flex:1;border:1px solid #cbd5e1;border-radius:6px;padding:7px 10px;font-size:13px;}
+.usul-kirim input:focus{outline:none;border-color:#60a5fa;}
 .usul-btn{border:1px solid #93c5fd;background:#eff6ff;color:#1d4ed8;border-radius:8px;padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;}
 .usul-btn:hover{background:#dbeafe;}
 .usul-panel{margin:12px 18px;padding:12px 14px;border:1px solid #bfdbfe;background:#f8fafc;border-radius:10px;font-size:13px;}
