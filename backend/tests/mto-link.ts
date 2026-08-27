@@ -848,7 +848,12 @@ async function main() {
   const nomorProp = serentak.map(r => r.json?.proposal_number).filter(Boolean);
   chk('semua dapat nomor', nomorProp.length, N_PROP);
   chk('nomornya unik', new Set(nomorProp).size, nomorProp.length);
-  chk('formatnya PROP/TAHUN/NNNN', nomorProp.every((n: string) => /^PROP\/\d{4}\/\d{4}$/.test(n)), true);
+  // Urutannya di-pad minimal 4 digit, TAPI tidak berhenti di 4 — database yang
+  // sudah melewati 9999 proposal menghasilkan `PROP/2026/10216`. Asersi lama
+  // `\d{4}` menyatakan itu cacat format, padahal nomornya benar; yang salah
+  // asersinya. Yang benar-benar dijaga di sini: prefix, tahun, dan urutan yang
+  // ter-pad — bukan batas atas yang memang tidak ada.
+  chk('formatnya PROP/TAHUN/NNNN', nomorProp.every((n: string) => /^PROP\/\d{4}\/\d{4,}$/.test(n)), true);
 
   // Template gagal separuh tidak boleh meninggalkan proposal setengah jadi.
   const denganTemplate = await call('POST', '/estimator/proposals', {

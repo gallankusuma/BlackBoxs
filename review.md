@@ -8515,6 +8515,73 @@ wizard sebelumnya.
    issued artifact dapat merekonstruksi type+parameter+formula/template version
    yang menghasilkan setiap quantity dan nilai kontraktual.
 
+**Status: [DEV] DITERAPKAN** — 27 Agustus 2026
+
+**Klaimnya benar, kedua-duanya.** Handler `apply-template` mendestruktur persis
+`{ proposal_type, template_sections, mode }` dan satu-satunya tulisan ke header
+adalah `UPDATE proposals SET proposal_type = ?`. `design_params` tidak pernah
+disentuh. Dan `applyWizardTemplate()` di editor memang hanya mengirim tiga field
+itu, padahal `getResult()` wizard sudah menyertakan `design_params`.
+
+Satu fakta yang memperjelas keparahannya: `design_params` **tidak dibaca oleh
+satu pun kode backend maupun frontend** — ia murni provenance. Jadi nilainya yang
+stale tidak pernah membuat apa pun terlihat rusak; ia hanya diam-diam berbohong
+tentang parameter mana yang menghasilkan kuantitas aktif.
+
+Yang berubah:
+
+**Backend** (`estimator.routes.ts`)
+1. `design_params` diterima, divalidasi objek (**422 `DESIGN_PARAMS_TIDAK_VALID`**
+   dengan `field`), dan ditulis bersama itemnya dalam transaction yang sama.
+2. `proposal_type` divalidasi terhadap registry `TIPE_TEMPLATE` — daftar yang
+   **sama** dengan yang dipakai memilih prefix AHSP. Sebelumnya prefix-nya
+   didefinisikan inline di dalam handler, jadi tipe apa pun diterima dan yang
+   tak dikenal menghasilkan template kosong tanpa memberi tahu siapa pun.
+   Sekarang **422 `TIPE_PROPOSAL_TIDAK_DIKENAL`** yang menyebutkan tipe yang sah.
+3. **`append` dengan tipe berbeda ditolak 409 `TIPE_TEMPLATE_BERBEDA`**, sebelum
+   mutasi apa pun. Ini opsi yang review sendiri tawarkan, dan saya ambil dengan
+   sadar: skema hanya menyediakan satu `proposal_type` dan satu `design_params`,
+   jadi selama model multi-tipe belum ada, menolak lebih jujur daripada menimpa.
+   Pesannya menyebutkan jalan keluarnya (Replace, atau proposal terpisah).
+4. Riwayat penerapan disimpan di `design_params._penerapan` — tipe, mode,
+   parameter, jumlah seksi, pelaku, waktu. Entri ber-`mode: 'replace'` menandai
+   bahwa semua sebelumnya sudah tidak menghasilkan apa-apa lagi, jadi basis aktif
+   selalu bisa direkonstruksi. Aman ditambahkan justru karena tidak ada consumer
+   yang mem-parse kunci tertentu.
+
+**Frontend** (`EstimatorProposalEditor.vue`) — `applyWizardTemplate()` mengirim
+`design_params`. Jalur `catch`-nya sudah menampilkan `response.data.error`, jadi
+penolakan 409/422 terbaca apa adanya tanpa perubahan tambahan.
+
+**Tes: `backend/tests/apply-template-provenance.ts` — 34 asersi, masuk `test:all`.**
+Terbukti bisa gagal: **22 dari 34 gagal** di kode lama — termasuk
+`tipe header TIDAK berubah → dapat "electrical"` (append Electrical benar-benar
+mengubah header proposal Civil) dan `parameter aktif kini B → dapat "A-…"`
+(basis desain tetap parameter template sebelumnya setelah Replace).
+
+Terhadap acceptance test: (1) Replace → header, tipe, dan parameter seluruhnya
+berpindah ke B — terpenuhi; (2) append tipe berbeda ditolak 409 sebelum mutasi —
+terpenuhi (opsi kedua yang review izinkan); (3) append tipe sama menyimpan
+riwayat per penerapan — terpenuhi lewat `_penerapan`, **bukan** lewat tabel
+application terpisah; penautan per-item ke penerapan tertentu **belum** ada dan
+itu memang butuh model aggregate yang lebih besar; (4) tipe/parameter tidak valid
+ditolak 422 berdiagnostik dan yang lama tetap utuh — terpenuhi; (5) rollback
+seluruh aggregate — sudah dijamin transaction tunggal yang ada sebelumnya;
+(6) submitted/deal tetap 409 — terpenuhi, dan diuji.
+
+**Satu koreksi pada tes yang sudah ada, karena mengubah arti buktinya.**
+Menjalankan suite penuh memunculkan kegagalan `formatnya PROP/TAHUN/NNNN`.
+Setelah diperiksa: itu **bug asersi, bukan cacat produk**. Database dev sudah
+melewati 9.999 proposal sehingga nomornya `PROP/2026/10216` — lima digit, dan
+memang benar. Regex `\d{4}` menyatakan itu cacat format. Diubah ke `\d{4,}`:
+yang dijaga prefix, tahun, dan urutan ter-pad, bukan batas atas yang memang
+tidak ada.
+
+Produksi: 3 proposal, seluruhnya `civil_structure`, 2 punya `design_params`.
+Tidak ada migrasi yang perlu.
+
+`test:all` 0 gagal (25 suite).
+
 ---
 
 ## Live Auto Review — 20 Agustus 2026 09:43 WIB

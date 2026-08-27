@@ -1609,10 +1609,15 @@ const applyWizardTemplate = async () => {
   wizardApplying.value = true;
   try {
     if (sections.length) {
+      // EST-TPL-R43: `design_params` ikut dikirim. Wizard sudah menghasilkannya
+      // — itu dimensi yang dipakai menghitung geometry dan MTO — tapi jalur
+      // editor dulu membuangnya, sehingga header proposal tetap membawa
+      // parameter template SEBELUMNYA sementara RAB-nya sudah dari yang baru.
       await api.post(`/estimator/proposals/${proposalId}/apply-template`, {
         proposal_type:     wizardData.type || null,
         template_sections: sections,
         mode:              wizardApplyMode.value,
+        design_params:     wizardData.design_params || null,
       });
     }
     if (warehouseZones.length) {

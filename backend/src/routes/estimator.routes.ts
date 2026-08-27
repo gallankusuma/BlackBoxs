@@ -2304,6 +2304,19 @@ router.put('/proposals/:id', authMiddleware, bolehUbah, async (req: Request, res
   }
 });
 
+/**
+ * Registry tipe template → prefix kode AHSP.
+ *
+ * Dipakai dua kali: memvalidasi `proposal_type` yang masuk, dan memilih AHSP.
+ * Harus satu daftar — kalau validasi memakai daftar lain, tipe yang lolos
+ * validasi tapi tidak ada di sini menghasilkan template kosong tanpa memberi
+ * tahu siapa pun.
+ */
+const TIPE_TEMPLATE: Record<string, string> = {
+  civil_building: 'CB', civil_structure: 'CS', piping: 'PP',
+  electrical: 'EL', mechanical: 'ME',
+};
+
 // Apply template wizard to existing proposal
 router.post('/proposals/:id/apply-template', authMiddleware, bolehUbah, async (req: Request, res: Response) => {
   try {
@@ -2312,11 +2325,39 @@ router.post('/proposals/:id/apply-template', authMiddleware, bolehUbah, async (r
     // Tanpa kunci, proposal yang sudah dikirim ke pelanggan masih bisa
     // ditambahi seluruh paket pekerjaan.
     const proposalId = req.params.id;
-    const { proposal_type, template_sections, mode = 'append' } = req.body;
+    const { proposal_type, template_sections, mode = 'append', design_params } = req.body;
     // mode: 'append' = add items | 'replace' = delete existing items first
 
     if (!template_sections || !Array.isArray(template_sections) || template_sections.length === 0) {
       return res.status(400).json({ error: 'template_sections required' });
+    }
+
+    // EST-TPL-R43: parameter desain yang menghasilkan template ini ikut disimpan.
+    //
+    // Sebelumnya handler hanya mendestruktur tiga field dan hanya menulis
+    // `proposal_type`. `proposals.design_params` karena itu tetap berisi
+    // geometry template SEBELUMNYA — atau null — sementara RAB dan MTO sudah
+    // berasal dari dimensi yang baru. Tidak ada yang bisa membuktikan parameter
+    // mana yang menghasilkan kuantitas aktif, dan regenerasi tidak reproducible.
+    if (design_params !== undefined && design_params !== null
+        && (typeof design_params !== 'object' || Array.isArray(design_params))) {
+      return res.status(422).json({
+        error: 'design_params harus berupa objek parameter desain.',
+        code: 'DESIGN_PARAMS_TIDAK_VALID',
+        field: 'design_params',
+      });
+    }
+
+    // Divalidasi terhadap registry yang sama dengan yang dipakai memilih AHSP di
+    // bawah. Tipe di luar itu tidak akan menemukan satu pun AHSP, jadi
+    // menerimanya berarti menghasilkan template kosong tanpa memberi tahu.
+    if (proposal_type && !(proposal_type in TIPE_TEMPLATE)) {
+      return res.status(422).json({
+        error: `Tipe proposal "${proposal_type}" tidak dikenal.`,
+        code: 'TIPE_PROPOSAL_TIDAK_DIKENAL',
+        field: 'proposal_type',
+        tipe_dikenal: Object.keys(TIPE_TEMPLATE),
+      });
     }
 
     const lockedTpl = await proposalLock(proposalId);
@@ -2333,21 +2374,69 @@ router.post('/proposals/:id/apply-template', authMiddleware, bolehUbah, async (r
       const raceLock = await proposalLockTx(req.params.id, tx);
       if (raceLock) return { error: raceLock.status, body: raceLock.body };
 
+      // Keadaan header dibaca DI DALAM transaction, dari baris yang sudah
+      // dikunci `proposalLockTx`.
+      const header: any = await tx.get(
+        'SELECT proposal_type, design_params FROM proposals WHERE id = ?', [proposalId]);
+
+      // EST-TPL-R43: `append` tipe berbeda ditolak, tidak menimpa header.
+      //
+      // Menambahkan paket Electrical ke proposal Civil dulu menyisakan seluruh
+      // item Civil tapi mengubah header menjadi Electrical — proposal berisi
+      // scope dua disiplin sambil mengaku satu, dan parameter Civil lamanya
+      // masih tersimpan di satu-satunya JSON `design_params`. Skema memang hanya
+      // menyediakan satu `proposal_type` dan satu `design_params`, jadi selama
+      // model multi-tipe belum ada, ditolak lebih jujur daripada menimpa.
+      if (mode !== 'replace' && proposal_type && header?.proposal_type
+          && header.proposal_type !== proposal_type) {
+        return { error: 409, body: {
+          error: `Proposal ini bertipe "${header.proposal_type}". Menambahkan template `
+            + `"${proposal_type}" akan membuat header mengaku satu tipe sementara isinya dua. `
+            + 'Pakai mode Replace, atau buat proposal terpisah untuk disiplin itu.',
+          code: 'TIPE_TEMPLATE_BERBEDA',
+          tipe_proposal: header.proposal_type,
+          tipe_template: proposal_type,
+        } };
+      }
+
       if (mode === 'replace') {
       await tx.run('DELETE FROM proposal_items WHERE proposal_id = ?', [proposalId]);
     }
 
-    // Update proposal_type on the proposal
-    if (proposal_type) {
-      await tx.run('UPDATE proposals SET proposal_type = ? WHERE id = ?', [proposal_type, proposalId]);
+    // Basis desain header diperbarui bersama itemnya, dalam transaction yang
+    // sama. Riwayat penerapan disimpan supaya proposal yang ditambahi beberapa
+    // kali tetap bisa direkonstruksi — entri ber-`mode: 'replace'` menandai
+    // bahwa semua yang sebelumnya sudah tidak menghasilkan apa-apa lagi.
+    if (proposal_type || design_params !== undefined) {
+      let lama: any = {};
+      try {
+        lama = typeof header?.design_params === 'string'
+          ? JSON.parse(header.design_params || '{}') : (header?.design_params || {});
+      } catch { lama = {}; }
+      const riwayat = Array.isArray(lama._penerapan) ? lama._penerapan : [];
+      const aktif = design_params !== undefined && design_params !== null ? design_params : {};
+      const { _penerapan: _abaikan, ...paramLamaBersih } = lama;
+
+      const barusan = {
+        tipe: proposal_type || header?.proposal_type || null,
+        mode,
+        parameter: aktif,
+        jumlah_seksi: template_sections.length,
+        oleh: (req as any).userId ?? null,
+        pada: new Date().toISOString(),
+      };
+
+      const gabungan = design_params !== undefined && design_params !== null
+        ? { ...aktif, _penerapan: [...riwayat, barusan] }
+        : { ...paramLamaBersih, _penerapan: [...riwayat, barusan] };
+
+      await tx.run(
+        'UPDATE proposals SET proposal_type = ?, design_params = ? WHERE id = ?',
+        [proposal_type || header?.proposal_type || null, JSON.stringify(gabungan), proposalId]
+      );
     }
 
-    // Map proposal_type to AHSP code prefix
-    const typePrefix: Record<string, string> = {
-      civil_building: 'CB', civil_structure: 'CS', piping: 'PP',
-      electrical: 'EL', mechanical: 'ME'
-    };
-    const prefix = typePrefix[proposal_type as string] || '';
+    const prefix = TIPE_TEMPLATE[proposal_type as string] || '';
 
     let ahspLookup: Record<string, any> = {};
     if (prefix) {
