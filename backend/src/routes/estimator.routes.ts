@@ -8,7 +8,7 @@ import { renderPenawaran } from '../modules/estimator/penawaran/pdf';
 import { authMiddleware } from '../middleware/auth';
 import { requirePermission, loadUserAccess } from '../middleware/permission';
 import multer from 'multer';
-import { callGeminiText, bacaGambarAi } from './ai.routes';
+import { bacaGambarAi, jalankanTeksAi } from './ai.routes';
 import { dbAll, dbGet, dbRun , withTransaction, TxRunner} from '../config/database';
 import { nextSequentialCode } from './procurement.routes';
 import { buatKontrakDariProposal, checksumBaseline } from './contract.routes';
@@ -2249,18 +2249,27 @@ router.post('/proposals/:id/mto/diskusi', authMiddleware, bolehUbah, async (req:
     const terkunci = await proposalLock(req.params.id);
     if (terkunci) return res.status(terkunci.status).json(terkunci.body);
 
-    const kunci = process.env.GEMINI_API_KEY;
-    if (!kunci || kunci.startsWith('your-')) {
-      return res.status(503).json({
-        error: 'Asisten belum tersedia — GEMINI_API_KEY belum disetel di server.',
-        code: 'AI_BELUM_SIAP',
-      });
-    }
-
     const zonaMasuk = Array.isArray(req.body?.zona) ? req.body.zona.slice(0, 20) : [];
     const riwayat = Array.isArray(req.body?.riwayat) ? req.body.riwayat.slice(-12) : [];
 
-    const jawaban = await callGeminiText(promptDiskusi(zonaMasuk, pesan, riwayat), kunci);
+    // EST-MTO-R56b: diskusi ikut berlapis. Jalur ini justru yang paling sering
+    // dipanggil — satu pembacaan gambar bisa diikuti sepuluh giliran diskusi,
+    // dan tiap giliran memakai satu kuota.
+    let jawaban: string;
+    let penyediaDiskusi = '';
+    try {
+      const hasilTeks = await jalankanTeksAi(promptDiskusi(zonaMasuk, pesan, riwayat));
+      jawaban = hasilTeks.teks;
+      penyediaDiskusi = hasilTeks.penyedia;
+    } catch (e: any) {
+      if (e?.kodeAi === 'AI_BELUM_SIAP') {
+        return res.status(503).json({
+          error: 'Asisten belum tersedia — belum ada kunci API AI yang disetel di server.',
+          code: 'AI_BELUM_SIAP',
+        });
+      }
+      throw e;
+    }
 
     const dibacaDiskusi = bacaJsonAi(jawaban);
     if (!dibacaDiskusi.ok) {
@@ -2281,6 +2290,7 @@ router.post('/proposals/:id/mto/diskusi', authMiddleware, bolehUbah, async (req:
       balasan: String(hasil?.balasan || '').slice(0, 2000),
       catatan_umum: String(hasil?.catatan_umum || '').slice(0, 1000),
       tersimpan: false,
+      penyedia: penyediaDiskusi,
     });
   } catch (err: any) {
     console.error('Diskusi MTO gagal:', err?.message);

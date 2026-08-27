@@ -198,6 +198,23 @@ async function main() {
     chk('prompt diskusi menegaskan memakai nama field persis',
       rute.includes('pakai NAMA FIELD PERSIS'), true);
 
+    console.log('\n9c. Jalur DISKUSI ikut berlapis, bukan hanya pembacaan gambar');
+    // Diskusi justru yang paling sering dipanggil: satu pembacaan gambar bisa
+    // diikuti sepuluh giliran diskusi, dan tiap giliran memakai satu kuota.
+    // Melapisi separuh sistem berarti separuhnya masih berhenti total saat
+    // kuota habis.
+    const ai = baca(new URL('../src/routes/ai.routes.ts', import.meta.url), 'utf8');
+    chk('ada lapisan untuk jalur teks', ai.includes('export async function jalankanTeksAi'), true);
+    chk('jalur OpenAI teks ada', ai.includes('export async function callOpenAiText'), true);
+    chk('endpoint diskusi memakai lapisan, bukan satu penyedia langsung',
+      rute.includes('await jalankanTeksAi(') && !rute.includes('await callGeminiText('), true);
+    chk('perilakunya sama dengan lapisan gambar — hanya kuota yang di-fallback',
+      (ai.match(/if \(!galatKuota\(e\)\) throw e;/g) || []).length, 2);
+    chk('penyedia yang gagal dicatat di kedua lapisan',
+      (ai.match(/e\.penyediaGagal = p;/g) || []).length, 2);
+    chk('penyedia yang dipakai dilaporkan juga di diskusi',
+      rute.includes('penyedia: penyediaDiskusi'), true);
+
     console.log('\n10. Layar benar-benar memakai jalur ini');
     const { readFileSync } = await import('node:fs');
     const vue = readFileSync(

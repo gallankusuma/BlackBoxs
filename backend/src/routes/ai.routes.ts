@@ -149,6 +149,111 @@ async function callGemini(prompt: string, apiKey: string): Promise<string> {
  * pengguna mengetik satu kalimat itu pemborosan yang terasa lambat di layar.
  * Yang direvisi adalah parameter yang sudah terbaca, bukan gambarnya.
  */
+/**
+ * EST-MTO-R56b: jalur TEKS ikut berlapis.
+ *
+ * Lapisan penyedia sebelumnya hanya menutup pembacaan gambar. Giliran diskusi
+ * — merevisi parameter lewat percakapan — masih Gemini-saja, padahal justru
+ * jalur itu yang paling sering dipanggil: satu pembacaan gambar bisa diikuti
+ * lima sampai sepuluh giliran diskusi, dan tiap giliran memakai satu kuota.
+ * Melapisi separuh sistem berarti separuhnya masih berhenti total saat kuota
+ * habis.
+ */
+export async function callOpenAiText(prompt: string, apiKey: string): Promise<string> {
+  const body = JSON.stringify({
+    model: process.env.OPENAI_TEXT_MODEL || 'gpt-4.1-mini',
+    input: [{ role: 'user', content: [{ type: 'input_text', text: prompt }] }],
+    text: { format: { type: 'json_object' } },
+    temperature: 0,
+    max_output_tokens: 8192,
+  });
+
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: 'api.openai.com',
+      path: '/v1/responses',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Length': Buffer.byteLength(body),
+      },
+    }, (res) => {
+      let data = '';
+      res.on('data', c => (data += c));
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed?.error) return reject(new Error(parsed.error.message || 'OpenAI menolak permintaan'));
+          let teks = String(parsed?.output_text || '');
+          if (!teks) {
+            for (const o of parsed?.output || []) {
+              for (const c of o?.content || []) if (typeof c?.text === 'string') teks += c.text;
+            }
+          }
+          if (!teks) {
+            console.error('[OpenAI Text] Balasan kosong:', JSON.stringify(parsed).slice(0, 400));
+            return reject(new Error('OpenAI tidak mengembalikan jawaban'));
+          }
+          resolve(teks);
+        } catch {
+          console.error('[OpenAI Text] Parse error:', data.slice(0, 400));
+          reject(new Error('Balasan OpenAI tidak bisa dibaca'));
+        }
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+/**
+ * Jalankan permintaan teks lewat penyedia yang tersedia, dengan cadangan.
+ *
+ * Bentuknya sengaja sama persis dengan `bacaGambarAi` — urutan dari
+ * `AI_VISION_PROVIDER`, hanya kegagalan kuota yang di-fallback, dan penyedia
+ * yang gagal ditempelkan ke errornya. Dua lapisan yang berperilaku berbeda akan
+ * menghasilkan dua pesan error yang berbeda untuk sebab yang sama.
+ */
+export async function jalankanTeksAi(
+  prompt: string,
+): Promise<{ teks: string; penyedia: string; dicoba: string[] }> {
+  const gemini = process.env.GEMINI_API_KEY;
+  const openai = process.env.OPENAI_API_KEY;
+  const siap = (k?: string) => !!k && !k.startsWith('your-');
+
+  const urutan: Array<'gemini' | 'openai'> =
+    String(process.env.AI_VISION_PROVIDER || 'gemini').toLowerCase() === 'openai'
+      ? ['openai', 'gemini'] : ['gemini', 'openai'];
+
+  const dicoba: string[] = [];
+  let terakhir: any = null;
+
+  for (const p of urutan) {
+    const kunci = p === 'gemini' ? gemini : openai;
+    if (!siap(kunci)) continue;
+    dicoba.push(p);
+    try {
+      const teks = p === 'gemini'
+        ? await callGeminiText(prompt, kunci as string)
+        : await callOpenAiText(prompt, kunci as string);
+      return { teks, penyedia: p, dicoba };
+    } catch (e: any) {
+      e.penyediaGagal = p;
+      terakhir = e;
+      if (!galatKuota(e)) throw e;
+      console.error(`[AI Teks] ${p} kehabisan kuota, mencoba penyedia berikutnya:`, e.message?.slice(0, 100));
+    }
+  }
+
+  if (!dicoba.length) {
+    throw Object.assign(new Error('Tidak ada penyedia AI yang siap — GEMINI_API_KEY maupun OPENAI_API_KEY belum disetel.'),
+      { kodeAi: 'AI_BELUM_SIAP' });
+  }
+  throw terakhir || new Error('Semua penyedia AI gagal');
+}
+
 export async function callGeminiText(prompt: string, apiKey: string): Promise<string> {
   const body = JSON.stringify({
     contents: [{ parts: [{ text: prompt }] }],

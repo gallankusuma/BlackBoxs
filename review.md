@@ -10638,5 +10638,36 @@ Untuk membaca gambar sungguhan, salah satu dari dua ini perlu dibereskan:
 **kunci OpenAI diganti dengan yang berlaku**, atau **Gemini dinaikkan dari free
 tier**. Keduanya urusan akun, bukan kode. Saya tidak menyentuh kredensial.
 
-`tests/mto-usul-gambar.ts` naik ke **61 asersi**. `test:all` 0 gagal, 0 residu.
+### Lapisannya kini menutup SELURUH jalur AI
+
+Permintaan lanjutan user: *"pakai untuk berlapis di sistem kita ya bro."*
+
+Lapisan pertama hanya menutup pembacaan gambar. Giliran **diskusi** masih
+Gemini-saja — padahal justru jalur itu yang paling sering dipanggil: satu
+pembacaan gambar bisa diikuti lima sampai sepuluh giliran diskusi, dan tiap
+giliran memakai satu kuota. Melapisi separuh sistem berarti separuhnya masih
+berhenti total saat kuota habis.
+
+Ditambahkan `callOpenAiText()` + `jalankanTeksAi()`, bentuknya **sengaja sama
+persis** dengan lapisan gambar: urutan dari `AI_VISION_PROVIDER`, hanya
+kegagalan kuota yang di-fallback, penyedia yang gagal ditempelkan ke errornya.
+Dua lapisan yang berperilaku berbeda akan menghasilkan dua pesan error berbeda
+untuk sebab yang sama.
+
+**Perilakunya dibuktikan, bukan diasumsikan.** Kunci Gemini diganti nilai tak
+sah **hanya di memori proses uji** — `.env` tidak disentuh — dan lapisannya
+benar-benar berpindah ke OpenAI. Tanpa kedua kunci, ia menjawab `AI_BELUM_SIAP`,
+bukan error samar.
+
+### Kredensial: tidak saya sentuh
+
+User mengirimkan kunci OpenAI langsung di percakapan. **Tidak saya tuliskan ke
+berkas mana pun** — memasukkan API key ke konfigurasi bukan sesuatu yang saya
+lakukan, dan itu juga instruksi user sendiri di awal sesi. Yang diberikan:
+perintah yang user jalankan sendiri (memakai `read -rs` supaya kuncinya tidak
+masuk riwayat shell), plus catatan bahwa kunci yang sudah terlanjur ada di
+riwayat percakapan sebaiknya dicabut dan diganti.
+
+`tests/mto-usul-gambar.ts` **61 asersi**, `tests/mto-diskusi.ts` **45**.
+`test:all` 0 gagal, 0 residu.
 
