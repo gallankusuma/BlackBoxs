@@ -8486,6 +8486,53 @@ ownership agar UI tidak mengungkap aksi yang tidak dimiliki actor.
    status dengan default fail-closed; capability UI dan respons backend tidak
    berbeda.
 
+**Status: [DEV] DITERAPKAN** — 27 Agustus 2026
+
+**Klaimnya benar.** `v-if="proposal.status !== 'deal'"` memang memunculkan tombol
+Delete untuk `submitted` dan `no_deal`, dan handler-nya berakhir di
+`alert('Failed to delete proposal')` tanpa pernah membaca body 409.
+
+Satu hal yang review belum sebut, dan memperluas cakupannya: backend juga menolak
+proposal yang **sudah punya project** dengan kode berbeda
+(`PROPOSAL_HAS_PROJECT`). Jadi predikat yang benar bukan sekadar "draft atau
+review", melainkan draft/review **dan** belum jadi project.
+
+Yang berubah (`EstimatorProposalList.vue`):
+
+1. `bolehHapus()` mencerminkan kontrak backend persis — `['draft','review']` dan
+   `!project_id`. Tombol destruktif hanya muncul kalau tindakannya memang
+   mungkin.
+2. Status yang tidak bisa dihapus menampilkan **alasannya** sebagai teks lirih
+   ("Sudah dikirim", "Sudah deal", "Sudah jadi project") — bukan tombol yang
+   pasti gagal, dan bukan pula ruang kosong yang membuat pengguna bertanya-tanya.
+3. **`no_deal` ditawari "↩ Buka kembali"**, bukan Delete. Ini bukan karangan:
+   `VALID_TRANSITIONS` di backend memuat `no_deal: ['draft']` dengan komentar
+   "can re-open as draft". Menawarkan lifecycle yang memang ada lebih jujur
+   daripada menyamarkannya sebagai penghapusan yang mustahil.
+4. Penolakan menampilkan **pesan 409 server apa adanya**, lalu memuat ulang
+   daftar — status bisa berubah setelah daftar dimuat, dan barisnya harus
+   mencerminkan keadaan sebenarnya, bukan diubah optimistis.
+5. Konfirmasi menyebut nomor dan nama proposalnya, serta menyatakan bahwa item
+   RAB dan elemen MTO ikut terhapus.
+
+**Tes: `backend/tests/register-aksi.ts` — 23 asersi, masuk `test:all`.**
+Terbukti bisa gagal: **8 dari 23 gagal** di kode lama, seluruhnya asersi sumber —
+konsekuensi wajar karena cacatnya di layar. Bagian backend (bagian 1–4) lulus di
+kedua versi dan mengunci kontrak yang layarnya salah baca: `submitted` ditolak
+409 `PROPOSAL_LOCKED` berikut `status_proposal` aktualnya, `no_deal` ditolak sama,
+`draft`/`review` berhasil, `no_deal → draft` diterima lalu proposalnya boleh
+dihapus, dan proposal ber-project ditolak dengan kode yang membedakan sebabnya.
+
+Terhadap acceptance test: (1) Delete hanya terlihat untuk draft/review tanpa
+project — terpenuhi; (2) daftar basi yang berubah jadi submitted sebelum diklik
+menampilkan pesan 409 aktual dan memuat ulang barisnya — terpenuhi;
+(3) `no_deal` mendapat aksi Re-open sesuai state machine — terpenuhi.
+Bagian "capability harus memperhitungkan permission dan ownership" **belum** —
+itu menunggu RBAC Proposal diterapkan penuh; sekarang gerbangnya lifecycle, bukan
+permission.
+
+`test:all` 0 gagal.
+
 ---
 
 ## Live Auto Review — 20 Agustus 2026 09:40 WIB

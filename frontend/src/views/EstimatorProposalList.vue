@@ -79,9 +79,26 @@
               <router-link v-if="proposal.project_id" :to="`/projects/${proposal.project_id}`" class="text-green-600 hover:text-green-800 mr-3">
                 View Project
               </router-link>
-              <button v-if="proposal.status !== 'deal'" @click="deleteProposal(proposal.id)" class="text-red-600 hover:text-red-800">
+              <!-- EST-UX-R48: affordance destruktif hanya muncul kalau
+                   aksinya memang mungkin. `status !== 'deal'` mencakup
+                   `submitted` dan `no_deal`, yang backend selalu tolak 409 —
+                   operator berulang kali menyetujui dialog "Are you sure" untuk
+                   tindakan yang mustahil berhasil. -->
+              <button v-if="bolehHapus(proposal)" @click="deleteProposal(proposal)"
+                class="text-red-600 hover:text-red-800">
                 Delete
               </button>
+              <!-- `no_deal → draft` ada di state machine backend. Menawarkannya
+                   apa adanya lebih jujur daripada menyamarkan lifecycle itu
+                   sebagai Delete yang pasti gagal. -->
+              <button v-else-if="proposal.status === 'no_deal'" @click="bukaKembali(proposal)"
+                :disabled="membuka === proposal.id"
+                class="text-amber-600 hover:text-amber-800 disabled:opacity-50">
+                {{ membuka === proposal.id ? 'Membuka…' : '↩ Buka kembali' }}
+              </button>
+              <span v-else class="text-xs text-gray-400" :title="alasanTakBisaHapus(proposal)">
+                {{ alasanTakBisaHapus(proposal) }}
+              </span>
             </td>
           </tr>
         </tbody>
@@ -793,15 +810,63 @@ const openProposal = (id: number) => {
   router.push(`/estimator/proposals/${id}`);
 };
 
-const deleteProposal = async (id: number) => {
-  if (!confirm('Are you sure you want to delete this proposal?')) return;
-  
+/**
+ * EST-UX-R48: predikat yang sama dengan backend, bukan tebakan.
+ *
+ * Backend mengizinkan penghapusan hanya untuk `draft`/`review` **dan** yang
+ * belum punya project (`PROPOSAL_LOCKED` / `PROPOSAL_HAS_PROJECT`). Layar dulu
+ * memakai `status !== 'deal'`, yang ikut memunculkan tombol untuk `submitted`
+ * dan `no_deal` — dua status yang backend selalu tolak. Operator menyetujui
+ * dialog destruktif untuk tindakan yang mustahil berhasil, lalu hanya melihat
+ * "Failed to delete proposal" tanpa tahu sebabnya maupun jalur yang benar.
+ */
+const STATUS_BOLEH_HAPUS = ['draft', 'review'];
+
+const bolehHapus = (p: any) =>
+  STATUS_BOLEH_HAPUS.includes(String(p?.status || 'draft').toLowerCase()) && !p?.project_id;
+
+const alasanTakBisaHapus = (p: any) => {
+  if (p?.project_id) return 'Sudah jadi project';
+  const st = String(p?.status || '').toLowerCase();
+  if (st === 'deal') return 'Sudah deal';
+  if (st === 'submitted') return 'Sudah dikirim';
+  if (st === 'no_deal') return 'Ditutup';
+  return '';
+};
+
+const membuka = ref<number | null>(null);
+
+/** Kembalikan proposal `no_deal` menjadi draft — transisi yang memang ada. */
+const bukaKembali = async (p: any) => {
+  if (!confirm(`Buka kembali ${p.proposal_number || 'proposal ini'} menjadi draft?`)) return;
+  membuka.value = p.id;
   try {
-    await api.delete(`/estimator/proposals/${id}`);
+    await api.put(`/estimator/proposals/${p.id}/status`, { status: 'draft' });
     await loadProposals();
-  } catch (error) {
+  } catch (error: any) {
+    alert(error?.response?.data?.error || 'Gagal membuka kembali proposal.');
+    // Statusnya mungkin sudah berubah di sisi lain — muat ulang, jangan
+    // biarkan layar menampilkan keadaan yang sudah tidak berlaku.
+    await loadProposals();
+  } finally {
+    membuka.value = null;
+  }
+};
+
+const deleteProposal = async (p: any) => {
+  const nama = [p?.proposal_number, p?.project_name].filter(Boolean).join(' — ') || 'proposal ini';
+  if (!confirm(`Hapus ${nama}?\n\nSeluruh item RAB dan elemen MTO-nya ikut terhapus.\nTindakan ini tidak bisa dibatalkan.`)) return;
+
+  try {
+    await api.delete(`/estimator/proposals/${p.id}`);
+    await loadProposals();
+  } catch (error: any) {
+    // Status bisa berubah setelah daftar dimuat — 409 dari backend menjelaskan
+    // persis apa yang terjadi, dan itu yang ditampilkan. Daftarnya dimuat ulang
+    // supaya barisnya mencerminkan keadaan sebenarnya, bukan diubah optimistis.
     console.error('Failed to delete proposal:', error);
-    alert('Failed to delete proposal');
+    alert(error?.response?.data?.error || 'Gagal menghapus proposal.');
+    await loadProposals();
   }
 };
 
