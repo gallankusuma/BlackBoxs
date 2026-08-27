@@ -290,17 +290,21 @@
                 <div v-for="pf in proofFiles" :key="pf.id" class="px-4 py-3 flex items-center gap-3">
                   <!-- Thumbnail or icon -->
                   <div class="flex-shrink-0 w-12 h-12 rounded-lg overflow-hidden bg-gray-100 flex items-center justify-center">
-                    <img v-if="pf.file_type?.startsWith('image/')"
-                      :src="apiBase + pf.file_path"
+                    <!-- `<img>` tidak bisa membawa header Authorization, jadi
+                         sejak DR-P0-05 sumber `/uploads/...` selalu 403. Blob
+                         URL-nya disiapkan lebih dulu lewat endpoint ber-auth. -->
+                    <img v-if="pf.file_type?.startsWith('image/') && pratinjauProof[pf.id]"
+                      :src="pratinjauProof[pf.id]"
                       class="w-full h-full object-cover" />
+                    <span v-else-if="pf.file_type?.startsWith('image/')" class="text-xl">🖼</span>
                     <span v-else class="text-xl">📄</span>
                   </div>
                   <!-- Info -->
                   <div class="flex-1 min-w-0">
-                    <a :href="apiBase + pf.file_path" target="_blank"
-                      class="text-xs font-semibold text-blue-600 hover:underline truncate block">
-                      {{ pf.original_name }}
-                    </a>
+                    <button @click="bukaProof(pf)" :disabled="membukaProof === pf.id"
+                      class="text-xs font-semibold text-blue-600 hover:underline truncate block text-left disabled:opacity-60">
+                      {{ membukaProof === pf.id ? 'Membuka…' : pf.original_name }}
+                    </button>
                     <div class="text-[10px] text-gray-400 mt-0.5">
                       {{ fmtSize(pf.file_size) }} · {{ pf.uploaded_by_name || 'System' }} · {{ fmtDate(pf.created_at) }}
                     </div>
@@ -343,11 +347,78 @@ const rescheduling = ref(false);
 
 // Payment proof state
 const proofFiles = ref<any[]>([]);
+
+/**
+ * Bukti pembayaran diambil lewat endpoint ber-autentikasi, bukan tautan langsung.
+ *
+ * DR-P0-05 menutup `/uploads/*` — benar, bukti pembayaran memang tidak boleh
+ * terbuka tanpa token. Tapi `<a href>` dan terutama `<img src>` tidak bisa
+ * membawa header Authorization, jadi keduanya berakhir di 403
+ * UPLOADS_NOT_PUBLIC: tautan menampilkan JSON error, thumbnail jadi gambar
+ * rusak. Blob URL menyelesaikan keduanya.
+ */
+const pratinjauProof = ref<Record<number, string>>({});
+const membukaProof = ref<number | null>(null);
+
+const ambilProof = async (proofId: number): Promise<string> => {
+  const res = await api.get(`/finance/payment-schedule/proofs/${proofId}/download`,
+    { responseType: 'blob' });
+  return URL.createObjectURL(res.data as Blob);
+};
+
+/** Siapkan thumbnail untuk bukti bertipe gambar. */
+const siapkanPratinjauProof = async () => {
+  for (const url of Object.values(pratinjauProof.value)) URL.revokeObjectURL(url);
+  pratinjauProof.value = {};
+  for (const pf of proofFiles.value) {
+    if (!pf?.file_type?.startsWith('image/')) continue;
+    try {
+      pratinjauProof.value[pf.id] = await ambilProof(pf.id);
+    } catch {
+      // Thumbnail gagal bukan alasan menggagalkan daftarnya — ikonnya saja
+      // yang tampil, dan tautannya tetap bisa dicoba.
+    }
+  }
+};
+
+const bukaProof = async (pf: any) => {
+  membukaProof.value = pf.id;
+  let url = '';
+  try {
+    url = await ambilProof(pf.id);
+    const w = window.open(url, '_blank');
+    if (!w) {
+      const a = document.createElement('a');
+      a.href = url; a.download = pf.original_name || 'bukti';
+      document.body.appendChild(a); a.click(); a.remove();
+    }
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  } catch (e: any) {
+    if (url) URL.revokeObjectURL(url);
+    // Errornya datang sebagai blob karena responseType blob — harus dibaca
+    // dulu, kalau tidak yang tampil cuma "[object Blob]".
+    let pesan = 'Gagal membuka bukti pembayaran.';
+    const d = e?.response?.data;
+    if (d instanceof Blob) {
+      try { pesan = JSON.parse(await d.text())?.error || pesan; } catch { /* biarkan */ }
+    } else if (d?.error) { pesan = d.error; }
+    alert(pesan);
+  } finally {
+    membukaProof.value = null;
+  }
+};
 const proofLoading = ref(false);
 const proofUploading = ref(false);
 const apiBase = (api.defaults.baseURL || '').replace('/api', '');
 
-function closeDetail() { detailRow.value = null; proofFiles.value = []; }
+function closeDetail() {
+  detailRow.value = null;
+  proofFiles.value = [];
+  // Blob URL harus dicabut — kalau tidak, tiap membuka panel menahan gambarnya
+  // di memori sampai tab ditutup.
+  for (const url of Object.values(pratinjauProof.value)) URL.revokeObjectURL(url);
+  pratinjauProof.value = {};
+}
 
 // Summary
 const summary = ref({ total_planned: 0, due_soon: 0, overdue: 0, paid: 0, remaining: 0 });
@@ -511,6 +582,7 @@ async function fetchProofs(row: any) {
   try {
     const res = await api.get(`/finance/payment-schedule/${row.id}/proofs`, { params: { source: row.source || 'po' } });
     proofFiles.value = res.data?.data || [];
+    await siapkanPratinjauProof();
   } catch { proofFiles.value = []; }
   finally { proofLoading.value = false; }
 }
@@ -541,6 +613,10 @@ async function deleteProof(pf: any) {
   try {
     await api.delete(`/finance/payment-schedule/proof/${pf.id}`);
     proofFiles.value = proofFiles.value.filter((f: any) => f.id !== pf.id);
+    if (pratinjauProof.value[pf.id]) {
+      URL.revokeObjectURL(pratinjauProof.value[pf.id]);
+      delete pratinjauProof.value[pf.id];
+    }
   } catch (err: any) {
     alert(err?.response?.data?.error || 'Gagal hapus');
   }

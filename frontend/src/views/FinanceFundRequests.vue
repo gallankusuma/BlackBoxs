@@ -339,7 +339,15 @@
                 <div class="flex items-center gap-2 min-w-0">
                   <span class="text-lg">{{ getFileIcon(doc.file_type) }}</span>
                   <div class="min-w-0">
-                    <a :href="apiBaseUrl + doc.file_path" target="_blank" class="text-sm text-blue-700 hover:underline font-medium truncate block">{{ doc.original_name }}</a>
+                    <!-- DR-P0-05: `/uploads/*` tidak lagi publik — benar, dokumen
+                         keuangan memang tidak boleh terbuka tanpa token. Tautan
+                         langsung karena itu selalu membalas 403
+                         UPLOADS_NOT_PUBLIC. Berkasnya diambil lewat endpoint
+                         ber-autentikasi, lalu dibuka sebagai blob. -->
+                    <button @click="bukaDokumen(doc)" :disabled="membukaDoc === doc.id"
+                      class="text-sm text-blue-700 hover:underline font-medium truncate block text-left disabled:opacity-60">
+                      {{ membukaDoc === doc.id ? 'Membuka…' : doc.original_name }}
+                    </button>
                     <p class="text-xs text-gray-400">{{ formatFileSize(doc.file_size) }} • {{ doc.uploaded_by_name || 'System' }} • {{ fmtDate(doc.created_at) }}</p>
                   </div>
                 </div>
@@ -714,6 +722,51 @@ const uploadDocument = async (event: Event) => {
   }
   uploadingDoc.value = false;
   input.value = '';
+};
+
+/**
+ * Buka dokumen fund request lewat endpoint ber-autentikasi.
+ *
+ * Tautan `<a href="/uploads/...">` tidak bisa membawa header Authorization,
+ * jadi sejak DR-P0-05 ia selalu berakhir di 403 UPLOADS_NOT_PUBLIC — persis
+ * yang dilihat pengguna: halaman JSON error, bukan dokumennya. Berkasnya
+ * diambil sebagai blob dengan token yang sama seperti request lain, lalu
+ * dibuka di tab baru.
+ */
+const membukaDoc = ref<number | null>(null);
+
+const bukaDokumen = async (doc: any) => {
+  if (!detailTarget.value) return;
+  membukaDoc.value = doc.id;
+  let url = '';
+  try {
+    const res = await api.get(
+      `/finance/fund-requests/${detailTarget.value.id}/documents/${doc.id}/download`,
+      { responseType: 'blob' }
+    );
+    url = URL.createObjectURL(res.data as Blob);
+    const w = window.open(url, '_blank');
+    if (!w) {
+      // Popup diblokir — jangan diam saja, berkasnya tetap harus bisa diambil.
+      const a = document.createElement('a');
+      a.href = url; a.download = doc.original_name || 'dokumen';
+      document.body.appendChild(a); a.click(); a.remove();
+    }
+    // Jangan dicabut seketika: tab yang baru dibuka masih memuatnya.
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  } catch (e: any) {
+    if (url) URL.revokeObjectURL(url);
+    // Respons error datang sebagai blob karena responseType-nya blob, jadi
+    // pesannya harus dibaca dulu — kalau tidak, yang tampil cuma "[object Blob]".
+    let pesan = 'Gagal membuka dokumen.';
+    const d = e?.response?.data;
+    if (d instanceof Blob) {
+      try { pesan = JSON.parse(await d.text())?.error || pesan; } catch { /* biarkan */ }
+    } else if (d?.error) { pesan = d.error; }
+    alert(pesan);
+  } finally {
+    membukaDoc.value = null;
+  }
 };
 
 const deleteDocument = async (doc: any) => {

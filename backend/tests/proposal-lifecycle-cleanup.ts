@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { sapuFixture } from './_bersih';
 /**
  * EST-LIFE-R42 — menghapus proposal harus menghapus seluruh turunannya.
  *
@@ -165,6 +166,15 @@ async function main() {
     const sisa: any[] = await dbAll(
       `SELECT id FROM proposals WHERE project_name LIKE ?`, [`%${stamp}%`]);
     chk('tidak ada proposal fixture tertinggal', sisa.length, 0);
+  }
+
+  // Sisa fixture disapu langsung di database — termasuk yang API-nya memang
+  // menolak menghapus (proposal submitted/deal). Tanpa ini database dev
+  // bertumbuh monoton tiap run; lihat `tests/_bersih.ts`.
+  const disapu = await sapuFixture(stamp);
+  if (disapu.proposal || disapu.elemen || disapu.ahsp) {
+    console.log(`  ––   sisa fixture disapu: ${disapu.proposal} proposal, `
+      + `${disapu.elemen} elemen MTO, ${disapu.baris} baris, ${disapu.ahsp} AHSP`);
   }
 
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);

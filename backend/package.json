@@ -25,7 +25,7 @@
     "test:deploy-gate": "bash ../scripts/test-deploy-gate.sh",
     "test:client-proposals": "tsx tests/client-proposals.ts",
     "test:proposal-commercial": "tsx tests/proposal-commercial.ts",
-    "test:all": "npm test && npm run test:mto && npm run test:mto-link && npm run test:http && npm run test:pin && npm run test:rbac && npm run test:asset && npm run test:depreciation && npm run test:procurement && npm run test:prospects && npm run test:rab && npm run test:payment-schedule && npm run test:schedule-ownership && npm run test:client-proposals && npm run test:proposal-commercial && npm run test:qto-summary && npm run test:estimator-rbac && npm run test:drift && npm run test:link-authority && npm run test:ahsp-active && npm run test:klasifikasi && npm run test:lifecycle && npm run test:template-prov && npm run test:item-identity && npm run test:durability && npm run test:mto-usul && npm run test:deploy-gate",
+    "test:all": "npm test && npm run test:mto && npm run test:mto-link && npm run test:http && npm run test:pin && npm run test:rbac && npm run test:asset && npm run test:depreciation && npm run test:procurement && npm run test:prospects && npm run test:rab && npm run test:payment-schedule && npm run test:schedule-ownership && npm run test:client-proposals && npm run test:proposal-commercial && npm run test:qto-summary && npm run test:estimator-rbac && npm run test:drift && npm run test:link-authority && npm run test:ahsp-active && npm run test:klasifikasi && npm run test:lifecycle && npm run test:template-prov && npm run test:item-identity && npm run test:durability && npm run test:mto-usul && npm run test:deploy-gate && npm run test:uploads && npm run test:kebersihan",
     "test:mto": "tsx tests/mto-calculator.ts",
     "test:mto-link": "tsx tests/mto-link.ts",
     "smoke": "node ../scripts/smoke-test.js",
@@ -39,7 +39,9 @@
     "test:lifecycle": "tsx tests/proposal-lifecycle-cleanup.ts",
     "test:template-prov": "tsx tests/apply-template-provenance.ts",
     "test:item-identity": "tsx tests/rab-item-identity.ts",
-    "test:durability": "tsx tests/mto-durability.ts"
+    "test:durability": "tsx tests/mto-durability.ts",
+    "test:kebersihan": "tsx tests/kebersihan-fixture.ts",
+    "test:uploads": "tsx tests/uploads-berauth.ts"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

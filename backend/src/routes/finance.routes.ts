@@ -1320,6 +1320,47 @@ router.post('/fund-requests/:id/documents', authMiddleware, frDocUpload.single('
   }
 });
 
+// GET /fund-requests/:frId/documents/:docId/download
+//
+// DR-P0-05 menutup `/uploads/*` dari akses publik — benar, dokumen keuangan
+// memang tidak boleh terbuka tanpa token. Tapi modul ini tidak pernah punya
+// jalur ber-autentikasi penggantinya: yang ada hanya list, upload, dan delete.
+// Layar menaut langsung ke `/uploads/fund-requests/<berkas>`, jadi begitu
+// penjagaan itu aktif, SELURUH dokumen fund request tidak bisa dibuka lagi —
+// 27 berkas di produksi. Dilaporkan pengguna 27 Agustus 2026.
+router.get('/fund-requests/:frId/documents/:docId/download', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const doc = await dbGet(
+      'SELECT file_path, file_name, original_name, file_type FROM fund_request_documents WHERE id = ? AND fund_request_id = ?',
+      [req.params.docId, req.params.frId]
+    ) as any;
+    if (!doc) return res.status(404).json({ error: 'Dokumen tidak ditemukan' });
+
+    // `file_path` tersimpan sebagai `/uploads/fund-requests/<berkas>`. Hanya
+    // nama berkasnya yang dipakai, supaya `../` pada data lama tidak bisa
+    // keluar dari folder uploads.
+    const namaBerkas = path.basename(String(doc.file_path || ''));
+    if (!namaBerkas) return res.status(404).json({ error: 'Dokumen tidak ditemukan' });
+
+    const berkas = path.join(process.cwd(), 'uploads', 'fund-requests', namaBerkas);
+    if (!fs.existsSync(berkas)) return res.status(404).json({ error: 'Berkas sudah tidak ada di server' });
+
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    // `inline` supaya PDF dan gambar terbuka langsung di tab — itu yang
+    // dilakukan pengguna sebelum penjagaan ini, dan mengubahnya jadi unduhan
+    // paksa akan terasa seperti kemunduran lain.
+    res.sendFile(berkas, {
+      headers: {
+        'Content-Disposition':
+          `inline; filename="${encodeURIComponent(doc.original_name || doc.file_name || namaBerkas)}"`,
+      },
+    });
+  } catch (error) {
+    console.error('Error downloading fund request document:', error);
+    res.status(500).json({ error: 'Gagal membuka dokumen' });
+  }
+});
+
 // DELETE /fund-requests/:frId/documents/:docId
 router.delete('/fund-requests/:frId/documents/:docId', authMiddleware, async (req: Request, res: Response) => {
   try {
@@ -1563,6 +1604,40 @@ router.post('/payment-schedule/:id/proof', authMiddleware, proofUpload.single('f
   } catch (error: any) {
     console.error('Error uploading payment proof:', error);
     res.status(500).json({ error: 'Failed to upload proof: ' + error.message });
+  }
+});
+
+// GET /payment-schedule/proofs/:proofId/download
+//
+// Sama sebabnya dengan dokumen fund request: DR-P0-05 menutup `/uploads/*`,
+// dan modul ini tidak punya jalur ber-autentikasi penggantinya. Layar bahkan
+// memakai `<img :src="/uploads/...">` untuk thumbnail — `<img>` tidak bisa
+// membawa header Authorization sama sekali, jadi tidak ada cara memperbaikinya
+// dari sisi tautan. Berkasnya sekarang diambil lewat sini lalu dijadikan blob.
+router.get('/payment-schedule/proofs/:proofId/download', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const doc = await dbGet(
+      'SELECT file_path, file_name, original_name FROM payment_proofs WHERE id = ?',
+      [req.params.proofId]
+    ) as any;
+    if (!doc) return res.status(404).json({ error: 'Bukti pembayaran tidak ditemukan' });
+
+    const namaBerkas = path.basename(String(doc.file_path || ''));
+    if (!namaBerkas) return res.status(404).json({ error: 'Bukti pembayaran tidak ditemukan' });
+
+    const berkas = path.join(process.cwd(), 'uploads', 'payment-proofs', namaBerkas);
+    if (!fs.existsSync(berkas)) return res.status(404).json({ error: 'Berkas sudah tidak ada di server' });
+
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.sendFile(berkas, {
+      headers: {
+        'Content-Disposition':
+          `inline; filename="${encodeURIComponent(doc.original_name || doc.file_name || namaBerkas)}"`,
+      },
+    });
+  } catch (error) {
+    console.error('Error downloading payment proof:', error);
+    res.status(500).json({ error: 'Gagal membuka bukti pembayaran' });
   }
 });
 

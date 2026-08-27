@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { sapuFixture } from './_bersih';
 /**
  * Tes QTO summary project.
  *
@@ -217,6 +218,15 @@ async function main() {
     let sisa = 0;
     for (const h of bersihkan.reverse()) { try { await h(); } catch { sisa++; } }
     chk('data uji terhapus', sisa, 0);
+  }
+
+  // Sisa fixture disapu langsung di database — termasuk yang API-nya memang
+  // menolak menghapus (proposal submitted/deal). Tanpa ini database dev
+  // bertumbuh monoton tiap run; lihat `tests/_bersih.ts`.
+  const disapu = await sapuFixture(stamp);
+  if (disapu.proposal || disapu.elemen || disapu.ahsp) {
+    console.log(`  ––   sisa fixture disapu: ${disapu.proposal} proposal, `
+      + `${disapu.elemen} elemen MTO, ${disapu.baris} baris, ${disapu.ahsp} AHSP`);
   }
 
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);

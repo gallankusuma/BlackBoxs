@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { sapuFixture } from './_bersih';
 /**
  * EST-MTO-R45 — indikator "tersimpan" harus mengikuti fakta, bukan satu boolean.
  *
@@ -138,6 +139,15 @@ async function main() {
     const yatim: any = await dbGet(
       `SELECT COUNT(*) AS n FROM engineering_inputs WHERE scope_type='proposal' AND scope_id=?`, [pid]);
     chk('tidak ada elemen MTO tertinggal', Number(yatim?.n), 0);
+  }
+
+  // Sisa fixture disapu langsung di database — termasuk yang API-nya memang
+  // menolak menghapus (proposal submitted/deal). Tanpa ini database dev
+  // bertumbuh monoton tiap run; lihat `tests/_bersih.ts`.
+  const disapu = await sapuFixture(stamp);
+  if (disapu.proposal || disapu.elemen || disapu.ahsp) {
+    console.log(`  ––   sisa fixture disapu: ${disapu.proposal} proposal, `
+      + `${disapu.elemen} elemen MTO, ${disapu.baris} baris, ${disapu.ahsp} AHSP`);
   }
 
   console.log(`\n=== ${pass} lulus, ${fail} gagal ===`);
