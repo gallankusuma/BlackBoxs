@@ -2468,6 +2468,77 @@ router.delete('/proposals/:id', authMiddleware, bolehHapus, async (req: Request,
 // ============================================
 
 // Add item to proposal
+/**
+ * EST-KLAS-R41: klasifikasi satu baris tidak boleh datang dari dua acuan klien.
+ *
+ * `discipline_id` dan `sub_discipline_id` dulu diterima sebagai dua input
+ * independen lalu disimpan apa adanya. Keduanya bisa valid sendiri-sendiri
+ * sementara pasangannya salah — dan akibatnya baru muncul jauh di hilir:
+ * ringkasan discipline menjumlahkan `pi.discipline_id`, ringkasan
+ * sub-discipline mengembalikan parent kanonik dari master, dan pohon RAB
+ * mencetak sub apa pun yang tersimpan di bawah `pi.discipline_id`. Satu baris
+ * yang sama muncul sebagai Civil di satu laporan dan Piping di laporan lain,
+ * padahal grand total-nya benar — jadi tidak ada angka yang terlihat janggal.
+ *
+ * Kontraknya sekarang: **sub-discipline yang menentukan parent.** Itu acuan yang
+ * lebih spesifik, dan urutannya sama dengan cara layar bekerja (pilih discipline
+ * dulu, sub sebagai penajaman). Kalau klien mengirim pasangan silang, parent
+ * kanonik yang dipakai — bukan ditolak, karena menolak akan menghentikan
+ * pekerjaan yang maksudnya jelas. Nilai yang benar-benar tersimpan dikembalikan
+ * di respons supaya pemanggil bisa melihat apa yang terjadi.
+ */
+// Satu bentuk objek, bukan union: `strictNullChecks` mati di project ini,
+// sehingga penyempitan discriminated union tidak bekerja.
+interface HasilKlasifikasi {
+  ok: boolean;
+  discipline_id: number | null;
+  sub_discipline_id: number | null;
+  error: number;
+  body: any;
+}
+const klasOk = (d: number | null, sd: number | null): HasilKlasifikasi =>
+  ({ ok: true, discipline_id: d, sub_discipline_id: sd, error: 0, body: null });
+const klasGagal = (error: number, body: any): HasilKlasifikasi =>
+  ({ ok: false, discipline_id: null, sub_discipline_id: null, error, body });
+
+async function selaraskanKlasifikasi(
+  disciplineId: any, subDisciplineId: any, get: (sql: string, p?: any[]) => Promise<any>
+): Promise<HasilKlasifikasi> {
+  if (subDisciplineId) {
+    const sub: any = await get(
+      `SELECT id, discipline_id, name, is_active FROM master_sub_disciplines WHERE id = ?`,
+      [subDisciplineId]
+    );
+    if (!sub) {
+      return klasGagal(404, {
+        error: 'Sub-discipline tidak ditemukan.', code: 'SUB_DISCIPLINE_TIDAK_DITEMUKAN' });
+    }
+    if (!Number(sub.is_active)) {
+      // Tidak dibiarkan jatuh diam-diam ke "unassigned": baris tanpa
+      // klasifikasi tidak akan pernah muncul di breakdown mana pun.
+      return klasGagal(409, {
+        error: `Sub-discipline "${sub.name}" sudah tidak aktif.`, code: 'SUB_DISCIPLINE_TIDAK_AKTIF' });
+    }
+    return klasOk(Number(sub.discipline_id), Number(sub.id));
+  }
+
+  if (disciplineId) {
+    const d: any = await get(
+      `SELECT id, name, is_active FROM master_disciplines WHERE id = ?`, [disciplineId]);
+    if (!d) {
+      return klasGagal(404, {
+        error: 'Discipline tidak ditemukan.', code: 'DISCIPLINE_TIDAK_DITEMUKAN' });
+    }
+    if (!Number(d.is_active)) {
+      return klasGagal(409, {
+        error: `Discipline "${d.name}" sudah tidak aktif.`, code: 'DISCIPLINE_TIDAK_AKTIF' });
+    }
+    return klasOk(Number(d.id), null);
+  }
+
+  return klasOk(null, null);
+}
+
 router.post('/proposals/:proposalId/items', authMiddleware, bolehUbah, async (req: Request, res: Response) => {
   try {
     // EST-MTO-R18: seluruh perubahan yang menggeser nilai komersial ikut dikunci.
@@ -2542,6 +2613,10 @@ router.post('/proposals/:proposalId/items', authMiddleware, bolehUbah, async (re
       const unitPrice = parseFloat(ahsp.harga_satuan as any) || 0;
       const totalPrice = bulatUang(qtyValue * unitPrice);
 
+      // Klasifikasi diselaraskan di dalam transaction yang sama.
+      const klas = await selaraskanKlasifikasi(discipline_id, sub_discipline_id, tx.get);
+      if (!klas.ok) return { error: klas.error, body: klas.body };
+
       // `order_no` dihitung DI DALAM transaction yang sudah mengunci proposal.
       const urutan: any = await tx.get(
         'SELECT COALESCE(MAX(order_no), 0) AS maks FROM proposal_items WHERE proposal_id = ?',
@@ -2555,16 +2630,26 @@ router.post('/proposals/:proposalId/items', authMiddleware, bolehUbah, async (re
           ahsp_code_snapshot, ahsp_name_snapshot, unit_snapshot, unit_price_snapshot,
           qty, total_price, order_no)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [proposalId, discipline_id ?? null, sub_discipline_id ?? null, ahsp_id,
+        [proposalId, klas.discipline_id, klas.sub_discipline_id, ahsp_id,
          ahsp.kode, ahsp.name, ahsp.satuan, unitPrice,
          qtyValue, totalPrice, orderNo]
       );
       await recalculateProposal(proposalId as string, tx);
-      return { ok: true as const, id: r.insertId };
+      return {
+        ok: true as const, id: r.insertId,
+        discipline_id: klas.discipline_id, sub_discipline_id: klas.sub_discipline_id,
+      };
     });
 
     if ('error' in insertedId) return res.status(insertedId.error).json(insertedId.body);
-    res.status(201).json({ message: 'Item added', id: insertedId.id });
+    // Klasifikasi yang BENAR-BENAR tersimpan dikembalikan — kalau klien mengirim
+    // pasangan silang, di sinilah ia melihat parent kanonik yang dipakai.
+    res.status(201).json({
+      message: 'Item added',
+      id: insertedId.id,
+      discipline_id: insertedId.discipline_id,
+      sub_discipline_id: insertedId.sub_discipline_id,
+    });
   } catch (error: any) {
     if (error?.lock) return res.status(error.lock.status).json(error.lock.body);
     console.error('Error adding proposal item:', error);

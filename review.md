@@ -8172,6 +8172,64 @@ issued—flag untuk keputusan/migrasi revision.
 6. Migrasi melaporkan seluruh pair legacy mismatch, nilai sebelum/sesudah tetap,
    issued revision lama immutable, dan koreksi mempunyai actor/reason/audit.
 
+**Status: [DEV] DITERAPKAN** — 27 Agustus 2026
+
+**Klaimnya benar.** `POST /proposals/:proposalId/items` menerima `discipline_id`
+dan `sub_discipline_id` sebagai dua input independen lalu menyimpannya apa
+adanya — tidak ada satu pun query yang memastikan sub itu anak dari discipline
+tersebut. Keduanya bisa valid sendiri-sendiri sementara pasangannya salah.
+
+Yang membuatnya berbahaya justru karena grand total-nya benar: tidak ada angka
+yang terlihat janggal, sementara ringkasan discipline menjumlahkan
+`pi.discipline_id`, ringkasan sub-discipline mengembalikan parent kanonik dari
+master, dan pohon RAB mencetak sub apa pun di bawah `pi.discipline_id`. Satu
+baris muncul sebagai Civil di satu laporan dan Piping di laporan lain.
+
+**Kontrak yang dipilih: sub-discipline yang menentukan parent.** Review
+menawarkan dua opsi — tolak 422, atau abaikan discipline klien dan pakai parent
+kanonik. Saya ambil yang kedua, alasannya: sub adalah acuan yang lebih spesifik,
+dan urutannya sama dengan cara layar bekerja (pilih discipline dulu, sub sebagai
+penajaman). Menolak akan menghentikan pekerjaan yang maksudnya sebenarnya jelas.
+Supaya tidak jadi "menerima input salah diam-diam", klasifikasi yang
+**benar-benar tersimpan** dikembalikan di respons 201.
+
+Yang berubah (`estimator.routes.ts`): helper `selaraskanKlasifikasi()` dipanggil
+di dalam transaction yang sama. Sub diberikan → parent diturunkan dari master.
+Sub kosong, discipline diberikan → discipline divalidasi sendiri. Id tidak ada →
+**404** (`SUB_DISCIPLINE_TIDAK_DITEMUKAN` / `DISCIPLINE_TIDAK_DITEMUKAN`);
+nonaktif → **409** (`..._TIDAK_AKTIF`). Tidak ada yang jatuh diam-diam ke tanpa
+klasifikasi — baris tanpa klasifikasi tidak akan pernah muncul di breakdown mana
+pun, jadi itu bukan kegagalan yang aman.
+
+Jalur template/wizard diperiksa: keempat `INSERT INTO proposal_items` di sana
+tidak pernah menetapkan discipline/sub sama sekali (NULL), jadi jalur itu tidak
+bisa membentuk pasangan silang. `PUT /items/:itemId` hanya menerima
+`qty`/`description`/`ahsp_id`. Jadi satu-satunya pintu memang `POST /items`, dan
+itu yang ditutup.
+
+**Dampak produksi diaudit sebelum deploy:** **0 baris berpasangan silang** — dan
+lebih jauh, **0 dari 548 `proposal_items` punya klasifikasi sama sekali**
+(seluruhnya NULL), serta 0 sub-discipline nonaktif. Tidak ada migrasi legacy yang
+perlu dijalankan dan tidak ada revisi issued yang perlu di-flag. Perbaikan ini
+murni pencegahan.
+
+**Tes: `backend/tests/klasifikasi-item.ts` — 26 asersi, masuk `test:all`.**
+Terbukti bisa gagal: kode dikembalikan ke versi lama, **13 dari 26 gagal** —
+termasuk `nol pasangan silang → dapat 1` (baris silang benar-benar tersimpan),
+`sub nonaktif ditolak 409 → dapat 201`, dan `discipline tidak ada ditolak 404 →
+dapat 500` (kegagalan FK bocor sebagai 500, bukan diagnosa).
+
+Terhadap acceptance test: (1) pasangan silang → parent kanonik yang disimpan,
+sesuai kontrak terdokumentasi — terpenuhi; (2) pasangan valid dan sub-only
+menghasilkan klasifikasi identik — terpenuhi, diuji berdampingan; (3) id
+missing/inactive ditolak berkode, tidak jatuh ke unassigned — terpenuhi;
+(4) ringkasan, sub-ringkasan, dan pohon RAB menempatkan baris pada parent yang
+sama — terpenuhi; (5) jalur template/clone tidak bisa bypass — diverifikasi di
+sumber (jalur itu tidak menulis klasifikasi sama sekali); (6) migrasi baris
+legacy — **tidak diperlukan**, hasil audit produksi nol.
+
+`test:all` 0 gagal (23 suite).
+
 ---
 
 ## Live Auto Review — 20 Agustus 2026 09:33 WIB
