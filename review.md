@@ -5790,11 +5790,21 @@ saat Deal menyentuh `contract_baseline_lines` yang **tidak boleh punya jalur
 tulis** — perlu tabel baseline jadwal projectnya sendiri, dan itu pekerjaan
 tersendiri, bukan tempelan.
 
-Migrasi proposal lama juga belum: proposal yang revisinya terbit **sebelum**
-perubahan ini tidak punya `schedule_checksum`, sehingga jatuh ke jalur live
-seperti sebelumnya. Itu perilaku yang aman (tidak ada yang rusak), tapi bukan
-baseline. Perlu keputusan: dibiarkan, atau dibangkitkan satu baseline eksplisit
-dari master saat ini dan ditandai sebagai rekonstruksi.
+Migrasi proposal lama **ternyata tidak diperlukan**, dan itu saya periksa di
+produksi, bukan saya asumsikan: `proposal_revisions` berisi **0 baris**
+(3 proposal, 0 revisi terbit). Ledger revisi memang baru dipasang, jadi tidak
+ada satu pun revisi terbit yang lahir sebelum perubahan ini. Kalau nanti ada
+proposal lama yang perlu di-issue, jadwalnya akan langsung dipotret di
+penerbitan pertamanya.
+
+### Terpasang di produksi
+
+Deploy 28 Agustus 2026. Diverifikasi lewat INFORMATION_SCHEMA: tabel
+`proposal_revision_schedule` ada (19 kolom), `proposals` +4 kolom parameter,
+`proposal_revisions` +6 kolom, dan 0 revisi terbit tanpa checksum.
+`npm run smoke` **30 lulus, 1 gagal** — kegagalannya tetap satu-satunya temuan
+lama yang menunggu tindakan pemilik server (kredensial master), bukan regresi
+dari perubahan ini.
 
 ---
 
