@@ -378,6 +378,14 @@
             karena keduanya menjadi dasar kurva kas dan rencana billing yang sudah dikirim.
           </div>
 
+          <!-- Sumber jadwal dinyatakan tegas: potret revisi terbit tidak ikut
+               bergeser saat master AHSP diubah, dan itu perlu terlihat. -->
+          <div v-if="scheduleSumber === 'snapshot'"
+               class="mb-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm text-amber-900">
+            🔒 Jadwal ini dibaca dari <strong>potret Revisi #{{ scheduleRevisionNo }}</strong> —
+            parameternya terkunci dan tidak bergeser walau master AHSP berubah.
+          </div>
+
           <!-- Settings Bar -->
           <div class="bg-white rounded-lg shadow p-4 flex flex-wrap gap-4 items-end">
             <div>
@@ -396,7 +404,7 @@
               <label class="block text-xs font-medium text-gray-600 mb-1">📆 Hari Kerja/Minggu</label>
               <input v-model.number="scheduleWorkDaysPerWeek" type="number" min="5" max="7" class="w-20 border border-gray-300 rounded-lg px-3 py-1.5 text-sm text-center">
             </div>
-            <button @click="loadSchedule" class="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold hover:bg-indigo-700">
+            <button @click="ubahParamJadwal" class="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold hover:bg-indigo-700">
               🔄 Hitung Ulang
             </button>
             <div v-if="scheduleData" class="ml-auto text-sm text-gray-600">
@@ -694,7 +702,7 @@
           <label class="text-sm font-medium text-gray-600">Pekerja/hari</label>
           <input v-model.number="scheduleWorkers" type="number" min="1" max="100" class="w-20 border border-gray-300 rounded-lg px-3 py-1.5 text-sm text-center">
         </div>
-        <button @click="loadPaymentSchedule" class="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-semibold hover:bg-emerald-700">
+        <button @click="ubahParamJadwal" class="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-semibold hover:bg-emerald-700">
           🔄 Generate
         </button>
         <div v-if="paymentData" class="ml-auto text-sm text-gray-600">
@@ -1276,9 +1284,17 @@ const activeProposalTab = ref<'rab' | 'mto' | 'schedule' | 'payment'>('rab');
 // ── Schedule state ──
 const scheduleData = ref<any>(null);
 const scheduleLoading = ref(false);
-const scheduleStartDate = ref(new Date().toISOString().split('T')[0]);
+// Kosong dulu — diisi dari server saat jadwal dimuat. Sebelumnya di-seed dari
+// jam browser, sehingga jadwal yang sama menampilkan tanggal berbeda tergantung
+// kapan dan di mesin siapa halaman dibuka.
+const scheduleStartDate = ref('');
 const scheduleWorkers = ref(8);
 const scheduleHours = ref(8);
+// Diisi 'snapshot' saat jadwal dibaca dari potret revisi terbit — parameternya
+// ikut terkunci di situ dan tidak boleh dikirim balik ke server.
+const scheduleSumber = ref('');
+const scheduleRevisionNo = ref<number | null>(null);
+const scheduleTersimpan = ref(false);
 const scheduleWorkDaysPerWeek = ref(6);
 const ganttDayWidth = 18; // pixels per day
 
@@ -1786,19 +1802,74 @@ const loadSchedule = async () => {
   if (scheduleLoading.value) return;
   scheduleLoading.value = true;
   try {
-    const params = new URLSearchParams({
-      workers_per_day: String(scheduleWorkers.value),
-      hours_per_day:   String(scheduleHours.value),
-      ...(scheduleStartDate.value ? { start_date: scheduleStartDate.value } : {})
-    });
+    // Pemuatan pertama tidak mengirim parameter apa pun: biar server yang
+    // menjawab dengan parameter tersimpan (atau potret revisi terbit).
+    const params = new URLSearchParams(
+      scheduleTersimpan.value
+        ? {
+            workers_per_day: String(scheduleWorkers.value),
+            hours_per_day:   String(scheduleHours.value),
+            ...(scheduleStartDate.value ? { start_date: scheduleStartDate.value } : {})
+          }
+        : {}
+    );
     const { data } = await api.get(`/estimator/proposals/${proposalId}/schedule?${params}`);
     data.wbs = data.wbs.map((row: any) => ({ ...row, _expanded: false, _editing: false }));
     scheduleData.value = data;
+    scheduleSumber.value = data.sumber || '';
+    scheduleRevisionNo.value = data.revision_no ?? null;
+    if (data.settings) {
+      scheduleWorkers.value  = Number(data.settings.workers_per_day) || scheduleWorkers.value;
+      scheduleHours.value    = Number(data.settings.hours_per_day)   || scheduleHours.value;
+      scheduleWorkDaysPerWeek.value = Number(data.settings.workdays_per_week) || scheduleWorkDaysPerWeek.value;
+      if (data.settings.start_date) scheduleStartDate.value = data.settings.start_date;
+    }
+    scheduleTersimpan.value = true;
   } catch (error) {
     console.error('Failed to load schedule:', error);
   } finally {
     scheduleLoading.value = false;
   }
+};
+
+/**
+ * Parameter jadwal disimpan di proposalnya, bukan hanya dikirim sebagai query.
+ *
+ * Tanpa ini, dua orang yang membuka proposal yang sama melihat jadwal berbeda:
+ * tanggal mulai dari jam browser masing-masing, jumlah pekerja dari default
+ * layar. Jadwal yang tidak bisa direproduksi tidak bisa dipakai membangun
+ * master schedule.
+ */
+const simpanParamJadwal = async () => {
+  if (scheduleSumber.value === 'snapshot') return; // potret tidak diubah
+  try {
+    await api.put(`/estimator/proposals/${proposalId}/schedule-params`, {
+      start_date:        scheduleStartDate.value || null,
+      workers_per_day:   scheduleWorkers.value,
+      hours_per_day:     scheduleHours.value,
+      workdays_per_week: scheduleWorkDaysPerWeek.value,
+    });
+  } catch (e: any) {
+    // Proposal terkunci menjawab 409 — itu benar, dan bukan kegagalan diam.
+    const kode = e?.response?.data?.code;
+    if (kode === 'PROPOSAL_LOCKED') {
+      alert('Proposal sudah terkunci — parameter jadwalnya tidak bisa diubah lagi.');
+    } else {
+      alert(e?.response?.data?.error || 'Gagal menyimpan parameter jadwal');
+    }
+    throw e;
+  }
+};
+
+/** Dipanggil dari input parameter: simpan dulu, baru muat ulang jadwalnya. */
+const ubahParamJadwal = async () => {
+  try {
+    await simpanParamJadwal();
+  } catch {
+    return; // tolakan server sudah dilaporkan; jangan muat jadwal yang keliru
+  }
+  await loadSchedule();
+  if (paymentData.value) await loadPaymentSchedule();
 };
 
 // ── Schedule overrides

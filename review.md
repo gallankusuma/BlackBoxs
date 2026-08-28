@@ -5683,6 +5683,119 @@ baru; parameter schedule tersimpan dan kembali identik setelah reload; total
 cash curve tetap balance ke total revision; Deal menyalin revision schedule yang
 sama ke Project baseline tanpa menghitung ulang diam-diam.
 
+**[DEV] DITERAPKAN SEBAGIAN — 28 Agustus 2026**
+
+Ketiga klaimnya saya periksa dulu di kode, dan **ketiganya benar**:
+
+1. `GET /proposals/:id/schedule` membaca `ahsp_items`, `ahsp_headers`, dan
+   `ahsp_wbs_templates` **live pada tiap request**.
+2. `workers_per_day`, `hours_per_day`, dan `start_date` memang **hanya query
+   parameter** — tidak ada satu pun kolom yang menyimpannya.
+3. `EstimatorProposalEditor.vue:1279` berbunyi
+   `const scheduleStartDate = ref(new Date().toISOString().split('T')[0])` —
+   **jam browser**, persis seperti yang ditulis reviewer.
+
+### Yang dikerjakan
+
+**Parameter jadwal jadi milik proposal, bukan milik query.**
+`ensureProposalScheduleSchema` menambah 4 kolom di `proposals`
+(`schedule_start_date`, `schedule_workers_per_day`, `schedule_hours_per_day`,
+`schedule_workdays_per_week`) dan endpoint baru
+`PUT /proposals/:id/schedule-params`. Nilai tak masuk akal **ditolak 400**,
+bukan dibulatkan diam-diam (pekerja 0,1–1000; jam 0,5–24; hari kerja 1–7) —
+nol pekerja menghasilkan durasi tak hingga yang merambat ke seluruh kurva.
+Proposal terkunci dijawab **409 `PROPOSAL_LOCKED`**.
+
+**Potret jadwal dibekukan bersama revisinya.** Tabel baru
+`proposal_revision_schedule` (FK cascade ke `proposal_revisions`) menyimpan tiap
+baris beserta `labor_components` — komposisi tenaganya ikut dipotret, karena
+tanpa itu pertanyaan "kenapa durasinya 8 hari" hanya bisa dijawab dengan
+menghitung ulang dari master yang mungkin sudah berubah. Checksum ditulis dengan
+angka dinormalkan `.toFixed(3)` lebih dulu; `mysql2` mengembalikan DECIMAL
+sebagai string, jadi tanpa normalisasi checksum tidak akan pernah cocok saat
+dihitung ulang.
+
+`bekukanJadwalRevisi()` menghitung **di dalam transaction yang sama** dengan
+pembekuan revisi, bukan lewat HTTP ke endpoint sendiri — panggilan HTTP akan
+memakai koneksi kedua yang buta terhadap transaction yang belum commit.
+
+Revisi ber-status `issued`/`accepted` sejak itu **membaca potret**
+(`sumber: 'snapshot'`). Menghitung ulang dengan master sekarang masih bisa,
+tapi **harus diminta tegas** lewat `?hitung_ulang=1` (`sumber: 'live'`) —
+tidak pernah terjadi diam-diam.
+
+**Kurva kas membaca potret yang sama.** `GET /payment-schedule` sebelumnya
+menghitung durasinya **sendiri** dari `ahsp_items` live. Dua endpoint yang
+masing-masing menghitung durasi adalah dua sumber kebenaran: begitu master
+berubah, Gantt dan kurva kas bisa bergeser berbeda dan selisihnya tidak bisa
+dijelaskan ke siapa pun. Sekarang ia membaca `proposal_revision_schedule` dan
+tidak menjalankan query AHSP-nya sama sekali untuk baris yang ada di potret.
+Tanggal mulainya pun mengikuti urutan: potret → tersimpan di proposal → query →
+baru jam server sebagai bawaan terakhir.
+
+**Layar berhenti memakai jam browser.** `scheduleStartDate` mulai kosong dan
+diisi dari respons server; pemuatan pertama tidak mengirim parameter apa pun
+supaya server yang menjawab dengan nilai tersimpan. Tombol "Hitung Ulang" kini
+**menyimpan dulu, baru memuat**, sehingga parameter yang dilihat orang kedua
+sama dengan yang dilihat orang pertama. Saat sumbernya potret, layar
+menyatakannya tegas: *"Jadwal ini dibaca dari potret Revisi #N — parameternya
+terkunci dan tidak bergeser walau master AHSP berubah."*
+
+### Satu bug yang tersingkap saat menulis tesnya
+
+Potret sempat saya tulis dengan `row_type = 'task'`, sementara endpoint jadwal
+memakai `type: 'item'` dan layar menyaring dengan `row.type === 'section'` /
+`'item'`. Akibatnya jadwal revisi terbit akan tampil **kosong** di layar. Kolom
+yang dirender (`qty`, `unit`, `unit_price`, `total_price`) juga belum ikut
+dipotret. Keduanya diperbaiki; `row_type` sekarang mengikuti kontrak endpoint.
+
+### Tes
+
+`tests/schedule-baseline.ts` — **50 asersi**, `npm run test:jadwal`.
+Yang menentukan: setelah submit, `ahsp_items.koefisien` **digandakan langsung di
+database**, lalu dibuktikan jadwal terbit tetap 8 hari sementara
+`?hitung_ulang=1` menunjukkan 16.
+
+Dibuktikan bergigi lewat dua mutasi:
+
+| Mutasi | Hasil |
+|---|---|
+| Cabang potret jadwal dimatikan | **6 gagal** — `dapat 16, harusnya 8` |
+| Cabang potret kurva kas dimatikan | **3 gagal** — `dapat "live", harusnya "snapshot"` |
+
+Tanggal fixture sengaja 25 Maret: durasi 8 hari berakhir 2 April dan 16 hari
+berakhir 10 April, sehingga sebaran nilainya antar bulan benar-benar berbeda.
+Dengan 2 Maret keduanya jatuh di bulan yang sama dan tesnya tidak menguji apa
+pun — itu asersi saya yang keliru, dan sempat gagal sekali karena itu.
+
+`test:all` **2164 lulus, 0 gagal** (38 suite). Residu fixture nol: jadwal yatim
+0, `engineering_inputs` yatim 0, `mto_lines` yatim 0, kontrak yatim 0.
+
+### Kriteria terima: yang tercapai dan yang belum
+
+| Kriteria | Status |
+|---|---|
+| Ubah master setelah submit → issued schedule tidak berubah | ✅ terbukti |
+| Draft/revisi baru boleh memilih master baru | ✅ jalur live tetap ada |
+| Parameter tersimpan dan identik setelah reload | ✅ terbukti |
+| Total cash curve balance ke total revisi | ✅ `reconciled: true` |
+| **Resume resource (`/resume`) masih membaca master live** | ❌ **belum** |
+| **Deal menyalin schedule revisi ke Project baseline** | ❌ **belum** |
+
+Dua yang terakhir saya **tidak** kerjakan diam-diam supaya tidak terlihat
+selesai padahal belum. `/resume` membaca komposisi dan harga AHSP live
+(`estimator.routes.ts` ±2532), jadi kebutuhan material/manpower/equipment masih
+bisa bergeser setelah master berubah. Menyalin jadwal revisi ke baseline project
+saat Deal menyentuh `contract_baseline_lines` yang **tidak boleh punya jalur
+tulis** — perlu tabel baseline jadwal projectnya sendiri, dan itu pekerjaan
+tersendiri, bukan tempelan.
+
+Migrasi proposal lama juga belum: proposal yang revisinya terbit **sebelum**
+perubahan ini tidak punya `schedule_checksum`, sehingga jatuh ke jalur live
+seperti sebelumnya. Itu perilaku yang aman (tidak ada yang rusak), tapi bukan
+baseline. Perlu keputusan: dibiarkan, atau dibangkitkan satu baseline eksplisit
+dari master saat ini dan ditandai sebagai rekonstruksi.
+
 ---
 
 ## System Design Review — Proposal — 16 Agustus 2026 19:57 WIB

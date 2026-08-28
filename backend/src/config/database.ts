@@ -980,6 +980,90 @@ const ensureProposalRevisionSchema = async (connection: any) => {
     'ALTER TABLE proposals ADD COLUMN IF NOT EXISTS accepted_revision_id INT NULL');
 };
 
+/**
+ * SCHED-R57: master schedule yang reproducible.
+ *
+ * Dua cacat yang membuatnya tidak reproducible, dan keduanya terbukti di kode:
+ *
+ * 1. **Parameter jadwal tidak pernah disimpan.** `workers_per_day`,
+ *    `hours_per_day`, dan `start_date` hanya query parameter, dan layar
+ *    menginisialisasi tanggal mulai dari `new Date()` — jam browser. Membuka
+ *    proposal yang SAMA besok menghasilkan tanggal berbeda, dan dua orang yang
+ *    membukanya di hari berbeda melihat jadwal berbeda.
+ * 2. **Jadwal dihitung ulang dari master LIVE tiap request.** Endpoint membaca
+ *    `ahsp_items`, `ahsp_headers`, dan `ahsp_wbs_templates` yang sedang
+ *    berlaku. Begitu komposisi AHSP diperbaiki, durasi dan tanggal selesai
+ *    proposal yang sudah dikirim ke client ikut berubah — tanpa satu pun
+ *    tindakan estimator.
+ *
+ * Yang disimpan di sini menutup keduanya: parameternya menempel pada proposal,
+ * dan hasil jadwalnya dipotret saat revisi diterbitkan. Master tetap boleh
+ * berkembang untuk revisi berikutnya; revisi yang sudah terbit selalu membaca
+ * potretnya.
+ */
+const ensureProposalScheduleSchema = async (connection: any) => {
+  for (const sql of [
+    "ALTER TABLE proposals ADD COLUMN IF NOT EXISTS schedule_start_date DATE NULL",
+    "ALTER TABLE proposals ADD COLUMN IF NOT EXISTS schedule_workers_per_day DECIMAL(10,2) NULL",
+    "ALTER TABLE proposals ADD COLUMN IF NOT EXISTS schedule_hours_per_day DECIMAL(10,2) NULL",
+    "ALTER TABLE proposals ADD COLUMN IF NOT EXISTS schedule_workdays_per_week TINYINT NULL",
+  ]) await execSchemaEnsure(connection, sql);
+
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS proposal_revision_schedule (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      revision_id INT NOT NULL,
+      line_no INT NOT NULL,
+      proposal_item_id INT NULL,
+      -- Nilainya mengikuti kontrak endpoint jadwal: 'section' atau 'item'.
+      -- Sempat saya tulis 'task', dan itu bug nyata — layar menyaring baris
+      -- dengan type === 'item', jadi potretnya akan terbaca kosong.
+      row_type VARCHAR(20) NOT NULL DEFAULT 'item',
+      kode VARCHAR(50) NULL,
+      name VARCHAR(500) NULL,
+      start_day DECIMAL(12,3) NOT NULL DEFAULT 0,
+      duration_days DECIMAL(12,3) NOT NULL DEFAULT 0,
+      start_date DATE NULL,
+      end_date DATE NULL,
+      -- Kolom yang dirender layar ikut dipotret. Tanpa ini, membuka jadwal
+      -- revisi terbit menampilkan baris tanpa volume dan tanpa harga.
+      qty DECIMAL(18,4) NULL,
+      unit VARCHAR(50) NULL,
+      unit_price DECIMAL(18,2) NULL,
+      total_price DECIMAL(18,2) NULL,
+      work_category VARCHAR(100) NULL,
+      labor_total_oh DECIMAL(18,3) NOT NULL DEFAULT 0,
+      -- Komposisi tenaga ikut dipotret: tanpa ini, "kenapa durasinya 12 hari"
+      -- hanya bisa dijawab dengan menghitung ulang dari master yang mungkin
+      -- sudah berubah.
+      labor_components JSON NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_prs_rev (revision_id),
+      CONSTRAINT fk_prs_rev FOREIGN KEY (revision_id)
+        REFERENCES proposal_revisions(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+  // Tabelnya sempat terbentuk tanpa kolom-kolom ini di database yang sudah
+  // berjalan; CREATE TABLE IF NOT EXISTS tidak akan menambahkannya sendiri.
+  for (const sql of [
+    "ALTER TABLE proposal_revision_schedule ADD COLUMN IF NOT EXISTS qty DECIMAL(18,4) NULL",
+    "ALTER TABLE proposal_revision_schedule ADD COLUMN IF NOT EXISTS unit VARCHAR(50) NULL",
+    "ALTER TABLE proposal_revision_schedule ADD COLUMN IF NOT EXISTS unit_price DECIMAL(18,2) NULL",
+    "ALTER TABLE proposal_revision_schedule ADD COLUMN IF NOT EXISTS total_price DECIMAL(18,2) NULL",
+    "ALTER TABLE proposal_revision_schedule ADD COLUMN IF NOT EXISTS work_category VARCHAR(100) NULL",
+  ]) await execSchemaEnsure(connection, sql);
+
+  // Parameter yang dipakai saat potret dibuat, menempel pada revisinya.
+  for (const sql of [
+    "ALTER TABLE proposal_revisions ADD COLUMN IF NOT EXISTS schedule_start_date DATE NULL",
+    "ALTER TABLE proposal_revisions ADD COLUMN IF NOT EXISTS schedule_workers_per_day DECIMAL(10,2) NULL",
+    "ALTER TABLE proposal_revisions ADD COLUMN IF NOT EXISTS schedule_hours_per_day DECIMAL(10,2) NULL",
+    "ALTER TABLE proposal_revisions ADD COLUMN IF NOT EXISTS schedule_workdays_per_week TINYINT NULL",
+    "ALTER TABLE proposal_revisions ADD COLUMN IF NOT EXISTS schedule_total_days DECIMAL(12,3) NULL",
+    "ALTER TABLE proposal_revisions ADD COLUMN IF NOT EXISTS schedule_checksum CHAR(64) NULL",
+  ]) await execSchemaEnsure(connection, sql);
+};
+
 const ensureRouteModuleSchema = async (connection: any) => {
   const statements = [
     `CREATE TABLE IF NOT EXISTS inbox_notifications (
@@ -2270,6 +2354,7 @@ export async function initializeDatabase() {
     await ensureRouteModuleSchema(connection);
     await ensureWebauthnChallengeOffice(connection);
     await ensureProposalRevisionSchema(connection);
+    await ensureProposalScheduleSchema(connection);
     await ensureContractLedgerSchema(connection);
     await ensureMobilePinSchema(connection);
     await ensureAssetDepreciationSchema(connection);

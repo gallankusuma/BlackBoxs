@@ -3,6 +3,7 @@ import { calculateMto, toLegacyQuantities, FORMULA_VERSION, MtoResult } from '..
 import { checkUnitCompatibility, isProposalEditable } from '../modules/estimator/mto/units';
 import { spesifikasiField, spesifikasiOpsional, katalogElemen } from '../modules/estimator/mto/contract';
 import { enrichMtoElement, groupStoredLines } from '../modules/estimator/mto/enrich';
+import crypto from 'crypto';
 import { rakitDokumen } from '../modules/estimator/penawaran/dokumen';
 import { renderPenawaran } from '../modules/estimator/penawaran/pdf';
 import { authMiddleware } from '../middleware/auth';
@@ -1000,12 +1001,154 @@ router.get('/proposals/:id/items', authMiddleware, bolehLihat, async (req: Reque
 // ============================================
 // GET /proposals/:id/schedule
 // Returns WBS structure with duration calculated from AHSP labor (Section A) × qty
+/**
+ * SCHED-R57: simpan parameter jadwal pada proposalnya.
+ *
+ * Tanpa ini, tanggal mulai berasal dari jam browser setiap kunjungan — dua
+ * orang yang membuka proposal yang sama di hari berbeda melihat jadwal
+ * berbeda, dan jadwal yang menjadi lampiran penawaran tidak bisa
+ * direkonstruksi.
+ */
+router.put('/proposals/:id/schedule-params', authMiddleware, bolehUbah, async (req: Request, res: Response) => {
+  try {
+    const terkunci = await proposalLock(req.params.id);
+    if (terkunci) return res.status(terkunci.status).json(terkunci.body);
+
+    const { start_date, workers_per_day, hours_per_day, workdays_per_week } = req.body || {};
+
+    if (start_date !== undefined && start_date !== null && start_date !== ''
+        && !/^\d{4}-\d{2}-\d{2}$/.test(String(start_date))) {
+      return res.status(400).json({
+        error: 'Tanggal mulai harus berformat YYYY-MM-DD.', code: 'TANGGAL_TIDAK_VALID' });
+    }
+
+    // Angka yang tidak masuk akal ditolak, bukan dibulatkan diam-diam: nol
+    // pekerja per hari menghasilkan durasi tak hingga, dan 200 jam sehari
+    // menghasilkan jadwal yang tidak mungkin dikerjakan siapa pun.
+    const angka = (v: any, nama: string, min: number, maks: number) => {
+      if (v === undefined || v === null || v === '') return { ok: true, nilai: null as any, pesan: '' };
+      const n = Number(v);
+      if (!Number.isFinite(n) || n < min || n > maks) {
+        return { ok: false, nilai: null as any, pesan: `${nama} harus antara ${min} dan ${maks}.` };
+      }
+      return { ok: true, nilai: n, pesan: '' };
+    };
+    const w = angka(workers_per_day, 'Pekerja per hari', 0.1, 1000);
+    const h = angka(hours_per_day, 'Jam per hari', 0.5, 24);
+    const d = angka(workdays_per_week, 'Hari kerja per minggu', 1, 7);
+    for (const c of [w, h, d]) {
+      if (!c.ok) return res.status(400).json({ error: c.pesan, code: 'PARAMETER_TIDAK_VALID' });
+    }
+
+    await dbRun(
+      `UPDATE proposals SET
+         schedule_start_date = ?, schedule_workers_per_day = ?,
+         schedule_hours_per_day = ?, schedule_workdays_per_week = ?
+       WHERE id = ?`,
+      [start_date || null, w.nilai, h.nilai, d.nilai, req.params.id]
+    );
+
+    const hdr: any = await dbGet(
+      `SELECT schedule_start_date, schedule_workers_per_day, schedule_hours_per_day,
+              schedule_workdays_per_week FROM proposals WHERE id = ?`, [req.params.id]);
+    if (!hdr) return res.status(404).json({ error: 'Proposal tidak ditemukan' });
+
+    res.json({
+      message: 'Parameter jadwal tersimpan',
+      settings: {
+        start_date: hdr.schedule_start_date ? String(hdr.schedule_start_date).slice(0, 10) : null,
+        workers_per_day: hdr.schedule_workers_per_day === null ? null : Number(hdr.schedule_workers_per_day),
+        hours_per_day: hdr.schedule_hours_per_day === null ? null : Number(hdr.schedule_hours_per_day),
+        workdays_per_week: hdr.schedule_workdays_per_week,
+      },
+    });
+  } catch (error: any) {
+    console.error('Error saving schedule params:', error);
+    res.status(500).json({ error: 'Gagal menyimpan parameter jadwal' });
+  }
+});
+
 router.get('/proposals/:id/schedule', authMiddleware, bolehLihat, async (req: Request, res: Response) => {
   try {
     const proposalId    = req.params.id;
-    const workersPerDay = parseFloat(req.query.workers_per_day as string) || 8;
-    const hoursPerDay   = parseFloat(req.query.hours_per_day  as string) || 8;
-    const startDateStr  = req.query.start_date as string || null; // e.g. '2026-01-01'
+
+    // SCHED-R57: parameter diambil dari PROPOSAL kalau tidak dikirim di query.
+    //
+    // Sebelumnya ketiganya hanya query parameter, dan layar mengisi tanggal
+    // mulai dari `new Date()` — jam browser. Membuka proposal yang sama besok
+    // menghasilkan tanggal berbeda, dan dua orang yang membukanya di hari
+    // berbeda melihat jadwal berbeda. Jadwal yang menjadi lampiran penawaran
+    // tidak bisa direkonstruksi.
+    const hdrJadwal: any = await dbGet(
+      `SELECT status, schedule_start_date, schedule_workers_per_day,
+              schedule_hours_per_day, schedule_workdays_per_week, accepted_revision_id
+       FROM proposals WHERE id = ?`, [proposalId]);
+    if (!hdrJadwal) return res.status(404).json({ error: 'Proposal tidak ditemukan' });
+
+    // Revisi yang SUDAH TERBIT membaca potretnya, bukan menghitung ulang dari
+    // master yang sedang berlaku. Inilah yang membuat perubahan komposisi AHSP
+    // tidak menggeser jadwal penawaran yang sudah dikirim.
+    const revisiTerbit: any = await dbGet(
+      `SELECT * FROM proposal_revisions
+       WHERE proposal_id = ? AND status IN ('issued', 'accepted')
+       ORDER BY revision_no DESC LIMIT 1`, [proposalId]);
+
+    if (revisiTerbit && revisiTerbit.schedule_checksum && req.query.hitung_ulang !== '1') {
+      const baris: any[] = await dbAll(
+        'SELECT * FROM proposal_revision_schedule WHERE revision_id = ? ORDER BY line_no',
+        [revisiTerbit.id]);
+      if (baris.length) {
+        return res.json({
+          proposal_id: proposalId,
+          settings: {
+            workers_per_day: Number(revisiTerbit.schedule_workers_per_day),
+            hours_per_day: Number(revisiTerbit.schedule_hours_per_day),
+            start_date: revisiTerbit.schedule_start_date
+              ? String(revisiTerbit.schedule_start_date).slice(0, 10) : null,
+            workdays_per_week: revisiTerbit.schedule_workdays_per_week,
+          },
+          total_duration_days: Number(revisiTerbit.schedule_total_days),
+          // Dinyatakan tegas: yang dibaca potret, bukan hitungan sekarang.
+          sumber: 'snapshot',
+          revision_no: revisiTerbit.revision_no,
+          schedule_checksum: revisiTerbit.schedule_checksum,
+          wbs: baris.map((b: any) => ({
+            id: `${b.row_type}-${b.proposal_item_id}`,
+            type: b.row_type,
+            proposal_item_id: b.proposal_item_id,
+            kode: b.kode,
+            name: b.name,
+            qty: b.qty === null ? 0 : Number(b.qty),
+            unit: b.unit,
+            unit_price: b.unit_price === null ? 0 : Number(b.unit_price),
+            total_price: b.total_price === null ? 0 : Number(b.total_price),
+            work_category: b.work_category,
+            // Potret tidak bisa di-override lagi — override berlaku pada
+            // proposal yang masih bisa diubah, bukan pada revisi yang terbit.
+            is_overridden: false,
+            is_pinned: false,
+            start_day: Number(b.start_day),
+            duration_days: Number(b.duration_days),
+            start_date: b.start_date ? String(b.start_date).slice(0, 10) : null,
+            end_date: b.end_date ? String(b.end_date).slice(0, 10) : null,
+            labor_total_oh: Number(b.labor_total_oh),
+            labor_components: (() => {
+              try {
+                return typeof b.labor_components === 'string'
+                  ? JSON.parse(b.labor_components || '[]') : (b.labor_components || []);
+              } catch { return []; }
+            })(),
+          })),
+        });
+      }
+    }
+
+    const workersPerDay = parseFloat(req.query.workers_per_day as string)
+      || Number(hdrJadwal.schedule_workers_per_day) || 8;
+    const hoursPerDay   = parseFloat(req.query.hours_per_day as string)
+      || Number(hdrJadwal.schedule_hours_per_day) || 8;
+    const startDateStr  = (req.query.start_date as string)
+      || (hdrJadwal.schedule_start_date ? String(hdrJadwal.schedule_start_date).slice(0, 10) : null);
 
     // Load all overrides for this proposal's items
     const overrideRows = await dbAll(
@@ -1262,8 +1405,16 @@ router.get('/proposals/:id/schedule', authMiddleware, bolehLihat, async (req: Re
 
     res.json({
       proposal_id: proposalId,
-      settings: { workers_per_day: workersPerDay, hours_per_day: hoursPerDay },
+      settings: {
+        workers_per_day: workersPerDay,
+        hours_per_day: hoursPerDay,
+        start_date: startDateStr,
+        workdays_per_week: hdrJadwal.schedule_workdays_per_week ?? null,
+      },
       total_duration_days: Math.round(totalDurationDays * 100) / 100,
+      // Dihitung dari master yang sedang berlaku — sah untuk draft, dan
+      // dinyatakan supaya tidak tertukar dengan potret revisi terbit.
+      sumber: 'live',
       wbs
     });
 
@@ -1473,6 +1624,149 @@ const selaraskanClient = async (
  * bukan dibaca ulang dari `proposals`: kalau dibaca ulang, revisi lama ikut
  * berubah setiap kali headernya disunting dan potretnya berhenti menjadi potret.
  */
+/**
+ * SCHED-R57: potret jadwal untuk sebuah revisi yang diterbitkan.
+ *
+ * Dihitung dengan memanggil endpoint jadwal itu sendiri lewat HTTP internal?
+ * Tidak — jadwalnya dihitung ulang di sini dari data yang sama, karena
+ * memanggil endpoint dari dalam transaction berarti koneksi database kedua
+ * yang tidak melihat perubahan transaction ini.
+ *
+ * Yang dipotret bukan hanya tanggal: komposisi tenaga ikut disimpan. Tanpa itu,
+ * pertanyaan "kenapa durasinya 12 hari" hanya bisa dijawab dengan menghitung
+ * ulang dari master yang mungkin sudah berubah — dan jawabannya tidak lagi sama
+ * dengan yang dipakai saat penawaran dikirim.
+ */
+async function bekukanJadwalRevisi(
+  proposalId: any, revisionId: number, proposal: any, tx: TxRunner
+): Promise<{ total: number; checksum: string; baris: number }> {
+  const workersPerDay = Number(proposal.schedule_workers_per_day) || 8;
+  const hoursPerDay = Number(proposal.schedule_hours_per_day) || 8;
+  const startDateStr = proposal.schedule_start_date
+    ? String(proposal.schedule_start_date).slice(0, 10) : null;
+
+  const items: any[] = await tx.all(
+    `SELECT pi.id, pi.is_section, pi.ahsp_id, pi.ahsp_code_snapshot AS kode,
+            pi.ahsp_name_snapshot AS name, pi.qty, pi.description, pi.section_label,
+            pi.unit_snapshot, pi.unit_price_snapshot, pi.total_price,
+            pi.section_order, pi.order_no
+     FROM proposal_items pi WHERE pi.proposal_id = ?
+     ORDER BY pi.section_order IS NULL, pi.section_order, pi.is_section DESC, pi.order_no, pi.id`,
+    [proposalId]
+  );
+
+  const overrides: any[] = await tx.all(
+    `SELECT so.proposal_item_id, so.start_day_override, so.duration_days_override
+     FROM schedule_overrides so
+     JOIN proposal_items pi ON pi.id = so.proposal_item_id
+     WHERE pi.proposal_id = ?`, [proposalId]);
+  const petaOverride: Record<number, any> = {};
+  for (const o of overrides) petaOverride[o.proposal_item_id] = o;
+
+  const tanggal = (offset: number): string | null => {
+    if (!startDateStr) return null;
+    const d = new Date(startDateStr);
+    d.setDate(d.getDate() + Math.round(offset));
+    return d.toISOString().slice(0, 10);
+  };
+
+  const baris: any[] = [];
+  let kumulatif = 0;
+  let lineNo = 0;
+
+  for (const it of items) {
+    lineNo++;
+    if (Number(it.is_section) === 1) {
+      baris.push({
+        line_no: lineNo, proposal_item_id: it.id, row_type: 'section',
+        kode: it.kode, name: it.section_label || it.name,
+        start_day: kumulatif, duration_days: 0,
+        start_date: tanggal(kumulatif), end_date: tanggal(kumulatif),
+        qty: null, unit: null, unit_price: null, total_price: null, work_category: null,
+        labor_total_oh: 0, labor_components: [],
+      });
+      continue;
+    }
+
+    let totalOH = 0;
+    const komponen: any[] = [];
+    if (it.ahsp_id) {
+      const tenaga: any[] = await tx.all(
+        `SELECT resource_name, resource_satuan, koefisien FROM ahsp_items
+         WHERE ahsp_id = ? AND section = 'A' ORDER BY id ASC`, [it.ahsp_id]);
+      const qty = Number(it.qty) || 0;
+      for (const t of tenaga) {
+        const oh = (Number(t.koefisien) || 0) * qty;
+        totalOH += oh;
+        komponen.push({ nama: t.resource_name, satuan: t.resource_satuan, oh: Math.round(oh * 1000) / 1000 });
+      }
+    }
+
+    const ov = petaOverride[it.id];
+    const durasiHitung = totalOH > 0 ? totalOH / (workersPerDay * (hoursPerDay / 8)) : 0;
+    const durasi = ov?.duration_days_override != null
+      ? Number(ov.duration_days_override) : durasiHitung;
+    const mulai = ov?.start_day_override != null ? Number(ov.start_day_override) : kumulatif;
+
+    baris.push({
+      // 'item', bukan 'task' — mengikuti kontrak endpoint jadwal. Layar
+      // menyaring baris dengan `type === 'item'`.
+      line_no: lineNo, proposal_item_id: it.id, row_type: 'item',
+      kode: it.kode, name: it.description || it.name,
+      start_day: Math.round(mulai * 1000) / 1000,
+      duration_days: Math.round(durasi * 1000) / 1000,
+      start_date: tanggal(mulai), end_date: tanggal(mulai + durasi),
+      qty: Number(it.qty) || 0,
+      unit: it.unit_snapshot || null,
+      unit_price: Number(it.unit_price_snapshot) || 0,
+      total_price: Number(it.total_price) || 0,
+      work_category: null,
+      labor_total_oh: Math.round(totalOH * 1000) / 1000,
+      labor_components: komponen,
+    });
+    kumulatif = Math.max(kumulatif, mulai + durasi);
+  }
+
+  for (const b of baris) {
+    await tx.run(
+      `INSERT INTO proposal_revision_schedule
+        (revision_id, line_no, proposal_item_id, row_type, kode, name,
+         start_day, duration_days, start_date, end_date,
+         qty, unit, unit_price, total_price, work_category,
+         labor_total_oh, labor_components)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [revisionId, b.line_no, b.proposal_item_id, b.row_type,
+       b.kode ? String(b.kode).slice(0, 50) : null,
+       b.name ? String(b.name).slice(0, 500) : null,
+       b.start_day, b.duration_days, b.start_date, b.end_date,
+       b.qty, b.unit, b.unit_price, b.total_price, b.work_category,
+       b.labor_total_oh, JSON.stringify(b.labor_components)]
+    );
+  }
+
+  const total = Math.round(kumulatif * 1000) / 1000;
+  // Checksum atas ISI jadwalnya — angkanya dinormalkan ke presisi kolomnya
+  // supaya cocok saat dihitung ulang dari data tersimpan (pelajaran dari
+  // checksum baseline kontrak, yang sempat tidak pernah cocok karena `mysql2`
+  // mengembalikan DECIMAL sebagai string).
+  const checksum = crypto.createHash('sha256').update(JSON.stringify(
+    baris.map(b => [b.line_no, b.row_type, b.kode || '', b.name || '',
+      Number(b.start_day).toFixed(3), Number(b.duration_days).toFixed(3),
+      b.start_date || '', b.end_date || '', Number(b.labor_total_oh).toFixed(3)])
+  )).digest('hex');
+
+  await tx.run(
+    `UPDATE proposal_revisions SET
+       schedule_start_date = ?, schedule_workers_per_day = ?, schedule_hours_per_day = ?,
+       schedule_workdays_per_week = ?, schedule_total_days = ?, schedule_checksum = ?
+     WHERE id = ?`,
+    [startDateStr, workersPerDay, hoursPerDay,
+     proposal.schedule_workdays_per_week ?? null, total, checksum, revisionId]
+  );
+
+  return { total, checksum, baris: baris.length };
+}
+
 async function bekukanRevisi(
   proposalId: any, proposal: any, userId: any, tx: TxRunner
 ): Promise<{ id: number; nomor: number; checksum: string }> {
@@ -1536,6 +1830,11 @@ async function bekukanRevisi(
        b.unit, b.qty, b.unit_price, b.amount, b.source_item_id]
     );
   }
+
+  // Jadwal ikut dibekukan di transaction yang sama: revisi yang punya BOQ tapi
+  // tidak punya jadwal berarti lampiran penawarannya tidak lengkap, dan
+  // menghitungnya belakangan akan memakai master yang mungkin sudah berubah.
+  await bekukanJadwalRevisi(proposalId, revId, proposal, tx);
 
   return { id: revId, nomor, checksum };
 }
@@ -2443,7 +2742,10 @@ router.delete('/proposals/:id/schedule/overrides/:itemId', authMiddleware, boleh
 router.get('/proposals/:id/payment-schedule', authMiddleware, bolehLihat, async (req: Request, res: Response) => {
   try {
     const proposalId   = req.params.id;
-    const startDateStr = req.query.start_date as string || new Date().toISOString().slice(0, 10);
+    // Urutan sengaja: query hanya dipakai kalau tidak ada yang tersimpan.
+    // Jam server sebagai bawaan terakhir hanya supaya proposal yang memang
+    // belum pernah diberi tanggal tetap bisa dilihat — bukan sumber kebenaran.
+    const startDateQuery = req.query.start_date as string || '';
 
     // Parameter dari query dibatasi: dipakai sebagai PEMBAGI saat menghitung
     // durasi otomatis, jadi nol atau negatif menghasilkan Infinity/NaN yang
@@ -2457,7 +2759,7 @@ router.get('/proposals/:id/payment-schedule', authMiddleware, bolehLihat, async 
     const workersPerDay = dalamRentang(req.query.workers_per_day, 8, 1, 1000);
     const hoursPerDay   = dalamRentang(req.query.hours_per_day, 8, 1, 24);
 
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(startDateStr)) {
+    if (startDateQuery && !/^\d{4}-\d{2}-\d{2}$/.test(startDateQuery)) {
       return res.status(400).json({
         error: 'start_date harus berformat YYYY-MM-DD.',
         code: 'TANGGAL_TIDAK_VALID',
@@ -2472,10 +2774,51 @@ router.get('/proposals/:id/payment-schedule', authMiddleware, bolehLihat, async 
     // pun berhasil dimuat; frontend hanya menulis errornya ke console sehingga
     // kegagalannya tidak terlihat siapa pun.
     const proposal: any = await dbGet(
-      `SELECT id, total_project FROM proposals WHERE id = ?`, [proposalId]
+      `SELECT id, total_project, schedule_start_date FROM proposals WHERE id = ?`, [proposalId]
     );
     if (!proposal) return res.status(404).json({ error: 'Proposal tidak ditemukan' });
     const totalContract = uang(proposal.total_project);
+
+    // Kurva kas mengikuti jadwal yang SAMA, bukan menghitung durasinya sendiri.
+    //
+    // Dua endpoint yang masing-masing menghitung durasi dari AHSP live adalah
+    // dua sumber kebenaran: begitu master berubah, Gantt dan kurva kas bisa
+    // bergeser berbeda dan selisihnya tidak bisa dijelaskan ke siapa pun. Kalau
+    // ada revisi terbit, keduanya membaca potret yang sama.
+    const revJadwal: any = await dbGet(
+      `SELECT id, schedule_start_date, schedule_workers_per_day, schedule_hours_per_day,
+              schedule_checksum, revision_no
+       FROM proposal_revisions
+       WHERE proposal_id = ? AND status IN ('issued', 'accepted') AND schedule_checksum IS NOT NULL
+       ORDER BY revision_no DESC LIMIT 1`, [proposalId]);
+
+    const potretJadwal: Record<number, { start_day: number; duration_days: number }> = {};
+    let sumberJadwal = 'live';
+    let revisiJadwalNo: number | null = null;
+    if (revJadwal && req.query.hitung_ulang !== '1') {
+      const barisJadwal: any[] = await dbAll(
+        `SELECT proposal_item_id, start_day, duration_days
+         FROM proposal_revision_schedule
+         WHERE revision_id = ? AND row_type = 'item' AND proposal_item_id IS NOT NULL`,
+        [revJadwal.id]);
+      if (barisJadwal.length) {
+        for (const b of barisJadwal) {
+          potretJadwal[Number(b.proposal_item_id)] = {
+            start_day: Number(b.start_day),
+            duration_days: Number(b.duration_days),
+          };
+        }
+        sumberJadwal = 'snapshot';
+        revisiJadwalNo = revJadwal.revision_no;
+      }
+    }
+
+    const startDateStr =
+      (sumberJadwal === 'snapshot' && revJadwal.schedule_start_date
+        ? String(revJadwal.schedule_start_date).slice(0, 10) : '')
+      || (proposal.schedule_start_date ? String(proposal.schedule_start_date).slice(0, 10) : '')
+      || startDateQuery
+      || new Date().toISOString().slice(0, 10);
 
     // 2. Get all items with price & schedule overrides
     const items = await dbAll(
@@ -2514,6 +2857,18 @@ router.get('/proposals/:id/payment-schedule', authMiddleware, bolehLihat, async 
       const price = uang(item.total_price);
       const bobot = totalHargaItem > 0 ? price / totalHargaItem * 100 : 0;
       const ov = overrides[item.id];
+
+      // Potret menang: baris yang ada di potret tidak dihitung ulang, dan
+      // query AHSP live-nya pun tidak dijalankan.
+      const dariPotret = potretJadwal[Number(item.id)];
+      if (dariPotret) {
+        cursor = Math.max(cursor, dariPotret.start_day + dariPotret.duration_days);
+        itemSchedules.push({
+          id: item.id, name: item.name, price, bobot,
+          startDay: dariPotret.start_day, duration: dariPotret.duration_days,
+        });
+        continue;
+      }
 
       // Simplified: if no AHSP, duration=0
       // Get labor OH for duration estimate
@@ -2688,6 +3043,9 @@ router.get('/proposals/:id/payment-schedule', authMiddleware, bolehLihat, async 
       scheduled_amount: totalTerjadwal,
       unallocated_amount: belumTeralokasi,
       reconciled: Math.abs(belumTeralokasi) < 0.005,
+      // Sama seperti endpoint jadwal: sumbernya dinyatakan, tidak ditebak.
+      sumber: sumberJadwal,
+      revision_no: revisiJadwalNo,
     });
 
   } catch (err: any) {
