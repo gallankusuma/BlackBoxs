@@ -1064,6 +1064,52 @@ const ensureProposalScheduleSchema = async (connection: any) => {
   ]) await execSchemaEnsure(connection, sql);
 };
 
+/**
+ * SCHED-R57 (lanjutan) — basis sumber daya ikut dibekukan bersama revisinya.
+ *
+ * `GET /proposals/:id/resume` membaca `ahsp_items` LIVE: koefisien maupun
+ * `resource_harga`. Akibatnya kebutuhan material/tenaga/alat dan biayanya untuk
+ * penawaran yang SUDAH DIKIRIM ikut bergeser begitu master AHSP disunting —
+ * dan biaya sumber dayanya bisa berhenti sejalan dengan `unit_price_snapshot`
+ * yang dipakai BOQ-nya sendiri. Procurement plan dan mobilization plan yang
+ * dibangun dari layar itu karena itu tidak bisa direkonsiliasi.
+ */
+const ensureProposalResourceSchema = async (connection: any) => {
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS proposal_revision_resource (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      revision_id INT NOT NULL,
+      line_no INT NOT NULL,
+      -- 'A' tenaga, 'B' material, 'C' alat — sama dengan ahsp_items.section.
+      section CHAR(1) NOT NULL,
+      proposal_item_id INT NULL,
+      ahsp_code VARCHAR(50) NULL,
+      ahsp_name VARCHAR(500) NULL,
+      discipline VARCHAR(255) NULL,
+      sub_discipline VARCHAR(255) NULL,
+      resource_id INT NULL,
+      resource_name VARCHAR(500) NULL,
+      resource_satuan VARCHAR(50) NULL,
+      -- Harga saat dibekukan. Tanpa kolom ini, biaya sumber daya dihitung ulang
+      -- dengan harga master hari ini dan tidak lagi cocok dengan BOQ-nya.
+      resource_harga DECIMAL(18,2) NOT NULL DEFAULT 0,
+      koefisien DECIMAL(18,6) NOT NULL DEFAULT 0,
+      item_qty DECIMAL(18,4) NOT NULL DEFAULT 0,
+      total_qty DECIMAL(18,4) NOT NULL DEFAULT 0,
+      total_cost DECIMAL(18,2) NOT NULL DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_prr_rev (revision_id),
+      KEY idx_prr_sec (revision_id, section),
+      CONSTRAINT fk_prr_rev FOREIGN KEY (revision_id)
+        REFERENCES proposal_revisions(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+  for (const sql of [
+    "ALTER TABLE proposal_revisions ADD COLUMN IF NOT EXISTS resource_checksum CHAR(64) NULL",
+    "ALTER TABLE proposal_revisions ADD COLUMN IF NOT EXISTS resource_line_count INT NULL",
+  ]) await execSchemaEnsure(connection, sql);
+};
+
 const ensureRouteModuleSchema = async (connection: any) => {
   const statements = [
     `CREATE TABLE IF NOT EXISTS inbox_notifications (
@@ -2355,6 +2401,7 @@ export async function initializeDatabase() {
     await ensureWebauthnChallengeOffice(connection);
     await ensureProposalRevisionSchema(connection);
     await ensureProposalScheduleSchema(connection);
+    await ensureProposalResourceSchema(connection);
     await ensureContractLedgerSchema(connection);
     await ensureMobilePinSchema(connection);
     await ensureAssetDepreciationSchema(connection);

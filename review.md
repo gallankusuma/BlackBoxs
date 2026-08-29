@@ -5779,16 +5779,13 @@ pun — itu asersi saya yang keliru, dan sempat gagal sekali karena itu.
 | Draft/revisi baru boleh memilih master baru | ✅ jalur live tetap ada |
 | Parameter tersimpan dan identik setelah reload | ✅ terbukti |
 | Total cash curve balance ke total revisi | ✅ `reconciled: true` |
-| **Resume resource (`/resume`) masih membaca master live** | ❌ **belum** |
+| Resume resource (`/resume`) masih membaca master live | ✅ **sudah** — lihat lanjutan di bawah |
 | **Deal menyalin schedule revisi ke Project baseline** | ❌ **belum** |
 
-Dua yang terakhir saya **tidak** kerjakan diam-diam supaya tidak terlihat
-selesai padahal belum. `/resume` membaca komposisi dan harga AHSP live
-(`estimator.routes.ts` ±2532), jadi kebutuhan material/manpower/equipment masih
-bisa bergeser setelah master berubah. Menyalin jadwal revisi ke baseline project
-saat Deal menyentuh `contract_baseline_lines` yang **tidak boleh punya jalur
-tulis** — perlu tabel baseline jadwal projectnya sendiri, dan itu pekerjaan
-tersendiri, bukan tempelan.
+`/resume` sudah dikerjakan menyusul — lihat bagian berikutnya. Menyalin jadwal
+revisi ke baseline project saat Deal menyentuh `contract_baseline_lines` yang
+**tidak boleh punya jalur tulis** — perlu tabel baseline jadwal projectnya
+sendiri, dan itu pekerjaan tersendiri, bukan tempelan.
 
 Migrasi proposal lama **ternyata tidak diperlukan**, dan itu saya periksa di
 produksi, bukan saya asumsikan: `proposal_revisions` berisi **0 baris**
@@ -5805,6 +5802,94 @@ Deploy 28 Agustus 2026. Diverifikasi lewat INFORMATION_SCHEMA: tabel
 `npm run smoke` **30 lulus, 1 gagal** — kegagalannya tetap satu-satunya temuan
 lama yang menunggu tindakan pemilik server (kredensial master), bukan regresi
 dari perubahan ini.
+
+---
+
+**[DEV] LANJUTAN — basis sumber daya `/resume` ikut dibekukan — 29 Agustus 2026**
+
+Kriteria terima "resume resource" saya kerjakan menyusul. Klaimnya benar, dan
+**lebih luas dari yang ditulis**: `GET /proposals/:id/resume` membaca
+`ahsp_items` live untuk **koefisien maupun `resource_harga`**. Jadi untuk
+penawaran yang sudah dikirim, bukan hanya kuantitasnya yang bergeser —
+**biayanya juga**, dan biaya sumber dayanya berhenti sejalan dengan
+`unit_price_snapshot` yang dipakai BOQ penawaran itu sendiri.
+
+### Yang dikerjakan
+
+Tabel baru `proposal_revision_resource` (FK cascade ke `proposal_revisions`)
+menyimpan tiap baris sumber daya berikut **harga saat dibekukan**, plus
+`resource_checksum` + `resource_line_count` di revisinya. `bekukanRevisi()`
+memanggilnya di transaction yang sama dengan BOQ dan jadwalnya.
+
+Satu kalkulator dipakai dua jalur — `hitungSumberDaya()` melayani pembekuan
+maupun pembacaan live, dengan `pembaca` yang bisa `dbAll` atau `tx.all` supaya
+di dalam transaction ia melihat data yang belum di-commit. Menyalinnya jadi dua
+salinan berarti dua sumber kebenaran, dan itu persis penyakit yang sedang
+diobati di butir ini.
+
+Revisi terbit membaca potret (`sumber: 'snapshot'`); `?hitung_ulang=1` masih
+bisa meminta hitungan dengan master sekarang, tapi harus diminta tegas.
+
+**N+1 ikut dicabut.** Versi lama menembak `ahsp_items` **sekali untuk tiap baris
+proposal** — proposal 200 baris berarti 200 perjalanan ke database untuk data
+yang banyak berulang. Sekarang satu query `IN (...)` dengan id yang sudah
+divalidasi bilangan bulat.
+
+### Temuan tambahan: durasi "Master Schedule" dikarang di browser
+
+Saat menyambungkan layarnya saya menemukan cacat yang tidak ada di daftar
+review. `/resume` mengirim `duration_days: 0` untuk **setiap** work package,
+dengan komentar `// default, frontend can edit`. Layarnya
+([ProposalResume.vue:197](frontend/src/components/ProposalResume.vue)) karena itu
+selalu jatuh ke:
+
+```
+duration_days: item.duration_days || Math.max(7, Math.ceil(item.qty / 10) * 7)
+```
+
+Durasi berbasis **kuantitas dibagi sepuluh, dibulatkan ke minggu** — tidak ada
+hubungannya dengan tenaga AHSP. Tabnya bernama "Master Schedule". Jadi satu
+proposal yang sama menampilkan **dua jadwal yang sama sekali berbeda**: Gantt di
+editor menghitung dari OH tenaga, tab ini dari qty/10. Terbukti di tes: item
+10 m³ menghasilkan **2,5 hari** dari tenaga AHSP, sementara rumus lama memberi
+**7 hari**.
+
+Sekarang `schedule_items` membawa durasi nyata — dari `proposal_revision_schedule`
+kalau revisinya terbit, atau dihitung dari OH tenaga di `barisSumber` dengan
+aturan pembagi yang sama dengan endpoint jadwal (OJ dibagi jam kerja, OH tidak)
+plus `schedule_overrides`. Rumus karangan di browser dicabut.
+
+Sekalian: kegagalan muat resume tidak lagi hanya masuk `console.error` — layar
+kosong tanpa sebab tidak bisa dibedakan dari proposal yang memang belum berisi.
+
+### Tes
+
+`tests/resume-baseline.ts` — **42 asersi**, `npm run test:resume`. AHSP-nya
+sengaja punya ketiga bagian (A tenaga, B material, C alat) supaya terbukti
+ketiganya ikut dibekukan, bukan salah satu.
+
+Yang menentukan: setelah submit, koefisien **dan** harga master digeser langsung
+di database (koefisien ×3, harga ×10). Dibuktikan bergigi — potretnya dimatikan
+menghasilkan **10 kegagalan**:
+
+| Asersi | Tanpa potret |
+|---|---|
+| kuantitas material tidak bergeser | 50 → **150** |
+| harga satuan tetap harga saat dikirim | 60.000 → **600.000** |
+| biaya material tidak bergeser | 3 juta → **90 juta** |
+
+Biaya material penawaran yang sudah dikirim ke client menjadi **30× lipat**
+tanpa satu pun tindakan estimator. Itu ukuran cacatnya.
+
+`test:all` **2211 lulus, 0 gagal**. Residu fixture nol di ketiga tabel potret.
+
+### Yang masih terbuka
+
+Kalkulator jadwal di `GET /schedule` masih belum diekstrak menjadi fungsi
+bersama — `/resume` memakai aturan pembagi yang sama tapi ditulis di tempatnya
+sendiri. Keduanya diuji, jadi divergensinya akan ketahuan, tapi ekstraksi
+penuh handler 400 baris itu pekerjaan tersendiri dan tidak saya campurkan ke
+sini.
 
 ---
 

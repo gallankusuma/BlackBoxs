@@ -1767,6 +1767,125 @@ async function bekukanJadwalRevisi(
   return { total, checksum, baris: baris.length };
 }
 
+/**
+ * Basis sumber daya satu proposal: tiap baris AHSP dikali qty itemnya.
+ *
+ * Dipakai DUA jalur — pembekuan revisi dan pembacaan live `/resume` — dengan
+ * sengaja. Menyalinnya menjadi dua salinan berarti dua sumber kebenaran, dan
+ * angka di layar bisa berbeda dari angka yang dibekukan tanpa ada yang tahu.
+ *
+ * `pembaca` boleh `dbAll` maupun `tx.all`: saat dipanggil di dalam transaction
+ * pembekuan, ia harus melihat data yang belum di-commit.
+ */
+async function hitungSumberDaya(
+  proposalId: any, pembaca: (sql: string, params?: any[]) => Promise<any[]>
+): Promise<any[]> {
+  const items: any[] = await pembaca(
+    `SELECT pi.id, pi.qty, pi.ahsp_id, pi.ahsp_code_snapshot, pi.ahsp_name_snapshot,
+            pi.unit_snapshot, pi.unit_price_snapshot, pi.total_price,
+            d.name as discipline_name, sd.name as sub_discipline_name
+     FROM proposal_items pi
+     LEFT JOIN master_disciplines d ON pi.discipline_id = d.id
+     LEFT JOIN master_sub_disciplines sd ON pi.sub_discipline_id = sd.id
+     WHERE pi.proposal_id = ?
+     ORDER BY d.order_no, sd.order_no, pi.order_no`,
+    [proposalId]
+  );
+
+  // Satu query untuk seluruh AHSP, bukan satu query per item. Versi lama
+  // menembak `ahsp_items` sekali untuk tiap baris proposal — proposal 200 baris
+  // berarti 200 perjalanan ke database untuk data yang banyak berulang.
+  const idAhsp = Array.from(new Set(
+    items.map((i: any) => Number(i.ahsp_id)).filter((n: number) => Number.isInteger(n) && n > 0)
+  ));
+  const petaAhsp: Record<number, any[]> = {};
+  if (idAhsp.length) {
+    // Id sudah divalidasi bilangan bulat di atas, jadi aman disisipkan; MySQL
+    // menolak daftar dinamis lewat placeholder tunggal.
+    const barisAhsp: any[] = await pembaca(
+      `SELECT ahsp_id, section, resource_type, resource_id, resource_name,
+              resource_satuan, resource_harga, koefisien, jumlah_harga
+       FROM ahsp_items WHERE ahsp_id IN (${idAhsp.join(',')})
+       ORDER BY ahsp_id, section, id`, []);
+    for (const b of barisAhsp) {
+      const k = Number(b.ahsp_id);
+      (petaAhsp[k] || (petaAhsp[k] = [])).push(b);
+    }
+  }
+
+  const hasil: any[] = [];
+  let lineNo = 0;
+  for (const pi of items) {
+    for (const ai of (petaAhsp[Number(pi.ahsp_id)] || [])) {
+      const totalQty = (Number(ai.koefisien) || 0) * (Number(pi.qty) || 0);
+      const harga = Number(ai.resource_harga) || 0;
+      hasil.push({
+        line_no: ++lineNo,
+        section: ai.section,
+        proposal_item_id: pi.id,
+        ahsp_code: pi.ahsp_code_snapshot,
+        ahsp_name: pi.ahsp_name_snapshot,
+        discipline: pi.discipline_name,
+        sub_discipline: pi.sub_discipline_name,
+        resource_id: ai.resource_id,
+        resource_name: ai.resource_name,
+        resource_satuan: ai.resource_satuan,
+        resource_harga: harga,
+        koefisien: Number(ai.koefisien) || 0,
+        item_qty: Number(pi.qty) || 0,
+        total_qty: totalQty,
+        total_cost: totalQty * harga,
+      });
+    }
+  }
+  return hasil;
+}
+
+/**
+ * Bekukan basis sumber daya bersama revisinya, di transaction yang sama.
+ */
+async function bekukanSumberDayaRevisi(
+  proposalId: any, revisionId: number, tx: TxRunner
+): Promise<{ checksum: string; baris: number }> {
+  const baris = await hitungSumberDaya(proposalId, (sql, params) => tx.all(sql, params || []));
+
+  // Dinormalkan ke presisi kolomnya sebelum di-hash — `mysql2` mengembalikan
+  // DECIMAL sebagai string, jadi tanpa ini checksum tidak akan pernah cocok
+  // saat dihitung ulang dari baris tersimpan.
+  const checksum = crypto.createHash('sha256').update(JSON.stringify(
+    baris.map(b => [b.line_no, b.section || '', b.ahsp_code || '',
+      b.resource_name || '', b.resource_satuan || '',
+      Number(b.resource_harga).toFixed(2), Number(b.koefisien).toFixed(6),
+      Number(b.item_qty).toFixed(4), Number(b.total_qty).toFixed(4),
+      Number(b.total_cost).toFixed(2)])
+  )).digest('hex');
+
+  for (const b of baris) {
+    await tx.run(
+      `INSERT INTO proposal_revision_resource
+        (revision_id, line_no, section, proposal_item_id, ahsp_code, ahsp_name,
+         discipline, sub_discipline, resource_id, resource_name, resource_satuan,
+         resource_harga, koefisien, item_qty, total_qty, total_cost)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [revisionId, b.line_no, b.section || 'B', b.proposal_item_id,
+       b.ahsp_code ? String(b.ahsp_code).slice(0, 50) : null,
+       b.ahsp_name ? String(b.ahsp_name).slice(0, 500) : null,
+       b.discipline ? String(b.discipline).slice(0, 255) : null,
+       b.sub_discipline ? String(b.sub_discipline).slice(0, 255) : null,
+       b.resource_id ?? null,
+       b.resource_name ? String(b.resource_name).slice(0, 500) : null,
+       b.resource_satuan ? String(b.resource_satuan).slice(0, 50) : null,
+       b.resource_harga, b.koefisien, b.item_qty, b.total_qty, b.total_cost]
+    );
+  }
+
+  await tx.run(
+    `UPDATE proposal_revisions SET resource_checksum = ?, resource_line_count = ?
+     WHERE id = ?`, [checksum, baris.length, revisionId]);
+
+  return { checksum, baris: baris.length };
+}
+
 async function bekukanRevisi(
   proposalId: any, proposal: any, userId: any, tx: TxRunner
 ): Promise<{ id: number; nomor: number; checksum: string }> {
@@ -1835,6 +1954,10 @@ async function bekukanRevisi(
   // tidak punya jadwal berarti lampiran penawarannya tidak lengkap, dan
   // menghitungnya belakangan akan memakai master yang mungkin sudah berubah.
   await bekukanJadwalRevisi(proposalId, revId, proposal, tx);
+
+  // Basis sumber dayanya juga: procurement plan dan mobilization plan dibangun
+  // dari sini, dan keduanya tidak berguna kalau angkanya bisa bergeser sendiri.
+  await bekukanSumberDayaRevisi(proposalId, revId, tx);
 
   return { id: revId, nomor, checksum };
 }
@@ -5024,41 +5147,71 @@ router.get('/proposals/:id/resume', authMiddleware, bolehLihat, async (req: Requ
       [proposalId]
     );
 
-    // For each proposal item, get AHSP items and multiply koefisien by qty
+    // Revisi yang SUDAH TERBIT membaca basis sumber daya yang dibekukan
+    // bersamanya. Tanpa ini, menyunting master AHSP menggeser kebutuhan
+    // material/tenaga/alat penawaran yang sudah dikirim ke client — dan
+    // biayanya berhenti sejalan dengan harga snapshot BOQ-nya sendiri.
+    const revSumber: any = await dbGet(
+      `SELECT id, revision_no FROM proposal_revisions
+       WHERE proposal_id = ? AND status IN ('issued', 'accepted')
+         AND resource_checksum IS NOT NULL
+       ORDER BY revision_no DESC LIMIT 1`, [proposalId]);
+
+    let sumberData = 'live';
+    let revisiSumberNo: number | null = null;
+    let barisSumber: any[];
+
+    if (revSumber && req.query.hitung_ulang !== '1') {
+      const potret: any[] = await dbAll(
+        `SELECT * FROM proposal_revision_resource WHERE revision_id = ? ORDER BY line_no`,
+        [revSumber.id]);
+      if (potret.length) {
+        sumberData = 'snapshot';
+        revisiSumberNo = revSumber.revision_no;
+        barisSumber = potret.map((b: any) => ({
+          section: b.section,
+          resource_id: b.resource_id,
+          resource_name: b.resource_name,
+          resource_satuan: b.resource_satuan,
+          resource_harga: Number(b.resource_harga),
+          koefisien: Number(b.koefisien),
+          item_qty: Number(b.item_qty),
+          total_qty: Number(b.total_qty),
+          total_cost: Number(b.total_cost),
+          ahsp_name: b.ahsp_name,
+          ahsp_code: b.ahsp_code,
+          discipline: b.discipline,
+          sub_discipline: b.sub_discipline,
+        }));
+      } else {
+        barisSumber = await hitungSumberDaya(proposalId, dbAll as any);
+      }
+    } else {
+      barisSumber = await hitungSumberDaya(proposalId, dbAll as any);
+    }
+
     const materials: any[] = [];
     const labor: any[] = [];
     const equipment: any[] = [];
 
-    for (const pi of proposalItems as any[]) {
-      const ahspItems = await dbAll(
-        `SELECT section, resource_type, resource_id, resource_name, resource_satuan, 
-                resource_harga, koefisien, jumlah_harga
-         FROM ahsp_items WHERE ahsp_id = ? ORDER BY section, id`,
-        [pi.ahsp_id]
-      );
-
-      for (const ai of ahspItems as any[]) {
-        const totalQty = (ai.koefisien || 0) * (pi.qty || 0);
-        const totalCost = totalQty * (ai.resource_harga || 0);
-        const entry = {
-          resource_id: ai.resource_id,
-          resource_name: ai.resource_name,
-          resource_satuan: ai.resource_satuan,
-          resource_harga: ai.resource_harga,
-          koefisien: ai.koefisien,
-          item_qty: pi.qty,
-          total_qty: totalQty,
-          total_cost: totalCost,
-          from_ahsp: pi.ahsp_name_snapshot,
-          from_ahsp_code: pi.ahsp_code_snapshot,
-          discipline: pi.discipline_name,
-          sub_discipline: pi.sub_discipline_name,
-        };
-
-        if (ai.section === 'A') labor.push(entry);
-        else if (ai.section === 'B') materials.push(entry);
-        else if (ai.section === 'C') equipment.push(entry);
-      }
+    for (const b of barisSumber) {
+      const entry = {
+        resource_id: b.resource_id,
+        resource_name: b.resource_name,
+        resource_satuan: b.resource_satuan,
+        resource_harga: b.resource_harga,
+        koefisien: b.koefisien,
+        item_qty: b.item_qty,
+        total_qty: b.total_qty,
+        total_cost: b.total_cost,
+        from_ahsp: b.ahsp_name,
+        from_ahsp_code: b.ahsp_code,
+        discipline: b.discipline,
+        sub_discipline: b.sub_discipline,
+      };
+      if (b.section === 'A') labor.push(entry);
+      else if (b.section === 'B') materials.push(entry);
+      else if (b.section === 'C') equipment.push(entry);
     }
 
     // Aggregate by resource_name + resource_satuan
@@ -5088,7 +5241,70 @@ router.get('/proposals/:id/resume', authMiddleware, bolehLihat, async (req: Requ
       return Array.from(map.values()).sort((a, b) => b.total_cost - a.total_cost);
     };
 
-    // Schedule items: each proposal item as a work package
+    // Work package di tab "Master Schedule".
+    //
+    // Sebelumnya `duration_days` dan `start_offset` dikirim NOL apa adanya
+    // dengan catatan "frontend can edit", dan layar mengisinya sendiri dengan
+    // `Math.max(7, Math.ceil(qty / 10) * 7)` — durasi karangan berbasis
+    // kuantitas yang tidak ada hubungannya dengan tenaga AHSP. Akibatnya satu
+    // proposal yang sama menampilkan dua jadwal berbeda: Gantt di editor
+    // menghitung dari OH tenaga, tab ini menghitung dari qty dibagi sepuluh.
+    //
+    // Sekarang keduanya berasal dari basis yang sama.
+    const petaJadwal: Record<number, { duration: number; start: number }> = {};
+
+    if (sumberData === 'snapshot' && revSumber) {
+      // Revisi terbit: dibaca dari jadwal yang dibekukan bersamanya.
+      const jadwalBeku: any[] = await dbAll(
+        `SELECT proposal_item_id, start_day, duration_days
+         FROM proposal_revision_schedule
+         WHERE revision_id = ? AND row_type = 'item' AND proposal_item_id IS NOT NULL`,
+        [revSumber.id]);
+      for (const j of jadwalBeku) {
+        petaJadwal[Number(j.proposal_item_id)] =
+          { duration: Number(j.duration_days), start: Number(j.start_day) };
+      }
+    }
+
+    if (!Object.keys(petaJadwal).length) {
+      // Draft: dihitung dari OH tenaga di `barisSumber` — daftar yang sama yang
+      // sudah dipakai ringkasan tenaga di atas, dengan aturan pembagi yang sama
+      // dengan endpoint jadwal (OJ dibagi jam kerja, OH tidak).
+      const workers = Number((proposal as any).schedule_workers_per_day) || 8;
+      const hours = Number((proposal as any).schedule_hours_per_day) || 8;
+      const ohPerItem: Record<number, number> = {};
+      for (const b of barisSumber) {
+        if (b.section !== 'A') continue;
+        const id = Number(b.proposal_item_id);
+        if (!id) continue;
+        const satuan = String(b.resource_satuan || '').toUpperCase();
+        const hari = satuan === 'OJ'
+          ? Number(b.total_qty) / (workers * hours)
+          : Number(b.total_qty) / workers;
+        ohPerItem[id] = (ohPerItem[id] || 0) + (Number.isFinite(hari) ? hari : 0);
+      }
+
+      const ov: any[] = await dbAll(
+        `SELECT so.proposal_item_id, so.start_day_override, so.duration_days_override
+         FROM schedule_overrides so
+         JOIN proposal_items pi ON pi.id = so.proposal_item_id
+         WHERE pi.proposal_id = ?`, [proposalId]);
+      const petaOv: Record<number, any> = {};
+      for (const o of ov) petaOv[Number(o.proposal_item_id)] = o;
+
+      let kursor = 0;
+      for (const pi of proposalItems as any[]) {
+        const id = Number(pi.id);
+        const o = petaOv[id];
+        const durasi = o?.duration_days_override != null
+          ? Number(o.duration_days_override)
+          : Math.round((ohPerItem[id] || 0) * 100) / 100;
+        const mulai = o?.start_day_override != null ? Number(o.start_day_override) : kursor;
+        petaJadwal[id] = { duration: durasi, start: mulai };
+        kursor = Math.max(kursor, mulai + durasi);
+      }
+    }
+
     const scheduleItems = (proposalItems as any[]).map((pi: any, idx: number) => ({
       id: pi.id,
       order: idx + 1,
@@ -5099,8 +5315,8 @@ router.get('/proposals/:id/resume', authMiddleware, bolehLihat, async (req: Requ
       cost: pi.total_price,
       discipline: pi.discipline_name,
       sub_discipline: pi.sub_discipline_name,
-      duration_days: 0, // default, frontend can edit
-      start_offset: 0,  // default, frontend can edit
+      duration_days: petaJadwal[Number(pi.id)]?.duration ?? 0,
+      start_offset: petaJadwal[Number(pi.id)]?.start ?? 0,
     }));
 
     res.json({
@@ -5117,6 +5333,9 @@ router.get('/proposals/:id/resume', authMiddleware, bolehLihat, async (req: Requ
         labor_cost: labor.reduce((s, l) => s + l.total_cost, 0),
         equipment_cost: equipment.reduce((s, e) => s + e.total_cost, 0),
       },
+      // Sama seperti jadwal dan kurva kas: sumbernya dinyatakan, tidak ditebak.
+      sumber: sumberData,
+      revision_no: revisiSumberNo,
     });
   } catch (error) {
     console.error('Error fetching proposal resume:', error);

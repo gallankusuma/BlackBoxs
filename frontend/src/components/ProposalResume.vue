@@ -24,10 +24,27 @@
 
       <!-- Content -->
       <div class="flex-1 overflow-y-auto p-0">
+        <!-- Sumber angkanya dinyatakan: potret revisi terbit tidak bergeser
+             walau master AHSP disunting, dan itu perlu terlihat. Berdiri
+             sendiri, BUKAN bagian rantai v-else-if di bawah — kalau ikut
+             rantai, banner yang tampil menyembunyikan seluruh isi tabnya. -->
+        <div v-if="!loading && !galat && data?.sumber === 'snapshot'"
+             class="mx-6 mt-4 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm text-amber-900">
+          🔒 Angka ini dibaca dari <strong>potret Revisi #{{ data.revision_no }}</strong> —
+          kuantitas dan harga sumber dayanya terkunci pada saat penawaran dikirim.
+        </div>
+
         <!-- Loading -->
         <div v-if="loading" class="flex items-center justify-center h-64">
           <div class="text-gray-500">Loading resume data...</div>
         </div>
+
+        <!-- Gagal muat dinyatakan, bukan disembunyikan sebagai layar kosong -->
+        <div v-else-if="galat" class="m-6 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">
+          {{ galat }}
+          <button @click="fetchResume" class="ml-3 underline font-semibold">Coba lagi</button>
+        </div>
+
 
         <!-- Overview Tab -->
         <div v-else-if="activeTab === 'overview'" class="p-6 space-y-6">
@@ -160,6 +177,7 @@ const activeTab = ref('overview');
 const loading = ref(false);
 const data = ref<any>(null);
 const scheduleItems = ref<any[]>([]);
+const galat = ref('');
 
 const tabs = computed(() => [
   { id: 'overview', icon: '📊', label: 'Overview', count: 0 },
@@ -192,12 +210,22 @@ const fetchResume = async () => {
   try {
     const { data: result } = await api.get(`/estimator/proposals/${props.proposalId}/resume`);
     data.value = result;
+    // Durasi datang dari server, tidak lagi dikarang di sini.
+    //
+    // Versi lama mengisi `Math.max(7, Math.ceil(item.qty / 10) * 7)` — durasi
+    // berbasis kuantitas yang tidak ada hubungannya dengan tenaga AHSP, padahal
+    // tabnya bernama "Master Schedule". Proposal yang sama karena itu
+    // menampilkan dua jadwal berbeda di dua tempat.
     scheduleItems.value = (result.schedule_items || []).map((item: any) => ({
       ...item,
-      duration_days: item.duration_days || Math.max(7, Math.ceil(item.qty / 10) * 7),
-      start_offset: item.start_offset || 0,
+      duration_days: Number(item.duration_days) || 0,
+      start_offset: Number(item.start_offset) || 0,
     }));
-  } catch (err) {
+    galat.value = '';
+  } catch (err: any) {
+    // Kegagalannya tidak lagi hanya masuk console: layar kosong tanpa sebab
+    // tidak bisa dibedakan dari proposal yang memang belum punya isi.
+    galat.value = err?.response?.data?.error || 'Gagal memuat resume proposal.';
     console.error('Failed to load resume:', err);
   } finally {
     loading.value = false;
