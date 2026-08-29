@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import crypto from 'crypto';
 import { enrichMtoElement, groupStoredLines } from '../modules/estimator/mto/enrich';
 import { dbQuery, dbGet, dbAll, dbRun, withTransaction, TxRunner } from '../config/database';
 import { isProposalEditable } from '../modules/estimator/mto/units';
@@ -14,6 +15,21 @@ const genAI = process.env.GEMINI_API_KEY
 
 
 const router = Router();
+
+// Didaftarkan PALING AWAL: rute literal harus mendahului `/:id`, kalau tidak
+// Express mencocokkannya sebagai id dan endpoint ini tidak pernah terpanggil.
+/** Katalog cost code (CBS). Berlaku lintas proyek — itu justru gunanya. */
+router.get('/cost-codes', authMiddleware, async (_req: Request, res: Response) => {
+  try {
+    const rows = await dbAll(
+      `SELECT id, code, name, category, description, is_active
+       FROM cost_codes WHERE is_active = 1 ORDER BY category, code`, []);
+    res.json({ data: rows, count: (rows as any[]).length });
+  } catch (err: any) {
+    console.error('Error membaca cost codes:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // Get all projects with client and manager info
 router.get('/', authMiddleware, async (req: Request, res: Response) => {
@@ -31,8 +47,32 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
         p.created_at,
         c.name as client_name,
         u.full_name as manager_name,
-        (SELECT COUNT(*) FROM project_tasks t WHERE t.project_id = p.id AND t.status = 'Done') * 100 / 
-        NULLIF((SELECT COUNT(*) FROM project_tasks t WHERE t.project_id = p.id), 0) as progress
+        -- Progress BERBOBOT kalau WBS-nya sudah ada.
+        --
+        -- Rumus lama COUNT(Done) / COUNT(*) memperlakukan galian 2 juta dan
+        -- struktur beton 800 juta sebagai dua pekerjaan yang sama besar, jadi
+        -- 50% bisa berarti apa saja. Di sini tiap work package menyumbang
+        -- sebesar bobot nilainya.
+        --
+        -- Project yang belum punya WBS tetap memakai rumus lama supaya tidak
+        -- mendadak menampilkan kosong; progress_source menyebutkan mana yang
+        -- sedang dipakai, jadi angkanya tidak perlu ditebak.
+        COALESCE(
+          (SELECT SUM(w.weight_pct * COALESCE(tp.rata, 0)) / NULLIF(SUM(w.weight_pct), 0)
+             FROM project_wbs w
+             JOIN (SELECT t.wbs_id AS wid,
+                          AVG(CASE WHEN t.status = 'Done' THEN 100 ELSE COALESCE(t.progress, 0) END) AS rata
+                     FROM project_tasks t WHERE t.wbs_id IS NOT NULL GROUP BY t.wbs_id) tp
+               ON tp.wid = w.id
+            WHERE w.project_id = p.id),
+          (SELECT COUNT(*) FROM project_tasks t WHERE t.project_id = p.id AND t.status = 'Done') * 100 /
+          NULLIF((SELECT COUNT(*) FROM project_tasks t WHERE t.project_id = p.id), 0)
+        ) as progress,
+        CASE WHEN EXISTS (
+          SELECT 1 FROM project_wbs w
+           JOIN project_tasks t ON t.wbs_id = w.id
+          WHERE w.project_id = p.id
+        ) THEN 'wbs_weighted' ELSE 'task_count' END as progress_source
       FROM client_projects p
       LEFT JOIN clients c ON p.client_id = c.id
       LEFT JOIN users u ON p.assigned_to = u.id
@@ -2259,6 +2299,331 @@ router.post('/:id/schedule/seed-from-baseline', authMiddleware, async (req: Requ
     });
   } catch (err: any) {
     console.error('Error membentuk rencana kerja dari baseline:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PROJ-CTRL Fase 1 — WBS / CBS
+// ═══════════════════════════════════════════════════════════════════════════
+
+
+/**
+ * Bentuk WBS dari BOQ kontrak — apa yang DIJUAL, bukan yang dikarang ulang.
+ *
+ * `contract_baseline_lines` immutable dan sudah membawa section + item + nilai,
+ * jadi ia sumber yang tepat: section jadi induk, item jadi work package, dan
+ * bobotnya = nilai baris / total nilai. Bobot dihitung sekali lalu DISIMPAN
+ * karena ia baseline — bobot yang ikut bergerak tiap kali nilai berubah membuat
+ * kurva-S kemarin dan hari ini tidak bisa dibandingkan.
+ */
+router.post('/:id/wbs/generate', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const projectId = Number(req.params.id);
+    if (!Number.isInteger(projectId) || projectId <= 0) {
+      return res.status(400).json({ error: 'Id project tidak valid' });
+    }
+
+    const hasil = await withTransaction(async (tx: TxRunner) => {
+      const proyek: any = await tx.get(
+        'SELECT id FROM client_projects WHERE id = ? FOR UPDATE', [projectId]);
+      if (!proyek) return { error: 404, body: { error: 'Project tidak ditemukan' } };
+
+      const sudah: any = await tx.get(
+        'SELECT COUNT(*) n FROM project_wbs WHERE project_id = ?', [projectId]);
+      if (Number(sudah?.n) > 0) {
+        // WBS yang sudah dipakai menempel transaksi tidak boleh ditimpa oleh
+        // tombol yang niatnya cuma "mulai dari nol".
+        return { error: 409, body: {
+          error: `Project ini sudah punya ${sudah.n} baris WBS. Struktur yang sudah berjalan tidak ditimpa.`,
+          code: 'WBS_SUDAH_ADA',
+        } };
+      }
+
+      const kontrak: any = await tx.get(
+        'SELECT id, contract_number FROM contracts WHERE project_id = ? ORDER BY id DESC LIMIT 1',
+        [projectId]);
+      if (!kontrak) {
+        return { error: 400, body: {
+          error: 'Project ini belum punya kontrak, jadi WBS-nya belum bisa dibentuk dari BOQ.',
+          code: 'KONTRAK_TIDAK_ADA',
+        } };
+      }
+
+      const baris: any[] = await tx.all(
+        `SELECT line_no, is_section, section_label, ahsp_code, description, unit, qty, amount
+         FROM contract_baseline_lines WHERE contract_id = ? ORDER BY line_no`, [kontrak.id]);
+      if (!baris.length) {
+        return { error: 400, body: {
+          error: 'Baseline BOQ kontrak ini kosong.', code: 'BASELINE_KOSONG',
+        } };
+      }
+
+      const total = baris
+        .filter(b => Number(b.is_section) !== 1)
+        .reduce((a, b) => a + (Number(b.amount) || 0), 0);
+
+      let noInduk = 0, noAnak = 0, urut = 0, dibuat = 0;
+      let indukId: number | null = null;
+      const jejak: any[] = [];
+
+      for (const b of baris) {
+        urut++;
+        if (Number(b.is_section) === 1) {
+          noInduk++; noAnak = 0;
+          const kode = String(noInduk);
+          const r = await tx.run(
+            `INSERT INTO project_wbs
+              (project_id, parent_id, wbs_code, level, name, baseline_value, weight_pct,
+               source, source_line_no, sort_order)
+             VALUES (?, NULL, ?, 1, ?, 0, 0, 'contract_baseline', ?, ?)`,
+            [projectId, kode,
+             String(b.section_label || b.description || `Bagian ${noInduk}`).slice(0, 500),
+             b.line_no, urut]);
+          indukId = r.insertId;
+          jejak.push([kode, '0.000000', '0.00']);
+          dibuat++;
+          continue;
+        }
+
+        // Item sebelum section mana pun tetap dapat tempat — kalau tidak, ia
+        // hilang dari struktur dan bobotnya ikut hilang tanpa terlihat.
+        if (indukId === null) {
+          noInduk++;
+          const kodeInduk = String(noInduk);
+          const r0 = await tx.run(
+            `INSERT INTO project_wbs
+              (project_id, parent_id, wbs_code, level, name, baseline_value, weight_pct,
+               source, sort_order)
+             VALUES (?, NULL, ?, 1, 'Tanpa Bagian', 0, 0, 'contract_baseline', ?)`,
+            [projectId, kodeInduk, urut]);
+          indukId = r0.insertId;
+          jejak.push([kodeInduk, '0.000000', '0.00']);
+          dibuat++;
+        }
+
+        noAnak++;
+        const nilai = Math.round((Number(b.amount) || 0) * 100) / 100;
+        const bobot = total > 0 ? Math.round(nilai / total * 100 * 1e6) / 1e6 : 0;
+        const kode = `${noInduk}.${noAnak}`;
+        await tx.run(
+          `INSERT INTO project_wbs
+            (project_id, parent_id, wbs_code, level, name, description, qty, unit,
+             baseline_value, weight_pct, source, source_line_no, sort_order)
+           VALUES (?, ?, ?, 2, ?, ?, ?, ?, ?, ?, 'contract_baseline', ?, ?)`,
+          [projectId, indukId, kode,
+           String(b.description || b.ahsp_code || `Pekerjaan ${b.line_no}`).slice(0, 500),
+           b.ahsp_code ? String(b.ahsp_code).slice(0, 500) : null,
+           b.qty ?? null, b.unit ? String(b.unit).slice(0, 50) : null,
+           nilai, bobot, b.line_no, urut]);
+        jejak.push([kode, bobot.toFixed(6), nilai.toFixed(2)]);
+        dibuat++;
+      }
+
+      const checksum = crypto.createHash('sha256')
+        .update(JSON.stringify(jejak)).digest('hex');
+      await tx.run(
+        `UPDATE client_projects SET wbs_baseline_value = ?, wbs_checksum = ? WHERE id = ?`,
+        [Math.round(total * 100) / 100, checksum, projectId]);
+
+      return { ok: true as const, dibuat, total: Math.round(total * 100) / 100,
+               checksum, contract_number: kontrak.contract_number };
+    });
+
+    if ((hasil as any).error) return res.status((hasil as any).error).json((hasil as any).body);
+    res.status(201).json({
+      message: `${(hasil as any).dibuat} baris WBS dibentuk dari BOQ kontrak.`,
+      ...(hasil as any),
+    });
+  } catch (err: any) {
+    console.error('Error membentuk WBS:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Pohon WBS dengan progress BERBOBOT.
+ *
+ * Progress lama = `COUNT(task Done) / COUNT(task)`. Galian 2 juta dan struktur
+ * beton 800 juta dihitung sama besar, jadi "50%" bisa berarti apa saja. Di sini
+ * progress tiap work package datang dari task yang tertaut padanya, lalu
+ * dijumlah dengan bobot nilainya.
+ */
+router.get('/:id/wbs', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const projectId = Number(req.params.id);
+    if (!Number.isInteger(projectId) || projectId <= 0) {
+      return res.status(400).json({ error: 'Id project tidak valid' });
+    }
+    const proyek: any = await dbGet(
+      `SELECT id, project_number, wbs_baseline_value, wbs_checksum
+       FROM client_projects WHERE id = ?`, [projectId]);
+    if (!proyek) return res.status(404).json({ error: 'Project tidak ditemukan' });
+
+    const baris: any[] = await dbAll(
+      `SELECT w.*, cc.code AS cost_code, cc.name AS cost_code_name, cc.category AS cost_category,
+              (SELECT COUNT(*) FROM project_tasks t WHERE t.wbs_id = w.id) AS jml_task,
+              (SELECT AVG(CASE WHEN t.status = 'Done' THEN 100 ELSE COALESCE(t.progress, 0) END)
+                 FROM project_tasks t WHERE t.wbs_id = w.id) AS progress_task,
+              (SELECT COALESCE(SUM(e.amount), 0) FROM project_expenses e WHERE e.wbs_id = w.id) AS biaya
+       FROM project_wbs w
+       LEFT JOIN cost_codes cc ON cc.id = w.cost_code_id
+       WHERE w.project_id = ?
+       ORDER BY w.sort_order, w.id`, [projectId]);
+
+    if (!baris.length) {
+      return res.json({
+        project_id: projectId, ada_wbs: false,
+        sebab: 'Project ini belum punya WBS. Bentuk dari BOQ kontrak lewat '
+             + 'POST /projects/:id/wbs/generate.',
+        lines: [], ringkasan: null,
+      });
+    }
+
+    const daun = baris.filter(b => Number(b.level) === 2);
+    const bobotTerpakai = daun.reduce((a, b) => a + Number(b.weight_pct), 0);
+    // Progress tertimbang: hanya baris yang PUNYA task yang berkontribusi.
+    // Baris tanpa task tidak dianggap 0% — ia belum diketahui, dan menyebut
+    // "belum diketahui" sebagai nol membuat progress selalu terlihat rendah.
+    const berTask = daun.filter(b => Number(b.jml_task) > 0);
+    const bobotBerTask = berTask.reduce((a, b) => a + Number(b.weight_pct), 0);
+    const progresTertimbang = berTask.reduce(
+      (a, b) => a + Number(b.weight_pct) * (Number(b.progress_task) || 0) / 100, 0);
+
+    // Progress induk = jumlah tertimbang anaknya, dinormalkan ke bobot anak.
+    const anakDari: Record<number, any[]> = {};
+    for (const b of daun) {
+      const p = Number(b.parent_id);
+      (anakDari[p] || (anakDari[p] = [])).push(b);
+    }
+
+    const lines = baris.map((b: any) => {
+      const anak = anakDari[Number(b.id)] || [];
+      const bobotAnak = anak.reduce((a, x) => a + Number(x.weight_pct), 0);
+      const isInduk = Number(b.level) === 1;
+      return {
+        id: b.id,
+        parent_id: b.parent_id,
+        wbs_code: b.wbs_code,
+        level: Number(b.level),
+        name: b.name,
+        description: b.description,
+        qty: b.qty === null ? null : Number(b.qty),
+        unit: b.unit,
+        baseline_value: isInduk
+          ? Math.round(anak.reduce((a, x) => a + Number(x.baseline_value), 0) * 100) / 100
+          : Number(b.baseline_value),
+        weight_pct: isInduk ? Math.round(bobotAnak * 1e6) / 1e6 : Number(b.weight_pct),
+        cost_code_id: b.cost_code_id,
+        cost_code: b.cost_code,
+        cost_code_name: b.cost_code_name,
+        cost_category: b.cost_category,
+        source: b.source,
+        task_count: isInduk ? anak.reduce((a, x) => a + Number(x.jml_task), 0) : Number(b.jml_task),
+        // null berarti BELUM DIKETAHUI, bukan nol persen.
+        progress_pct: isInduk
+          ? (bobotAnak > 0
+              ? Math.round(anak.reduce((a, x) => a + Number(x.weight_pct) * (Number(x.progress_task) || 0), 0) / bobotAnak * 100) / 100
+              : null)
+          : (Number(b.jml_task) > 0 ? Math.round(Number(b.progress_task) * 100) / 100 : null),
+        actual_cost: isInduk
+          ? Math.round(anak.reduce((a, x) => a + Number(x.biaya), 0) * 100) / 100
+          : Number(b.biaya),
+      };
+    });
+
+    res.json({
+      project_id: projectId,
+      project_number: proyek.project_number,
+      ada_wbs: true,
+      baseline_value: proyek.wbs_baseline_value === null ? null : Number(proyek.wbs_baseline_value),
+      checksum: proyek.wbs_checksum,
+      lines,
+      ringkasan: {
+        jml_work_package: daun.length,
+        // Harus 100 (dalam toleransi pembulatan). Kalau tidak, ada bobot yang hilang.
+        total_bobot_pct: Math.round(bobotTerpakai * 100) / 100,
+        bobot_terpetakan_ke_task_pct: Math.round(bobotBerTask * 100) / 100,
+        progress_tertimbang_pct: Math.round(progresTertimbang * 100) / 100,
+        // Dinyatakan tegas: berapa persen nilai proyek yang progressnya
+        // benar-benar diketahui. Tanpa ini, 5% tertimbang dari 10% pekerjaan
+        // yang terpetakan terbaca sama dengan 5% dari seluruh proyek.
+        cakupan_pct: Math.round(bobotBerTask * 100) / 100,
+        actual_cost: Math.round(daun.reduce((a, b) => a + Number(b.biaya), 0) * 100) / 100,
+      },
+    });
+  } catch (err: any) {
+    console.error('Error membaca WBS:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** Tetapkan cost code sebuah work package. */
+router.put('/:id/wbs/:wbsId/cost-code', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const projectId = Number(req.params.id);
+    const wbsId = Number(req.params.wbsId);
+    if (!Number.isInteger(projectId) || !Number.isInteger(wbsId)) {
+      return res.status(400).json({ error: 'Id tidak valid' });
+    }
+    const { cost_code_id } = req.body;
+
+    if (cost_code_id != null) {
+      const cc: any = await dbGet('SELECT id FROM cost_codes WHERE id = ? AND is_active = 1',
+        [cost_code_id]);
+      if (!cc) return res.status(400).json({
+        error: 'Cost code tidak dikenal atau sudah tidak aktif.', code: 'COST_CODE_TIDAK_VALID' });
+    }
+
+    // Predikat project ikut serta — sama seperti task dan milestone, `:wbsId`
+    // milik project lain tidak boleh disentuh dari sini.
+    const upd: any = await dbRun(
+      'UPDATE project_wbs SET cost_code_id = ? WHERE id = ? AND project_id = ?',
+      [cost_code_id ?? null, wbsId, projectId]);
+    if (!upd?.affectedRows) {
+      return res.status(404).json({
+        error: 'Work package tidak ditemukan pada project ini.',
+        code: 'WBS_BUKAN_MILIK_PROJECT',
+      });
+    }
+    res.json({ message: 'Cost code diperbarui' });
+  } catch (err: any) {
+    console.error('Error menetapkan cost code:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** Tautkan task ke work package. */
+router.put('/:id/tasks/:taskId/wbs', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const projectId = Number(req.params.id);
+    const taskId = Number(req.params.taskId);
+    if (!Number.isInteger(projectId) || !Number.isInteger(taskId)) {
+      return res.status(400).json({ error: 'Id tidak valid' });
+    }
+    const { wbs_id } = req.body;
+
+    if (wbs_id != null) {
+      // Work package milik project lain akan membuat bobot proyek seberang
+      // ikut terhitung di sini.
+      const w: any = await dbGet('SELECT id FROM project_wbs WHERE id = ? AND project_id = ?',
+        [wbs_id, projectId]);
+      if (!w) return res.status(400).json({
+        error: 'Work package itu bukan milik project ini.', code: 'WBS_BEDA_PROJECT' });
+    }
+
+    const upd: any = await dbRun(
+      'UPDATE project_tasks SET wbs_id = ? WHERE id = ? AND project_id = ?',
+      [wbs_id ?? null, taskId, projectId]);
+    if (!upd?.affectedRows) {
+      return res.status(404).json({
+        error: 'Task tidak ditemukan pada project ini.',
+        code: 'TASK_BUKAN_MILIK_PROJECT',
+      });
+    }
+    res.json({ message: 'Task ditautkan ke WBS' });
+  } catch (err: any) {
+    console.error('Error menautkan task ke WBS:', err);
     res.status(500).json({ error: err.message });
   }
 });

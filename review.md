@@ -2890,6 +2890,92 @@ negative cross-project test. Fase 1: WBS/CBS + baseline + cost-code handoff.
 Fase 2: schedule logic dan progress cut-off/approval. Fase 3: EVM, S-curve,
 forecast, serta cash-flow terintegrasi.
 
+**[DEV] FASE 1 DITERAPKAN (WBS/CBS) — 29 Agustus 2026**
+
+Fase 1 dikerjakan menyusul: WBS/CBS + bobot baseline + cost code. Fase 2
+(schedule logic, progress cut-off/approval) dan Fase 3 (EVM, S-curve, forecast)
+**belum**.
+
+### Yang diperbaiki
+
+Progress proyek dihitung `COUNT(task Done) * 100 / COUNT(task)` — terverifikasi
+di [project.routes.ts:34](backend/src/routes/project.routes.ts). Galian 100 juta
+dan struktur beton 900 juta dihitung **sama besar**, jadi "50%" bisa berarti apa
+saja.
+
+Dua sumbu dipisah tegas:
+
+- **`project_wbs`** — APA yang dikerjakan, berhierarki, bobot dari nilai
+  baseline kontrak. Dibentuk dari `contract_baseline_lines` (section jadi induk,
+  item jadi work package), jadi strukturnya **apa yang dijual**, bukan yang
+  dikarang ulang di lapangan.
+- **`cost_codes`** — JENIS biayanya (LAB/MAT/EQP/SUB/OVH/OTH), berlaku lintas
+  proyek. Itu justru gunanya: biaya beton di proyek A dan B baru bisa
+  dibandingkan kalau kodenya sama.
+
+Bobot **disimpan, bukan dihitung saat dibaca**, dan itu disengaja: ia baseline.
+Bobot yang ikut bergerak setiap kali nilai berubah membuat kurva-S kemarin dan
+hari ini tidak bisa dibandingkan. Checksum WBS ditulis di `client_projects`.
+
+Transaksi kini punya tempat menempel: `project_tasks.wbs_id`,
+`project_expenses.wbs_id` + `cost_code_id`. Semuanya nullable — data lama tidak
+boleh mendadak tidak valid, dan pemetaan susulan pekerjaan tersendiri.
+
+Daftar project memakai angka berbobot kalau WBS-nya ada, dan **menyebutkan mana
+yang dipakai** lewat `progress_source` (`wbs_weighted` / `task_count`) — angkanya
+tidak perlu ditebak.
+
+### Satu keputusan yang perlu dicatat: "belum diketahui" bukan "nol persen"
+
+Work package tanpa task tertaut dilaporkan `progress_pct: null`, bukan 0, dan
+tidak ikut dalam pembagi progress tertimbang. Menyebut yang belum dipetakan
+sebagai nol membuat progress selalu terlihat rendah dan orang berhenti
+mempercayainya. Sebagai gantinya ada **`cakupan_pct`**: berapa persen nilai
+proyek yang progressnya benar-benar diketahui. Tanpa itu, "5% tertimbang dari
+10% pekerjaan yang terpetakan" terbaca sama dengan "5% dari seluruh proyek".
+Layar menyatakannya juga.
+
+### Tes
+
+`tests/project-wbs.ts` — **50 asersi**, `npm run test:wbs`. Fixture-nya sengaja
+timpang: beton 900 juta, galian 100 juta. Menyelesaikan yang kecil harus memberi
+**10%**, bukan 50%.
+
+Mutation check (bobot dikembalikan rata per baris) → **6 kegagalan**:
+
+```
+FAIL beton 900jt → bobot 90%          → dapat 50
+FAIL progress tertimbang 10%          → dapat 50
+FAIL progressnya 10, bukan 50         → dapat 50
+```
+
+Dua cacat tersingkap saat menulisnya, keduanya diperbaiki:
+
+1. Task berstatus `Done` terbaca **0%**. Kolom `project_tasks.progress`
+   bawaannya `0` dan bukan NULL, jadi `COALESCE(progress, …)` selalu mengambil
+   nol — pekerjaan yang sudah selesai dihitung belum mulai.
+2. `GET /projects/cost-codes` tidak pernah terpanggil: `/:id` terdaftar lebih
+   dulu, jadi Express mencocokkannya sebagai id. Rute literal dipindah ke paling
+   atas.
+
+`test:all` **2399 lulus, 0 gagal**. Residu nol.
+
+### Layar
+
+Tab **🧱 WBS / Bobot** di Project Detail: nilai baseline, jumlah work package,
+progress tertimbang, cakupan, dan tabel per work package dengan bobot, cost code
+(bisa diubah di tempat), progress, serta biaya aktual. Cakupan di bawah 100%
+dinyatakan terang-terangan, bukan disembunyikan.
+
+### Yang masih terbuka
+
+`purchase_orders`, `accounts_payable`, MR/PR/GRN, dan timesheet **belum** membawa
+`wbs_id`/`cost_code_id`. Menambahkannya butuh keputusan alur (siapa yang memetakan,
+kapan, dan apa yang terjadi pada 134 AP + 91 PO produksi yang bahkan belum punya
+`project_id`) — itu bukan keputusan teknis, jadi saya tidak mengambilnya sendiri.
+
+---
+
 **[DEV] FASE 0 DITERAPKAN — 29 Agustus 2026**
 
 Seluruh Fase 0 dikerjakan. Fase 1–3 (WBS/CBS, schedule logic, EVM) **belum** dan

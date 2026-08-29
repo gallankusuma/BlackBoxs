@@ -1180,6 +1180,99 @@ const ensurePaymentReversalSchema = async (connection: any) => {
   }
 };
 
+/**
+ * PROJ-CTRL Fase 1 — WBS/CBS: tulang punggung project controls.
+ *
+ * Sebelum ini "progress" proyek dihitung `COUNT(task Done) / COUNT(task)`.
+ * Dua pekerjaan yang bobotnya berbeda jauh — galian 2 juta dan struktur beton
+ * 800 juta — dihitung sama besar, jadi 50% bisa berarti apa saja. Tidak ada
+ * pula tempat untuk menempelkan biaya: 0 dari 134 AP produksi punya
+ * `project_id`, apalagi work package.
+ *
+ * Dua sumbu yang sengaja dipisah:
+ *
+ *   WBS (Work Breakdown Structure) — APA yang dikerjakan, berhierarki, dengan
+ *   bobot dari nilai baseline kontrak. Ini yang membuat progress bisa dijumlah.
+ *
+ *   CBS / cost code — JENIS biayanya (upah, material, alat, subkon). Ini yang
+ *   membuat biaya bisa dibandingkan antar proyek.
+ *
+ * Bobot disimpan, bukan dihitung saat dibaca, dan itu disengaja: ia BASELINE.
+ * Bobot yang ikut bergerak setiap kali nilai berubah membuat kurva-S kemarin
+ * dan hari ini tidak bisa dibandingkan.
+ */
+const ensureProjectWbsSchema = async (connection: any) => {
+  // Katalog cost code berlaku lintas proyek — itu justru gunanya: biaya beton
+  // di proyek A dan proyek B baru bisa dibandingkan kalau kodenya sama.
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS cost_codes (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      code VARCHAR(30) NOT NULL,
+      name VARCHAR(255) NOT NULL,
+      -- labor | material | equipment | subcon | overhead | other
+      category VARCHAR(30) NOT NULL DEFAULT 'other',
+      description VARCHAR(500) NULL,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_cost_code (code)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS project_wbs (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      project_id INT NOT NULL,
+      parent_id INT NULL,
+      -- Kode berjenjang seperti 1, 1.2, 1.2.3 — dibentuk saat dibuat.
+      wbs_code VARCHAR(50) NOT NULL,
+      level TINYINT NOT NULL DEFAULT 1,
+      name VARCHAR(500) NOT NULL,
+      description VARCHAR(500) NULL,
+      qty DECIMAL(18,4) NULL,
+      unit VARCHAR(50) NULL,
+      -- Nilai baseline dan bobotnya. Keduanya dibekukan saat WBS dibentuk.
+      baseline_value DECIMAL(18,2) NOT NULL DEFAULT 0,
+      weight_pct DECIMAL(9,6) NOT NULL DEFAULT 0,
+      cost_code_id INT NULL,
+      -- Asal usulnya: 'contract_baseline' kalau dibentuk dari BOQ kontrak,
+      -- 'manual' kalau ditambahkan orang. Dibedakan supaya jelas mana yang
+      -- benar-benar mewakili apa yang dijual.
+      source VARCHAR(30) NOT NULL DEFAULT 'manual',
+      source_line_no INT NULL,
+      sort_order INT NOT NULL DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_wbs_kode (project_id, wbs_code),
+      KEY idx_wbs_proj (project_id),
+      KEY idx_wbs_parent (parent_id),
+      CONSTRAINT fk_wbs_proj FOREIGN KEY (project_id)
+        REFERENCES client_projects(id) ON DELETE CASCADE,
+      CONSTRAINT fk_wbs_parent FOREIGN KEY (parent_id)
+        REFERENCES project_wbs(id) ON DELETE CASCADE,
+      CONSTRAINT fk_wbs_cost_code FOREIGN KEY (cost_code_id)
+        REFERENCES cost_codes(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+  // Transaksi menempel ke work package. Nullable: data lama tidak boleh
+  // mendadak tidak valid, dan pemetaan susulan adalah pekerjaan tersendiri.
+  for (const sql of [
+    "ALTER TABLE project_tasks ADD COLUMN IF NOT EXISTS wbs_id INT NULL",
+    "ALTER TABLE project_expenses ADD COLUMN IF NOT EXISTS wbs_id INT NULL",
+    "ALTER TABLE project_expenses ADD COLUMN IF NOT EXISTS cost_code_id INT NULL",
+    "ALTER TABLE client_projects ADD COLUMN IF NOT EXISTS wbs_baseline_value DECIMAL(18,2) NULL",
+    "ALTER TABLE client_projects ADD COLUMN IF NOT EXISTS wbs_checksum CHAR(64) NULL",
+  ]) await execSchemaEnsure(connection, sql);
+
+  // Katalog awal yang netral — supaya fitur cost code tidak lahir kosong dan
+  // tiap proyek mengarang kodenya sendiri.
+  await execSchemaEnsure(connection, `
+    INSERT IGNORE INTO cost_codes (code, name, category) VALUES
+      ('LAB', 'Upah / Tenaga Kerja', 'labor'),
+      ('MAT', 'Material', 'material'),
+      ('EQP', 'Peralatan', 'equipment'),
+      ('SUB', 'Subkontraktor', 'subcon'),
+      ('OVH', 'Overhead Proyek', 'overhead'),
+      ('OTH', 'Lain-lain', 'other')`);
+};
+
 const ensureRouteModuleSchema = async (connection: any) => {
   const statements = [
     `CREATE TABLE IF NOT EXISTS inbox_notifications (
@@ -2474,6 +2567,7 @@ export async function initializeDatabase() {
     await ensureProposalResourceSchema(connection);
     await ensureProjectScheduleBaselineSchema(connection);
     await ensurePaymentReversalSchema(connection);
+    await ensureProjectWbsSchema(connection);
     await ensureContractLedgerSchema(connection);
     await ensureMobilePinSchema(connection);
     await ensureAssetDepreciationSchema(connection);

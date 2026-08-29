@@ -249,6 +249,95 @@
         />
       </div>
 
+      <!-- WBS Tab — bobot pekerjaan, progress tertimbang, biaya per work package -->
+      <div v-if="activeTab === 'wbs'" class="space-y-4">
+        <div v-if="wbs && !wbs.ada_wbs" class="rounded-xl border border-blue-300 bg-blue-50 px-5 py-4">
+          <p class="text-sm text-blue-900">{{ wbs.sebab }}</p>
+          <button @click="bentukWbs" :disabled="membentukWbs"
+            class="mt-3 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-50">
+            {{ membentukWbs ? 'Membentuk…' : 'Bentuk WBS dari BOQ kontrak' }}
+          </button>
+        </div>
+
+        <template v-if="wbs?.ada_wbs">
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div class="bg-white rounded-xl border border-gray-200 p-4">
+              <p class="text-xs text-gray-500">Nilai baseline</p>
+              <p class="text-lg font-bold text-gray-900">{{ formatCurrency(wbs.baseline_value) }}</p>
+            </div>
+            <div class="bg-white rounded-xl border border-gray-200 p-4">
+              <p class="text-xs text-gray-500">Work package</p>
+              <p class="text-lg font-bold text-gray-900">{{ wbs.ringkasan.jml_work_package }}</p>
+            </div>
+            <div class="bg-white rounded-xl border border-gray-200 p-4">
+              <p class="text-xs text-gray-500">Progress tertimbang</p>
+              <p class="text-lg font-bold text-emerald-700">{{ wbs.ringkasan.progress_tertimbang_pct }}%</p>
+            </div>
+            <div class="bg-white rounded-xl border border-gray-200 p-4">
+              <p class="text-xs text-gray-500">Cakupan terpetakan</p>
+              <p class="text-lg font-bold"
+                 :class="wbs.ringkasan.cakupan_pct >= 100 ? 'text-emerald-700' : 'text-amber-700'">
+                {{ wbs.ringkasan.cakupan_pct }}%
+              </p>
+            </div>
+          </div>
+
+          <!-- Cakupan di bawah 100% berarti progressnya belum bicara tentang
+               seluruh proyek. Itu harus dikatakan, bukan disembunyikan. -->
+          <div v-if="wbs.ringkasan.cakupan_pct < 100"
+               class="rounded-lg border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm text-amber-900">
+            Baru {{ wbs.ringkasan.cakupan_pct }}% dari nilai pekerjaan yang punya task tertaut.
+            Progress {{ wbs.ringkasan.progress_tertimbang_pct }}% itu dihitung dari bagian tersebut saja.
+          </div>
+
+          <div class="bg-white rounded-xl border border-gray-200 overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead class="bg-gray-50 text-gray-600">
+                <tr>
+                  <th class="text-left px-4 py-2 font-medium">WBS</th>
+                  <th class="text-left px-4 py-2 font-medium">Pekerjaan</th>
+                  <th class="text-right px-4 py-2 font-medium">Volume</th>
+                  <th class="text-right px-4 py-2 font-medium">Nilai</th>
+                  <th class="text-right px-4 py-2 font-medium">Bobot</th>
+                  <th class="text-left px-4 py-2 font-medium">Cost code</th>
+                  <th class="text-right px-4 py-2 font-medium">Progress</th>
+                  <th class="text-right px-4 py-2 font-medium">Biaya aktual</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="r in wbs.lines" :key="r.id" class="border-t"
+                    :class="r.level === 1 ? 'bg-indigo-50 font-semibold' : ''">
+                  <td class="px-4 py-2 whitespace-nowrap text-gray-500">{{ r.wbs_code }}</td>
+                  <td class="px-4 py-2" :class="r.level === 2 ? 'pl-8' : ''">{{ r.name }}</td>
+                  <td class="px-4 py-2 text-right text-gray-600">
+                    <span v-if="r.qty !== null">{{ r.qty }} {{ r.unit }}</span>
+                    <span v-else>—</span>
+                  </td>
+                  <td class="px-4 py-2 text-right">{{ formatCurrency(r.baseline_value) }}</td>
+                  <td class="px-4 py-2 text-right">{{ r.weight_pct }}%</td>
+                  <td class="px-4 py-2">
+                    <select v-if="r.level === 2" :value="r.cost_code_id ?? ''"
+                      @change="setCostCode(r, ($event.target as HTMLSelectElement).value)"
+                      class="border border-gray-300 rounded px-2 py-1 text-xs">
+                      <option value="">—</option>
+                      <option v-for="c in costCodes" :key="c.id" :value="c.id">{{ c.code }} · {{ c.name }}</option>
+                    </select>
+                  </td>
+                  <td class="px-4 py-2 text-right">
+                    <!-- null = belum ada task tertaut, BUKAN nol persen. -->
+                    <span v-if="r.progress_pct === null" class="text-gray-400">belum tertaut</span>
+                    <span v-else :class="r.progress_pct >= 100 ? 'text-emerald-600 font-semibold' : ''">
+                      {{ r.progress_pct }}%
+                    </span>
+                  </td>
+                  <td class="px-4 py-2 text-right text-gray-700">{{ formatCurrency(r.actual_cost) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </template>
+      </div>
+
       <!-- Gantt Tab -->
       <div v-if="activeTab === 'gantt'" class="space-y-4">
         <!-- Baseline jadwal kontrak: apa yang DIJUAL, terkunci.
@@ -539,6 +628,7 @@ const editForm = ref({
 
 const tabs = [
   { id: 'overview', label: 'Overview' },
+  { id: 'wbs', label: '🧱 WBS / Bobot' },
   { id: 'cost-control', label: 'Cost Control' },
   { id: 'mto', label: '📐 MTO / QTO' },
   { id: 'manpower', label: '👷 Manpower Plan' },
@@ -646,6 +736,50 @@ const loadAktivitas = async () => {
   } catch (e) {
     aktivitas.value = [];
     console.error('Gagal memuat aktivitas project:', e);
+  }
+};
+
+const wbs = ref<any>(null);
+const costCodes = ref<any[]>([]);
+const membentukWbs = ref(false);
+
+const loadWbs = async () => {
+  if (!project.value) return;
+  try {
+    const [tree, cc] = await Promise.all([
+      api.get(`/projects/${project.value.id}/wbs`),
+      api.get('/projects/cost-codes'),
+    ]);
+    wbs.value = tree.data;
+    costCodes.value = cc.data?.data || [];
+  } catch (e) {
+    wbs.value = null;
+    console.error('Gagal memuat WBS:', e);
+  }
+};
+
+const bentukWbs = async () => {
+  if (!project.value || membentukWbs.value) return;
+  membentukWbs.value = true;
+  try {
+    const { data } = await api.post(`/projects/${project.value.id}/wbs/generate`);
+    await loadWbs();
+    alert(data?.message || 'WBS dibentuk.');
+  } catch (e: any) {
+    alert(e?.response?.data?.error || 'Gagal membentuk WBS.');
+  } finally {
+    membentukWbs.value = false;
+  }
+};
+
+const setCostCode = async (row: any, nilai: string) => {
+  if (!project.value) return;
+  try {
+    await api.put(`/projects/${project.value.id}/wbs/${row.id}/cost-code`,
+      { cost_code_id: nilai === '' ? null : Number(nilai) });
+    await loadWbs();
+  } catch (e: any) {
+    alert(e?.response?.data?.error || 'Gagal menetapkan cost code.');
   }
 };
 
@@ -887,6 +1021,8 @@ const formatDate = (date: string) => {
 watch(activeTab, (newTab) => {
   if (newTab === 'tasks-list' || newTab === 'tasks-kanban') {
     loadTasks();
+  } else if (newTab === 'wbs') {
+    loadWbs();
   } else if (newTab === 'gantt') {
     // Tab Gantt membandingkan rencana kerja dengan baseline kontrak, jadi
     // keduanya harus segar saat dibuka.
@@ -911,6 +1047,7 @@ watch(project, (newProject) => {
     loadFiles();
     loadBaselineJadwal();
     loadAktivitas();
+    loadWbs();
   }
 });
 </script>
