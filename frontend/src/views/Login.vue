@@ -72,12 +72,26 @@
             </span>
           </button>
         </form>
+
+        <!-- Versi & tanggal build. Disuntikkan saat build (lihat `define` di
+             vite.config.ts), jadi tidak ada baris yang harus diperbarui tangan
+             dan kemudian terlupa. Sengaja hanya versi + tanggal: cukup untuk
+             memastikan pengguna dan support bicara tentang rilis yang sama,
+             tanpa memaparkan apa pun tentang isi sistem. -->
+        <p class="mt-6 text-center text-[11px] text-gray-400 select-text">
+          BlackBox EPC v{{ versiAplikasi }} &middot; build {{ tanggalBuild }}
+        </p>
       </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
+const versiAplikasi = __APP_VERSION__;
+// Ditampilkan sebagai tanggal lokal pembaca, bukan ISO mentah.
+const tanggalBuild = new Date(__BUILD_TIME__).toLocaleDateString('id-ID', {
+  day: 'numeric', month: 'short', year: 'numeric',
+});
 import { ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { useAuthStore } from '../stores/auth';

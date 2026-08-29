@@ -1,9 +1,19 @@
 import { defineConfig } from 'vite';
+import { readFileSync } from 'fs';
 import vue from '@vitejs/plugin-vue';
 import path from 'path';
 import { VitePWA } from 'vite-plugin-pwa';
 
+// Versi & waktu build disuntikkan saat build, bukan ditulis tangan di layar —
+// baris yang harus diperbarui manual akan berhenti diperbarui.
+const versiApp = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version;
+const waktuBuild = new Date().toISOString();
+
 export default defineConfig({
+  define: {
+    __APP_VERSION__: JSON.stringify(versiApp),
+    __BUILD_TIME__: JSON.stringify(waktuBuild),
+  },
   plugins: [
     vue(),
     VitePWA({
