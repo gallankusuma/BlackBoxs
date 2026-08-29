@@ -338,6 +338,146 @@
         </template>
       </div>
 
+      <!-- Progress cut-off: planned / claimed / approved, bertiga terpisah -->
+      <div v-if="activeTab === 'progress'" class="space-y-4">
+        <div v-if="progres" class="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div class="bg-white rounded-xl border border-gray-200 p-4">
+            <p class="text-xs text-gray-500">Earned (disetujui)</p>
+            <p class="text-lg font-bold text-emerald-700">
+              {{ progres.ringkasan.earned_pct ?? '—' }}<span v-if="progres.ringkasan.earned_pct !== null">%</span>
+            </p>
+          </div>
+          <div class="bg-white rounded-xl border border-gray-200 p-4">
+            <p class="text-xs text-gray-500">Rencana (baseline)</p>
+            <p class="text-lg font-bold text-gray-900">
+              {{ progres.ringkasan.planned_pct ?? '—' }}<span v-if="progres.ringkasan.planned_pct !== null">%</span>
+            </p>
+          </div>
+          <div class="bg-white rounded-xl border border-gray-200 p-4">
+            <p class="text-xs text-gray-500">Deviasi</p>
+            <p class="text-lg font-bold"
+               :class="(progres.ringkasan.deviasi_pct ?? 0) < 0 ? 'text-red-600' : 'text-emerald-700'">
+              <span v-if="progres.ringkasan.deviasi_pct === null">—</span>
+              <span v-else>{{ progres.ringkasan.deviasi_pct > 0 ? '+' : '' }}{{ progres.ringkasan.deviasi_pct }}%</span>
+            </p>
+          </div>
+          <div class="bg-white rounded-xl border border-gray-200 p-4">
+            <p class="text-xs text-gray-500">Diklaim, belum disetujui</p>
+            <p class="text-lg font-bold"
+               :class="(progres.ringkasan.klaim_tidak_disetujui_pct ?? 0) > 0 ? 'text-amber-700' : 'text-gray-900'">
+              <span v-if="progres.ringkasan.klaim_tidak_disetujui_pct === null">—</span>
+              <span v-else>{{ progres.ringkasan.klaim_tidak_disetujui_pct }}%</span>
+            </p>
+          </div>
+        </div>
+
+        <div v-if="progres && !progres.current" class="rounded-xl border border-blue-300 bg-blue-50 px-5 py-4 flex flex-wrap items-center gap-3">
+          <span class="text-sm text-blue-900">Belum ada periode terbuka.</span>
+          <input v-model="cutoffBaru" type="date" class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+          <button @click="bukaPeriode" :disabled="!cutoffBaru || sibukProgres"
+            class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-50">
+            Buka periode cut-off
+          </button>
+        </div>
+
+        <template v-if="progres?.current">
+          <div class="rounded-xl border px-5 py-3 flex flex-wrap items-center gap-4"
+               :class="progres.current.status === 'submitted' ? 'border-amber-300 bg-amber-50' : 'border-gray-200 bg-white'">
+            <span class="text-sm font-semibold">
+              Periode #{{ progres.current.period_no }} · cut-off {{ progres.current.cutoff_date }}
+            </span>
+            <span class="text-xs px-2 py-0.5 rounded-full"
+                  :class="progres.current.status === 'submitted' ? 'bg-amber-200 text-amber-900' : 'bg-gray-200 text-gray-700'">
+              {{ progres.current.status }}
+            </span>
+            <span v-if="progres.current.rejection_reason" class="text-sm text-red-700">
+              Ditolak: {{ progres.current.rejection_reason }}
+            </span>
+            <div class="ml-auto flex gap-2">
+              <button v-if="progres.current.status === 'draft'" @click="ajukanPeriode" :disabled="sibukProgres"
+                class="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold hover:bg-indigo-700 disabled:opacity-50">
+                Ajukan
+              </button>
+              <template v-if="progres.current.status === 'submitted'">
+                <button @click="setujuiPeriode" :disabled="sibukProgres"
+                  class="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-semibold hover:bg-emerald-700 disabled:opacity-50">
+                  Setujui
+                </button>
+                <button @click="tolakPeriode" :disabled="sibukProgres"
+                  class="px-4 py-2 border border-red-300 text-red-700 rounded-lg text-sm font-semibold hover:bg-red-50 disabled:opacity-50">
+                  Tolak
+                </button>
+              </template>
+            </div>
+          </div>
+
+          <div class="bg-white rounded-xl border border-gray-200 overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead class="bg-gray-50 text-gray-600">
+                <tr>
+                  <th class="text-left px-4 py-2 font-medium">WBS</th>
+                  <th class="text-left px-4 py-2 font-medium">Pekerjaan</th>
+                  <th class="text-right px-4 py-2 font-medium">Bobot</th>
+                  <th class="text-right px-4 py-2 font-medium">Rencana</th>
+                  <th class="text-right px-4 py-2 font-medium">Sudah disetujui</th>
+                  <th class="text-right px-4 py-2 font-medium">Klaim (%)</th>
+                  <th class="text-left px-4 py-2 font-medium">Bukti</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="l in progres.current.lines" :key="l.id" class="border-t">
+                  <td class="px-4 py-2 text-gray-500 whitespace-nowrap">{{ l.wbs_code }}</td>
+                  <td class="px-4 py-2">{{ l.name }}</td>
+                  <td class="px-4 py-2 text-right">{{ l.weight_pct }}%</td>
+                  <td class="px-4 py-2 text-right text-gray-600">{{ l.planned_pct }}%</td>
+                  <td class="px-4 py-2 text-right text-gray-500">{{ l.prev_approved_pct }}%</td>
+                  <td class="px-4 py-2 text-right">
+                    <input v-if="progres.current.status === 'draft'" type="number" min="0" max="100"
+                      :value="l.claimed_pct" @change="simpanKlaim(l, $event)"
+                      class="w-20 border border-gray-300 rounded px-2 py-1 text-sm text-right">
+                    <span v-else>{{ l.claimed_pct }}%</span>
+                  </td>
+                  <td class="px-4 py-2">
+                    <input v-if="progres.current.status === 'draft'" type="text"
+                      :value="l.evidence_note || ''" @change="simpanBukti(l, $event)"
+                      placeholder="foto / opname / berita acara"
+                      class="w-full border border-gray-300 rounded px-2 py-1 text-xs">
+                    <span v-else class="text-xs text-gray-600">{{ l.evidence_note || '—' }}</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </template>
+
+        <div v-if="progres?.periods?.length" class="bg-white rounded-xl border border-gray-200 overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead class="bg-gray-50 text-gray-600">
+              <tr>
+                <th class="text-left px-4 py-2 font-medium">Periode</th>
+                <th class="text-left px-4 py-2 font-medium">Cut-off</th>
+                <th class="text-left px-4 py-2 font-medium">Status</th>
+                <th class="text-right px-4 py-2 font-medium">Rencana</th>
+                <th class="text-right px-4 py-2 font-medium">Diklaim</th>
+                <th class="text-right px-4 py-2 font-medium">Disetujui</th>
+                <th class="text-left px-4 py-2 font-medium">Penyetuju</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="pp in progres.periods" :key="pp.id" class="border-t">
+                <td class="px-4 py-2">#{{ pp.period_no }}</td>
+                <td class="px-4 py-2">{{ pp.cutoff_date }}</td>
+                <td class="px-4 py-2">{{ pp.status }}</td>
+                <td class="px-4 py-2 text-right">{{ pp.planned_pct ?? '—' }}</td>
+                <td class="px-4 py-2 text-right">{{ pp.claimed_pct ?? '—' }}</td>
+                <td class="px-4 py-2 text-right font-semibold">{{ pp.earned_pct ?? '—' }}</td>
+                <td class="px-4 py-2 text-gray-600">{{ pp.approved_by_name || '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       <!-- Gantt Tab -->
       <div v-if="activeTab === 'gantt'" class="space-y-4">
         <!-- Baseline jadwal kontrak: apa yang DIJUAL, terkunci.
@@ -629,6 +769,7 @@ const editForm = ref({
 const tabs = [
   { id: 'overview', label: 'Overview' },
   { id: 'wbs', label: '🧱 WBS / Bobot' },
+  { id: 'progress', label: '📈 Progress Cut-off' },
   { id: 'cost-control', label: 'Cost Control' },
   { id: 'mto', label: '📐 MTO / QTO' },
   { id: 'manpower', label: '👷 Manpower Plan' },
@@ -737,6 +878,68 @@ const loadAktivitas = async () => {
     aktivitas.value = [];
     console.error('Gagal memuat aktivitas project:', e);
   }
+};
+
+const progres = ref<any>(null);
+const cutoffBaru = ref('');
+const sibukProgres = ref(false);
+
+const loadProgres = async () => {
+  if (!project.value) return;
+  try {
+    const { data } = await api.get(`/projects/${project.value.id}/progress`);
+    progres.value = data;
+  } catch (e) {
+    progres.value = null;
+    console.error('Gagal memuat progress:', e);
+  }
+};
+
+const aksiProgres = async (fn: () => Promise<any>, sukses?: string) => {
+  if (sibukProgres.value) return;
+  sibukProgres.value = true;
+  try {
+    const { data } = await fn();
+    await loadProgres();
+    await loadWbs();
+    if (sukses) alert(data?.message || sukses);
+  } catch (e: any) {
+    // Kode galat dari server dibawa apa adanya — "klaim mundur" dan "tanpa
+    // bukti" adalah dua hal berbeda, dan pemakainya perlu tahu yang mana.
+    alert(e?.response?.data?.error || 'Gagal.');
+  } finally {
+    sibukProgres.value = false;
+  }
+};
+
+const bukaPeriode = () => aksiProgres(
+  () => api.post(`/projects/${project.value.id}/progress/periods`, { cutoff_date: cutoffBaru.value }),
+  'Periode dibuka.');
+const ajukanPeriode = () => aksiProgres(
+  () => api.post(`/projects/${project.value.id}/progress/periods/${progres.value.current.id}/submit`),
+  'Diajukan.');
+const setujuiPeriode = () => aksiProgres(
+  () => api.post(`/projects/${project.value.id}/progress/periods/${progres.value.current.id}/approve`, {}),
+  'Disetujui.');
+const tolakPeriode = () => {
+  const alasan = prompt('Alasan penolakan:');
+  if (!alasan) return;
+  return aksiProgres(
+    () => api.post(`/projects/${project.value.id}/progress/periods/${progres.value.current.id}/reject`,
+      { reason: alasan }), 'Dikembalikan ke draft.');
+};
+
+const simpanKlaim = (l: any, e: Event) => {
+  const v = Number((e.target as HTMLInputElement).value);
+  return aksiProgres(() => api.put(
+    `/projects/${project.value.id}/progress/periods/${progres.value.current.id}/lines/${l.id}`,
+    { claimed_pct: v, evidence_note: l.evidence_note, evidence_ref: l.evidence_ref }));
+};
+const simpanBukti = (l: any, e: Event) => {
+  const v = (e.target as HTMLInputElement).value;
+  return aksiProgres(() => api.put(
+    `/projects/${project.value.id}/progress/periods/${progres.value.current.id}/lines/${l.id}`,
+    { claimed_pct: l.claimed_pct, evidence_note: v, evidence_ref: l.evidence_ref }));
 };
 
 const wbs = ref<any>(null);
@@ -1023,6 +1226,9 @@ watch(activeTab, (newTab) => {
     loadTasks();
   } else if (newTab === 'wbs') {
     loadWbs();
+  } else if (newTab === 'progress') {
+    loadProgres();
+    loadWbs();
   } else if (newTab === 'gantt') {
     // Tab Gantt membandingkan rencana kerja dengan baseline kontrak, jadi
     // keduanya harus segar saat dibuka.
@@ -1048,6 +1254,7 @@ watch(project, (newProject) => {
     loadBaselineJadwal();
     loadAktivitas();
     loadWbs();
+    loadProgres();
   }
 });
 </script>

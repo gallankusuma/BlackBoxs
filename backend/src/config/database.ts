@@ -1273,6 +1273,92 @@ const ensureProjectWbsSchema = async (connection: any) => {
       ('OTH', 'Lain-lain', 'other')`);
 };
 
+/**
+ * PROJ-CTRL Fase 2 — progress cut-off dengan bukti dan persetujuan.
+ *
+ * Sampai Fase 1, "progress" masih turunan status task: begitu seseorang menekan
+ * Done, angkanya naik. Itu cukup untuk papan kerja, tapi tidak untuk apa pun
+ * yang berkonsekuensi uang — tidak ada periode, tidak ada bukti, tidak ada yang
+ * menyetujui, dan tidak ada jejak siapa mengklaim berapa.
+ *
+ * Tiga angka sengaja disimpan TERPISAH untuk tiap work package tiap periode:
+ *
+ *   planned  — seharusnya sudah berapa persen menurut baseline jadwal
+ *   claimed  — yang diakui lapangan
+ *   approved — yang disetujui setelah diperiksa
+ *
+ * Meleburnya menjadi satu "progress" menghapus justru informasi yang dicari:
+ * selisih claimed vs approved adalah eksposur, dan selisih approved vs planned
+ * adalah keterlambatan. Hanya `approved` yang menjadi earned progress.
+ *
+ * Periode yang sudah disetujui **tidak boleh punya jalur tulis** — sama seperti
+ * `contract_baseline_lines` dan `project_schedule_baseline`. Koreksi dilakukan
+ * lewat periode berikutnya, bukan dengan menyunting yang sudah disetujui.
+ */
+const ensureProgressCutoffSchema = async (connection: any) => {
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS project_progress_periods (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      project_id INT NOT NULL,
+      period_no INT NOT NULL,
+      period_start DATE NULL,
+      period_end DATE NULL,
+      cutoff_date DATE NOT NULL,
+      -- draft → submitted → approved. Ditolak kembali ke draft supaya lapangan
+      -- bisa memperbaiki; yang approved bersifat final.
+      status VARCHAR(20) NOT NULL DEFAULT 'draft',
+      submitted_by INT NULL, submitted_at DATETIME NULL,
+      approved_by INT NULL, approved_at DATETIME NULL,
+      rejected_by INT NULL, rejected_at DATETIME NULL,
+      rejection_reason VARCHAR(500) NULL,
+      -- Dibekukan saat disetujui, bukan dihitung ulang saat dibaca: bobot dan
+      -- baseline boleh berkembang untuk periode berikutnya, tapi angka yang
+      -- sudah disetujui harus tetap bisa dibaca ulang persis sama.
+      planned_pct DECIMAL(9,4) NULL,
+      claimed_pct DECIMAL(9,4) NULL,
+      earned_pct DECIMAL(9,4) NULL,
+      checksum CHAR(64) NULL,
+      created_by INT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_periode (project_id, period_no),
+      KEY idx_periode_proj (project_id, status),
+      CONSTRAINT fk_periode_proj FOREIGN KEY (project_id)
+        REFERENCES client_projects(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS project_progress_lines (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      period_id INT NOT NULL,
+      wbs_id INT NOT NULL,
+      -- Bobot dipotret saat periode dibuka. Kalau WBS berubah kemudian, angka
+      -- periode ini tetap bisa dijelaskan dengan bobot yang berlaku saat itu.
+      weight_pct DECIMAL(9,6) NOT NULL DEFAULT 0,
+      baseline_qty DECIMAL(18,4) NULL,
+      unit VARCHAR(50) NULL,
+      planned_pct DECIMAL(9,4) NOT NULL DEFAULT 0,
+      -- Kumulatif, bukan tambahan periode ini. Kumulatif lebih sulit salah
+      -- dibaca: "sudah 60%" tidak bisa ditafsirkan dua cara.
+      claimed_pct DECIMAL(9,4) NOT NULL DEFAULT 0,
+      claimed_qty DECIMAL(18,4) NULL,
+      approved_pct DECIMAL(9,4) NULL,
+      -- Kumulatif yang sudah disetujui SEBELUM periode ini — pembanding agar
+      -- klaim tidak bisa mundur diam-diam.
+      prev_approved_pct DECIMAL(9,4) NOT NULL DEFAULT 0,
+      evidence_note VARCHAR(1000) NULL,
+      evidence_ref VARCHAR(500) NULL,
+      approver_note VARCHAR(1000) NULL,
+      claimed_by INT NULL, claimed_at DATETIME NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_baris_periode (period_id, wbs_id),
+      KEY idx_baris_periode (period_id),
+      CONSTRAINT fk_baris_periode FOREIGN KEY (period_id)
+        REFERENCES project_progress_periods(id) ON DELETE CASCADE,
+      CONSTRAINT fk_baris_wbs FOREIGN KEY (wbs_id)
+        REFERENCES project_wbs(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+};
+
 const ensureRouteModuleSchema = async (connection: any) => {
   const statements = [
     `CREATE TABLE IF NOT EXISTS inbox_notifications (
@@ -2568,6 +2654,7 @@ export async function initializeDatabase() {
     await ensureProjectScheduleBaselineSchema(connection);
     await ensurePaymentReversalSchema(connection);
     await ensureProjectWbsSchema(connection);
+    await ensureProgressCutoffSchema(connection);
     await ensureContractLedgerSchema(connection);
     await ensureMobilePinSchema(connection);
     await ensureAssetDepreciationSchema(connection);

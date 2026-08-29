@@ -57,7 +57,16 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
         -- Project yang belum punya WBS tetap memakai rumus lama supaya tidak
         -- mendadak menampilkan kosong; progress_source menyebutkan mana yang
         -- sedang dipakai, jadi angkanya tidak perlu ditebak.
+        -- Urutan sumbernya sengaja: progress yang SUDAH DISETUJUI selalu menang.
+        --
+        -- Status task tidak boleh langsung menjadi earned progress — menekan
+        -- Done bukan bukti pekerjaan diterima. Angka dari task hanya dipakai
+        -- selama belum ada satu pun periode cut-off yang disetujui, dan
+        -- progress_source selalu menyebutkan mana yang sedang dipakai.
         COALESCE(
+          (SELECT pp.earned_pct FROM project_progress_periods pp
+            WHERE pp.project_id = p.id AND pp.status = 'approved'
+            ORDER BY pp.period_no DESC LIMIT 1),
           (SELECT SUM(w.weight_pct * COALESCE(tp.rata, 0)) / NULLIF(SUM(w.weight_pct), 0)
              FROM project_wbs w
              JOIN (SELECT t.wbs_id AS wid,
@@ -68,11 +77,16 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
           (SELECT COUNT(*) FROM project_tasks t WHERE t.project_id = p.id AND t.status = 'Done') * 100 /
           NULLIF((SELECT COUNT(*) FROM project_tasks t WHERE t.project_id = p.id), 0)
         ) as progress,
-        CASE WHEN EXISTS (
-          SELECT 1 FROM project_wbs w
-           JOIN project_tasks t ON t.wbs_id = w.id
-          WHERE w.project_id = p.id
-        ) THEN 'wbs_weighted' ELSE 'task_count' END as progress_source
+        CASE
+          WHEN EXISTS (SELECT 1 FROM project_progress_periods pp
+                        WHERE pp.project_id = p.id AND pp.status = 'approved')
+            THEN 'approved_progress'
+          WHEN EXISTS (SELECT 1 FROM project_wbs w
+                         JOIN project_tasks t ON t.wbs_id = w.id
+                        WHERE w.project_id = p.id)
+            THEN 'wbs_weighted'
+          ELSE 'task_count'
+        END as progress_source
       FROM client_projects p
       LEFT JOIN clients c ON p.client_id = c.id
       LEFT JOIN users u ON p.assigned_to = u.id
@@ -2465,7 +2479,11 @@ router.get('/:id/wbs', authMiddleware, async (req: Request, res: Response) => {
               (SELECT COUNT(*) FROM project_tasks t WHERE t.wbs_id = w.id) AS jml_task,
               (SELECT AVG(CASE WHEN t.status = 'Done' THEN 100 ELSE COALESCE(t.progress, 0) END)
                  FROM project_tasks t WHERE t.wbs_id = w.id) AS progress_task,
-              (SELECT COALESCE(SUM(e.amount), 0) FROM project_expenses e WHERE e.wbs_id = w.id) AS biaya
+              (SELECT COALESCE(SUM(e.amount), 0) FROM project_expenses e WHERE e.wbs_id = w.id) AS biaya,
+              (SELECT l.approved_pct FROM project_progress_lines l
+                 JOIN project_progress_periods pp ON pp.id = l.period_id
+                WHERE l.wbs_id = w.id AND pp.status = 'approved'
+                ORDER BY pp.period_no DESC LIMIT 1) AS earned
        FROM project_wbs w
        LEFT JOIN cost_codes cc ON cc.id = w.cost_code_id
        WHERE w.project_id = ?
@@ -2529,6 +2547,14 @@ router.get('/:id/wbs', authMiddleware, async (req: Request, res: Response) => {
         actual_cost: isInduk
           ? Math.round(anak.reduce((a, x) => a + Number(x.biaya), 0) * 100) / 100
           : Number(b.biaya),
+        // Progress yang SUDAH DISETUJUI lewat cut-off. Dibedakan tegas dari
+        // `progress_pct` yang berasal dari status task: yang satu bukti, yang
+        // satu lagi baru niat. null = belum pernah masuk periode disetujui.
+        earned_pct: isInduk
+          ? (bobotAnak > 0 && anak.some(x => x.earned !== null)
+              ? Math.round(anak.reduce((a, x) => a + Number(x.weight_pct) * (Number(x.earned) || 0), 0) / bobotAnak * 100) / 100
+              : null)
+          : (b.earned === null ? null : Number(b.earned)),
       };
     });
 
@@ -2550,6 +2576,11 @@ router.get('/:id/wbs', authMiddleware, async (req: Request, res: Response) => {
         // yang terpetakan terbaca sama dengan 5% dari seluruh proyek.
         cakupan_pct: Math.round(bobotBerTask * 100) / 100,
         actual_cost: Math.round(daun.reduce((a, b) => a + Number(b.biaya), 0) * 100) / 100,
+        // Earned tertimbang dari cut-off yang disetujui — inilah angka yang
+        // boleh dipakai untuk tagihan dan laporan, bukan progress dari task.
+        earned_pct: daun.some(b => b.earned !== null)
+          ? Math.round(daun.reduce((a, b) => a + Number(b.weight_pct) * (Number(b.earned) || 0) / 100, 0) * 100) / 100
+          : null,
       },
     });
   } catch (err: any) {
@@ -2624,6 +2655,537 @@ router.put('/:id/tasks/:taskId/wbs', authMiddleware, async (req: Request, res: R
     res.json({ message: 'Task ditautkan ke WBS' });
   } catch (err: any) {
     console.error('Error menautkan task ke WBS:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PROJ-CTRL Fase 2 — progress cut-off: planned / claimed / approved
+// ═══════════════════════════════════════════════════════════════════════════
+
+const idValid = (n: any) => Number.isInteger(Number(n)) && Number(n) > 0;
+const pct = (v: any) => Math.round((Number(v) || 0) * 10000) / 10000;
+
+/**
+ * Planned % sebuah work package pada satu tanggal cut-off.
+ *
+ * Dibaca dari `project_schedule_baseline` — jadwal yang DIJUAL. Kalau baris itu
+ * belum mulai 0%, sudah lewat 100%, di tengah dihitung linier terhadap
+ * durasinya. Linier dipilih karena baseline tidak menyimpan kurva per aktivitas;
+ * begitu ia ada, di sinilah tempat menggantinya, dan hanya di sini.
+ */
+const plannedPadaTanggal = (mulai: any, durasi: any, cutoff: string): number => {
+  if (!mulai) return 0;
+  const HARI = 86400000;
+  const t0 = new Date(String(mulai).slice(0, 10)).getTime();
+  const tc = new Date(cutoff).getTime();
+  const d = Number(durasi) || 0;
+  if (!Number.isFinite(t0) || !Number.isFinite(tc)) return 0;
+  if (tc <= t0) return 0;
+  if (d <= 0) return 100;                       // milestone: lewat = selesai
+  const lewat = (tc - t0) / HARI;
+  return Math.max(0, Math.min(100, Math.round(lewat / d * 100 * 10000) / 10000));
+};
+
+/** Buka periode cut-off baru. Barisnya dibentuk dari WBS, bukan diketik ulang. */
+router.post('/:id/progress/periods', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const projectId = Number(req.params.id);
+    if (!idValid(projectId)) return res.status(400).json({ error: 'Id project tidak valid' });
+    const { cutoff_date, period_start, period_end } = req.body || {};
+    if (!cutoff_date || !/^\d{4}-\d{2}-\d{2}$/.test(String(cutoff_date))) {
+      return res.status(400).json({
+        error: 'cutoff_date wajib dan harus berformat YYYY-MM-DD.',
+        code: 'CUTOFF_TIDAK_VALID',
+      });
+    }
+    const userId = (req as any).user?.userId || (req as any).userId || null;
+
+    const hasil = await withTransaction(async (tx: TxRunner) => {
+      const proyek: any = await tx.get(
+        'SELECT id FROM client_projects WHERE id = ? FOR UPDATE', [projectId]);
+      if (!proyek) return { error: 404, body: { error: 'Project tidak ditemukan' } };
+
+      const wbs: any[] = await tx.all(
+        `SELECT id, wbs_code, name, qty, unit, weight_pct, source_line_no
+         FROM project_wbs WHERE project_id = ? AND level = 2 ORDER BY sort_order, id`,
+        [projectId]);
+      if (!wbs.length) {
+        return { error: 400, body: {
+          error: 'Project ini belum punya WBS, jadi progress belum bisa diukur.',
+          code: 'WBS_TIDAK_ADA',
+        } };
+      }
+
+      // Satu periode terbuka pada satu waktu. Dua periode draft berjalan
+      // bersamaan berarti dua klaim untuk pekerjaan yang sama tanpa ada yang
+      // tahu mana yang berlaku.
+      const terbuka: any = await tx.get(
+        `SELECT id, period_no, status FROM project_progress_periods
+         WHERE project_id = ? AND status IN ('draft', 'submitted') LIMIT 1`, [projectId]);
+      if (terbuka) {
+        return { error: 409, body: {
+          error: `Periode #${terbuka.period_no} masih ${terbuka.status}. Selesaikan dulu.`,
+          code: 'PERIODE_MASIH_TERBUKA',
+          period_id: terbuka.id,
+        } };
+      }
+
+      const maks: any = await tx.get(
+        'SELECT COALESCE(MAX(period_no), 0) n FROM project_progress_periods WHERE project_id = ?',
+        [projectId]);
+      const nomor = Number(maks?.n || 0) + 1;
+
+      // Cut-off tidak boleh mundur dari periode terakhir yang disetujui.
+      const terakhir: any = await tx.get(
+        `SELECT cutoff_date FROM project_progress_periods
+         WHERE project_id = ? AND status = 'approved'
+         ORDER BY period_no DESC LIMIT 1`, [projectId]);
+      if (terakhir && String(cutoff_date) <= String(terakhir.cutoff_date).slice(0, 10)) {
+        return { error: 400, body: {
+          error: `cutoff_date harus setelah periode terakhir yang disetujui (${String(terakhir.cutoff_date).slice(0, 10)}).`,
+          code: 'CUTOFF_MUNDUR',
+        } };
+      }
+
+      const r = await tx.run(
+        `INSERT INTO project_progress_periods
+          (project_id, period_no, period_start, period_end, cutoff_date, status, created_by)
+         VALUES (?, ?, ?, ?, ?, 'draft', ?)`,
+        [projectId, nomor, period_start || null, period_end || null, cutoff_date, userId]);
+      const periodId = r.insertId;
+
+      // Jadwal baseline dipetakan lewat nomor baris BOQ — keduanya lahir dari
+      // proposal yang sama, jadi `source_line_no` ↔ `line_no` adalah tautan
+      // yang benar-benar ada, bukan pencocokan nama yang bisa meleset.
+      const jadwal: any[] = await tx.all(
+        `SELECT line_no, start_date, duration_days FROM project_schedule_baseline
+         WHERE project_id = ? AND row_type = 'item'`, [projectId]);
+      const petaJadwal: Record<number, any> = {};
+      for (const j of jadwal) petaJadwal[Number(j.line_no)] = j;
+
+      // Kumulatif yang sudah disetujui sebelumnya — jadi lantai klaim.
+      const sebelum: any[] = await tx.all(
+        `SELECT l.wbs_id, MAX(l.approved_pct) AS pct
+         FROM project_progress_lines l
+         JOIN project_progress_periods p ON p.id = l.period_id
+         WHERE p.project_id = ? AND p.status = 'approved'
+         GROUP BY l.wbs_id`, [projectId]);
+      const petaSebelum: Record<number, number> = {};
+      for (const x of sebelum) petaSebelum[Number(x.wbs_id)] = Number(x.pct) || 0;
+
+      for (const w of wbs) {
+        const j = w.source_line_no != null ? petaJadwal[Number(w.source_line_no)] : null;
+        const planned = j ? plannedPadaTanggal(j.start_date, j.duration_days, String(cutoff_date)) : 0;
+        const prev = petaSebelum[Number(w.id)] || 0;
+        await tx.run(
+          `INSERT INTO project_progress_lines
+            (period_id, wbs_id, weight_pct, baseline_qty, unit, planned_pct,
+             claimed_pct, prev_approved_pct)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [periodId, w.id, w.weight_pct, w.qty ?? null, w.unit ?? null,
+           planned, prev, prev]);
+      }
+
+      return { ok: true as const, period_id: periodId, period_no: nomor, baris: wbs.length };
+    });
+
+    if ((hasil as any).error) return res.status((hasil as any).error).json((hasil as any).body);
+    res.status(201).json({
+      message: `Periode #${(hasil as any).period_no} dibuka dengan ${(hasil as any).baris} work package.`,
+      ...(hasil as any),
+    });
+  } catch (err: any) {
+    console.error('Error membuka periode progress:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** Isi klaim satu work package. Hanya selama periodenya masih draft. */
+router.put('/:id/progress/periods/:periodId/lines/:lineId', authMiddleware,
+  async (req: Request, res: Response) => {
+    try {
+      const projectId = Number(req.params.id);
+      const periodId = Number(req.params.periodId);
+      const lineId = Number(req.params.lineId);
+      if (!idValid(projectId) || !idValid(periodId) || !idValid(lineId)) {
+        return res.status(400).json({ error: 'Id tidak valid' });
+      }
+      const { claimed_pct, claimed_qty, evidence_note, evidence_ref } = req.body || {};
+      const userId = (req as any).user?.userId || (req as any).userId || null;
+
+      const hasil = await withTransaction(async (tx: TxRunner) => {
+        const periode: any = await tx.get(
+          `SELECT * FROM project_progress_periods WHERE id = ? AND project_id = ? FOR UPDATE`,
+          [periodId, projectId]);
+        if (!periode) return { error: 404, body: {
+          error: 'Periode tidak ditemukan pada project ini.',
+          code: 'PERIODE_BUKAN_MILIK_PROJECT' } };
+        if (periode.status !== 'draft') {
+          return { error: 409, body: {
+            error: `Periode ini berstatus ${periode.status}, klaimnya sudah terkunci.`,
+            code: 'PERIODE_TERKUNCI' } };
+        }
+
+        const baris: any = await tx.get(
+          'SELECT * FROM project_progress_lines WHERE id = ? AND period_id = ? FOR UPDATE',
+          [lineId, periodId]);
+        if (!baris) return { error: 404, body: {
+          error: 'Baris tidak ditemukan pada periode ini.', code: 'BARIS_BUKAN_MILIK_PERIODE' } };
+
+        const nilai = pct(claimed_pct);
+        if (!Number.isFinite(nilai) || nilai < 0 || nilai > 100) {
+          return { error: 400, body: {
+            error: 'claimed_pct harus antara 0 dan 100.', code: 'KLAIM_DI_LUAR_RENTANG' } };
+        }
+        // Kumulatif tidak boleh mundur di bawah yang SUDAH disetujui — itu
+        // membatalkan persetujuan lama lewat pintu belakang.
+        const lantai = Number(baris.prev_approved_pct) || 0;
+        if (nilai + 0.0001 < lantai) {
+          return { error: 400, body: {
+            error: `Klaim ${nilai}% di bawah yang sudah disetujui (${lantai}%). Koreksi turun harus lewat persetujuan, bukan klaim.`,
+            code: 'KLAIM_MUNDUR' } };
+        }
+
+        await tx.run(
+          `UPDATE project_progress_lines
+             SET claimed_pct = ?, claimed_qty = ?, evidence_note = ?, evidence_ref = ?,
+                 claimed_by = ?, claimed_at = NOW()
+           WHERE id = ?`,
+          [nilai, claimed_qty ?? null,
+           evidence_note ? String(evidence_note).slice(0, 1000) : null,
+           evidence_ref ? String(evidence_ref).slice(0, 500) : null,
+           userId, lineId]);
+        return { ok: true as const, claimed_pct: nilai };
+      });
+
+      if ((hasil as any).error) return res.status((hasil as any).error).json((hasil as any).body);
+      res.json({ message: 'Klaim tersimpan', ...(hasil as any) });
+    } catch (err: any) {
+      console.error('Error menyimpan klaim progress:', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+/** Ajukan periode: draft → submitted. Klaim terkunci sejak ini. */
+router.post('/:id/progress/periods/:periodId/submit', authMiddleware,
+  async (req: Request, res: Response) => {
+    try {
+      const projectId = Number(req.params.id);
+      const periodId = Number(req.params.periodId);
+      if (!idValid(projectId) || !idValid(periodId)) {
+        return res.status(400).json({ error: 'Id tidak valid' });
+      }
+      const userId = (req as any).user?.userId || (req as any).userId || null;
+
+      const hasil = await withTransaction(async (tx: TxRunner) => {
+        const periode: any = await tx.get(
+          'SELECT * FROM project_progress_periods WHERE id = ? AND project_id = ? FOR UPDATE',
+          [periodId, projectId]);
+        if (!periode) return { error: 404, body: {
+          error: 'Periode tidak ditemukan pada project ini.',
+          code: 'PERIODE_BUKAN_MILIK_PROJECT' } };
+        if (periode.status !== 'draft') {
+          return { error: 409, body: {
+            error: `Hanya periode draft yang bisa diajukan; ini ${periode.status}.`,
+            code: 'TRANSISI_TIDAK_SAH' } };
+        }
+
+        // Klaim yang naik WAJIB berbukti. Angka tanpa bukti tidak bisa
+        // diperiksa siapa pun, dan menyetujuinya berarti menyetujui ketiadaan.
+        const tanpaBukti: any[] = await tx.all(
+          `SELECT l.id, w.wbs_code FROM project_progress_lines l
+           JOIN project_wbs w ON w.id = l.wbs_id
+           WHERE l.period_id = ? AND l.claimed_pct > l.prev_approved_pct
+             AND (l.evidence_note IS NULL OR l.evidence_note = '')
+             AND (l.evidence_ref IS NULL OR l.evidence_ref = '')`, [periodId]);
+        if (tanpaBukti.length) {
+          return { error: 400, body: {
+            error: `${tanpaBukti.length} work package mengklaim kenaikan tanpa bukti.`,
+            code: 'KLAIM_TANPA_BUKTI',
+            wbs: tanpaBukti.map((x: any) => x.wbs_code),
+          } };
+        }
+
+        await tx.run(
+          `UPDATE project_progress_periods
+             SET status = 'submitted', submitted_by = ?, submitted_at = NOW() WHERE id = ?`,
+          [userId, periodId]);
+        return { ok: true as const };
+      });
+
+      if ((hasil as any).error) return res.status((hasil as any).error).json((hasil as any).body);
+      res.json({ message: 'Periode diajukan untuk persetujuan' });
+    } catch (err: any) {
+      console.error('Error mengajukan periode:', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+/**
+ * Setujui periode: submitted → approved, lalu BEKU.
+ *
+ * Penyetuju boleh menurunkan angka per baris — itu justru gunanya pemeriksaan.
+ * Yang tidak boleh: menyetujui lebih besar dari yang diklaim (itu memberi
+ * progress yang tidak pernah diminta siapa pun) atau di bawah yang sudah
+ * disetujui periode sebelumnya (itu membatalkan persetujuan lama diam-diam).
+ */
+router.post('/:id/progress/periods/:periodId/approve', authMiddleware,
+  async (req: Request, res: Response) => {
+    try {
+      const projectId = Number(req.params.id);
+      const periodId = Number(req.params.periodId);
+      if (!idValid(projectId) || !idValid(periodId)) {
+        return res.status(400).json({ error: 'Id tidak valid' });
+      }
+      const userId = (req as any).user?.userId || (req as any).userId || null;
+      // [{ line_id, approved_pct, note }] — baris yang tidak disebut disetujui
+      // sebesar klaimnya.
+      const koreksi: any[] = Array.isArray(req.body?.lines) ? req.body.lines : [];
+
+      const hasil = await withTransaction(async (tx: TxRunner) => {
+        const periode: any = await tx.get(
+          'SELECT * FROM project_progress_periods WHERE id = ? AND project_id = ? FOR UPDATE',
+          [periodId, projectId]);
+        if (!periode) return { error: 404, body: {
+          error: 'Periode tidak ditemukan pada project ini.',
+          code: 'PERIODE_BUKAN_MILIK_PROJECT' } };
+        if (periode.status !== 'submitted') {
+          return { error: 409, body: {
+            error: `Hanya periode submitted yang bisa disetujui; ini ${periode.status}.`,
+            code: 'TRANSISI_TIDAK_SAH' } };
+        }
+
+        const baris: any[] = await tx.all(
+          'SELECT * FROM project_progress_lines WHERE period_id = ? ORDER BY id', [periodId]);
+        const petaKoreksi: Record<number, any> = {};
+        for (const k of koreksi) if (idValid(k?.line_id)) petaKoreksi[Number(k.line_id)] = k;
+
+        for (const k of koreksi) {
+          if (!baris.some(b => Number(b.id) === Number(k?.line_id))) {
+            return { error: 400, body: {
+              error: `Baris ${k?.line_id} bukan bagian periode ini.`,
+              code: 'BARIS_BUKAN_MILIK_PERIODE' } };
+          }
+        }
+
+        let terbobot = 0, klaimTerbobot = 0, planTerbobot = 0, totalBobot = 0;
+        for (const b of baris) {
+          const k = petaKoreksi[Number(b.id)];
+          const disetujui = k && k.approved_pct !== undefined
+            ? pct(k.approved_pct) : pct(b.claimed_pct);
+
+          if (!Number.isFinite(disetujui) || disetujui < 0 || disetujui > 100) {
+            return { error: 400, body: {
+              error: 'approved_pct harus antara 0 dan 100.',
+              code: 'PERSETUJUAN_DI_LUAR_RENTANG', line_id: b.id } };
+          }
+          if (disetujui > pct(b.claimed_pct) + 0.0001) {
+            return { error: 400, body: {
+              error: `Tidak bisa menyetujui ${disetujui}% sementara yang diklaim ${pct(b.claimed_pct)}%.`,
+              code: 'PERSETUJUAN_MELEBIHI_KLAIM', line_id: b.id } };
+          }
+          if (disetujui + 0.0001 < pct(b.prev_approved_pct)) {
+            return { error: 400, body: {
+              error: `Tidak bisa menyetujui ${disetujui}% di bawah yang sudah disetujui sebelumnya (${pct(b.prev_approved_pct)}%).`,
+              code: 'PERSETUJUAN_MUNDUR', line_id: b.id } };
+          }
+
+          await tx.run(
+            `UPDATE project_progress_lines SET approved_pct = ?, approver_note = ? WHERE id = ?`,
+            [disetujui, k?.note ? String(k.note).slice(0, 1000) : null, b.id]);
+
+          const w = Number(b.weight_pct) || 0;
+          totalBobot += w;
+          terbobot += w * disetujui / 100;
+          klaimTerbobot += w * (Number(b.claimed_pct) || 0) / 100;
+          planTerbobot += w * (Number(b.planned_pct) || 0) / 100;
+        }
+
+        const checksum = crypto.createHash('sha256').update(JSON.stringify(
+          baris.map(b => {
+            const k = petaKoreksi[Number(b.id)];
+            const a = k && k.approved_pct !== undefined ? pct(k.approved_pct) : pct(b.claimed_pct);
+            return [b.wbs_id, Number(b.weight_pct).toFixed(6),
+                    Number(b.planned_pct).toFixed(4), Number(b.claimed_pct).toFixed(4),
+                    a.toFixed(4)];
+          })
+        )).digest('hex');
+
+        await tx.run(
+          `UPDATE project_progress_periods
+             SET status = 'approved', approved_by = ?, approved_at = NOW(),
+                 planned_pct = ?, claimed_pct = ?, earned_pct = ?, checksum = ?
+           WHERE id = ?`,
+          [userId, pct(planTerbobot), pct(klaimTerbobot), pct(terbobot), checksum, periodId]);
+
+        // Penyetuju yang sama dengan pengaju bukan pelanggaran teknis, tapi ia
+        // fakta yang pantas tercatat — bukan disembunyikan.
+        if (periode.submitted_by && userId && Number(periode.submitted_by) === Number(userId)) {
+          await tx.run(
+            `INSERT INTO project_activities (project_id, user_id, action_type, description)
+             VALUES (?, ?, 'progress_approved', ?)`,
+            [projectId, userId,
+             `Menyetujui periode #${periode.period_no} yang diajukannya sendiri (earned ${pct(terbobot)}%)`]);
+        } else {
+          await tx.run(
+            `INSERT INTO project_activities (project_id, user_id, action_type, description)
+             VALUES (?, ?, 'progress_approved', ?)`,
+            [projectId, userId, `Menyetujui periode #${periode.period_no} (earned ${pct(terbobot)}%)`]);
+        }
+
+        return { ok: true as const, earned_pct: pct(terbobot), claimed_pct: pct(klaimTerbobot),
+                 planned_pct: pct(planTerbobot), bobot_tercakup: Math.round(totalBobot * 100) / 100,
+                 checksum };
+      });
+
+      if ((hasil as any).error) return res.status((hasil as any).error).json((hasil as any).body);
+      res.json({ message: 'Periode disetujui', ...(hasil as any) });
+    } catch (err: any) {
+      console.error('Error menyetujui periode:', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+/** Tolak periode: submitted → draft, dengan alasan yang tercatat. */
+router.post('/:id/progress/periods/:periodId/reject', authMiddleware,
+  async (req: Request, res: Response) => {
+    try {
+      const projectId = Number(req.params.id);
+      const periodId = Number(req.params.periodId);
+      if (!idValid(projectId) || !idValid(periodId)) {
+        return res.status(400).json({ error: 'Id tidak valid' });
+      }
+      const alasan = String(req.body?.reason || '').trim();
+      if (!alasan) {
+        return res.status(400).json({
+          error: 'Penolakan harus menyebutkan alasannya.', code: 'ALASAN_WAJIB' });
+      }
+      const userId = (req as any).user?.userId || (req as any).userId || null;
+
+      const hasil = await withTransaction(async (tx: TxRunner) => {
+        const periode: any = await tx.get(
+          'SELECT * FROM project_progress_periods WHERE id = ? AND project_id = ? FOR UPDATE',
+          [periodId, projectId]);
+        if (!periode) return { error: 404, body: {
+          error: 'Periode tidak ditemukan pada project ini.',
+          code: 'PERIODE_BUKAN_MILIK_PROJECT' } };
+        if (periode.status !== 'submitted') {
+          return { error: 409, body: {
+            error: `Hanya periode submitted yang bisa ditolak; ini ${periode.status}.`,
+            code: 'TRANSISI_TIDAK_SAH' } };
+        }
+        // Kembali ke draft, BUKAN status terminal: yang ditolak memang harus
+        // bisa diperbaiki lapangan lalu diajukan lagi.
+        await tx.run(
+          `UPDATE project_progress_periods
+             SET status = 'draft', rejected_by = ?, rejected_at = NOW(), rejection_reason = ?,
+                 submitted_by = NULL, submitted_at = NULL
+           WHERE id = ?`, [userId, alasan.slice(0, 500), periodId]);
+        return { ok: true as const };
+      });
+
+      if ((hasil as any).error) return res.status((hasil as any).error).json((hasil as any).body);
+      res.json({ message: 'Periode dikembalikan ke draft' });
+    } catch (err: any) {
+      console.error('Error menolak periode:', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+/**
+ * Riwayat cut-off + data kurva-S.
+ *
+ * Planned, claimed, dan earned dilaporkan sebagai tiga deret TERPISAH. Selisih
+ * claimed−earned adalah eksposur yang belum disetujui; selisih earned−planned
+ * adalah keterlambatan. Meleburnya jadi satu garis menghapus keduanya.
+ */
+router.get('/:id/progress', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const projectId = Number(req.params.id);
+    if (!idValid(projectId)) return res.status(400).json({ error: 'Id project tidak valid' });
+    const proyek: any = await dbGet('SELECT id, project_number FROM client_projects WHERE id = ?',
+      [projectId]);
+    if (!proyek) return res.status(404).json({ error: 'Project tidak ditemukan' });
+
+    const periode: any[] = await dbAll(
+      `SELECT p.*, us.full_name AS submitted_by_name, ua.full_name AS approved_by_name
+       FROM project_progress_periods p
+       LEFT JOIN users us ON us.id = p.submitted_by
+       LEFT JOIN users ua ON ua.id = p.approved_by
+       WHERE p.project_id = ? ORDER BY p.period_no`, [projectId]);
+
+    const terbuka = periode.find((p: any) => p.status === 'draft' || p.status === 'submitted');
+    let barisTerbuka: any[] = [];
+    if (terbuka) {
+      barisTerbuka = await dbAll(
+        `SELECT l.*, w.wbs_code, w.name AS wbs_name
+         FROM project_progress_lines l
+         JOIN project_wbs w ON w.id = l.wbs_id
+         WHERE l.period_id = ? ORDER BY w.sort_order, w.id`, [terbuka.id]) as any[];
+    }
+
+    const disetujui = periode.filter((p: any) => p.status === 'approved');
+    const terakhir = disetujui.length ? disetujui[disetujui.length - 1] : null;
+
+    res.json({
+      project_id: projectId,
+      project_number: proyek.project_number,
+      periods: periode.map((p: any) => ({
+        id: p.id, period_no: p.period_no, status: p.status,
+        cutoff_date: p.cutoff_date ? String(p.cutoff_date).slice(0, 10) : null,
+        period_start: p.period_start ? String(p.period_start).slice(0, 10) : null,
+        period_end: p.period_end ? String(p.period_end).slice(0, 10) : null,
+        // null untuk periode yang belum disetujui — angkanya memang belum ada,
+        // dan nol akan terbaca sebagai "tidak ada kemajuan".
+        planned_pct: p.planned_pct === null ? null : Number(p.planned_pct),
+        claimed_pct: p.claimed_pct === null ? null : Number(p.claimed_pct),
+        earned_pct: p.earned_pct === null ? null : Number(p.earned_pct),
+        checksum: p.checksum,
+        submitted_by_name: p.submitted_by_name, approved_by_name: p.approved_by_name,
+        approved_at: p.approved_at, rejection_reason: p.rejection_reason,
+      })),
+      // Deret kurva-S: hanya periode yang DISETUJUI yang masuk.
+      kurva: disetujui.map((p: any) => ({
+        period_no: p.period_no,
+        cutoff_date: String(p.cutoff_date).slice(0, 10),
+        planned_pct: Number(p.planned_pct),
+        earned_pct: Number(p.earned_pct),
+      })),
+      current: terbuka ? {
+        id: terbuka.id, period_no: terbuka.period_no, status: terbuka.status,
+        cutoff_date: String(terbuka.cutoff_date).slice(0, 10),
+        rejection_reason: terbuka.rejection_reason,
+        lines: barisTerbuka.map((l: any) => ({
+          id: l.id, wbs_id: l.wbs_id, wbs_code: l.wbs_code, name: l.wbs_name,
+          weight_pct: Number(l.weight_pct),
+          baseline_qty: l.baseline_qty === null ? null : Number(l.baseline_qty),
+          unit: l.unit,
+          planned_pct: Number(l.planned_pct),
+          claimed_pct: Number(l.claimed_pct),
+          prev_approved_pct: Number(l.prev_approved_pct),
+          claimed_qty: l.claimed_qty === null ? null : Number(l.claimed_qty),
+          evidence_note: l.evidence_note, evidence_ref: l.evidence_ref,
+        })),
+      } : null,
+      ringkasan: {
+        jml_periode: periode.length,
+        jml_disetujui: disetujui.length,
+        earned_pct: terakhir ? Number(terakhir.earned_pct) : null,
+        planned_pct: terakhir ? Number(terakhir.planned_pct) : null,
+        // Positif = di depan jadwal, negatif = terlambat. Dinyatakan, tidak
+        // perlu dihitung sendiri oleh pembaca.
+        deviasi_pct: terakhir
+          ? Math.round((Number(terakhir.earned_pct) - Number(terakhir.planned_pct)) * 100) / 100
+          : null,
+        // Eksposur: yang diklaim tapi tidak disetujui pada periode terakhir.
+        klaim_tidak_disetujui_pct: terakhir
+          ? Math.round((Number(terakhir.claimed_pct) - Number(terakhir.earned_pct)) * 100) / 100
+          : null,
+      },
+    });
+  } catch (err: any) {
+    console.error('Error membaca progress:', err);
     res.status(500).json({ error: err.message });
   }
 });

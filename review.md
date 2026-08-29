@@ -2890,6 +2890,98 @@ negative cross-project test. Fase 1: WBS/CBS + baseline + cost-code handoff.
 Fase 2: schedule logic dan progress cut-off/approval. Fase 3: EVM, S-curve,
 forecast, serta cash-flow terintegrasi.
 
+**[DEV] FASE 2 DITERAPKAN (progress cut-off) — 29 Agustus 2026**
+
+Kriteria terima #3: *"Periodic progress cut-off menyimpan planned, claimed,
+verified, approved, evidence, quantity installed, dan approver. Roll-up memakai
+bobot baseline; status task tidak langsung menjadi earned progress."*
+
+### Tiga angka, disimpan terpisah
+
+`project_progress_periods` + `project_progress_lines` menyimpan untuk tiap work
+package tiap periode: **planned** (seharusnya sudah berapa persen menurut
+baseline jadwal), **claimed** (yang diakui lapangan), **approved** (yang
+disetujui setelah diperiksa). Meleburnya jadi satu "progress" menghapus justru
+informasi yang dicari — selisih claimed↔approved adalah **eksposur**, selisih
+approved↔planned adalah **keterlambatan**. Keduanya dilaporkan sebagai angka
+tersendiri.
+
+`planned` dihitung dari `project_schedule_baseline` pada tanggal cut-off, linier
+terhadap durasi. Linier dipilih karena baseline belum menyimpan kurva per
+aktivitas; begitu ia ada, penggantinya ada di satu tempat saja.
+
+### Status task berhenti menjadi earned progress
+
+Ini inti butirnya. Urutan sumber progress sekarang: **periode disetujui →
+WBS-tertimbang dari task → hitungan task lama**, dan `progress_source`
+menyebutkan mana yang dipakai. Pohon WBS membawa `earned_pct` (disetujui) dan
+`progress_pct` (dari task) sebagai **dua kolom berbeda** — yang satu bukti, yang
+satu baru niat.
+
+Diperagakan lewat mutasi (status task dikembalikan menang): satu task ditandai
+Done membuat progress proyek melonjak `28% → 100%`.
+
+### Aturan yang ditegakkan
+
+| Aturan | Kode galat |
+|---|---|
+| Klaim yang NAIK wajib berbukti | `KLAIM_TANPA_BUKTI` |
+| Klaim tidak boleh mundur di bawah yang sudah disetujui | `KLAIM_MUNDUR` |
+| Persetujuan tidak boleh melebihi klaim | `PERSETUJUAN_MELEBIHI_KLAIM` |
+| Persetujuan tidak boleh di bawah persetujuan sebelumnya | `PERSETUJUAN_MUNDUR` |
+| Satu periode terbuka pada satu waktu | `PERIODE_MASIH_TERBUKA` |
+| Cut-off tidak boleh mundur | `CUTOFF_MUNDUR` |
+| Periode disetujui beku (klaim/approve/reject ditolak) | `PERIODE_TERKUNCI` / `TRANSISI_TIDAK_SAH` |
+| Penolakan wajib beralasan | `ALASAN_WAJIB` |
+
+Penyetuju **boleh menurunkan** angka per baris — itu justru gunanya pemeriksaan.
+Yang tidak boleh: menyetujui lebih besar dari yang diklaim (memberi progress
+yang tidak pernah diminta siapa pun). Penyetuju yang sama dengan pengaju bukan
+pelanggaran teknis, tapi **dicatat ke `project_activities`** apa adanya — bukan
+disembunyikan, mengikuti pola yang sama dengan revision ledger.
+
+Yang ditolak kembali ke **draft**, bukan status terminal: yang ditolak memang
+harus bisa diperbaiki lapangan lalu diajukan lagi.
+
+### Tes
+
+`tests/progress-cutoff.ts` — **56 asersi**, `npm run test:cutoff`. Skenario
+intinya: klaim beton 30% dipotong penyetuju jadi 20%, sementara galian disetujui
+100%. Dengan bobot 90/10 → earned **28%**, claimed tetap tercatat **37%**,
+selisih **9%** dilaporkan sebagai eksposur.
+
+Mutation check (persetujuan boleh melebihi klaim + status task menang) →
+**14 kegagalan**:
+
+```
+FAIL earned dilaporkan              → dapat 91   (menyetujui 90% dari klaim 30%)
+FAIL progressnya tetap 28           → dapat 100  (satu task Done)
+FAIL klaim tak disetujui 9%         → dapat -54
+```
+
+`test:all` **2455 lulus, 0 gagal**. Residu nol.
+
+### Layar
+
+Tab **📈 Progress Cut-off**: earned / rencana / deviasi / klaim-belum-disetujui,
+tabel klaim per work package dengan kolom bukti, tombol Ajukan–Setujui–Tolak
+sesuai status, dan riwayat periode berikut penyetujunya.
+
+### Yang sengaja TIDAK dikerjakan
+
+- Kolom **`verified`** sebagai tahap ketiga (QC memverifikasi sebelum approver
+  menyetujui) belum ada. Menambahkannya sebagai kolom tanpa peran yang
+  benar-benar memakainya hanya menghasilkan angka yang selalu sama dengan
+  approved — itu kolom bohong. Perlu keputusan siapa yang memegang peran itu.
+- **Unggah berkas bukti** belum; `evidence_note` dan `evidence_ref` masih teks.
+  Berkas menyentuh klasifikasi nginx `/uploads` (lihat CLAUDE.md), jadi harus
+  diputuskan dulu ia masuk kelompok mana.
+- **EVM (PV/EV/AC, SPI/CPI)** — Fase 3. Datanya kini ada (planned/earned per
+  periode + biaya per work package), tapi AC belum bisa dipercaya sebelum
+  PO/AP membawa `wbs_id`.
+
+---
+
 **[DEV] FASE 1 DITERAPKAN (WBS/CBS) — 29 Agustus 2026**
 
 Fase 1 dikerjakan menyusul: WBS/CBS + bobot baseline + cost code. Fase 2
