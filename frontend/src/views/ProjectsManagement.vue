@@ -69,6 +69,15 @@
       <p class="mt-4 text-gray-500">Loading projects...</p>
     </div>
 
+    <!-- Gagal muat dibedakan dari "memang belum ada project": keduanya
+         menghasilkan daftar kosong, tapi artinya jauh berbeda. -->
+    <div v-else-if="galat" class="text-center py-12 bg-white rounded-lg shadow border border-red-200">
+      <p class="text-sm text-red-700">{{ galat }}</p>
+      <button @click="loadProjects" class="mt-4 text-red-600 hover:text-red-800 font-medium">
+        Coba lagi
+      </button>
+    </div>
+
     <div v-else-if="filteredProjects.length === 0" class="text-center py-12 bg-white rounded-lg shadow">
       <p class="text-xl text-gray-500">No projects found.</p>
       <button 
@@ -284,6 +293,7 @@ const projects = ref<any[]>([]);
 const clients = ref<any[]>([]);
 const users = ref<any[]>([]);
 const loading = ref(true);
+const galat = ref('');
 const showCreateModal = ref(false);
 
 const searchQuery = ref('');
@@ -306,115 +316,21 @@ const loadProjects = async () => {
   loading.value = true;
   try {
     const { data } = await api.get('/projects');
-    projects.value = data && data.length > 0 ? data : mockProjects();
-  } catch (error) {
+    // Daftar KOSONG adalah jawaban yang sah — dulu justru itu yang memicu
+    // enam project software fiktif muncul, tidak dibedakan secara visual dari
+    // project bisnis sungguhan. Kegagalan API pun diisi data yang sama, jadi
+    // layar yang rusak terlihat persis seperti layar yang sehat.
+    projects.value = Array.isArray(data) ? data : (data?.data || []);
+    galat.value = '';
+  } catch (error: any) {
     console.error('Failed to load projects:', error);
-    projects.value = mockProjects();
+    projects.value = [];
+    galat.value = error?.response?.data?.error || 'Gagal memuat daftar project.';
   } finally {
     loading.value = false;
   }
 };
 
-const mockProjects = () => {
-  return [
-    { 
-      id: 1, 
-      title: 'Mobile App Development', 
-      client_name: 'Tech Startup Inc', 
-      client_id: 1,
-      project_number: 'PRJ-001',
-      status: 'in_progress', 
-      progress: 65,
-      price: 25000,
-      start_date: '2026-01-10',
-      deadline: '2026-06-30',
-      created_at: '2026-01-10',
-      description: 'Develop a cross-platform mobile application',
-      assigned_to: 1,
-      manager_name: 'John Doe'
-    },
-    { 
-      id: 2, 
-      title: 'Website Redesign', 
-      client_name: 'Fashion Boutique Co', 
-      client_id: 2,
-      project_number: 'PRJ-002',
-      status: 'in_progress', 
-      progress: 45,
-      price: 15000,
-      start_date: '2026-02-01',
-      deadline: '2026-04-15',
-      created_at: '2026-02-01',
-      description: 'Complete redesign of e-commerce website',
-      assigned_to: 2,
-      manager_name: 'Jane Smith'
-    },
-    { 
-      id: 3, 
-      title: 'Cloud Migration', 
-      client_name: 'Enterprise Solutions Ltd', 
-      client_id: 3,
-      project_number: 'PRJ-003',
-      status: 'open', 
-      progress: 0,
-      price: 50000,
-      start_date: '2026-03-01',
-      deadline: '2026-08-31',
-      created_at: '2026-02-15',
-      description: 'Migrate on-premise infrastructure to cloud',
-      assigned_to: 3,
-      manager_name: 'Mike Johnson'
-    },
-    { 
-      id: 4, 
-      title: 'Data Analytics Dashboard', 
-      client_name: 'Analytics Corp', 
-      client_id: 4,
-      project_number: 'PRJ-004',
-      status: 'completed', 
-      progress: 100,
-      price: 18000,
-      start_date: '2025-11-15',
-      deadline: '2026-01-31',
-      created_at: '2025-11-15',
-      description: 'Build real-time analytics dashboard',
-      assigned_to: 1,
-      manager_name: 'John Doe'
-    },
-    { 
-      id: 5, 
-      title: 'API Integration', 
-      client_name: 'Financial Services Corp', 
-      client_id: 5,
-      project_number: 'PRJ-005',
-      status: 'in_progress', 
-      progress: 30,
-      price: 12000,
-      start_date: '2026-01-20',
-      deadline: '2026-05-20',
-      created_at: '2026-01-20',
-      description: 'Integrate third-party payment APIs',
-      assigned_to: 2,
-      manager_name: 'Jane Smith'
-    },
-    { 
-      id: 6, 
-      title: 'Security Audit', 
-      client_name: 'HealthCare Systems Inc', 
-      client_id: 6,
-      project_number: 'PRJ-006',
-      status: 'open', 
-      progress: 15,
-      price: 8500,
-      start_date: '2026-02-10',
-      deadline: '2026-03-31',
-      created_at: '2026-02-10',
-      description: 'Comprehensive security assessment',
-      assigned_to: 4,
-      manager_name: 'Sarah Wilson'
-    }
-  ];
-};
 
 const loadMetadata = async () => {
   try {

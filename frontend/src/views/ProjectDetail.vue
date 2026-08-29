@@ -775,7 +775,7 @@ const openTaskModal = (task: any = null) => {
 const saveTask = async (taskData: any) => {
   try {
     if (editingTask.value) {
-      await api.put(`/projects/tasks/${editingTask.value.id}`, taskData);
+      await api.put(`/projects/${project.value.id}/tasks/${editingTask.value.id}`, taskData);
     } else {
       await api.post(`/projects/${project.value.id}/tasks`, taskData);
     }
@@ -793,7 +793,7 @@ const updateTaskStatus = async (taskId: number, newStatus: string) => {
     const task = tasks.value.find(t => t.id === taskId);
     if (task) {
       task.status = newStatus;
-      await api.put(`/projects/tasks/${taskId}`, { ...task, status: newStatus });
+      await api.put(`/projects/${project.value.id}/tasks/${taskId}`, { ...task, status: newStatus });
     }
     if (activeTab.value === 'milestones') loadMilestones();
   } catch (error) {
@@ -805,7 +805,7 @@ const updateTaskStatus = async (taskId: number, newStatus: string) => {
 const deleteTask = async (taskId: number) => {
   if (!confirm('Are you sure you want to delete this task?')) return;
   try {
-    await api.delete(`/projects/tasks/${taskId}`);
+    await api.delete(`/projects/${project.value.id}/tasks/${taskId}`);
     loadTasks();
     if (activeTab.value === 'milestones') loadMilestones();
   } catch (error) {
@@ -821,7 +821,7 @@ const openMilestoneModal = (milestone: any = null) => {
 const saveMilestone = async (milestoneData: any) => {
   try {
     if (editingMilestone.value) {
-      await api.put(`/projects/milestones/${editingMilestone.value.id}`, milestoneData);
+      await api.put(`/projects/${project.value.id}/milestones/${editingMilestone.value.id}`, milestoneData);
     } else {
       await api.post(`/projects/${project.value.id}/milestones`, milestoneData);
     }
@@ -836,7 +836,7 @@ const saveMilestone = async (milestoneData: any) => {
 const deleteMilestone = async (milestoneId: number) => {
   if (!confirm('Are you sure you want to delete this milestone?')) return;
   try {
-    await api.delete(`/projects/milestones/${milestoneId}`);
+    await api.delete(`/projects/${project.value.id}/milestones/${milestoneId}`);
     loadMilestones();
   } catch (error) {
     console.error('Failed to delete milestone:', error);

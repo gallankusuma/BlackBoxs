@@ -373,6 +373,19 @@ router.post('/:id/tasks', authMiddleware, async (req: Request, res: Response) =>
       milestone_id 
     } = req.body;
 
+    // Milestone milik project lain akan menautkan task ini ke seberang.
+    if (milestone_id) {
+      const ms: any = await dbGet(
+        'SELECT id FROM project_milestones WHERE id = ? AND project_id = ?',
+        [milestone_id, req.params.id]);
+      if (!ms) {
+        return res.status(400).json({
+          error: 'Milestone itu bukan milik project ini.',
+          code: 'MILESTONE_BEDA_PROJECT',
+        });
+      }
+    }
+
     const result = await dbRun(`
       INSERT INTO project_tasks (
         project_id, title, description, status, priority, 
@@ -397,53 +410,106 @@ router.post('/:id/tasks', authMiddleware, async (req: Request, res: Response) =>
 });
 
 // Update task
-router.put('/tasks/:taskId', authMiddleware, async (req: Request, res: Response) => {
+/**
+ * PROJ-CTRL fase 0 — mutasi task WAJIB menyebut projectnya.
+ *
+ * Versi lama: `UPDATE project_tasks SET ... WHERE id = ?` tanpa satu pun
+ * predikat project dan tanpa memeriksa berapa baris yang benar-benar terkena.
+ * Akibatnya `:taskId` apa pun bisa diubah atau dihapus dari layar project mana
+ * pun — tidak ada yang mengikat task ke projectnya. Bahayanya nyata ketika
+ * layar masih memakai task contoh ber-id 1–6: aksi terhadap "task contoh"
+ * mengubah task betulan bernomor sama milik project lain, sementara layar
+ * menampilkan nama task contoh.
+ *
+ * Sekarang `project_id` ikut jadi predikat, dan jumlah baris terkena diperiksa:
+ * nol berarti task itu bukan milik project tersebut → 404, bukan "berhasil"
+ * yang tidak mengubah apa pun.
+ */
+const scopeTask = (req: Request) => {
+  const projectId = Number(req.params.id ?? req.body?.project_id ?? req.query?.project_id);
+  const taskId = Number(req.params.taskId);
+  return { projectId, taskId, valid: Number.isInteger(projectId) && projectId > 0
+    && Number.isInteger(taskId) && taskId > 0 };
+};
+
+const ubahTask = async (req: Request, res: Response) => {
   try {
-    const { 
-      title, 
-      description, 
-      status, 
-      priority, 
-      start_date, 
-      due_date, 
-      assigned_to, 
-      milestone_id 
-    } = req.body;
+    const { projectId, taskId, valid } = scopeTask(req);
+    if (!valid) {
+      return res.status(400).json({
+        error: 'Perubahan task harus menyebut project-nya.',
+        code: 'PROJECT_SCOPE_WAJIB',
+      });
+    }
+    const { title, description, status, priority, start_date, due_date,
+            assigned_to, milestone_id } = req.body;
 
-    await dbRun(`
-      UPDATE project_tasks SET 
-        title = ?, 
-        description = ?, 
-        status = ?, 
-        priority = ?, 
-        start_date = ?, 
-        due_date = ?, 
-        assigned_to = ?, 
-        milestone_id = ?
-      WHERE id = ?
-    `, [
-      title || null, description || null, status || null, priority || null, 
-      start_date || null, due_date || null, assigned_to || null, milestone_id || null, 
-      req.params.taskId
-    ]);
+    // milestone_id yang menunjuk milestone project LAIN akan menautkan task ke
+    // project seberang lewat pintu belakang.
+    if (milestone_id) {
+      const ms: any = await dbGet(
+        'SELECT id FROM project_milestones WHERE id = ? AND project_id = ?',
+        [milestone_id, projectId]);
+      if (!ms) {
+        return res.status(400).json({
+          error: 'Milestone itu bukan milik project ini.',
+          code: 'MILESTONE_BEDA_PROJECT',
+        });
+      }
+    }
 
+    const hasil: any = await dbRun(`
+      UPDATE project_tasks SET
+        title = ?, description = ?, status = ?, priority = ?,
+        start_date = ?, due_date = ?, assigned_to = ?, milestone_id = ?
+      WHERE id = ? AND project_id = ?
+    `, [title || null, description || null, status || null, priority || null,
+      start_date || null, due_date || null, assigned_to || null, milestone_id || null,
+      taskId, projectId]);
+
+    if (!hasil?.affectedRows) {
+      return res.status(404).json({
+        error: 'Task tidak ditemukan pada project ini.',
+        code: 'TASK_BUKAN_MILIK_PROJECT',
+      });
+    }
     res.json({ message: 'Task updated' });
   } catch (error) {
     console.error('Error updating task:', error);
     res.status(500).json({ error: 'Failed to update task' });
   }
-});
+};
 
-// Delete task
-router.delete('/tasks/:taskId', authMiddleware, async (req: Request, res: Response) => {
+const hapusTask = async (req: Request, res: Response) => {
   try {
-    await dbRun('DELETE FROM project_tasks WHERE id = ?', [req.params.taskId]);
+    const { projectId, taskId, valid } = scopeTask(req);
+    if (!valid) {
+      return res.status(400).json({
+        error: 'Penghapusan task harus menyebut project-nya.',
+        code: 'PROJECT_SCOPE_WAJIB',
+      });
+    }
+    const hasil: any = await dbRun(
+      'DELETE FROM project_tasks WHERE id = ? AND project_id = ?', [taskId, projectId]);
+    if (!hasil?.affectedRows) {
+      return res.status(404).json({
+        error: 'Task tidak ditemukan pada project ini.',
+        code: 'TASK_BUKAN_MILIK_PROJECT',
+      });
+    }
     res.json({ message: 'Task deleted' });
   } catch (error) {
     console.error('Error deleting task:', error);
     res.status(500).json({ error: 'Failed to delete task' });
   }
-});
+};
+
+router.put('/:id/tasks/:taskId', authMiddleware, ubahTask);
+router.delete('/:id/tasks/:taskId', authMiddleware, hapusTask);
+// Bentuk lama dipertahankan supaya klien lama tidak putus, tapi ia kini
+// menuntut `project_id` juga — tanpa itu 400, bukan diam-diam mengubah apa pun.
+router.put('/tasks/:taskId', authMiddleware, ubahTask);
+router.delete('/tasks/:taskId', authMiddleware, hapusTask);
 
 // ... Existing routes ...
 
@@ -471,10 +537,17 @@ router.get('/:id/milestones', authMiddleware, async (req: Request, res: Response
 router.post('/:id/milestones', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { title, description, due_date, status, amount } = req.body;
+    if (!title || !String(title).trim()) {
+      return res.status(400).json({ error: 'Milestone harus punya judul.', code: 'JUDUL_WAJIB' });
+    }
+    // `description` dan `due_date` yang tidak dikirim sampai ke bind sebagai
+    // `undefined`, dan mysql2 menolaknya — membuat milestone tanpa deskripsi
+    // atau tanggal selalu gagal 500, padahal keduanya memang boleh kosong.
     const result = await dbRun(`
       INSERT INTO project_milestones (project_id, title, description, due_date, status, amount)
       VALUES (?, ?, ?, ?, ?, ?)
-    `, [req.params.id, title, description, due_date, status || 'Pending', amount || 0]);
+    `, [req.params.id, String(title).trim(), description || null, due_date || null,
+        status || 'Pending', amount || 0]);
 
     // Log Activity
     await dbRun(`
@@ -490,32 +563,72 @@ router.post('/:id/milestones', authMiddleware, async (req: Request, res: Respons
 });
 
 // Update milestone
-router.put('/milestones/:milestoneId', authMiddleware, async (req: Request, res: Response) => {
-  try {
-    const { title, description, due_date, status, amount } = req.body;
-    await dbRun(`
-      UPDATE project_milestones SET 
-        title = ?, description = ?, due_date = ?, status = ?, amount = ?
-      WHERE id = ?
-    `, [title || null, description || null, due_date || null, status || null, amount || null, req.params.milestoneId]);
+/** Milestone: aturan yang sama persis dengan task di atas. */
+const scopeMilestone = (req: Request) => {
+  const projectId = Number(req.params.id ?? req.body?.project_id ?? req.query?.project_id);
+  const milestoneId = Number(req.params.milestoneId);
+  return { projectId, milestoneId, valid: Number.isInteger(projectId) && projectId > 0
+    && Number.isInteger(milestoneId) && milestoneId > 0 };
+};
 
+const ubahMilestone = async (req: Request, res: Response) => {
+  try {
+    const { projectId, milestoneId, valid } = scopeMilestone(req);
+    if (!valid) {
+      return res.status(400).json({
+        error: 'Perubahan milestone harus menyebut project-nya.',
+        code: 'PROJECT_SCOPE_WAJIB',
+      });
+    }
+    const { title, description, due_date, status, amount } = req.body;
+    const hasil: any = await dbRun(`
+      UPDATE project_milestones SET
+        title = ?, description = ?, due_date = ?, status = ?, amount = ?
+      WHERE id = ? AND project_id = ?
+    `, [title || null, description || null, due_date || null, status || null,
+      amount || null, milestoneId, projectId]);
+    if (!hasil?.affectedRows) {
+      return res.status(404).json({
+        error: 'Milestone tidak ditemukan pada project ini.',
+        code: 'MILESTONE_BUKAN_MILIK_PROJECT',
+      });
+    }
     res.json({ message: 'Milestone updated' });
   } catch (error) {
     console.error('Error updating milestone:', error);
     res.status(500).json({ error: 'Failed to update milestone' });
   }
-});
+};
 
-// Delete milestone
-router.delete('/milestones/:milestoneId', authMiddleware, async (req: Request, res: Response) => {
+const hapusMilestone = async (req: Request, res: Response) => {
   try {
-    await dbRun('DELETE FROM project_milestones WHERE id = ?', [req.params.milestoneId]);
+    const { projectId, milestoneId, valid } = scopeMilestone(req);
+    if (!valid) {
+      return res.status(400).json({
+        error: 'Penghapusan milestone harus menyebut project-nya.',
+        code: 'PROJECT_SCOPE_WAJIB',
+      });
+    }
+    const hasil: any = await dbRun(
+      'DELETE FROM project_milestones WHERE id = ? AND project_id = ?',
+      [milestoneId, projectId]);
+    if (!hasil?.affectedRows) {
+      return res.status(404).json({
+        error: 'Milestone tidak ditemukan pada project ini.',
+        code: 'MILESTONE_BUKAN_MILIK_PROJECT',
+      });
+    }
     res.json({ message: 'Milestone deleted' });
   } catch (error) {
     console.error('Error deleting milestone:', error);
     res.status(500).json({ error: 'Failed to delete milestone' });
   }
-});
+};
+
+router.put('/:id/milestones/:milestoneId', authMiddleware, ubahMilestone);
+router.delete('/:id/milestones/:milestoneId', authMiddleware, hapusMilestone);
+router.put('/milestones/:milestoneId', authMiddleware, ubahMilestone);
+router.delete('/milestones/:milestoneId', authMiddleware, hapusMilestone);
 
 // ... Existing routes ...
 

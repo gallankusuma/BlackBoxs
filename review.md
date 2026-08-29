@@ -2890,6 +2890,91 @@ negative cross-project test. Fase 1: WBS/CBS + baseline + cost-code handoff.
 Fase 2: schedule logic dan progress cut-off/approval. Fase 3: EVM, S-curve,
 forecast, serta cash-flow terintegrasi.
 
+**[DEV] FASE 0 DITERAPKAN — 29 Agustus 2026**
+
+Seluruh Fase 0 dikerjakan. Fase 1–3 (WBS/CBS, schedule logic, EVM) **belum** dan
+memang bukan bagian fase ini.
+
+Ketiga klaim Fase 0 saya periksa di kode, dan **ketiganya benar**.
+
+### 1. Mutasi task/milestone tidak punya predikat project — ini yang paling serius
+
+`PUT /projects/tasks/:taskId` dan `DELETE` memakai `WHERE id = ?` **tanpa satu
+pun predikat project** dan tanpa memeriksa baris terkena. Milestone sama persis.
+Artinya task apa pun bisa diubah atau dihapus dari layar project mana pun.
+
+Diperagakan lewat mutasi (predikatnya dicabut lagi, tes dijalankan):
+
+```
+FAIL judul task B tidak berubah → dapat "DISEROBOT DARI A"
+FAIL status task B tidak berubah → dapat "Done"
+FAIL task B masih ada         → dapat 0
+```
+
+Project A **mengubah judul dan status task milik project B, lalu
+menghapusnya**. Reviewer benar bahwa bahayanya berlipat ketika layar masih
+memakai task contoh ber-id 1–6 — aksi terhadap "task contoh" mengenai task
+betulan bernomor sama.
+
+Sekarang `project_id` ikut jadi predikat dan `affectedRows` diperiksa: nol
+berarti task itu bukan milik project tersebut → **404 `TASK_BUKAN_MILIK_PROJECT`**,
+bukan "berhasil" yang tidak mengubah apa pun. Rute bertingkat
+`PUT/DELETE /projects/:id/tasks/:taskId` (dan milestone) ditambahkan dan dipakai
+layar. Bentuk lama dipertahankan supaya klien lama tidak putus, tapi ia kini
+menuntut `project_id` — tanpa itu **400 `PROJECT_SCOPE_WAJIB`**, dan dengan
+`project_id` yang salah tetap 404.
+
+**Satu pintu belakang tambahan yang tidak ada di daftar:** `milestone_id` tidak
+pernah diperiksa kepemilikannya, jadi task project A bisa ditautkan ke milestone
+project B — project seberang ikut terseret lewat relasi. Ditutup di jalur
+create maupun update (**400 `MILESTONE_BEDA_PROJECT`**).
+
+### 2. Mock di jalur produksi
+
+`ProjectDetail.vue` sudah dibereskan di butir SCHED-R57 (task, milestone,
+project gagal-muat, daftar user, dan Recent Activity — lihat catatan di sana).
+Yang tersisa di butir ini `ProjectsManagement.vue`:
+
+```
+projects.value = data && data.length > 0 ? data : mockProjects();
+```
+
+Perhatikan `data.length > 0` — **daftar kosong yang sah** pun diganti enam
+project fiktif, bukan hanya kegagalan API. Empty state-nya sebenarnya sudah ada
+di template dan tidak pernah bisa tercapai. Mock dicabut; kegagalan API kini
+punya keadaan sendiri, terpisah dari "memang belum ada project" — keduanya
+menghasilkan nol baris tapi artinya jauh berbeda.
+
+### 3. Cacat yang tersingkap saat menulis tesnya
+
+`POST /projects/:id/milestones` meneruskan `description` dan `due_date` apa
+adanya ke bind. Keduanya `undefined` kalau tidak dikirim, dan mysql2 menolaknya
+— **membuat milestone tanpa deskripsi atau tanggal selalu gagal 500**, padahal
+kedua kolom itu memang nullable. Diperbaiki, sekalian judul kosong ditolak 400
+alih-alih menyimpan milestone tanpa nama.
+
+### Tes
+
+`tests/project-scope.ts` — **34 asersi**, `npm run test:scope-project`. Dua
+project dengan task dan milestone masing-masing, lalu dibuktikan tidak ada satu
+pun jalur yang bisa menyeberang. Mutation check: predikat project dicabut →
+**8 kegagalan**.
+
+`test:all` **2302 lulus, 0 gagal**.
+
+### Yang sengaja TIDAK dikerjakan di fase ini
+
+- Kriteria terima #3 (baseline immutable + change order → revisi baru) sudah
+  terpenuhi lewat CONTRACT-R51 dan SCHED-R57, tapi **belum terikat ke WBS/CBS**
+  — itu Fase 1.
+- Bobot progress, S-curve, dan EVM (kriteria #4) butuh `project_wbs`/`cost_codes`
+  lebih dulu. Menambahkannya sekarang berarti menghitung bobot dari jumlah task,
+  yang justru cacat yang sedang dikeluhkan.
+- `total_spent` yang menyamakan seluruh nilai PO dengan actual cost, dan endpoint
+  GET yang menulis `client_projects.actual_cost`, **masih ada**. Itu pemisahan
+  commitment/accrual/actual — Fase 1, dan menyentuhnya setengah jalan akan
+  membuat dua sumber kebenaran untuk "actual".
+
 **Acceptance criteria yang dapat diuji:**
 
 1. Project kosong menampilkan empty state, kegagalan API menampilkan error, dan
