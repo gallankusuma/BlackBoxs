@@ -3663,6 +3663,24 @@ koreksi melalui reversal yang mengacu event asal. Hilangkan atau arahkan endpoin
 aggregate-only `/pay` ke service/transaction yang sama. Uji dua pembayaran
 paralel, duplicate retry, overpayment, failure setelah INSERT, dan reversal.
 
+**[DEV] DITERAPKAN PENUH — 29 Agustus 2026**
+
+Sebagian besar sudah ditutup sebelumnya (`catatPembayaran()`: satu transaction,
+`FOR UPDATE`, batas `pembayaran <= sisa`, idempotensi lewat `reference_number`,
+dan `/pay` diarahkan ke jalur yang sama). **Dua sisa** ditutup sekarang:
+
+- **Reversal.** `POST /accounts-{payable,receivable}/:id/payments/:paymentId/reverse`
+  menulis event BARU bernilai negatif yang menunjuk event asalnya
+  (`reverses_payment_id` ↔ `reversed_by_payment_id`). Baris aslinya tidak
+  disentuh. Aggregate **dihitung ulang dari jumlah seluruh event**, bukan
+  dikurangi dari angka lama — kalau keduanya pernah melenceng, inilah yang
+  meluruskannya. Terikat induknya, jadi pembayaran milik tagihan lain tidak bisa
+  dibalik dari sini (404 `PAYMENT_BUKAN_MILIK_TAGIHAN`); pembatalan ganda 409,
+  membalik event pembatalan 400.
+- **Event tetap immutable.** Tes menghitung jalur tulisnya di seluruh
+  `src/routes/`: nol `DELETE`, dan `UPDATE` hanya diizinkan untuk menautkan
+  `reversed_by_payment_id` — bukan mengubah nominal.
+
 ### [ARCH-RISK / DESIGN-GAP — prioritas tinggi] Finance belum mempunyai satu subledger proyek dan accounting kernel
 
 **Kemampuan saat ini.** Baseline yang harus dipertahankan sudah cukup luas: AP/AR
@@ -3725,6 +3743,95 @@ vendor, biaya aktual, pajak, retention, dan margin proyek dapat benar sendiri-se
 namun gagal direkonsiliasi. Perusahaan tidak memiliki close bulanan, audit trail
 ke dokumen asal, cash forecast terpercaya, atau project P&L yang dapat dipakai
 untuk klaim, lender, pajak, dan keputusan EAC.
+
+**[DEV] LANGKAH PERTAMA DITERAPKAN — 29 Agustus 2026**
+
+Butir ini adalah accounting kernel penuh (CoA, jurnal double-entry, periode &
+hard close, subledger P2P dan O2C) dan **bergantung pada WBS/CBS yang belum
+ada** — Fase 1 project controls. Saya tidak mengaku menutupnya. Yang dikerjakan
+adalah irisan yang berdiri sendiri dan menjadi fondasinya, ditambah satu cacat
+yang ternyata jauh lebih parah dari yang tertulis.
+
+### Klaim #2 lebih parah dari "bukan laporan proyek aktif" — endpointnya mati total
+
+Reviewer menulis P&L membaca master legacy. Yang saya temukan: **kedua tabelnya
+tidak ada sama sekali.**
+
+```
+tabel_projects_legacy_ada        0
+tabel_estimator_proposals_ada    0   (di PRODUKSI)
+dev punya tabel projects?        0
+```
+
+Dan pencarian seluruh source memang tidak menemukan satu pun
+`INSERT INTO estimator_proposals`. Jadi `GET /finance/project-pl` tidak sekadar
+melaporkan proyek yang keliru — ia menjawab **500 pada setiap panggilan**
+(`ER_NO_SUCH_TABLE`), dibuktikan langsung: `status /project-pl: 500`. Belum ada
+satu pun layar yang memanggilnya, jadi kegagalannya tidak pernah terlihat
+siapa pun.
+
+Sekarang sumbernya master yang benar-benar dipakai alur Deal: `client_projects`
++ ledger kontrak. Nilai kontraknya **dihitung** `original_value + Σ CO approved`
+mengikuti aturan CONTRACT-R51, tidak pernah dari kolom denormalisasi. Project
+tanpa kontrak (dibuat manual, bukan lewat Deal) memakai `budget` dan itu
+**dinyatakan** lewat `contract_source`, bukan disamarkan.
+
+Sesuai target design #4, tahapan biaya **dipisah, tidak dilebur**:
+`committed_cost` (PO), `invoiced_cost` (tagihan vendor diakui), `paid_cost`
+(kas keluar), `expense_cost`, dan `actual_cost`. Versi lama menghitung margin
+dari `(kontrak − committed) / kontrak` — memperlakukan PO yang baru dibuat
+sebagai biaya yang sudah terjadi, padahal barangnya belum tentu datang.
+`pending_co_value` dilaporkan terpisah. 500 → **200**.
+
+### Klaim #4 — AP/AR bisa diedit setelah dibayar
+
+Benar, dan dua bentuknya sama-sama berbahaya:
+
+- `PUT /accounts-payable/:id` menimpa `amount` dan `project_id` bebas. Menurunkan
+  nilai di bawah yang sudah dibayar membuat aggregate mustahil dijelaskan;
+  memindahkan `project_id` menggeser biaya antar proyek **tanpa jejak apa pun**.
+- `PUT /accounts-receivable/:id` menimpa `status` dari body. Invoice yang baru
+  dibayar 40% bisa ditandai `paid` lewat field bebas, dan aging maupun dashboard
+  langsung ikut berbohong. Diperagakan lewat mutasi:
+  `FAIL statusnya tetap turunan pembayaran → dapat "paid"`.
+
+Sekarang ada kunci posting (409 `POSTING_TERKUNCI` / `POSTING_TERKUNCI_PROJECT`),
+dan status AR **selalu turunan event pembayaran** — tidak bisa dimajukan lewat
+field bebas. Field deskriptif tetap boleh diperbaiki; yang dikunci hanya yang
+berkonsekuensi uang.
+
+Kuncinya sengaja pada **saldo yang masih menempel**, bukan pada ada-tidaknya
+riwayat: begitu seluruh pembayaran dibatalkan, dokumennya bisa dikoreksi lagi.
+Kalau dikunci selamanya, tagihan yang salah tidak punya jalan keluar selain
+menyunting database langsung — persis yang sedang dihindari.
+
+### Tes
+
+`tests/finance-subledger.ts` — **44 asersi**, `npm run test:finance-ledger`.
+Mutation check (kunci posting + status turunan dimatikan) → **4 kegagalan**.
+`test:all` **2353 lulus, 0 gagal**.
+
+### Yang MASIH TERBUKA dari butir ini
+
+Supaya tidak terbaca selesai padahal belum:
+
+| Bagian | Status |
+|---|---|
+| Project P&L bersumber master aktif + contract baseline | ✅ |
+| Commitment / accrual / actual dipisah | ✅ |
+| Event pembayaran immutable + reversal | ✅ |
+| Posting lock & status bukan field bebas | ✅ |
+| **CoA, jurnal double-entry, fiscal period & hard close** | ❌ belum ada sama sekali |
+| **Tiga sumber receivable disatukan** | ❌ belum |
+| **Subledger P2P (commitment→accrual→three-way match)** | ❌ belum |
+| **Retention, PPN/PPh, credit note, FX** | ❌ belum |
+| **Dimensi WBS/CBS pada jurnal** | ❌ menunggu Fase 1 project controls |
+
+Satu temuan tambahan yang memperjelas klaim #1: `accounts_receivable.customer_id`
+menunjuk tabel **`customers`**, sementara Sales, Project, dan P&L memakai
+**`clients`**. Jadi masternya bukan hanya tiga sumber invoice — pelanggannya pun
+dua tabel berbeda. Menyatukannya menyentuh data produksi dan **butuh keputusan
+Anda**, jadi saya tidak melakukannya sendiri.
 
 **Dependensi dan migrasi.** Bergantung pada contract/change-order review 14:45,
 WBS/CBS/project controls 15:28, construction ledger 16:30, serta Procurement

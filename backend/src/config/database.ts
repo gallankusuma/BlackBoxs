@@ -1160,6 +1160,26 @@ const ensureProjectScheduleBaselineSchema = async (connection: any) => {
   ]) await execSchemaEnsure(connection, sql);
 };
 
+/**
+ * FIN-SUBLEDGER — event pembayaran jadi source of truth yang bisa dikoreksi.
+ *
+ * Koreksi pembayaran sebelumnya tidak punya jalur sama sekali: satu-satunya
+ * cara membetulkan angka yang salah adalah menyunting `accounts_payable.amount`
+ * langsung, yang tidak meninggalkan jejak dan bisa membuat tagihan jadi lebih
+ * kecil daripada yang sudah dibayar. Sekarang koreksi ditulis sebagai event
+ * BARU bernilai negatif yang menunjuk event asalnya — riwayatnya tetap utuh
+ * dan selisihnya selalu bisa dijelaskan.
+ */
+const ensurePaymentReversalSchema = async (connection: any) => {
+  for (const t of ['ap_payments', 'ar_payments']) {
+    for (const sql of [
+      `ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS reverses_payment_id INT NULL`,
+      `ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS reversed_by_payment_id INT NULL`,
+      `ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS reversal_reason VARCHAR(500) NULL`,
+    ]) await execSchemaEnsure(connection, sql);
+  }
+};
+
 const ensureRouteModuleSchema = async (connection: any) => {
   const statements = [
     `CREATE TABLE IF NOT EXISTS inbox_notifications (
@@ -2453,6 +2473,7 @@ export async function initializeDatabase() {
     await ensureProposalScheduleSchema(connection);
     await ensureProposalResourceSchema(connection);
     await ensureProjectScheduleBaselineSchema(connection);
+    await ensurePaymentReversalSchema(connection);
     await ensureContractLedgerSchema(connection);
     await ensureMobilePinSchema(connection);
     await ensureAssetDepreciationSchema(connection);

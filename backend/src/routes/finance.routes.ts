@@ -679,6 +679,122 @@ const catatPembayaran = async (opts: {
   });
 };
 
+/**
+ * Batalkan satu pembayaran dengan event LAWAN, bukan dengan menghapusnya.
+ *
+ * Menghapus baris pembayaran menghilangkan bukti bahwa uangnya pernah tercatat;
+ * menyunting `amount` tagihan membuat angka berubah tanpa jejak. Keduanya
+ * membuat rekonisiliasi bank berhenti bisa dijelaskan. Reversal menulis event
+ * baru bernilai negatif yang menunjuk event asalnya — riwayatnya utuh, dan
+ * aggregate dihitung ulang dari jumlah seluruh event.
+ */
+const balikkanPembayaran = async (opts: {
+  jenis: 'AP' | 'AR'; id: any; paymentId: any; alasan?: string | null; userId?: any;
+}): Promise<any> => {
+  const tabel = opts.jenis === 'AP' ? 'accounts_payable' : 'accounts_receivable';
+  const tabelEvent = opts.jenis === 'AP' ? 'ap_payments' : 'ar_payments';
+  const kolomFk = opts.jenis === 'AP' ? 'ap_id' : 'ar_id';
+
+  return withTransaction(async tx => {
+    const induk: any = await tx.get(`SELECT * FROM ${tabel} WHERE id = ? FOR UPDATE`, [opts.id]);
+    if (!induk) return { error: 404, body: { error: `${opts.jenis} tidak ditemukan` } };
+
+    // Terikat induknya: tanpa ini `:paymentId` milik tagihan lain bisa dibalik
+    // dari sini, dan uangnya berpindah tagihan tanpa jejak.
+    const asli: any = await tx.get(
+      `SELECT * FROM ${tabelEvent} WHERE id = ? AND ${kolomFk} = ? FOR UPDATE`,
+      [opts.paymentId, opts.id]);
+    if (!asli) {
+      return { error: 404, body: {
+        error: 'Pembayaran tidak ditemukan pada tagihan ini.',
+        code: 'PAYMENT_BUKAN_MILIK_TAGIHAN',
+      } };
+    }
+    if (Number(asli.amount) < 0) {
+      return { error: 400, body: {
+        error: 'Baris ini sendiri adalah pembatalan; ia tidak bisa dibatalkan lagi.',
+        code: 'SUDAH_EVENT_PEMBATALAN',
+      } };
+    }
+    if (asli.reversed_by_payment_id) {
+      return { error: 409, body: {
+        error: 'Pembayaran ini sudah pernah dibatalkan.',
+        code: 'SUDAH_DIBATALKAN',
+        reversal_id: asli.reversed_by_payment_id,
+      } };
+    }
+
+    const lawan = await tx.run(
+      `INSERT INTO ${tabelEvent}
+        (${kolomFk}, payment_date, amount, payment_method, reference_number, notes,
+         created_by, reverses_payment_id, reversal_reason)
+       VALUES (?,?,?,?,?,?,?,?,?)`,
+      [opts.id, businessDate(), -Math.abs(Number(asli.amount)),
+       asli.payment_method || null,
+       asli.reference_number ? `REV-${asli.reference_number}` : null,
+       `Pembatalan pembayaran #${asli.id}`, opts.userId || null,
+       asli.id, opts.alasan || null]);
+
+    await tx.run(
+      `UPDATE ${tabelEvent} SET reversed_by_payment_id = ? WHERE id = ?`,
+      [lawan.insertId, asli.id]);
+
+    // Aggregate dihitung ulang dari SELURUH event, bukan dikurangi dari angka
+    // lama — kalau keduanya pernah melenceng, ini yang meluruskannya.
+    const jml: any = await tx.get(
+      `SELECT COALESCE(SUM(amount), 0) AS total FROM ${tabelEvent} WHERE ${kolomFk} = ?`,
+      [opts.id]);
+    const totalBaru = Math.round((Number(jml?.total) || 0) * 100) / 100;
+    const tagihan = Number(induk.amount || 0);
+    const statusBaru = totalBaru <= 0 ? 'unpaid' : (totalBaru >= tagihan ? 'paid' : 'partial');
+
+    await tx.run(`UPDATE ${tabel} SET paid_amount = ?, status = ? WHERE id = ?`,
+      [totalBaru, statusBaru, opts.id]);
+
+    if (opts.jenis === 'AP' && induk.po_schedule_id) {
+      await tx.run(
+        'UPDATE purchase_order_payment_schedules SET paid_amount = ?, status = ? WHERE id = ?',
+        [totalBaru, statusBaru, induk.po_schedule_id]);
+    }
+
+    return { ok: true as const, data: {
+      reversal_id: lawan.insertId, reversed_payment_id: asli.id,
+      paid_amount: totalBaru, status: statusBaru,
+      sisa: Math.round((tagihan - totalBaru) * 100) / 100,
+    } };
+  });
+};
+
+router.post('/accounts-payable/:id/payments/:paymentId/reverse', authMiddleware,
+  async (req: Request, res: Response) => {
+    try {
+      const hasil = await balikkanPembayaran({
+        jenis: 'AP', id: req.params.id, paymentId: req.params.paymentId,
+        alasan: req.body?.reason, userId: (req as any).userId,
+      });
+      if ('error' in hasil) return res.status(hasil.error).json(hasil.body);
+      res.status(201).json({ success: true, message: 'Pembayaran dibatalkan', data: hasil.data });
+    } catch (e) {
+      console.error('Error reversing AP payment:', e);
+      res.status(500).json({ error: 'Failed to reverse payment' });
+    }
+  });
+
+router.post('/accounts-receivable/:id/payments/:paymentId/reverse', authMiddleware,
+  async (req: Request, res: Response) => {
+    try {
+      const hasil = await balikkanPembayaran({
+        jenis: 'AR', id: req.params.id, paymentId: req.params.paymentId,
+        alasan: req.body?.reason, userId: (req as any).userId,
+      });
+      if ('error' in hasil) return res.status(hasil.error).json(hasil.body);
+      res.status(201).json({ success: true, message: 'Pembayaran dibatalkan', data: hasil.data });
+    } catch (e) {
+      console.error('Error reversing AR payment:', e);
+      res.status(500).json({ error: 'Failed to reverse payment' });
+    }
+  });
+
 router.put('/accounts-payable/:id/pay', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { amount } = req.body;
@@ -1058,16 +1174,96 @@ router.get('/accounts-payable/:id', authMiddleware, async (req: Request, res: Re
 });
 
 // PUT /accounts-payable/:id — update AP record
+/**
+ * Kunci posting: dokumen yang sudah punya pembayaran tidak bisa lagi diubah
+ * nilai atau projectnya.
+ *
+ * Sebelumnya `amount` dan `project_id` bebas ditimpa kapan saja. Menurunkan
+ * nilai tagihan di bawah yang sudah dibayar membuat aggregate mustahil
+ * dijelaskan, dan memindahkan `project_id` menggeser biaya antar proyek tanpa
+ * jejak apa pun. Keduanya juga membuat rekonsiliasi bank berhenti bisa
+ * dipertanggungjawabkan.
+ *
+ * Field deskriptif (nomor invoice, tanggal jatuh tempo, catatan) tetap boleh
+ * diperbaiki — yang dikunci hanya yang berkonsekuensi uang. Koreksi nilai
+ * dilakukan lewat pembatalan pembayaran, bukan dengan menyunting angkanya.
+ */
+const periksaKunciPosting = async (
+  jenis: 'AP' | 'AR', id: any, perubahan: { amount?: any; project_id?: any },
+  tx: any
+): Promise<{ error: number; body: any } | null> => {
+  const tabel = jenis === 'AP' ? 'accounts_payable' : 'accounts_receivable';
+  const tabelEvent = jenis === 'AP' ? 'ap_payments' : 'ar_payments';
+  const kolomFk = jenis === 'AP' ? 'ap_id' : 'ar_id';
+
+  const row: any = await tx.get(`SELECT * FROM ${tabel} WHERE id = ? FOR UPDATE`, [id]);
+  if (!row) return { error: 404, body: { error: `${jenis} tidak ditemukan` } };
+
+  const ev: any = await tx.get(
+    `SELECT COUNT(*) AS n, COALESCE(SUM(amount), 0) AS total
+     FROM ${tabelEvent} WHERE ${kolomFk} = ?`, [id]);
+  const terbayar = Math.round((Number(ev?.total) || 0) * 100) / 100;
+
+  // Kuncinya pada UANG YANG MASIH MENEMPEL, bukan pada ada-tidaknya riwayat.
+  // Kalau seluruh pembayaran sudah dibatalkan, saldonya nol dan dokumen itu
+  // memang harus bisa dikoreksi — kalau tidak, tagihan yang salah terkunci
+  // selamanya dan satu-satunya jalan keluar kembali menjadi menyunting
+  // database langsung.
+  const adaEvent = terbayar > 0.005;
+
+  if (adaEvent) {
+    const nilaiBaru = perubahan.amount === undefined ? null : Math.round(Number(perubahan.amount) * 100) / 100;
+    const nilaiLama = Math.round(Number(row.amount || 0) * 100) / 100;
+    if (nilaiBaru !== null && Math.abs(nilaiBaru - nilaiLama) > 0.005) {
+      return { error: 409, body: {
+        error: `${jenis} ini sudah dibayar ${terbayar}, jadi nilainya tidak bisa diubah. `
+             + 'Batalkan pembayarannya lebih dulu.',
+        code: 'POSTING_TERKUNCI',
+        paid_amount: terbayar,
+      } };
+    }
+    const projBaru = perubahan.project_id === undefined ? null
+      : (perubahan.project_id === null ? null : Number(perubahan.project_id));
+    const projLama = row.project_id === null ? null : Number(row.project_id);
+    if (perubahan.project_id !== undefined && projBaru !== projLama) {
+      return { error: 409, body: {
+        error: 'Project tidak bisa dipindah setelah ada pembayaran — biayanya akan bergeser tanpa jejak.',
+        code: 'POSTING_TERKUNCI_PROJECT',
+      } };
+    }
+  }
+
+  // Bahkan tanpa kunci posting, nilai di bawah yang sudah dibayar tidak masuk akal.
+  if (perubahan.amount !== undefined && Number(perubahan.amount) + 0.005 < terbayar) {
+    return { error: 400, body: {
+      error: `Nilai ${jenis} tidak boleh di bawah yang sudah dibayar (${terbayar}).`,
+      code: 'NILAI_DI_BAWAH_TERBAYAR',
+    } };
+  }
+  return null;
+};
+
 router.put('/accounts-payable/:id', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { vendor_invoice_number, invoice_date, due_date, amount, description, project_id, notes } = req.body;
-    await dbRun(
-      `UPDATE accounts_payable SET vendor_invoice_number=?, invoice_date=?, due_date=?, amount=?,
-       description=?, project_id=?, notes=? WHERE id=?`,
-      [vendor_invoice_number||null, invoice_date||null, due_date||null, amount, description||null, project_id||null, notes||null, req.params.id]
-    );
+    const hasil = await withTransaction(async tx => {
+      const tolak = await periksaKunciPosting('AP', req.params.id, { amount, project_id }, tx);
+      if (tolak) return tolak;
+      const upd: any = await tx.run(
+        `UPDATE accounts_payable SET vendor_invoice_number=?, invoice_date=?, due_date=?, amount=?,
+         description=?, project_id=?, notes=? WHERE id=?`,
+        [vendor_invoice_number||null, invoice_date||null, due_date||null, amount,
+         description||null, project_id||null, notes||null, req.params.id]
+      );
+      if (!upd?.affectedRows) return { error: 404, body: { error: 'AP tidak ditemukan' } };
+      return { ok: true as const };
+    });
+    if ('error' in hasil) return res.status(hasil.error).json(hasil.body);
     res.json({ success: true, message: 'AP updated' });
-  } catch (e) { res.status(500).json({ error: 'Failed to update AP' }); }
+  } catch (e) {
+    console.error('Error updating AP:', e);
+    res.status(500).json({ error: 'Failed to update AP' });
+  }
 });
 
 // POST /accounts-payable/:id/payments — record payment
@@ -1159,13 +1355,37 @@ router.put('/accounts-receivable/:id', authMiddleware, async (req: Request, res:
     const { invoice_number, invoice_date, due_date, amount, tax_percent, description, notes, status } = req.body;
     const taxPct = Number(tax_percent||11);
     const taxAmt = Number(amount||0) * taxPct / 100;
-    await dbRun(
-      `UPDATE accounts_receivable SET invoice_number=?, invoice_date=?, due_date=?, amount=?,
-       tax_percent=?, tax_amount=?, description=?, notes=?, status=? WHERE id=?`,
-      [invoice_number||null, invoice_date||null, due_date||null, amount, taxPct, taxAmt, description||null, notes||null, status||'open', req.params.id]
-    );
-    res.json({ success: true, message: 'AR updated' });
-  } catch (e) { res.status(500).json({ error: 'Failed to update AR' }); }
+    const hasil = await withTransaction(async tx => {
+      const tolak = await periksaKunciPosting('AR', req.params.id, { amount }, tx);
+      if (tolak) return tolak;
+
+      // `status` sebelumnya ikut ditimpa dari body: satu invoice yang belum
+      // dibayar sepeser pun bisa ditandai `paid` lewat field bebas, dan aging
+      // maupun dashboard langsung ikut berbohong. Status kini SELALU turunan
+      // dari event pembayarannya.
+      const ev: any = await tx.get(
+        'SELECT COALESCE(SUM(amount), 0) AS total FROM ar_payments WHERE ar_id = ?',
+        [req.params.id]);
+      const terbayar = Math.round((Number(ev?.total) || 0) * 100) / 100;
+      const nilai = Math.round(Number(amount || 0) * 100) / 100;
+      const statusTurunan = terbayar <= 0 ? (status === 'cancelled' ? 'cancelled' : 'open')
+        : (terbayar >= nilai ? 'paid' : 'partial');
+
+      const upd: any = await tx.run(
+        `UPDATE accounts_receivable SET invoice_number=?, invoice_date=?, due_date=?, amount=?,
+         tax_percent=?, tax_amount=?, description=?, notes=?, status=? WHERE id=?`,
+        [invoice_number||null, invoice_date||null, due_date||null, amount, taxPct, taxAmt,
+         description||null, notes||null, statusTurunan, req.params.id]
+      );
+      if (!upd?.affectedRows) return { error: 404, body: { error: 'AR tidak ditemukan' } };
+      return { ok: true as const, status: statusTurunan };
+    });
+    if ('error' in hasil) return res.status(hasil.error).json(hasil.body);
+    res.json({ success: true, message: 'AR updated', status: (hasil as any).status });
+  } catch (e) {
+    console.error('Error updating AR:', e);
+    res.status(500).json({ error: 'Failed to update AR' });
+  }
 });
 
 // POST /accounts-receivable/:id/payments — record collection
@@ -1249,33 +1469,119 @@ router.get('/dashboard', authMiddleware, async (req: Request, res: Response) => 
 
 // ===== PROJECT P&L =====
 
+/**
+ * Project P&L — FIN-SUBLEDGER langkah pertama.
+ *
+ * Versi lama membaca `projects` dan `estimator_proposals`. **Kedua tabel itu
+ * tidak ada** — tidak di produksi, tidak di dev — dan pencarian seluruh source
+ * tidak menemukan satu pun `INSERT INTO estimator_proposals`. Jadi endpoint ini
+ * bukan sekadar melaporkan proyek yang keliru: ia menjawab **500 pada setiap
+ * panggilan** (`ER_NO_SUCH_TABLE`). Belum ada layar yang memakainya, jadi
+ * kegagalannya tidak pernah terlihat siapa pun.
+ *
+ * Sekarang sumbernya master yang benar-benar dipakai alur Deal: `client_projects`
+ * dan ledger kontrak. Nilai kontraknya **dihitung** `original_value + Σ CO
+ * approved` — mengikuti aturan CONTRACT-R51, tidak pernah dibaca dari kolom
+ * denormalisasi yang akan melenceng.
+ *
+ * Commitment, actual, dan billed dilaporkan sebagai angka yang BERBEDA, tidak
+ * dijumlahkan menjadi satu "biaya". Versi lama menghitung margin dari
+ * `(kontrak − committed) / kontrak`, yakni memperlakukan PO yang baru dibuat
+ * sebagai biaya yang sudah terjadi — barangnya belum tentu datang dan
+ * invoicenya belum tentu ada.
+ */
 router.get('/project-pl', authMiddleware, async (req: Request, res: Response) => {
   try {
+    // `LIMIT ?` ditolak MySQL sebagai prepared statement — divalidasi lalu
+    // disisipkan.
+    const batas = Math.min(Math.max(parseInt(String(req.query.limit ?? '20'), 10) || 20, 1), 200);
+
     const projects = await dbAll(
-      `SELECT p.id, p.name, p.code, p.status,
-              ep.grand_total as contract_value,
-              (SELECT SUM(ar.amount) FROM accounts_receivable ar WHERE ar.project_id = p.id) as billed_amount,
-              (SELECT SUM(ar.paid_amount) FROM accounts_receivable ar WHERE ar.project_id = p.id) as collected_amount,
-              (SELECT SUM(po.total_amount) FROM purchase_orders po WHERE po.project_id = p.id AND po.status != 'rejected') as committed_cost,
-              (SELECT SUM(ap.paid_amount) FROM accounts_payable ap WHERE ap.project_id = p.id) as actual_cost,
-              (SELECT SUM(pe.amount) FROM project_expenses pe WHERE pe.project_id = p.id) as expense_cost
-       FROM projects p
-       LEFT JOIN estimator_proposals ep ON ep.project_id = p.id AND ep.status = 'approved'
+      `SELECT p.id, p.project_name AS name, p.project_number AS code, p.status,
+              p.budget,
+              c.id AS contract_id, c.contract_number, c.original_value,
+              (SELECT COALESCE(SUM(co.value_delta), 0) FROM change_orders co
+                WHERE co.contract_id = c.id AND co.status = 'approved') AS approved_co_value,
+              (SELECT COALESCE(SUM(co.value_delta), 0) FROM change_orders co
+                WHERE co.contract_id = c.id AND co.status = 'submitted') AS pending_co_value,
+              (SELECT COALESCE(SUM(ar.amount), 0) FROM accounts_receivable ar
+                WHERE ar.project_id = p.id) AS billed_amount,
+              (SELECT COALESCE(SUM(ar.paid_amount), 0) FROM accounts_receivable ar
+                WHERE ar.project_id = p.id) AS collected_amount,
+              (SELECT COALESCE(SUM(po.total_amount), 0) FROM purchase_orders po
+                WHERE po.project_id = p.id AND po.status NOT IN ('rejected', 'cancelled')) AS committed_cost,
+              (SELECT COALESCE(SUM(ap.amount), 0) FROM accounts_payable ap
+                WHERE ap.project_id = p.id) AS invoiced_cost,
+              (SELECT COALESCE(SUM(ap.paid_amount), 0) FROM accounts_payable ap
+                WHERE ap.project_id = p.id) AS paid_cost,
+              (SELECT COALESCE(SUM(pe.amount), 0) FROM project_expenses pe
+                WHERE pe.project_id = p.id) AS expense_cost
+       FROM client_projects p
+       LEFT JOIN contracts c ON c.project_id = p.id
        ORDER BY p.created_at DESC
-       LIMIT 20`, []
+       LIMIT ${batas}`, []
     ) as any[];
+
+    const bulat = (n: any) => Math.round((Number(n) || 0) * 100) / 100;
+
     const result = projects.map((p: any) => {
-      const contract = Number(p.contract_value||0);
-      const billed = Number(p.billed_amount||0);
-      const collected = Number(p.collected_amount||0);
-      const cost = Number(p.actual_cost||0) + Number(p.expense_cost||0);
-      const committed = Number(p.committed_cost||0);
-      const margin = contract > 0 ? ((contract - committed) / contract * 100) : 0;
-      return { ...p, contract_value: contract, billed_amount: billed, collected_amount: collected,
-               actual_cost: cost, committed_cost: committed, gross_margin_pct: margin };
+      const asli = bulat(p.original_value);
+      const coDisetujui = bulat(p.approved_co_value);
+      // Nilai yang mengikat sekarang. Kalau projectnya belum punya kontrak
+      // (mis. dibuat manual, bukan lewat Deal), `budget` dipakai sebagai
+      // penggantinya dan itu DINYATAKAN lewat `contract_source`.
+      const adaKontrak = p.contract_id != null;
+      const nilaiKontrak = adaKontrak ? bulat(asli + coDisetujui) : bulat(p.budget);
+
+      const invoiced = bulat(p.invoiced_cost);
+      const dibayar = bulat(p.paid_cost);
+      const biayaLain = bulat(p.expense_cost);
+      const committed = bulat(p.committed_cost);
+
+      // "Actual" = tagihan vendor yang sudah diakui + biaya project. PO yang
+      // baru dibuat TIDAK termasuk — itu commitment, bukan biaya yang terjadi.
+      const actual = bulat(invoiced + biayaLain);
+
+      return {
+        id: p.id,
+        name: p.name,
+        code: p.code,
+        status: p.status,
+        contract_id: p.contract_id,
+        contract_number: p.contract_number,
+        contract_source: adaKontrak ? 'contract_ledger' : 'project_budget',
+        original_value: adaKontrak ? asli : null,
+        approved_co_value: adaKontrak ? coDisetujui : null,
+        // Dilaporkan terpisah: yang belum disetujui bukan bagian nilai kontrak,
+        // tapi menyembunyikannya membuat eksposur tak terlihat sampai terlambat.
+        pending_co_value: adaKontrak ? bulat(p.pending_co_value) : null,
+        contract_value: nilaiKontrak,
+
+        billed_amount: bulat(p.billed_amount),
+        collected_amount: bulat(p.collected_amount),
+        unbilled_amount: bulat(nilaiKontrak - bulat(p.billed_amount)),
+
+        // Tiga tahap biaya dipisah, tidak dilebur jadi satu angka.
+        committed_cost: committed,
+        invoiced_cost: invoiced,
+        paid_cost: dibayar,
+        expense_cost: biayaLain,
+        actual_cost: actual,
+
+        gross_margin: bulat(nilaiKontrak - actual),
+        gross_margin_pct: nilaiKontrak > 0
+          ? Math.round((nilaiKontrak - actual) / nilaiKontrak * 10000) / 100 : null,
+        // Margin kalau seluruh commitment nanti benar-benar menjadi biaya.
+        margin_at_commitment_pct: nilaiKontrak > 0
+          ? Math.round((nilaiKontrak - Math.max(actual, committed + biayaLain)) / nilaiKontrak * 10000) / 100
+          : null,
+      };
     });
-    res.json({ data: result });
-  } catch (e) { res.status(500).json({ error: 'Failed to fetch project P&L' }); }
+    res.json({ data: result, count: result.length });
+  } catch (e: any) {
+    console.error('Error project P&L:', e);
+    res.status(500).json({ error: 'Failed to fetch project P&L' });
+  }
 });
 
 // ===== FUND REQUEST DOCUMENTS =====
