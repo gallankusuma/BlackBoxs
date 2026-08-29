@@ -137,6 +137,21 @@
         <!-- ═══ RAB TAB ═══ -->
         <div v-show="activeProposalTab === 'rab'">
 
+        <!-- ══ Dari MTO ke RAB ═════════════════════════════════════════════
+             Jarak terlebar di alur estimator: gambar sudah jadi kuantitas,
+             lalu berhenti. Mengubahnya jadi penawaran berarti mencari AHSP
+             satu per satu di katalog ribuan baris — untuk SETIAP baris MTO.
+             Satu pondasi footplate saja menghasilkan enam. -->
+        <div v-if="isEditable" class="mb-4 flex flex-wrap items-center gap-3">
+          <button @click="bukaUsulRab"
+            class="px-4 py-2 bg-teal-600 text-white rounded-lg text-sm font-semibold hover:bg-teal-700">
+            📐 Buat RAB dari MTO
+          </button>
+          <span class="text-xs text-gray-500">
+            Mengusulkan AHSP untuk tiap baris kuantitas; Anda yang memutuskan.
+          </span>
+        </div>
+
         <!-- ══ Baris belum lengkap ══════════════════════════════════════════
              Template wizard meninggalkan baris ber-AHSP dan berharga satuan
              sungguhan tapi volumenya nol. Kalau proposal menjadi kontrak,
@@ -1265,6 +1280,110 @@
     </div>
   </div>
 
+
+  <!-- ══ Modal: usulan RAB dari MTO ══════════════════════════════════════════
+       Mesin mengusulkan, manusia memutuskan — pemisahan yang sama dengan
+       asisten gambar. Yang tertulis hanya baris yang dicentang. -->
+  <div v-if="showUsulRab" class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
+       @click.self="showUsulRab = false">
+    <div class="bg-white rounded-xl shadow-2xl w-[95vw] max-w-5xl h-[88vh] flex flex-col">
+      <div class="px-5 py-3 bg-gradient-to-r from-teal-600 to-emerald-600 text-white rounded-t-xl flex items-center justify-between">
+        <div>
+          <h3 class="font-bold">📐 Buat RAB dari MTO</h3>
+          <p class="text-xs text-teal-100">Usulan dihitung dari kode & satuan baris — bukan AI, jadi hasilnya sama tiap kali.</p>
+        </div>
+        <button @click="showUsulRab = false" class="text-2xl leading-none hover:text-teal-200">×</button>
+      </div>
+
+      <div class="px-5 py-3 border-b flex flex-wrap items-center gap-3">
+        <label class="text-sm text-gray-600">Elemen MTO</label>
+        <select v-model="usulElemenId" @change="muatUsulRab"
+          class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm min-w-[18rem]">
+          <option value="">— pilih elemen —</option>
+          <option v-for="el in mtoQuantities" :key="el.element_id" :value="el.element_id">
+            {{ el.element_name }} ({{ el.element_type }})
+          </option>
+        </select>
+        <span v-if="usulRab" class="text-xs text-gray-500">
+          {{ usulRab.ringkasan.jml_baris }} baris ·
+          {{ usulRab.ringkasan.sudah_tertaut }} sudah tertaut ·
+          {{ usulRab.ringkasan.tanpa_usulan }} tanpa kandidat
+        </span>
+      </div>
+
+      <div class="flex-1 overflow-y-auto p-5">
+        <p v-if="usulRabLoading" class="text-center text-gray-500 py-10">Menghitung usulan…</p>
+        <p v-else-if="!usulRab" class="text-center text-gray-400 py-10">Pilih elemen MTO di atas.</p>
+        <table v-else class="w-full text-sm">
+          <thead class="bg-gray-50 text-gray-600">
+            <tr>
+              <th class="w-8 px-2 py-2"></th>
+              <th class="text-left px-3 py-2 font-medium">Baris MTO</th>
+              <th class="text-right px-3 py-2 font-medium">Volume</th>
+              <th class="text-left px-3 py-2 font-medium">AHSP yang diusulkan</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="l in usulRab.lines" :key="l.line_code" class="border-t align-top">
+              <td class="px-2 py-2">
+                <input type="checkbox" v-model="pilihanRab[l.line_code]"
+                  :disabled="l.sudah_tertaut || !l.usulan.length">
+              </td>
+              <td class="px-3 py-2">
+                <div class="font-medium text-gray-800">{{ l.label }}</div>
+                <div class="text-xs text-gray-400">{{ l.line_code }}</div>
+                <div v-if="l.sudah_tertaut" class="text-xs text-emerald-700 mt-1">
+                  sudah tertaut ke {{ l.tertaut_ke.ahsp_code }}
+                </div>
+              </td>
+              <td class="px-3 py-2 text-right whitespace-nowrap">
+                {{ l.net_quantity }} {{ l.unit }}
+                <div v-if="l.waste_percent > 0" class="text-xs text-gray-400">
+                  gross {{ l.gross_quantity }}
+                </div>
+              </td>
+              <td class="px-3 py-2">
+                <template v-if="l.sudah_tertaut">
+                  <span class="text-xs text-gray-400">—</span>
+                </template>
+                <!-- Tidak ada kandidat berarti katalog memang belum punya AHSP
+                     bersatuan itu. Dikatakan, bukan dibiarkan kosong. -->
+                <template v-else-if="!l.usulan.length">
+                  <span class="text-xs text-amber-700">
+                    Belum ada AHSP bersatuan {{ l.unit }} yang cocok di katalog.
+                  </span>
+                </template>
+                <template v-else>
+                  <select v-model="ahspPilihan[l.line_code]"
+                    class="w-full border border-gray-300 rounded px-2 py-1 text-sm">
+                    <option v-for="u in l.usulan" :key="u.ahsp_id" :value="u.ahsp_id">
+                      {{ u.kode }} — {{ u.name }} ({{ formatNumber(u.harga_satuan) }}/{{ u.satuan }}) · skor {{ u.skor }}
+                    </option>
+                  </select>
+                  <p class="text-xs text-gray-500 mt-1">
+                    {{ (l.usulan.find((x: any) => x.ahsp_id === ahspPilihan[l.line_code]) || l.usulan[0]).alasan.join(' · ') }}
+                  </p>
+                </template>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="px-5 py-3 border-t flex items-center justify-between">
+        <span class="text-sm text-gray-600">{{ jmlDipilihRab }} baris dipilih</span>
+        <div class="flex gap-2">
+          <button @click="showUsulRab = false"
+            class="px-4 py-2 border border-gray-300 rounded-lg text-sm font-semibold">Batal</button>
+          <button @click="terapkanUsulRab" :disabled="!jmlDipilihRab || usulRabSibuk"
+            class="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-semibold hover:bg-emerald-700 disabled:opacity-50">
+            {{ usulRabSibuk ? 'Membuat…' : `Buat ${jmlDipilihRab} item RAB` }}
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
 </template>
 
 <script setup lang="ts">
@@ -1489,6 +1608,76 @@ const mtoTypeIcons: Record<string, string> = {
 const mtoTypeColors: Record<string, string> = {
   foundation: '#fef9c3', column: '#dbeafe', beam: '#ede9fe',
   slab: '#d1fae5', wall: '#f3f4f6', roof: '#fee2e2'
+};
+
+const showUsulRab = ref(false);
+const usulElemenId = ref<any>('');
+const usulRab = ref<any>(null);
+const usulRabLoading = ref(false);
+const usulRabSibuk = ref(false);
+const pilihanRab = ref<Record<string, boolean>>({});
+const ahspPilihan = ref<Record<string, number>>({});
+
+const jmlDipilihRab = computed(() =>
+  Object.entries(pilihanRab.value).filter(([, v]) => v).length);
+
+const bukaUsulRab = async () => {
+  showUsulRab.value = true;
+  if (!mtoQuantities.value.length) {
+    try {
+      const { data } = await api.get(`/estimator/proposals/${proposalId}/mto-quantities`);
+      mtoQuantities.value = data.elements || [];
+    } catch (e) { console.error('Gagal memuat elemen MTO', e); }
+  }
+  if (!usulElemenId.value && mtoQuantities.value.length) {
+    usulElemenId.value = mtoQuantities.value[0].element_id;
+    await muatUsulRab();
+  }
+};
+
+const muatUsulRab = async () => {
+  if (!usulElemenId.value) { usulRab.value = null; return; }
+  usulRabLoading.value = true;
+  pilihanRab.value = {};
+  ahspPilihan.value = {};
+  try {
+    const { data } = await api.get(
+      `/estimator/proposals/${proposalId}/mto/${usulElemenId.value}/usul-rab`);
+    usulRab.value = data;
+    // Kandidat teratas dipilih sebagai bawaan, tapi centangnya TIDAK — supaya
+    // tidak ada yang tertulis hanya karena layar dibuka.
+    for (const l of data.lines || []) {
+      if (l.usulan?.length) ahspPilihan.value[l.line_code] = l.usulan[0].ahsp_id;
+    }
+  } catch (e: any) {
+    usulRab.value = null;
+    alert(e?.response?.data?.error || 'Gagal memuat usulan RAB.');
+  } finally {
+    usulRabLoading.value = false;
+  }
+};
+
+const terapkanUsulRab = async () => {
+  if (usulRabSibuk.value) return;
+  const lines = Object.entries(pilihanRab.value)
+    .filter(([, v]) => v)
+    .map(([code]) => ({ line_code: code, ahsp_id: ahspPilihan.value[code] }))
+    .filter(x => !!x.ahsp_id);
+  if (!lines.length) return;
+  usulRabSibuk.value = true;
+  try {
+    const { data } = await api.post(
+      `/estimator/proposals/${proposalId}/mto/${usulElemenId.value}/rab`, { lines });
+    await loadProposal();
+    await muatUsulRab();
+    alert(data?.message || 'Item RAB dibuat.');
+  } catch (e: any) {
+    // Kode galat dibawa apa adanya — UNIT_MISMATCH dan BARIS_SUDAH_TERTAUT
+    // adalah dua hal berbeda.
+    alert(e?.response?.data?.error || 'Gagal membuat item RAB.');
+  } finally {
+    usulRabSibuk.value = false;
+  }
 };
 
 const openMTOPicker = async (item: any) => {

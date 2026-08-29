@@ -13,6 +13,7 @@ import { bacaGambarAi, jalankanTeksAi } from './ai.routes';
 import { dbAll, dbGet, dbRun , withTransaction, TxRunner} from '../config/database';
 import { nextSequentialCode } from './procurement.routes';
 import { buatKontrakDariProposal, checksumBaseline } from './contract.routes';
+import { usulkanAhsp, normalSatuan } from '../modules/estimator/mto/cocok-ahsp';
 import { uang, bulatUang, jumlahUang } from '../utils/money';
 
 const router = Router();
@@ -5170,6 +5171,245 @@ router.put('/proposals/:id/status', authMiddleware, bolehUbah, async (req: Reque
     res.status(500).json({ error: 'Failed to update status' });
   }
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MTO → RAB: dari kuantitas menjadi penawaran berharga
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Usulkan AHSP untuk tiap baris MTO sebuah elemen. **Tidak menulis apa pun.**
+ *
+ * Inilah jarak terlebar di alur estimator sebelum ini: gambar sudah menjadi
+ * kuantitas, lalu berhenti. Untuk mengubahnya jadi penawaran, seseorang harus
+ * mencari AHSP satu per satu di katalog berisi ribuan baris, membuat item RAB,
+ * lalu menautkannya — untuk SETIAP baris MTO. Sepuluh baris dari satu pondasi
+ * berarti sepuluh kali pekerjaan itu.
+ *
+ * Pencocokannya sengaja **deterministik, bukan AI**: ia perbandingan kata dan
+ * satuan terhadap katalog yang sudah ada, jadi hasilnya sama tiap kali,
+ * bisa diaudit, dan tidak memakan kuota. Tiap usulan membawa skor dan
+ * alasannya supaya estimator bisa menolaknya dengan dasar.
+ */
+router.get('/proposals/:id/mto/:elementId/usul-rab', authMiddleware, bolehLihat,
+  async (req: Request, res: Response) => {
+    try {
+      const proposalId = req.params.id;
+      const elementId = Number(req.params.elementId);
+      if (!Number.isInteger(elementId) || elementId <= 0) {
+        return res.status(400).json({ error: 'Id elemen tidak valid' });
+      }
+
+      const element: any = await dbGet(
+        `SELECT id, element_type, element_name, parameters FROM engineering_inputs
+         WHERE id = ? AND scope_type = 'proposal' AND scope_id = ?`, [elementId, proposalId]);
+      if (!element) return res.status(404).json({ error: 'Elemen MTO tidak ditemukan pada proposal ini' });
+
+      const params = typeof element.parameters === 'string'
+        ? JSON.parse(element.parameters || '{}') : (element.parameters || {});
+      const mto = calculateMto(element.element_type, params);
+
+      // Katalog dibaca sekali untuk seluruh baris — bukan sekali per baris.
+      const katalog: any[] = await dbAll(
+        `SELECT id, kode, name, satuan, harga_satuan, work_category
+         FROM ahsp_headers WHERE status = 'active'`, []);
+
+      // Item RAB yang SUDAH menaut ke elemen ini, supaya baris yang sudah
+      // beres tidak diusulkan lagi seolah-olah belum dikerjakan.
+      const existing: any[] = await dbAll(
+        `SELECT id, ahsp_code_snapshot, mto_link FROM proposal_items
+         WHERE proposal_id = ? AND mto_link IS NOT NULL`, [proposalId]);
+      const sudahTertaut: Record<string, any> = {};
+      for (const it of existing) {
+        let link: any;
+        try { link = typeof it.mto_link === 'string' ? JSON.parse(it.mto_link) : it.mto_link; } catch { continue; }
+        if (link && Number(link.element_id) === elementId && link.line_code) {
+          sudahTertaut[String(link.line_code)] = it;
+        }
+      }
+
+      const baris = mto.lines.map(l => {
+        const tertaut = sudahTertaut[l.code];
+        return {
+          line_code: l.code,
+          label: l.label,
+          unit: l.unit,
+          net_quantity: l.net_quantity,
+          gross_quantity: l.gross_quantity,
+          waste_percent: l.waste_percent,
+          sudah_tertaut: !!tertaut,
+          tertaut_ke: tertaut ? { item_id: tertaut.id, ahsp_code: tertaut.ahsp_code_snapshot } : null,
+          // Baris yang sudah tertaut tidak perlu usulan lagi.
+          usulan: tertaut ? [] : usulkanAhsp(
+            { code: l.code, label: l.label, unit: l.unit }, katalog as any),
+        };
+      });
+
+      const belum = baris.filter(b => !b.sudah_tertaut);
+      res.json({
+        element_id: elementId,
+        element_type: element.element_type,
+        element_name: element.element_name,
+        variant: mto.variant,
+        lines: baris,
+        ringkasan: {
+          jml_baris: baris.length,
+          sudah_tertaut: baris.length - belum.length,
+          // Dinyatakan terpisah: baris tanpa satu pun kandidat berarti
+          // katalognya memang belum punya AHSP bersatuan itu — bukan bug, tapi
+          // pekerjaan yang harus diselesaikan orang.
+          ada_usulan: belum.filter(b => b.usulan.length > 0).length,
+          tanpa_usulan: belum.filter(b => b.usulan.length === 0).length,
+        },
+        // Nol penulisan — sama seperti endpoint usulan gambar.
+        tersimpan: false,
+      });
+    } catch (err: any) {
+      console.error('Error mengusulkan AHSP untuk MTO:', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+/**
+ * Terapkan pilihan estimator: buat item RAB dan tautkan ke baris MTO-nya,
+ * dalam SATU transaction.
+ *
+ * Yang diterapkan hanya yang disebut pemanggil — endpoint usulan di atas tidak
+ * pernah menerapkan apa pun sendiri. Ini pemisahan yang sama dengan asisten
+ * gambar: mesin mengusulkan, manusia memutuskan, dan hanya keputusan manusia
+ * yang tertulis.
+ */
+router.post('/proposals/:id/mto/:elementId/rab', authMiddleware, bolehUbah,
+  async (req: Request, res: Response) => {
+    try {
+      const proposalId = req.params.id;
+      const elementId = Number(req.params.elementId);
+      if (!Number.isInteger(elementId) || elementId <= 0) {
+        return res.status(400).json({ error: 'Id elemen tidak valid' });
+      }
+      const pilihan: any[] = Array.isArray(req.body?.lines) ? req.body.lines : [];
+      if (!pilihan.length) {
+        return res.status(400).json({
+          error: 'Tidak ada baris yang dipilih.', code: 'PILIHAN_KOSONG' });
+      }
+
+      const hasil = await withTransaction(async (tx: TxRunner) => {
+        const terkunci = await proposalLockTx(proposalId, tx);
+        if (terkunci) return { error: terkunci.status, body: terkunci.body };
+
+        const element: any = await tx.get(
+          `SELECT id, element_type, element_name, parameters FROM engineering_inputs
+           WHERE id = ? AND scope_type = 'proposal' AND scope_id = ? FOR UPDATE`,
+          [elementId, proposalId]);
+        if (!element) return { error: 404, body: { error: 'Elemen MTO tidak ditemukan pada proposal ini' } };
+
+        const params = typeof element.parameters === 'string'
+          ? JSON.parse(element.parameters || '{}') : (element.parameters || {});
+        const mto = calculateMto(element.element_type, params);
+
+        // Versi formula diambil dari baris tersimpan kalau ada — sama seperti
+        // penaut manual, supaya gerbang submit bisa mendeteksi drift.
+        const tersimpan = await bacaBarisTersimpan(elementId, tx);
+        const versiFormula = tersimpan?.[0]?.formula_version || FORMULA_VERSION;
+
+        let orderNo = Number((await tx.get(
+          'SELECT COALESCE(MAX(order_no), 0) AS n FROM proposal_items WHERE proposal_id = ?',
+          [proposalId]) as any)?.n || 0);
+
+        const dibuat: any[] = [];
+        for (const p of pilihan) {
+          const kode = String(p?.line_code || '');
+          const line = mto.lines.find(l => l.code === kode);
+          if (!line) {
+            return { error: 404, body: {
+              error: `Baris MTO "${kode}" tidak ada pada elemen ini.`,
+              code: 'LINE_NOT_FOUND',
+              available: mto.lines.map(l => l.code) } };
+          }
+
+          const ahsp: any = await tx.get(
+            `SELECT id, kode, name, satuan, harga_satuan FROM ahsp_headers
+             WHERE id = ? AND status = 'active'`, [p?.ahsp_id]);
+          if (!ahsp) {
+            return { error: 400, body: {
+              error: `AHSP ${p?.ahsp_id} tidak ditemukan atau tidak aktif.`,
+              code: 'AHSP_TIDAK_VALID', line_code: kode } };
+          }
+
+          // Saringan yang sama dengan penaut manual — supaya jalur massal tidak
+          // bisa membuat tautan yang jalur satuan menolaknya.
+          const cek = checkUnitCompatibility(line.unit, ahsp.satuan);
+          if (!cek.compatible) {
+            return { error: 409, body: {
+              error: cek.reason, code: 'UNIT_MISMATCH',
+              line_code: kode, mto_unit: line.unit, rab_unit: ahsp.satuan } };
+          }
+
+          // Baris yang sudah tertaut tidak digandakan.
+          const adaTaut: any = await tx.get(
+            `SELECT id FROM proposal_items
+             WHERE proposal_id = ? AND mto_link IS NOT NULL
+               AND JSON_EXTRACT(mto_link, '$.element_id') = ?
+               AND JSON_UNQUOTE(JSON_EXTRACT(mto_link, '$.line_code')) = ?`,
+            [proposalId, elementId, kode]);
+          if (adaTaut) {
+            return { error: 409, body: {
+              error: `Baris "${kode}" sudah tertaut ke item RAB #${adaTaut.id}.`,
+              code: 'BARIS_SUDAH_TERTAUT', line_code: kode, item_id: adaTaut.id } };
+          }
+
+          const qty = line.net_quantity;   // RAB selalu net (EST-MTO-R13)
+          const harga = Number(ahsp.harga_satuan) || 0;
+          orderNo++;
+
+          const ins = await tx.run(
+            `INSERT INTO proposal_items
+              (proposal_id, ahsp_id, ahsp_code_snapshot, ahsp_name_snapshot, unit_snapshot,
+               unit_price_snapshot, qty, total_price, order_no, is_section, mto_link)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+            [proposalId, ahsp.id, ahsp.kode, ahsp.name, ahsp.satuan, harga,
+             qty, Math.round(qty * harga * 100) / 100, orderNo,
+             JSON.stringify({
+               element_id: element.id,
+               previous_qty: 0,
+               element_type: element.element_type,
+               element_name: element.element_name,
+               line_code: line.code,
+               basis: 'net',
+               gross_quantity: line.gross_quantity,
+               waste_percent: line.waste_percent,
+               value: qty,
+               unit: line.unit,
+               formula_version: versiFormula,
+             })]);
+
+          dibuat.push({
+            item_id: ins.insertId, line_code: line.code, label: line.label,
+            ahsp_code: ahsp.kode, ahsp_name: ahsp.name,
+            qty, unit: ahsp.satuan, unit_price: harga,
+            total: Math.round(qty * harga * 100) / 100,
+          });
+        }
+
+        await recalculateProposal(proposalId as string, tx);
+        const ringkas: any = await tx.get(
+          'SELECT direct_cost, total_project FROM proposals WHERE id = ?', [proposalId]);
+
+        await catatAudit(tx, proposalId, (req as any).userId, 'mto_to_rab', 'items',
+          null, `${dibuat.length} item RAB dibuat dari elemen MTO #${elementId}`);
+
+        return { ok: true as const, dibuat, total_project: Number(ringkas?.total_project) || 0 };
+      });
+
+      if ((hasil as any).error) return res.status((hasil as any).error).json((hasil as any).body);
+      res.status(201).json({
+        message: `${(hasil as any).dibuat.length} item RAB dibuat dan tertaut ke MTO.`,
+        ...(hasil as any),
+      });
+    } catch (err: any) {
+      console.error('Error membuat RAB dari MTO:', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
 
 // ============================================
 // PROPOSAL RESUME (Resource Summary)

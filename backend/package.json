@@ -25,7 +25,7 @@
     "test:deploy-gate": "bash ../scripts/test-deploy-gate.sh",
     "test:client-proposals": "tsx tests/client-proposals.ts",
     "test:proposal-commercial": "tsx tests/proposal-commercial.ts",
-    "test:all": "npm run test:deps && npm test && npm run test:mto && npm run test:mto-link && npm run test:http && npm run test:pin && npm run test:office && npm run test:rbac && npm run test:asset && npm run test:depreciation && npm run test:procurement && npm run test:prospects && npm run test:rab && npm run test:payment-schedule && npm run test:schedule-ownership && npm run test:client-proposals && npm run test:proposal-commercial && npm run test:qto-summary && npm run test:estimator-rbac && npm run test:drift && npm run test:link-authority && npm run test:ahsp-active && npm run test:klasifikasi && npm run test:lifecycle && npm run test:template-prov && npm run test:item-identity && npm run test:durability && npm run test:diskusi && npm run test:mto-usul && npm run test:deploy-gate && npm run test:register && npm run test:revisi && npm run test:jadwal && npm run test:kontrak && npm run test:register-list && npm run test:penawaran && npm run test:uploads && npm run test:kebersihan && npm run test:resume && npm run test:baseline-jadwal && npm run test:scope-project && npm run test:versi && npm run test:finance-ledger && npm run test:wbs && npm run test:cutoff && npm run test:evm",
+    "test:all": "npm run test:deps && npm test && npm run test:mto && npm run test:mto-link && npm run test:http && npm run test:pin && npm run test:office && npm run test:rbac && npm run test:asset && npm run test:depreciation && npm run test:procurement && npm run test:prospects && npm run test:rab && npm run test:payment-schedule && npm run test:schedule-ownership && npm run test:client-proposals && npm run test:proposal-commercial && npm run test:qto-summary && npm run test:estimator-rbac && npm run test:drift && npm run test:link-authority && npm run test:ahsp-active && npm run test:klasifikasi && npm run test:lifecycle && npm run test:template-prov && npm run test:item-identity && npm run test:durability && npm run test:diskusi && npm run test:mto-usul && npm run test:deploy-gate && npm run test:register && npm run test:revisi && npm run test:jadwal && npm run test:kontrak && npm run test:register-list && npm run test:penawaran && npm run test:uploads && npm run test:kebersihan && npm run test:resume && npm run test:baseline-jadwal && npm run test:scope-project && npm run test:versi && npm run test:finance-ledger && npm run test:wbs && npm run test:cutoff && npm run test:evm && npm run test:mto-rab",
     "test:mto": "tsx tests/mto-calculator.ts",
     "test:mto-link": "tsx tests/mto-link.ts",
     "smoke": "node ../scripts/smoke-test.js",
@@ -59,7 +59,8 @@
     "test:finance-ledger": "tsx tests/finance-subledger.ts",
     "test:wbs": "tsx tests/project-wbs.ts",
     "test:cutoff": "tsx tests/progress-cutoff.ts",
-    "test:evm": "tsx tests/cost-evm.ts"
+    "test:evm": "tsx tests/cost-evm.ts",
+    "test:mto-rab": "tsx tests/mto-ke-rab.ts"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
