@@ -11482,3 +11482,67 @@ kuota harian. Keduanya urusan akun. Kunci yang dikirim user di percakapan
 `tests/mto-usul-gambar.ts` **64 asersi**, `tests/mto-diskusi.ts` **45**.
 `test:all` 0 gagal, 0 residu.
 
+---
+
+## [DEV] Estimator diperkuat: jembatan MTO → RAB — 30 Agustus 2026
+
+Bukan butir review; permintaan langsung user *"bisa gak buat fitur proposal
+kita lebih powerful"*. Saya cari dulu di mana jaraknya paling lebar, dan
+ketemunya di satu tempat: **gambar sudah menjadi kuantitas, lalu berhenti.**
+
+Untuk mengubah MTO jadi penawaran, seseorang harus mencari AHSP satu per satu
+di katalog **3.469 baris aktif**, membuat item RAB, lalu menautkannya —
+untuk SETIAP baris MTO. Satu pondasi footplate saja menghasilkan enam baris.
+Penautannya sudah ada (EST-MTO-015) tapi seluruhnya manual.
+
+### Yang dibangun
+
+- `GET /proposals/:id/mto/:elementId/usul-rab` — mengusulkan AHSP untuk tiap
+  baris MTO. **Nol penulisan**, dan tesnya memverifikasi itu, bukan
+  mengasumsikannya.
+- `POST /proposals/:id/mto/:elementId/rab` — membuat item RAB **dan**
+  menautkannya, dalam satu transaction, hanya untuk baris yang dipilih.
+
+Pemisahan yang sama dengan asisten gambar: mesin mengusulkan, manusia
+memutuskan, dan hanya keputusan manusia yang tertulis.
+
+### Kenapa pencocokannya BUKAN AI
+
+Pembacaan gambar memang butuh penafsiran — "2000" di sebelah garis itu panjang
+atau lebar hanya bisa dijawab dengan melihat. Pencocokan AHSP tidak begitu: ia
+perbandingan kata dan satuan terhadap katalog yang sudah ada. Dikerjakan AI,
+hasilnya berubah antar pemanggilan, tidak bisa diaudit, dan memakan kuota untuk
+pekerjaan yang tidak memerlukannya.
+
+Jadi ia deterministik, dan tiap usulan membawa **skor + alasan** —
+"jenis pekerjaan cocok: beton, cor · satuan sama (m3)" — supaya estimator bisa
+menolaknya dengan dasar, bukan cuma merasa.
+
+**Satuan adalah saringan keras, bukan penambah skor.** Menautkan baris m³ ke
+AHSP m² menghasilkan angka salah besaran, dan penaut RAB memang sudah menolaknya
+(`UNIT_MISMATCH`). Mengusulkannya berarti mengundang orang menekan tombol yang
+pasti gagal. Fixture tesnya sengaja memuat AHSP m² bernama nyaris identik;
+mutasi (saringan dimatikan) → gagal.
+
+### Tes
+
+`tests/mto-ke-rab.ts` — **45 asersi**, `npm run test:mto-rab`.
+`test:all` **2549 lulus, 0 gagal**.
+
+### Smoke test — diminta user, dijalankan
+
+| Smoke | Hasil |
+|---|---|
+| `npm run smoke` (produksi) | **30 lulus, 1 gagal** — tetap kredensial master, temuan lama |
+| `npm run smoke:ai` (lokal) | **10 lulus, 0 gagal** — AI hidup lagi |
+| `smoke:ai` → produksi | **gagal di login (401)** — kredensial admin produksi berbeda dari `.env` lokal |
+
+**Asisten gambar hidup kembali.** Kunci OpenAI sudah berlaku, dan hasilnya
+bersih: gambar uji bersatuan milimeter dibaca benar (2000→2 m, 400→0,4 m,
+1500→1,5 m), qty 24 terbaca, dan kolom yang datanya kurang ditandai
+**keyakinan rendah** dengan keraguannya disebut — bukan ditebak. Sepuluh baris
+pekerjaan terhitung kalkulator, nol tersimpan.
+
+Yang menahan smoke AI ke produksi hanya kredensial admin produksi, dan itu
+**tidak saya sentuh**. Jalankan dengan `ADMIN_PASS` produksi kalau perlu diuji
+di sana.
