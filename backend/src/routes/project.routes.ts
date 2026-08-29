@@ -1924,5 +1924,231 @@ router.get('/:id/mto/summary', authMiddleware, async (req: Request, res: Respons
   }
 });
 
+/**
+ * Riwayat aktivitas project.
+ *
+ * `project_activities` sudah ditulis dari enam tempat (task, milestone, file,
+ * pembentukan rencana kerja, dsb) tapi **tidak pernah dibaca** — tidak ada satu
+ * pun endpoint GET terhadapnya. Layarnya karena itu menampilkan dua aktivitas
+ * karangan yang sama untuk setiap project ("John Doe updated the status to
+ * In Progress, 2 hours ago").
+ */
+router.get('/:id/activities', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const projectId = Number(req.params.id);
+    if (!Number.isInteger(projectId) || projectId <= 0) {
+      return res.status(400).json({ error: 'Id project tidak valid' });
+    }
+    // `LIMIT ?` ditolak MySQL sebagai prepared statement, jadi angkanya
+    // divalidasi lalu disisipkan.
+    const n = Math.min(Math.max(parseInt(String(req.query.limit ?? '20'), 10) || 20, 1), 100);
+    const rows = await dbAll(
+      `SELECT a.id, a.action_type, a.description, a.created_at,
+              u.full_name AS user_name, u.username
+       FROM project_activities a
+       LEFT JOIN users u ON u.id = a.user_id
+       WHERE a.project_id = ?
+       ORDER BY a.created_at DESC, a.id DESC
+       LIMIT ${n}`, [projectId]);
+    res.json({ data: rows, count: (rows as any[]).length });
+  } catch (err: any) {
+    console.error('Error membaca aktivitas project:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * SCHED-R57 (penutup) — baseline jadwal project: apa yang DIJUAL.
+ *
+ * Bedanya dengan `project_tasks`: yang ini tidak boleh berubah. `project_tasks`
+ * adalah rencana kerja yang memang harus bisa disunting saat lapangan bergerak.
+ * Selisih antara keduanya bukan masalah yang perlu disembunyikan — justru itu
+ * informasi yang dicari, dan sebelum ini tidak ada acuan untuk menghitungnya.
+ */
+router.get('/:id/schedule-baseline', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const projectId = Number(req.params.id);
+    if (!Number.isInteger(projectId) || projectId <= 0) {
+      return res.status(400).json({ error: 'Id project tidak valid' });
+    }
+
+    const proyek: any = await dbGet(
+      `SELECT id, project_number, project_name, schedule_baseline_checksum,
+              schedule_baseline_days, schedule_baseline_start
+       FROM client_projects WHERE id = ?`, [projectId]);
+    if (!proyek) return res.status(404).json({ error: 'Project tidak ditemukan' });
+
+    const baris: any[] = await dbAll(
+      `SELECT * FROM project_schedule_baseline WHERE project_id = ? ORDER BY line_no`,
+      [projectId]);
+
+    if (!baris.length) {
+      // Dibedakan tegas dari "baseline kosong": project yang lahir sebelum
+      // perubahan ini memang tidak punya baseline, dan itu bukan kesalahan.
+      // Menjawabnya dengan daftar kosong akan terbaca sebagai "jadwalnya nol
+      // hari", yang keliru.
+      return res.json({
+        project_id: projectId,
+        project_number: proyek.project_number,
+        ada_baseline: false,
+        sebab: 'Project ini dibuat sebelum jadwal ikut disalin saat deal, '
+             + 'atau penawarannya tidak punya revisi terbit dengan jadwal.',
+        lines: [], variance: [], ringkasan: null,
+      });
+    }
+
+    const tugas: any[] = await dbAll(
+      `SELECT id, title, start_date, due_date, progress, status
+       FROM project_tasks WHERE project_id = ?`, [projectId]);
+
+    // Dicocokkan lewat judul yang sama persis. Sengaja tidak fuzzy: tebakan
+    // pencocokan yang meleset menghasilkan angka keterlambatan palsu, dan
+    // "belum tertaut" adalah jawaban yang jujur.
+    const petaTugas = new Map<string, any>();
+    for (const t of tugas) {
+      const k = String(t.title || '').trim().toLowerCase();
+      if (k && !petaTugas.has(k)) petaTugas.set(k, t);
+    }
+
+    const HARI = 86400000;
+    const variance = baris
+      .filter((b: any) => b.row_type === 'item')
+      .map((b: any) => {
+        const t = petaTugas.get(String(b.name || '').trim().toLowerCase());
+        let durasiKerja: number | null = null;
+        if (t?.start_date && t?.due_date) {
+          durasiKerja = Math.round(
+            (new Date(t.due_date).getTime() - new Date(t.start_date).getTime()) / HARI * 1000) / 1000;
+        }
+        return {
+          line_no: b.line_no,
+          kode: b.kode,
+          name: b.name,
+          baseline_start_date: b.start_date ? String(b.start_date).slice(0, 10) : null,
+          baseline_duration_days: Number(b.duration_days),
+          task_id: t?.id ?? null,
+          task_start_date: t?.start_date ? String(t.start_date).slice(0, 10) : null,
+          task_duration_days: durasiKerja,
+          progress: t ? Number(t.progress) || 0 : null,
+          // null berarti belum bisa dibandingkan, BUKAN nol selisih.
+          selisih_hari: durasiKerja === null ? null
+            : Math.round((durasiKerja - Number(b.duration_days)) * 1000) / 1000,
+          status: t ? 'tertaut' : 'belum_tertaut',
+        };
+      });
+
+    const tertaut = variance.filter(v => v.status === 'tertaut');
+    res.json({
+      project_id: projectId,
+      project_number: proyek.project_number,
+      ada_baseline: true,
+      revision_no: baris[0]?.revision_no ?? null,
+      proposal_id: baris[0]?.proposal_id ?? null,
+      checksum: proyek.schedule_baseline_checksum,
+      total_days: proyek.schedule_baseline_days === null ? null : Number(proyek.schedule_baseline_days),
+      start_date: proyek.schedule_baseline_start
+        ? String(proyek.schedule_baseline_start).slice(0, 10) : null,
+      lines: baris.map((b: any) => ({
+        line_no: b.line_no, type: b.row_type, kode: b.kode, name: b.name,
+        start_day: Number(b.start_day), duration_days: Number(b.duration_days),
+        start_date: b.start_date ? String(b.start_date).slice(0, 10) : null,
+        end_date: b.end_date ? String(b.end_date).slice(0, 10) : null,
+        qty: b.qty === null ? null : Number(b.qty), unit: b.unit,
+        total_price: b.total_price === null ? null : Number(b.total_price),
+        labor_total_oh: Number(b.labor_total_oh),
+      })),
+      variance,
+      ringkasan: {
+        baris_baseline: variance.length,
+        tertaut: tertaut.length,
+        belum_tertaut: variance.length - tertaut.length,
+        total_selisih_hari: tertaut.reduce((s, v) => s + (v.selisih_hari || 0), 0),
+      },
+    });
+  } catch (err: any) {
+    console.error('Error membaca baseline jadwal:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Bentuk rencana kerja awal dari baseline — atas permintaan, bukan diam-diam.
+ *
+ * Sengaja TIDAK dijalankan otomatis saat deal. Membuat puluhan task tanpa
+ * diminta akan mengubah apa yang dilihat tim proyek di hari pertama, dan itu
+ * keputusan mereka, bukan efek samping transisi status.
+ */
+router.post('/:id/schedule/seed-from-baseline', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const projectId = Number(req.params.id);
+    if (!Number.isInteger(projectId) || projectId <= 0) {
+      return res.status(400).json({ error: 'Id project tidak valid' });
+    }
+    const userId = (req as any).user?.userId || null;
+
+    const hasil = await withTransaction(async (tx: TxRunner) => {
+      const proyek: any = await tx.get(
+        'SELECT id FROM client_projects WHERE id = ? FOR UPDATE', [projectId]);
+      if (!proyek) return { error: 404, body: { error: 'Project tidak ditemukan' } };
+
+      const baris: any[] = await tx.all(
+        `SELECT * FROM project_schedule_baseline
+         WHERE project_id = ? AND row_type = 'item' ORDER BY line_no`, [projectId]);
+      if (!baris.length) {
+        return { error: 400, body: {
+          error: 'Project ini tidak punya baseline jadwal yang bisa disalin.',
+          code: 'BASELINE_JADWAL_TIDAK_ADA',
+        } };
+      }
+
+      // Sudah ada task = jangan menggandakan. Rencana kerja yang sudah berjalan
+      // tidak boleh ditimpa oleh tombol yang niatnya cuma "mulai dari nol".
+      const adaTugas: any = await tx.get(
+        'SELECT COUNT(*) n FROM project_tasks WHERE project_id = ?', [projectId]);
+      if (Number(adaTugas?.n) > 0) {
+        return { error: 409, body: {
+          error: `Project ini sudah punya ${adaTugas.n} task. Rencana kerja yang sudah berjalan tidak ditimpa.`,
+          code: 'RENCANA_KERJA_SUDAH_ADA',
+        } };
+      }
+
+      const HARI = 86400000;
+      let dibuat = 0;
+      for (const b of baris) {
+        const mulai = b.start_date ? String(b.start_date).slice(0, 10) : null;
+        const selesai = mulai
+          ? new Date(new Date(mulai).getTime() + Number(b.duration_days) * HARI)
+              .toISOString().slice(0, 10)
+          : null;
+        await tx.run(
+          `INSERT INTO project_tasks
+            (project_id, title, description, status, priority, start_date, due_date, sort_order)
+           VALUES (?, ?, ?, 'To Do', 'Medium', ?, ?, ?)`,
+          [projectId, String(b.name || b.kode || `Pekerjaan ${b.line_no}`).slice(0, 255),
+           `Dari baseline jadwal kontrak (revisi #${b.revision_no ?? '-'}), `
+           + `durasi ${Number(b.duration_days)} hari.`,
+           mulai, selesai, b.line_no]);
+        dibuat++;
+      }
+
+      await tx.run(
+        `INSERT INTO project_activities (project_id, user_id, action_type, description)
+         VALUES (?, ?, 'seed_schedule', ?)`,
+        [projectId, userId, `Rencana kerja dibentuk dari baseline jadwal: ${dibuat} task`]);
+
+      return { ok: true, dibuat };
+    });
+
+    if ((hasil as any).error) return res.status((hasil as any).error).json((hasil as any).body);
+    res.status(201).json({
+      message: `${(hasil as any).dibuat} task dibentuk dari baseline jadwal.`,
+      dibuat: (hasil as any).dibuat,
+    });
+  } catch (err: any) {
+    console.error('Error membentuk rencana kerja dari baseline:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export const projectRoutes = router;
 

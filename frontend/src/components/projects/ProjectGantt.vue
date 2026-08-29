@@ -47,7 +47,7 @@
                 </div>
               </div>
               <p class="text-sm font-medium text-gray-800 truncate mt-1">{{ task.title }}</p>
-              <p class="text-xs text-gray-500">{{ task.assigned_to || 'Unassigned' }}</p>
+              <p class="text-xs text-gray-500">{{ task.assigned_to_name || 'Unassigned' }}</p>
             </div>
 
             <!-- Timeline Bar -->

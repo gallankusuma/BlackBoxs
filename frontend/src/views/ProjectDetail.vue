@@ -1,5 +1,22 @@
 <template>
-  <div class="min-h-screen bg-gray-50 flex flex-col" v-if="project">
+  <!-- Gagal muat dinyatakan. Sebelumnya `v-if="project"` saja: kalau project
+       gagal dimuat layarnya kosong tanpa satu pun keterangan — dan sebelum itu
+       lagi, diisi project palsu. -->
+  <div v-if="!project && galatProject" class="min-h-screen bg-gray-50 flex items-center justify-center p-6">
+    <div class="max-w-md w-full rounded-xl border border-red-300 bg-red-50 px-6 py-5 text-center">
+      <p class="text-sm text-red-800">{{ galatProject }}</p>
+      <div class="mt-4 flex justify-center gap-3">
+        <button @click="loadProject" class="px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-semibold hover:bg-red-700">
+          Coba lagi
+        </button>
+        <button @click="$router.push('/projects')" class="px-4 py-2 border border-gray-300 rounded-lg text-sm font-semibold text-gray-700 hover:bg-white">
+          Kembali ke daftar
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="min-h-screen bg-gray-50 flex flex-col" v-else-if="project">
     <!-- Header -->
     <div class="bg-white border-b border-gray-200 sticky top-0 z-20">
       <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
@@ -132,23 +149,23 @@
              <!-- Recent Activity -->
              <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
               <h3 class="font-bold text-gray-800 mb-4">Recent Activity</h3>
-              <div class="space-y-4">
-                 <!-- Mock Activities -->
-                 <div class="flex gap-3">
-                    <div class="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 text-xs font-bold shrink-0">JD</div>
-                    <div>
-                      <p class="text-sm text-gray-800"><span class="font-medium">John Doe</span> updated the status to <span class="font-medium">In Progress</span>.</p>
-                      <p class="text-xs text-gray-500 mt-1">2 hours ago</p>
+              <!-- Dibaca dari project_activities. Sebelumnya dua aktivitas
+                   karangan yang sama ditampilkan untuk SETIAP project. -->
+              <div v-if="aktivitas.length" class="space-y-4">
+                 <div v-for="a in aktivitas" :key="a.id" class="flex gap-3">
+                    <div class="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 text-xs font-bold shrink-0">
+                      {{ inisial(a.user_name || a.username) }}
                     </div>
-                 </div>
-                 <div class="flex gap-3">
-                    <div class="w-8 h-8 rounded-full bg-green-100 flex items-center justify-center text-green-600 text-xs font-bold shrink-0">SA</div>
                     <div>
-                      <p class="text-sm text-gray-800"><span class="font-medium">Sarah Ann</span> completed task <span class="font-medium">Design Wireframes</span>.</p>
-                      <p class="text-xs text-gray-500 mt-1">5 hours ago</p>
+                      <p class="text-sm text-gray-800">
+                        <span class="font-medium">{{ a.user_name || a.username || 'Sistem' }}</span>
+                        {{ a.description }}
+                      </p>
+                      <p class="text-xs text-gray-500 mt-1">{{ waktuRelatif(a.created_at) }}</p>
                     </div>
                  </div>
               </div>
+              <p v-else class="text-sm text-gray-500">Belum ada aktivitas tercatat pada project ini.</p>
             </div>
           </div>
 
@@ -180,6 +197,12 @@
       </div>
 
       <!-- Tasks List Tab -->
+      <div v-if="galatTugas && (activeTab === 'tasks-list' || activeTab === 'tasks-kanban' || activeTab === 'gantt')"
+           class="mb-4 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">
+        {{ galatTugas }}
+        <button @click="loadTasks" class="ml-3 underline font-semibold">Coba lagi</button>
+      </div>
+
       <div v-if="activeTab === 'tasks-list'">
          <div class="flex justify-between mb-6">
           <h3 class="text-lg font-bold text-gray-800">Tasks</h3>
@@ -227,7 +250,85 @@
       </div>
 
       <!-- Gantt Tab -->
-      <div v-if="activeTab === 'gantt'">
+      <div v-if="activeTab === 'gantt'" class="space-y-4">
+        <!-- Baseline jadwal kontrak: apa yang DIJUAL, terkunci.
+             Gantt di bawahnya adalah rencana kerja yang boleh bergerak;
+             selisih keduanya justru angka yang dicari. -->
+        <div v-if="baselineJadwal?.ada_baseline" class="bg-white rounded-xl border border-gray-200 shadow-sm">
+          <div class="flex flex-wrap items-center gap-x-6 gap-y-2 px-5 py-3 border-b bg-amber-50 rounded-t-xl">
+            <div class="text-sm font-semibold text-amber-900">
+              🔒 Baseline kontrak — Revisi #{{ baselineJadwal.revision_no }}
+            </div>
+            <div class="text-sm text-gray-600">
+              Mulai <strong>{{ baselineJadwal.start_date || '—' }}</strong>
+            </div>
+            <div class="text-sm text-gray-600">
+              Durasi kontrak <strong>{{ baselineJadwal.total_days }} hari</strong>
+            </div>
+            <div v-if="baselineJadwal.ringkasan" class="text-sm"
+                 :class="baselineJadwal.ringkasan.total_selisih_hari > 0 ? 'text-red-700 font-semibold' : 'text-emerald-700'">
+              Selisih rencana
+              {{ baselineJadwal.ringkasan.total_selisih_hari > 0 ? '+' : '' }}{{ baselineJadwal.ringkasan.total_selisih_hari }} hari
+            </div>
+            <div v-if="baselineJadwal.ringkasan?.belum_tertaut" class="text-sm text-gray-500">
+              {{ baselineJadwal.ringkasan.belum_tertaut }} baris belum tertaut ke task
+            </div>
+          </div>
+
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead class="bg-gray-50 text-gray-600">
+                <tr>
+                  <th class="text-left px-4 py-2 font-medium">Pekerjaan</th>
+                  <th class="text-right px-4 py-2 font-medium">Baseline mulai</th>
+                  <th class="text-right px-4 py-2 font-medium">Baseline durasi</th>
+                  <th class="text-right px-4 py-2 font-medium">Rencana durasi</th>
+                  <th class="text-right px-4 py-2 font-medium">Selisih</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="v in baselineJadwal.variance" :key="v.line_no" class="border-t">
+                  <td class="px-4 py-2">
+                    <span class="text-gray-400 mr-1">{{ v.kode }}</span>{{ v.name }}
+                  </td>
+                  <td class="px-4 py-2 text-right text-gray-600">{{ v.baseline_start_date || '—' }}</td>
+                  <td class="px-4 py-2 text-right">{{ v.baseline_duration_days }} hari</td>
+                  <td class="px-4 py-2 text-right">
+                    <span v-if="v.task_duration_days !== null">{{ v.task_duration_days }} hari</span>
+                    <span v-else class="text-gray-400">belum tertaut</span>
+                  </td>
+                  <td class="px-4 py-2 text-right"
+                      :class="v.selisih_hari === null ? 'text-gray-400'
+                              : v.selisih_hari > 0 ? 'text-red-600 font-semibold'
+                              : v.selisih_hari < 0 ? 'text-emerald-600 font-semibold' : 'text-gray-600'">
+                    <span v-if="v.selisih_hari === null">—</span>
+                    <span v-else>{{ v.selisih_hari > 0 ? '+' : '' }}{{ v.selisih_hari }} hari</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Baseline ada tapi rencana kerjanya masih kosong: tawarkan
+             membentuknya dari yang dijual, sekali klik dan atas permintaan. -->
+        <div v-if="baselineJadwal?.ada_baseline && !tasks.length"
+             class="rounded-xl border border-blue-300 bg-blue-50 px-5 py-4 flex flex-wrap items-center gap-4">
+          <div class="text-sm text-blue-900">
+            Project ini punya baseline jadwal kontrak tapi belum punya satu pun task.
+            Rencana kerjanya bisa dibentuk dari jadwal yang dijual.
+          </div>
+          <button @click="bentukDariBaseline" :disabled="menyemai"
+            class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-50">
+            {{ menyemai ? 'Membentuk…' : 'Bentuk rencana kerja dari baseline' }}
+          </button>
+        </div>
+
+        <div v-if="baselineJadwal && !baselineJadwal.ada_baseline"
+             class="rounded-xl border border-gray-200 bg-gray-50 px-5 py-3 text-sm text-gray-600">
+          Project ini tidak punya baseline jadwal kontrak. {{ baselineJadwal.sebab }}
+        </div>
+
         <ProjectGantt :tasks="tasks" :milestones="milestones" />
       </div>
 
@@ -401,6 +502,11 @@ const route = useRoute();
 const router = useRouter();
 const project = ref<any>(null);
 const activeTab = ref('overview');
+const galatTugas = ref('');
+const galatProject = ref('');
+const aktivitas = ref<any[]>([]);
+const baselineJadwal = ref<any>(null);
+const menyemai = ref(false);
 const wideTab = computed(() => ['manpower', 'mto', 'gantt', 'cost-control'].includes(activeTab.value));
 
 const tasks = ref<any[]>([]);
@@ -461,9 +567,16 @@ const loadProject = async () => {
     };
     // Populate edit form
     populateEditForm();
-  } catch {
-    project.value = getMockProject(projectId);
-    populateEditForm();
+  } catch (e: any) {
+    // Dulu jatuh ke `getMockProject()` — project gagal muat ditampilkan sebagai
+    // "Mobile App Development" lengkap dengan nilai dan tenggatnya. Layar yang
+    // memalsukan data tidak bisa dibedakan dari layar yang benar, dan itu jauh
+    // lebih berbahaya daripada pesan error.
+    project.value = null;
+    galatProject.value = e?.response?.status === 404
+      ? 'Project ini tidak ditemukan.'
+      : (e?.response?.data?.error || 'Gagal memuat project.');
+    console.error('Gagal memuat project:', e);
   }
 };
 
@@ -482,146 +595,98 @@ const populateEditForm = () => {
   };
 };
 
-const getMockProject = (id: any) => {
-  const mockProjects: { [key: string]: any } = {
-    '1': { 
-      id: 1, 
-      title: 'Mobile App Development', 
-      project_number: 'PRJ-001',
-      client_name: 'Tech Startup Inc',
-      status: 'in_progress', 
-      progress: 65,
-      price: 25000,
-      budget_spent: 16250,
-      start_date: '2026-01-10',
-      deadline: '2026-06-30',
-      description: 'Develop a cross-platform mobile application with iOS and Android support',
-      members: [
-        { id: 1, name: 'John Doe', avatar: 'JD' },
-        { id: 2, name: 'Jane Smith', avatar: 'JS' },
-        { id: 3, name: 'Mike Johnson', avatar: 'MJ' }
-      ]
-    },
-    '2': { 
-      id: 2, 
-      title: 'Website Redesign', 
-      project_number: 'PRJ-002',
-      client_name: 'Fashion Boutique Co',
-      status: 'in_progress', 
-      progress: 45,
-      price: 15000,
-      budget_spent: 6750,
-      start_date: '2026-02-01',
-      deadline: '2026-04-15',
-      description: 'Complete redesign of e-commerce website with modern UI/UX',
-      members: [
-        { id: 2, name: 'Jane Smith', avatar: 'JS' },
-        { id: 4, name: 'Sarah Wilson', avatar: 'SW' }
-      ]
-    },
-    '3': { 
-      id: 3, 
-      title: 'Cloud Migration', 
-      project_number: 'PRJ-003',
-      client_name: 'Enterprise Solutions Ltd',
-      status: 'open', 
-      progress: 0,
-      price: 50000,
-      budget_spent: 0,
-      start_date: '2026-03-01',
-      deadline: '2026-08-31',
-      description: 'Migrate on-premise infrastructure to cloud (AWS)',
-      members: [
-        { id: 1, name: 'John Doe', avatar: 'JD' },
-        { id: 3, name: 'Mike Johnson', avatar: 'MJ' }
-      ]
-    },
-    '4': { 
-      id: 4, 
-      title: 'Data Analytics Dashboard', 
-      project_number: 'PRJ-004',
-      client_name: 'Analytics Corp',
-      status: 'completed', 
-      progress: 100,
-      price: 18000,
-      budget_spent: 18000,
-      start_date: '2025-11-15',
-      deadline: '2026-01-31',
-      description: 'Build real-time analytics dashboard with BI tools',
-      members: [
-        { id: 1, name: 'John Doe', avatar: 'JD' },
-        { id: 4, name: 'Sarah Wilson', avatar: 'SW' }
-      ]
-    },
-    '5': { 
-      id: 5, 
-      title: 'API Integration', 
-      project_number: 'PRJ-005',
-      client_name: 'Financial Services Corp',
-      status: 'in_progress', 
-      progress: 30,
-      price: 12000,
-      budget_spent: 3600,
-      start_date: '2026-01-20',
-      deadline: '2026-05-20',
-      description: 'Integrate third-party payment APIs and services',
-      members: [
-        { id: 2, name: 'Jane Smith', avatar: 'JS' },
-        { id: 3, name: 'Mike Johnson', avatar: 'MJ' }
-      ]
-    },
-    '6': { 
-      id: 6, 
-      title: 'Security Audit', 
-      project_number: 'PRJ-006',
-      client_name: 'HealthCare Systems Inc',
-      status: 'open', 
-      progress: 15,
-      price: 8500,
-      budget_spent: 1275,
-      start_date: '2026-02-10',
-      deadline: '2026-03-31',
-      description: 'Comprehensive security assessment and penetration testing',
-      members: [
-        { id: 4, name: 'Sarah Wilson', avatar: 'SW' }
-      ]
-    }
-  };
-  
-  return mockProjects[id] || mockProjects['1'];
-};
 
-const loadTasks = () => {
+/**
+ * Task dan milestone dibaca dari database, bukan dikarang di layar.
+ *
+ * Versi lama mengisi keduanya dengan daftar hardcode ("John Doe", "Setup
+ * project infrastructure") padahal `GET /projects/:id/tasks` dan
+ * `/milestones` sudah ada dan bekerja. Akibatnya SETIAP project menampilkan
+ * enam task palsu yang sama, dan — ini yang paling merugikan — `saveTask`
+ * menyimpan task betulan ke database lalu memanggil `loadTasks()` yang
+ * langsung menimpanya kembali dengan data palsu. Task yang baru dibuat
+ * pengguna hilang dari layar seketika, padahal tersimpan.
+ */
+const loadTasks = async () => {
   if (!project.value) return;
   loadingTasks.value = true;
-  tasks.value = getMockTasks();
-  loadingTasks.value = false;
+  try {
+    const { data } = await api.get(`/projects/${project.value.id}/tasks`);
+    tasks.value = Array.isArray(data) ? data : [];
+    galatTugas.value = '';
+  } catch (e: any) {
+    // Daftar kosong karena gagal muat tidak boleh terbaca sama dengan
+    // "project ini memang belum punya task".
+    tasks.value = [];
+    galatTugas.value = e?.response?.data?.error || 'Gagal memuat task project.';
+    console.error('Gagal memuat task:', e);
+  } finally {
+    loadingTasks.value = false;
+  }
 };
 
-const getMockTasks = () => {
-  return [
-    { id: 1, title: 'Setup project infrastructure', status: 'Done', assigned_to: 'John Doe', due_date: '2026-01-20', priority: 'high' },
-    { id: 2, title: 'Design database schema', status: 'In Progress', assigned_to: 'Jane Smith', due_date: '2026-01-25', priority: 'high' },
-    { id: 3, title: 'Create API endpoints', status: 'In Progress', assigned_to: 'Mike Johnson', due_date: '2026-02-05', priority: 'high' },
-    { id: 4, title: 'Build UI components', status: 'To Do', assigned_to: 'Sarah Wilson', due_date: '2026-02-15', priority: 'medium' },
-    { id: 5, title: 'Write unit tests', status: 'To Do', assigned_to: 'John Doe', due_date: '2026-02-20', priority: 'medium' },
-    { id: 6, title: 'Integration testing', status: 'To Do', assigned_to: 'Jane Smith', due_date: '2026-03-01', priority: 'medium' }
-  ];
+const inisial = (nama?: string) => (nama || '?')
+  .split(' ').filter(Boolean).slice(0, 2).map(x => x[0]).join('').toUpperCase() || '?';
+
+const waktuRelatif = (iso?: string) => {
+  if (!iso) return '';
+  const detik = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  if (detik < 60) return 'baru saja';
+  if (detik < 3600) return `${Math.floor(detik / 60)} menit lalu`;
+  if (detik < 86400) return `${Math.floor(detik / 3600)} jam lalu`;
+  if (detik < 2592000) return `${Math.floor(detik / 86400)} hari lalu`;
+  return new Date(iso).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' });
 };
 
-const loadMilestones = () => {
+const loadAktivitas = async () => {
   if (!project.value) return;
-  milestones.value = getMockMilestones();
+  try {
+    const { data } = await api.get(`/projects/${project.value.id}/activities`);
+    aktivitas.value = data?.data || [];
+  } catch (e) {
+    aktivitas.value = [];
+    console.error('Gagal memuat aktivitas project:', e);
+  }
 };
 
-const getMockMilestones = () => {
-  return [
-    { id: 1, title: 'Project Setup Complete', description: 'All infrastructure and tools configured', due_date: '2026-01-20', status: 'Completed' },
-    { id: 2, title: 'Core Features Development', description: 'Complete development of core features', due_date: '2026-02-28', status: 'In Progress' },
-    { id: 3, title: 'Testing Phase', description: 'QA and testing of all features', due_date: '2026-03-31', status: 'Pending' },
-    { id: 4, title: 'Launch Ready', description: 'Final review and deployment preparation', due_date: '2026-04-15', status: 'Pending' }
-  ];
+/** Baseline jadwal kontrak — apa yang dijual, untuk dibandingkan dengan rencana. */
+const loadBaselineJadwal = async () => {
+  if (!project.value) return;
+  try {
+    const { data } = await api.get(`/projects/${project.value.id}/schedule-baseline`);
+    baselineJadwal.value = data;
+  } catch (e) {
+    baselineJadwal.value = null;
+    console.error('Gagal memuat baseline jadwal:', e);
+  }
 };
+
+const bentukDariBaseline = async () => {
+  if (!project.value || menyemai.value) return;
+  menyemai.value = true;
+  try {
+    const { data } = await api.post(`/projects/${project.value.id}/schedule/seed-from-baseline`);
+    await loadTasks();
+    await loadBaselineJadwal();
+    alert(data?.message || 'Rencana kerja dibentuk dari baseline.');
+  } catch (e: any) {
+    alert(e?.response?.data?.error || 'Gagal membentuk rencana kerja dari baseline.');
+  } finally {
+    menyemai.value = false;
+  }
+};
+
+const loadMilestones = async () => {
+  if (!project.value) return;
+  try {
+    const { data } = await api.get(`/projects/${project.value.id}/milestones`);
+    milestones.value = Array.isArray(data) ? data : [];
+  } catch (e) {
+    milestones.value = [];
+    console.error('Gagal memuat milestone:', e);
+  }
+};
+
 
 const loadFiles = async () => {
   if (!project.value) return;
@@ -635,7 +700,18 @@ const loadFiles = async () => {
 
 
 const loadMetadata = async () => {
-  users.value = getMockUsers();
+  // Dulu diisi daftar hardcode (John Doe, Jane Smith). Penugasan task karena
+  // itu menunjuk id user yang tidak ada di database ini.
+  try {
+    const res = await api.get('/users');
+    const daftar = res.data?.data || res.data || [];
+    users.value = (Array.isArray(daftar) ? daftar : []).map((u: any) => ({
+      ...u, name: u.full_name || u.name || u.username,
+    }));
+  } catch (e) {
+    users.value = [];
+    console.error('Gagal memuat daftar user:', e);
+  }
   try {
     const res = await api.get('/clients');
     clients.value = res.data?.data || res.data || [];
@@ -690,14 +766,6 @@ const deleteProject = async () => {
   }
 };
 
-const getMockUsers = () => {
-  return [
-    { id: 1, name: 'John Doe', email: 'john@example.com' },
-    { id: 2, name: 'Jane Smith', email: 'jane@example.com' },
-    { id: 3, name: 'Mike Johnson', email: 'mike@example.com' },
-    { id: 4, name: 'Sarah Wilson', email: 'sarah@example.com' }
-  ];
-};
 
 const openTaskModal = (task: any = null) => {
   editingTask.value = task;
@@ -819,6 +887,11 @@ const formatDate = (date: string) => {
 watch(activeTab, (newTab) => {
   if (newTab === 'tasks-list' || newTab === 'tasks-kanban') {
     loadTasks();
+  } else if (newTab === 'gantt') {
+    // Tab Gantt membandingkan rencana kerja dengan baseline kontrak, jadi
+    // keduanya harus segar saat dibuka.
+    loadTasks();
+    loadBaselineJadwal();
   } else if (newTab === 'milestones') {
     loadMilestones();
   } else if (newTab === 'files') {
@@ -836,6 +909,8 @@ watch(project, (newProject) => {
     loadTasks();
     loadMilestones();
     loadFiles();
+    loadBaselineJadwal();
+    loadAktivitas();
   }
 });
 </script>

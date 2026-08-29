@@ -1110,6 +1110,56 @@ const ensureProposalResourceSchema = async (connection: any) => {
   ]) await execSchemaEnsure(connection, sql);
 };
 
+/**
+ * SCHED-R57 (penutup) — jadwal yang dijual ikut menyeberang saat Deal.
+ *
+ * Sebelum ini, transisi deal menyalin BOQ ke `contract_baseline_lines` dan MTO
+ * ke scope project, tapi **jadwalnya tidak ikut sama sekali**. Project lahir
+ * dengan `project_tasks` kosong, sehingga jadwal yang dipakai menghitung harga
+ * dan dikirim ke client lenyap di serah terima — tim proyek menyusunnya lagi
+ * dari nol, dan tidak ada acuan untuk mengukur keterlambatan.
+ *
+ * Tabel ini adalah acuan itu, dan sifatnya sama dengan `contract_baseline_lines`:
+ * **tidak boleh punya jalur tulis**. `project_tasks` tetap jadi rencana kerja
+ * yang boleh berubah; selisih keduanya justru informasi yang dicari.
+ */
+const ensureProjectScheduleBaselineSchema = async (connection: any) => {
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS project_schedule_baseline (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      project_id INT NOT NULL,
+      -- Asal usulnya disimpan supaya baseline selalu bisa ditelusuri ke revisi
+      -- penawaran yang benar-benar disepakati, bukan ke "jadwal saat itu".
+      proposal_id INT NULL,
+      revision_id INT NULL,
+      revision_no INT NULL,
+      line_no INT NOT NULL,
+      row_type VARCHAR(20) NOT NULL DEFAULT 'item',
+      proposal_item_id INT NULL,
+      kode VARCHAR(50) NULL,
+      name VARCHAR(500) NULL,
+      start_day DECIMAL(12,3) NOT NULL DEFAULT 0,
+      duration_days DECIMAL(12,3) NOT NULL DEFAULT 0,
+      start_date DATE NULL,
+      end_date DATE NULL,
+      qty DECIMAL(18,4) NULL,
+      unit VARCHAR(50) NULL,
+      total_price DECIMAL(18,2) NULL,
+      labor_total_oh DECIMAL(18,3) NOT NULL DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_psb_proj (project_id),
+      UNIQUE KEY uq_psb_line (project_id, line_no),
+      CONSTRAINT fk_psb_proj FOREIGN KEY (project_id)
+        REFERENCES client_projects(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+  for (const sql of [
+    "ALTER TABLE client_projects ADD COLUMN IF NOT EXISTS schedule_baseline_checksum CHAR(64) NULL",
+    "ALTER TABLE client_projects ADD COLUMN IF NOT EXISTS schedule_baseline_days DECIMAL(12,3) NULL",
+    "ALTER TABLE client_projects ADD COLUMN IF NOT EXISTS schedule_baseline_start DATE NULL",
+  ]) await execSchemaEnsure(connection, sql);
+};
+
 const ensureRouteModuleSchema = async (connection: any) => {
   const statements = [
     `CREATE TABLE IF NOT EXISTS inbox_notifications (
@@ -2402,6 +2452,7 @@ export async function initializeDatabase() {
     await ensureProposalRevisionSchema(connection);
     await ensureProposalScheduleSchema(connection);
     await ensureProposalResourceSchema(connection);
+    await ensureProjectScheduleBaselineSchema(connection);
     await ensureContractLedgerSchema(connection);
     await ensureMobilePinSchema(connection);
     await ensureAssetDepreciationSchema(connection);

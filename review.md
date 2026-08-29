@@ -5780,12 +5780,9 @@ pun — itu asersi saya yang keliru, dan sempat gagal sekali karena itu.
 | Parameter tersimpan dan identik setelah reload | ✅ terbukti |
 | Total cash curve balance ke total revisi | ✅ `reconciled: true` |
 | Resume resource (`/resume`) masih membaca master live | ✅ **sudah** — lihat lanjutan di bawah |
-| **Deal menyalin schedule revisi ke Project baseline** | ❌ **belum** |
+| Deal menyalin schedule revisi ke Project baseline | ✅ **sudah** — lihat penutup di bawah |
 
-`/resume` sudah dikerjakan menyusul — lihat bagian berikutnya. Menyalin jadwal
-revisi ke baseline project saat Deal menyentuh `contract_baseline_lines` yang
-**tidak boleh punya jalur tulis** — perlu tabel baseline jadwal projectnya
-sendiri, dan itu pekerjaan tersendiri, bukan tempelan.
+Keduanya sudah dikerjakan menyusul — lihat dua bagian berikutnya.
 
 Migrasi proposal lama **ternyata tidak diperlukan**, dan itu saya periksa di
 produksi, bukan saya asumsikan: `proposal_revisions` berisi **0 baris**
@@ -5890,6 +5887,103 @@ bersama — `/resume` memakai aturan pembagi yang sama tapi ditulis di tempatnya
 sendiri. Keduanya diuji, jadi divergensinya akan ketahuan, tapi ekstraksi
 penuh handler 400 baris itu pekerjaan tersendiri dan tidak saya campurkan ke
 sini.
+
+---
+
+**[DEV] PENUTUP — Deal menyalin jadwal revisi ke baseline project — 29 Agustus 2026**
+
+Kriteria terima terakhir. Klaimnya benar: transisi deal menyalin BOQ ke
+`contract_baseline_lines` dan MTO ke scope project, tapi **jadwalnya tidak ikut
+sama sekali**. Project lahir dengan `project_tasks` kosong, jadi jadwal yang
+dipakai menghitung harga dan dikirim ke client hilang di serah terima — dan
+tidak ada acuan apa pun untuk mengukur keterlambatan terhadap apa yang dijual.
+
+### Yang dikerjakan
+
+`project_schedule_baseline` (FK cascade ke `client_projects`) diisi **di dalam
+transaction deal yang sama**, disalin **apa adanya** dari
+`proposal_revision_schedule` milik revisi yang diterima. Menghitung ulang di
+sini akan memakai master AHSP saat deal — yang bisa sudah berbeda dari saat
+penawaran diterbitkan — dan selisihnya tidak akan pernah bisa dijelaskan.
+Asal-usulnya (proposal, revisi, nomor revisi) ikut tersimpan per baris, plus
+checksum + total hari + tanggal mulai di `client_projects`.
+
+Sifatnya sama dengan `contract_baseline_lines`: **tidak boleh punya jalur
+tulis**, dan tesnya menghitungnya (harus nol UPDATE/DELETE di seluruh
+`src/routes/`). `project_tasks` tetap rencana kerja yang boleh bergerak;
+selisih keduanya justru angka yang dicari, dan sebelum ini tidak ada acuan
+untuk menghitungnya.
+
+Dua endpoint baru: `GET /projects/:id/schedule-baseline` (baseline + variance
+per baris terhadap task berjalan) dan `POST /projects/:id/schedule/seed-from-baseline`
+(membentuk rencana kerja dari yang dijual). Yang kedua sengaja **tidak**
+dijalankan otomatis saat deal — membuat puluhan task tanpa diminta mengubah apa
+yang dilihat tim proyek di hari pertama, dan itu keputusan mereka, bukan efek
+samping transisi status. Ia menolak 409 kalau project sudah punya task.
+
+Pencocokan baseline↔task lewat judul yang sama persis, **sengaja tidak fuzzy**:
+tebakan yang meleset menghasilkan angka keterlambatan palsu, dan "belum
+tertaut" adalah jawaban yang jujur. Baris yang belum tertaut dilaporkan
+`selisih_hari: null`, bukan nol.
+
+Project yang lahir sebelum perubahan ini dijawab `ada_baseline: false` berikut
+sebabnya — bukan daftar kosong yang akan terbaca sebagai "jadwalnya nol hari".
+
+### Temuan besar di luar daftar review: layar project menampilkan data palsu
+
+Saat menyambungkan panel baseline ke tab Gantt, ternyata seluruh sisi jadwal
+project adalah **demo**. `ProjectDetail.vue` mengisi task dan milestone dari
+daftar hardcode — "John Doe", "Setup project infrastructure", "Design database
+schema" — padahal `GET /projects/:id/tasks` dan `/milestones` sudah ada dan
+bekerja, dan tidak pernah dipanggil. **Setiap project di produksi menampilkan
+enam task palsu yang sama.**
+
+Yang paling merugikan: `saveTask` menyimpan task betulan lewat API, lalu
+memanggil `loadTasks()` yang **menimpanya kembali dengan data palsu**. Task yang
+baru dibuat pengguna hilang dari layar seketika, padahal tersimpan di database.
+Tidak ada cara melihatnya lagi.
+
+Tiga hal sekelas ikut ditemukan dan diperbaiki:
+
+| Yang dipalsukan | Sebelumnya | Sekarang |
+|---|---|---|
+| Task & milestone | daftar hardcode | dari endpointnya |
+| Project gagal muat | diganti project palsu "Mobile App Development" lengkap dengan nilai & tenggat | pesan galat + tombol coba lagi |
+| Daftar user penugasan | 4 nama karangan | dari `GET /users` |
+| Recent Activity | dua aktivitas karangan yang sama di tiap project | dari `project_activities` |
+
+`project_activities` ditulis dari **enam tempat** tapi tidak pernah dibaca —
+tidak ada satu pun endpoint GET terhadapnya. Ditambahkan sekarang.
+
+Layar yang memalsukan data lebih berbahaya daripada layar yang error: yang
+error terlihat salah, yang palsu terlihat benar.
+
+### Tes
+
+`tests/project-schedule-baseline.ts` — **57 asersi**,
+`npm run test:baseline-jadwal`. Termasuk guard permanen: nol `getMock*` tersisa
+dan nol nama karangan di `ProjectDetail.vue` (komentar dibuang lebih dulu —
+catatan sejarah yang menyebutnya justru berguna, yang dilarang menampilkannya
+ke pengguna).
+
+Dibuktikan bergigi: penyalinan baseline dimatikan → **23 kegagalan**, dari
+"baseline jadwal ikut tersalin" sampai "selisihnya +3 hari".
+
+Yang menentukan: master AHSP diubah ×5 **setelah deal**, dan baseline project
+tetap 8 hari dengan checksum yang sama.
+
+`test:all` **2268 lulus, 0 gagal**. Residu fixture nol.
+
+### SCHED-R57 tertutup
+
+| Kriteria | Status |
+|---|---|
+| Ubah master setelah submit → issued schedule tidak berubah | ✅ |
+| Draft/revisi baru boleh memilih master baru | ✅ |
+| Parameter tersimpan dan identik setelah reload | ✅ |
+| Total cash curve balance ke total revisi | ✅ |
+| Resume resource tidak lagi membaca master live | ✅ |
+| Deal menyalin schedule revisi ke Project baseline | ✅ |
 
 ---
 

@@ -4998,6 +4998,57 @@ router.put('/proposals/:id/status', authMiddleware, bolehUbah, async (req: Reque
         projectId, proposal, items: barisKontrak as any[], userId,
       });
 
+      // SCHED-R57: jadwal yang dijual ikut menyeberang, disalin APA ADANYA.
+      //
+      // Sebelum ini deal menyalin BOQ dan MTO tapi tidak jadwalnya, sehingga
+      // project lahir tanpa satu pun acuan waktu — jadwal yang dipakai
+      // menghitung harga dan dikirim ke client hilang di serah terima.
+      //
+      // Disalin, BUKAN dihitung ulang: menghitung ulang di sini akan memakai
+      // master AHSP saat deal, yang bisa sudah berbeda dari saat penawaran
+      // diterbitkan, dan selisihnya tidak akan pernah bisa dijelaskan.
+      const barisJadwalRev: any[] = await tx.all(
+        `SELECT line_no, row_type, proposal_item_id, kode, name, start_day, duration_days,
+                start_date, end_date, qty, unit, total_price, labor_total_oh
+         FROM proposal_revision_schedule WHERE revision_id = ? ORDER BY line_no`,
+        [revisiDiterima.id]);
+
+      let jadwalBaseline = 0;
+      let akhirHari = 0;
+      let mulaiBaseline: string | null = null;
+      for (const b of barisJadwalRev) {
+        await tx.run(
+          `INSERT INTO project_schedule_baseline
+            (project_id, proposal_id, revision_id, revision_no, line_no, row_type,
+             proposal_item_id, kode, name, start_day, duration_days, start_date, end_date,
+             qty, unit, total_price, labor_total_oh)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [projectId, proposalId, revisiDiterima.id, revisiDiterima.revision_no,
+           b.line_no, b.row_type, b.proposal_item_id, b.kode, b.name,
+           b.start_day, b.duration_days, b.start_date, b.end_date,
+           b.qty, b.unit, b.total_price, b.labor_total_oh]);
+        jadwalBaseline++;
+        akhirHari = Math.max(akhirHari, Number(b.start_day) + Number(b.duration_days));
+        if (b.start_date && (!mulaiBaseline || String(b.start_date).slice(0, 10) < mulaiBaseline)) {
+          mulaiBaseline = String(b.start_date).slice(0, 10);
+        }
+      }
+
+      if (jadwalBaseline) {
+        // Checksum dengan angka dinormalkan ke presisi kolomnya — `mysql2`
+        // mengembalikan DECIMAL sebagai string.
+        const cs = crypto.createHash('sha256').update(JSON.stringify(
+          barisJadwalRev.map((b: any) => [b.line_no, b.row_type, b.kode || '', b.name || '',
+            Number(b.start_day).toFixed(3), Number(b.duration_days).toFixed(3),
+            b.start_date ? String(b.start_date).slice(0, 10) : '',
+            b.end_date ? String(b.end_date).slice(0, 10) : ''])
+        )).digest('hex');
+        await tx.run(
+          `UPDATE client_projects SET schedule_baseline_checksum = ?,
+             schedule_baseline_days = ?, schedule_baseline_start = ? WHERE id = ?`,
+          [cs, Math.round(akhirHari * 1000) / 1000, mulaiBaseline, projectId]);
+      }
+
       // EST-MTO-017 + R32/019: pembuatan project, penautan, dan penyalinan
       // baseline MTO dijadikan SATU transaction.
       //
