@@ -290,6 +290,16 @@
             Progress {{ wbs.ringkasan.progress_tertimbang_pct }}% itu dihitung dari bagian tersebut saja.
           </div>
 
+          <!-- Biaya yang belum menempel work package dinyatakan terang-terangan:
+               angka per work package yang diam-diam mengabaikan separuh biaya
+               jauh lebih berbahaya daripada angka yang mengaku baru separuh. -->
+          <div v-if="alokasi && alokasi.belum_teralokasi.biaya > 0"
+               class="rounded-lg border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm text-amber-900">
+            {{ formatCurrency(alokasi.belum_teralokasi.biaya) }} biaya
+            ({{ alokasi.belum_teralokasi.jml_dokumen_biaya }} dokumen) belum menempel work package —
+            baru {{ alokasi.ringkasan.cakupan_pct }}% yang terpetakan.
+          </div>
+
           <div class="bg-white rounded-xl border border-gray-200 overflow-x-auto">
             <table class="w-full text-sm">
               <thead class="bg-gray-50 text-gray-600">
@@ -301,6 +311,7 @@
                   <th class="text-right px-4 py-2 font-medium">Bobot</th>
                   <th class="text-left px-4 py-2 font-medium">Cost code</th>
                   <th class="text-right px-4 py-2 font-medium">Progress</th>
+                  <th class="text-right px-4 py-2 font-medium">Komitmen</th>
                   <th class="text-right px-4 py-2 font-medium">Biaya aktual</th>
                 </tr>
               </thead>
@@ -330,6 +341,7 @@
                       {{ r.progress_pct }}%
                     </span>
                   </td>
+                  <td class="px-4 py-2 text-right text-gray-500">{{ formatCurrency(r.committed_cost) }}</td>
                   <td class="px-4 py-2 text-right text-gray-700">{{ formatCurrency(r.actual_cost) }}</td>
                 </tr>
               </tbody>
@@ -369,6 +381,51 @@
               <span v-else>{{ progres.ringkasan.klaim_tidak_disetujui_pct }}%</span>
             </p>
           </div>
+        </div>
+
+        <!-- EVM. Ditaruh di sini karena angkanya turunan langsung dari cut-off
+             yang disetujui — bukan laporan terpisah yang bisa berbeda. -->
+        <div v-if="evm" class="bg-white rounded-xl border border-gray-200 p-4 space-y-3">
+          <div class="flex flex-wrap items-baseline gap-x-6 gap-y-1">
+            <span class="text-sm font-semibold text-gray-800">Earned Value</span>
+            <span class="text-xs text-gray-500">BAC {{ formatCurrency(evm.bac) }} ·
+              {{ evm.bac_source === 'contract_ledger' ? 'dari ledger kontrak' : 'dari budget project' }}</span>
+          </div>
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div><p class="text-xs text-gray-500">PV (rencana)</p>
+              <p class="font-semibold">{{ evm.pv === null ? '—' : formatCurrency(evm.pv) }}</p></div>
+            <div><p class="text-xs text-gray-500">EV (disetujui)</p>
+              <p class="font-semibold text-emerald-700">{{ evm.ev === null ? '—' : formatCurrency(evm.ev) }}</p></div>
+            <div><p class="text-xs text-gray-500">AC (biaya terpetakan)</p>
+              <p class="font-semibold">{{ formatCurrency(evm.ac) }}</p></div>
+            <div><p class="text-xs text-gray-500">Komitmen (PO)</p>
+              <p class="font-semibold text-gray-600">{{ formatCurrency(evm.committed) }}</p></div>
+          </div>
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-4 pt-2 border-t">
+            <div><p class="text-xs text-gray-500">SPI</p>
+              <p class="font-semibold" :class="evm.spi !== null && evm.spi < 1 ? 'text-red-600' : 'text-emerald-700'">
+                {{ evm.spi ?? '—' }}</p></div>
+            <div><p class="text-xs text-gray-500">CPI</p>
+              <p class="font-semibold" :class="evm.cpi !== null && evm.cpi < 1 ? 'text-red-600' : 'text-emerald-700'">
+                {{ evm.cpi ?? '—' }}</p></div>
+            <div><p class="text-xs text-gray-500">EAC</p>
+              <p class="font-semibold">{{ evm.eac === null ? '—' : formatCurrency(evm.eac) }}</p></div>
+            <div><p class="text-xs text-gray-500">Cakupan biaya</p>
+              <p class="font-semibold"
+                 :class="(evm.keterandalan.cakupan_biaya_pct ?? 0) < 100 ? 'text-amber-700' : 'text-emerald-700'">
+                {{ evm.keterandalan.cakupan_biaya_pct === null ? '—' : evm.keterandalan.cakupan_biaya_pct + '%' }}</p></div>
+          </div>
+          <!-- Keterandalannya dinyatakan, bukan disembunyikan di balik angka
+               yang terlihat presisi. -->
+          <p class="text-xs rounded-lg px-3 py-2"
+             :class="(evm.keterandalan.cakupan_biaya_pct ?? 100) < 100 || !evm.keterandalan.ada_cutoff_disetujui
+                     ? 'bg-amber-50 text-amber-900 border border-amber-200'
+                     : 'bg-emerald-50 text-emerald-900 border border-emerald-200'">
+            {{ evm.keterandalan.catatan }}
+            <span v-if="evm.keterandalan.biaya_belum_dipetakan > 0">
+              ({{ formatCurrency(evm.keterandalan.biaya_belum_dipetakan) }} belum menempel work package)
+            </span>
+          </p>
         </div>
 
         <div v-if="progres && !progres.current" class="rounded-xl border border-blue-300 bg-blue-50 px-5 py-4 flex flex-wrap items-center gap-3">
@@ -880,6 +937,24 @@ const loadAktivitas = async () => {
   }
 };
 
+const evm = ref<any>(null);
+const alokasi = ref<any>(null);
+
+const loadEvm = async () => {
+  if (!project.value) return;
+  try {
+    const [e, a] = await Promise.all([
+      api.get(`/projects/${project.value.id}/evm`),
+      api.get(`/projects/${project.value.id}/cost-allocation`),
+    ]);
+    evm.value = e.data;
+    alokasi.value = a.data;
+  } catch (err) {
+    evm.value = null; alokasi.value = null;
+    console.error('Gagal memuat EVM:', err);
+  }
+};
+
 const progres = ref<any>(null);
 const cutoffBaru = ref('');
 const sibukProgres = ref(false);
@@ -902,6 +977,7 @@ const aksiProgres = async (fn: () => Promise<any>, sukses?: string) => {
     const { data } = await fn();
     await loadProgres();
     await loadWbs();
+    await loadEvm();
     if (sukses) alert(data?.message || sukses);
   } catch (e: any) {
     // Kode galat dari server dibawa apa adanya — "klaim mundur" dan "tanpa
@@ -1226,9 +1302,11 @@ watch(activeTab, (newTab) => {
     loadTasks();
   } else if (newTab === 'wbs') {
     loadWbs();
+    loadEvm();
   } else if (newTab === 'progress') {
     loadProgres();
     loadWbs();
+    loadEvm();
   } else if (newTab === 'gantt') {
     // Tab Gantt membandingkan rencana kerja dengan baseline kontrak, jadi
     // keduanya harus segar saat dibuka.
@@ -1255,6 +1333,7 @@ watch(project, (newProject) => {
     loadAktivitas();
     loadWbs();
     loadProgres();
+    loadEvm();
   }
 });
 </script>

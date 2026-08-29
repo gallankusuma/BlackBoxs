@@ -1359,6 +1359,38 @@ const ensureProgressCutoffSchema = async (connection: any) => {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
 };
 
+/**
+ * PROJ-CTRL Fase 1 lanjutan — biaya menempel ke work package.
+ *
+ * Tanpa ini, "actual cost" proyek adalah satu angka gelondongan yang tidak bisa
+ * dibandingkan dengan apa pun: earned progress dihitung per work package, biaya
+ * tidak. CPI yang dihitung dari keduanya akan terlihat presisi dan salah.
+ *
+ * Kolomnya **nullable, dan itu disengaja**. Produksi punya 134 AP dan 91 PO yang
+ * bahkan belum punya `project_id`; memaksa pemetaan berarti menebak, dan tebakan
+ * yang salah lebih buruk daripada mengaku belum tahu. Yang belum dipetakan
+ * dilaporkan apa adanya sebagai "belum teralokasi" — bukan disembunyikan, bukan
+ * pula dipaksa masuk ke work package mana pun.
+ */
+const ensureCostAllocationSchema = async (connection: any) => {
+  for (const sql of [
+    "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS wbs_id INT NULL",
+    "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS cost_code_id INT NULL",
+    "ALTER TABLE accounts_payable ADD COLUMN IF NOT EXISTS wbs_id INT NULL",
+    "ALTER TABLE accounts_payable ADD COLUMN IF NOT EXISTS cost_code_id INT NULL",
+  ]) await execSchemaEnsure(connection, sql);
+
+  // Index saja, bukan foreign key: `purchase_orders` dan `accounts_payable`
+  // hidup di modul lain dan sudah berisi data produksi. FK ke `project_wbs`
+  // akan menautkan siklus hidup dua modul yang selama ini berdiri sendiri —
+  // menghapus satu work package tidak boleh menyentuh dokumen keuangan.
+  // Kesahihan tautannya dijaga di jalur tulis, dan tesnya membuktikannya.
+  for (const sql of [
+    "ALTER TABLE purchase_orders ADD INDEX idx_po_wbs (wbs_id)",
+    "ALTER TABLE accounts_payable ADD INDEX idx_ap_wbs (wbs_id)",
+  ]) await execSchemaEnsure(connection, sql);
+};
+
 const ensureRouteModuleSchema = async (connection: any) => {
   const statements = [
     `CREATE TABLE IF NOT EXISTS inbox_notifications (
@@ -2655,6 +2687,7 @@ export async function initializeDatabase() {
     await ensurePaymentReversalSchema(connection);
     await ensureProjectWbsSchema(connection);
     await ensureProgressCutoffSchema(connection);
+    await ensureCostAllocationSchema(connection);
     await ensureContractLedgerSchema(connection);
     await ensureMobilePinSchema(connection);
     await ensureAssetDepreciationSchema(connection);

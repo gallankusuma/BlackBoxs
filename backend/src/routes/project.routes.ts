@@ -2479,7 +2479,10 @@ router.get('/:id/wbs', authMiddleware, async (req: Request, res: Response) => {
               (SELECT COUNT(*) FROM project_tasks t WHERE t.wbs_id = w.id) AS jml_task,
               (SELECT AVG(CASE WHEN t.status = 'Done' THEN 100 ELSE COALESCE(t.progress, 0) END)
                  FROM project_tasks t WHERE t.wbs_id = w.id) AS progress_task,
-              (SELECT COALESCE(SUM(e.amount), 0) FROM project_expenses e WHERE e.wbs_id = w.id) AS biaya,
+              (SELECT COALESCE(SUM(e.amount), 0) FROM project_expenses e WHERE e.wbs_id = w.id)
+              + (SELECT COALESCE(SUM(ap.amount), 0) FROM accounts_payable ap WHERE ap.wbs_id = w.id) AS biaya,
+              (SELECT COALESCE(SUM(po.total_amount), 0) FROM purchase_orders po
+                WHERE po.wbs_id = w.id AND po.status NOT IN ('rejected', 'cancelled')) AS komitmen,
               (SELECT l.approved_pct FROM project_progress_lines l
                  JOIN project_progress_periods pp ON pp.id = l.period_id
                 WHERE l.wbs_id = w.id AND pp.status = 'approved'
@@ -2547,6 +2550,12 @@ router.get('/:id/wbs', authMiddleware, async (req: Request, res: Response) => {
         actual_cost: isInduk
           ? Math.round(anak.reduce((a, x) => a + Number(x.biaya), 0) * 100) / 100
           : Number(b.biaya),
+        // Commitment tetap angka tersendiri: PO yang baru dibuat bukan biaya
+        // yang sudah terjadi, dan menjumlahkannya ke actual akan membuat CPI
+        // terlihat buruk sejak hari pertama.
+        committed_cost: isInduk
+          ? Math.round(anak.reduce((a, x) => a + Number(x.komitmen), 0) * 100) / 100
+          : Number(b.komitmen),
         // Progress yang SUDAH DISETUJUI lewat cut-off. Dibedakan tegas dari
         // `progress_pct` yang berasal dari status task: yang satu bukti, yang
         // satu lagi baru niat. null = belum pernah masuk periode disetujui.
@@ -3186,6 +3195,302 @@ router.get('/:id/progress', authMiddleware, async (req: Request, res: Response) 
     });
   } catch (err: any) {
     console.error('Error membaca progress:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PROJ-CTRL — alokasi biaya ke work package
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Dokumen biaya yang bisa dipetakan. Satu bentuk, tiga tabel. */
+const DOKUMEN_BIAYA: Record<string, { tabel: string; nilai: string; nomor: string; tanggal: string }> = {
+  po:      { tabel: 'purchase_orders',   nilai: 'total_amount', nomor: 'po_number',      tanggal: 'created_at' },
+  ap:      { tabel: 'accounts_payable',  nilai: 'amount',       nomor: 'vendor_invoice_number', tanggal: 'invoice_date' },
+  expense: { tabel: 'project_expenses',  nilai: 'amount',       nomor: 'expense_number', tanggal: 'expense_date' },
+};
+
+/**
+ * Ringkasan alokasi biaya proyek.
+ *
+ * Yang belum dipetakan **dilaporkan apa adanya** sebagai bucket tersendiri,
+ * bukan disembunyikan dan bukan pula dipaksa masuk work package mana pun.
+ * Angka "actual cost per work package" yang diam-diam mengabaikan separuh
+ * biaya jauh lebih berbahaya daripada angka yang mengaku baru mencakup separuh.
+ */
+router.get('/:id/cost-allocation', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const projectId = Number(req.params.id);
+    if (!idValid(projectId)) return res.status(400).json({ error: 'Id project tidak valid' });
+    const proyek: any = await dbGet('SELECT id, project_number FROM client_projects WHERE id = ?',
+      [projectId]);
+    if (!proyek) return res.status(404).json({ error: 'Project tidak ditemukan' });
+
+    const kumpulkan = async (jenis: string) => {
+      const d = DOKUMEN_BIAYA[jenis];
+      const rows: any[] = await dbAll(
+        `SELECT id, ${d.nomor} AS nomor, ${d.nilai} AS nilai, ${d.tanggal} AS tanggal,
+                wbs_id, cost_code_id
+         FROM ${d.tabel} WHERE project_id = ?
+         ORDER BY id DESC`, [projectId]);
+      return rows.map((r: any) => ({
+        jenis, id: r.id, nomor: r.nomor,
+        nilai: Math.round((Number(r.nilai) || 0) * 100) / 100,
+        tanggal: r.tanggal ? String(r.tanggal).slice(0, 10) : null,
+        wbs_id: r.wbs_id, cost_code_id: r.cost_code_id,
+      }));
+    };
+
+    const semua = [
+      ...(await kumpulkan('po')),
+      ...(await kumpulkan('ap')),
+      ...(await kumpulkan('expense')),
+    ];
+
+    const wbs: any[] = await dbAll(
+      `SELECT id, wbs_code, name, weight_pct, baseline_value
+       FROM project_wbs WHERE project_id = ? AND level = 2 ORDER BY sort_order, id`,
+      [projectId]);
+    const petaWbs: Record<number, any> = {};
+    for (const w of wbs) petaWbs[Number(w.id)] = w;
+
+    const perWbs: Record<number, { po: number; ap: number; expense: number; dok: number }> = {};
+    // Komitmen dan biaya dihitung TERPISAH sampai ke ringkasannya.
+    //
+    // Menjumlahkan PO ke "total biaya" akan membuat cakupan alokasi bercampur:
+    // PO yang sudah dipetakan menutupi tagihan yang belum, dan angkanya
+    // terlihat lebih rapi daripada keadaannya. PO adalah komitmen; ia belum
+    // tentu pernah menjadi biaya.
+    let belumBiaya = 0, belumBiayaDok = 0, belumKom = 0, belumKomDok = 0;
+    for (const d of semua) {
+      const w = Number(d.wbs_id);
+      const komitmen = d.jenis === 'po';
+      // Tautan yang menunjuk work package milik project LAIN diperlakukan
+      // sebagai belum teralokasi, bukan dihitung diam-diam.
+      if (!d.wbs_id || !petaWbs[w]) {
+        if (komitmen) { belumKom += d.nilai; belumKomDok++; }
+        else { belumBiaya += d.nilai; belumBiayaDok++; }
+        continue;
+      }
+      const b = perWbs[w] || (perWbs[w] = { po: 0, ap: 0, expense: 0, dok: 0 });
+      (b as any)[d.jenis] += d.nilai;
+      b.dok++;
+    }
+
+    const bulat = (n: number) => Math.round(n * 100) / 100;
+    const totalBiaya = bulat(semua.filter(d => d.jenis !== 'po').reduce((a, d) => a + d.nilai, 0));
+    const totalKom = bulat(semua.filter(d => d.jenis === 'po').reduce((a, d) => a + d.nilai, 0));
+
+    res.json({
+      project_id: projectId,
+      project_number: proyek.project_number,
+      per_wbs: wbs.map((w: any) => {
+        const b = perWbs[Number(w.id)] || { po: 0, ap: 0, expense: 0, dok: 0 };
+        return {
+          wbs_id: w.id, wbs_code: w.wbs_code, name: w.name,
+          weight_pct: Number(w.weight_pct),
+          baseline_value: Number(w.baseline_value),
+          // Commitment (PO) dan biaya yang sudah diakui (AP + expense) tetap
+          // dua angka berbeda — PO yang baru dibuat bukan biaya yang terjadi.
+          committed: bulat(b.po),
+          actual: bulat(b.ap + b.expense),
+          jml_dokumen: b.dok,
+        };
+      }),
+      belum_teralokasi: {
+        biaya: bulat(belumBiaya), jml_dokumen_biaya: belumBiayaDok,
+        komitmen: bulat(belumKom), jml_dokumen_komitmen: belumKomDok,
+      },
+      dokumen: semua,
+      ringkasan: {
+        total_biaya: totalBiaya,
+        biaya_teralokasi: bulat(totalBiaya - belumBiaya),
+        total_komitmen: totalKom,
+        komitmen_teralokasi: bulat(totalKom - belumKom),
+        // Berapa persen BIAYA yang benar-benar sudah menempel work package.
+        // Selama ini di bawah 100, angka per work package belum utuh — dan
+        // CPI yang dihitung darinya tidak boleh dibaca sebagai final.
+        cakupan_pct: totalBiaya > 0
+          ? Math.round((totalBiaya - belumBiaya) / totalBiaya * 10000) / 100 : null,
+        cakupan_komitmen_pct: totalKom > 0
+          ? Math.round((totalKom - belumKom) / totalKom * 10000) / 100 : null,
+      },
+    });
+  } catch (err: any) {
+    console.error('Error membaca alokasi biaya:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Petakan satu dokumen biaya ke work package + cost code.
+ *
+ * **Tidak pernah menyentuh nilai, tanggal, atau status dokumennya** — hanya
+ * dua kolom tautan. Itu syarat yang membuat pemetaan susulan aman dilakukan
+ * pada data historis: kalau pemetaannya keliru, yang salah cuma
+ * pengelompokannya, bukan angkanya.
+ */
+router.put('/:id/cost-allocation/:jenis/:docId', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const projectId = Number(req.params.id);
+    const docId = Number(req.params.docId);
+    const jenis = String(req.params.jenis);
+    if (!idValid(projectId) || !idValid(docId)) {
+      return res.status(400).json({ error: 'Id tidak valid' });
+    }
+    const d = DOKUMEN_BIAYA[jenis];
+    if (!d) return res.status(400).json({
+      error: `Jenis dokumen "${jenis}" tidak dikenal. Pilih: po, ap, expense.`,
+      code: 'JENIS_TIDAK_DIKENAL' });
+
+    const { wbs_id, cost_code_id } = req.body || {};
+
+    if (wbs_id != null) {
+      const w: any = await dbGet('SELECT id FROM project_wbs WHERE id = ? AND project_id = ?',
+        [wbs_id, projectId]);
+      if (!w) return res.status(400).json({
+        error: 'Work package itu bukan milik project ini.', code: 'WBS_BEDA_PROJECT' });
+    }
+    if (cost_code_id != null) {
+      const c: any = await dbGet('SELECT id FROM cost_codes WHERE id = ? AND is_active = 1',
+        [cost_code_id]);
+      if (!c) return res.status(400).json({
+        error: 'Cost code tidak dikenal atau sudah tidak aktif.', code: 'COST_CODE_TIDAK_VALID' });
+    }
+
+    // Predikat project ikut serta: dokumen milik proyek lain tidak boleh
+    // dipetakan dari sini, dan nol baris terkena berarti 404 — bukan
+    // "berhasil" yang tidak mengubah apa pun.
+    const upd: any = await dbRun(
+      `UPDATE ${d.tabel} SET wbs_id = ?, cost_code_id = ? WHERE id = ? AND project_id = ?`,
+      [wbs_id ?? null, cost_code_id ?? null, docId, projectId]);
+    if (!upd?.affectedRows) {
+      return res.status(404).json({
+        error: 'Dokumen tidak ditemukan pada project ini.',
+        code: 'DOKUMEN_BUKAN_MILIK_PROJECT' });
+    }
+    res.json({ message: 'Alokasi diperbarui' });
+  } catch (err: any) {
+    console.error('Error memetakan biaya:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * PROJ-CTRL Fase 3 — EVM: PV / EV / AC, SPI / CPI, EAC.
+ *
+ * Semua angkanya turunan dari yang sudah ada — baseline kontrak, periode
+ * cut-off yang DISETUJUI, dan biaya yang menempel work package. Tidak ada satu
+ * pun yang boleh diketik orang.
+ *
+ * Dua kejujuran yang sengaja dipertahankan:
+ *
+ * 1. **SPI dan CPI tidak sama tingkat kepercayaannya.** SPI hanya butuh planned
+ *    dan earned, keduanya lengkap. CPI butuh AC, dan AC hanya selengkap
+ *    pemetaan biayanya. Karena itu CPI selalu datang bersama `cakupan_biaya_pct`,
+ *    dan `null` kalau belum ada biaya yang dipetakan sama sekali — bukan angka
+ *    tak hingga yang terlihat meyakinkan.
+ * 2. **Belum ada cut-off disetujui = belum ada EV.** Dijawab `null`, bukan nol.
+ *    Nol berarti "sudah diukur, hasilnya belum ada kemajuan"; itu klaim yang
+ *    berbeda dan biasanya keliru.
+ */
+router.get('/:id/evm', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const projectId = Number(req.params.id);
+    if (!idValid(projectId)) return res.status(400).json({ error: 'Id project tidak valid' });
+
+    const proyek: any = await dbGet(
+      `SELECT p.id, p.project_number, p.budget, p.wbs_baseline_value,
+              c.id AS contract_id, c.original_value
+       FROM client_projects p
+       LEFT JOIN contracts c ON c.project_id = p.id
+       WHERE p.id = ?`, [projectId]);
+    if (!proyek) return res.status(404).json({ error: 'Project tidak ditemukan' });
+
+    // BAC: nilai kontrak berjalan (asli + CO disetujui), mengikuti aturan
+    // CONTRACT-R51 — dihitung, tidak dibaca dari kolom denormalisasi.
+    let bac = 0; let sumberBac = 'project_budget';
+    if (proyek.contract_id) {
+      const co: any = await dbGet(
+        `SELECT COALESCE(SUM(CASE WHEN status = 'approved' THEN value_delta END), 0) AS d
+         FROM change_orders WHERE contract_id = ?`, [proyek.contract_id]);
+      bac = Math.round(((Number(proyek.original_value) || 0) + (Number(co?.d) || 0)) * 100) / 100;
+      sumberBac = 'contract_ledger';
+    } else {
+      bac = Math.round((Number(proyek.budget) || 0) * 100) / 100;
+    }
+
+    const terakhir: any = await dbGet(
+      `SELECT period_no, cutoff_date, planned_pct, earned_pct, claimed_pct
+       FROM project_progress_periods
+       WHERE project_id = ? AND status = 'approved'
+       ORDER BY period_no DESC LIMIT 1`, [projectId]);
+
+    // AC hanya dari biaya yang benar-benar menempel work package proyek ini.
+    const biaya: any = await dbGet(
+      `SELECT
+         (SELECT COALESCE(SUM(e.amount), 0) FROM project_expenses e
+           JOIN project_wbs w ON w.id = e.wbs_id
+          WHERE w.project_id = ?) AS exp_dipetakan,
+         (SELECT COALESCE(SUM(ap.amount), 0) FROM accounts_payable ap
+           JOIN project_wbs w ON w.id = ap.wbs_id
+          WHERE w.project_id = ?) AS ap_dipetakan,
+         (SELECT COALESCE(SUM(e.amount), 0) FROM project_expenses e WHERE e.project_id = ?) AS exp_total,
+         (SELECT COALESCE(SUM(ap.amount), 0) FROM accounts_payable ap WHERE ap.project_id = ?) AS ap_total,
+         (SELECT COALESCE(SUM(po.total_amount), 0) FROM purchase_orders po
+           WHERE po.project_id = ? AND po.status NOT IN ('rejected','cancelled')) AS po_total`,
+      [projectId, projectId, projectId, projectId, projectId]);
+
+    const bulat = (n: any) => Math.round((Number(n) || 0) * 100) / 100;
+    const ac = bulat(Number(biaya?.exp_dipetakan) + Number(biaya?.ap_dipetakan));
+    const acTotal = bulat(Number(biaya?.exp_total) + Number(biaya?.ap_total));
+    const cakupanBiaya = acTotal > 0 ? Math.round(ac / acTotal * 10000) / 100 : null;
+
+    const adaEv = !!terakhir;
+    const pv = adaEv ? bulat(bac * Number(terakhir.planned_pct) / 100) : null;
+    const ev = adaEv ? bulat(bac * Number(terakhir.earned_pct) / 100) : null;
+
+    const spi = adaEv && pv! > 0 ? Math.round(ev! / pv! * 1000) / 1000 : null;
+    // CPI hanya bermakna kalau ada biaya yang dipetakan. Tanpa itu ia bukan
+    // "tak hingga", ia belum diketahui.
+    const cpi = adaEv && ac > 0 ? Math.round(ev! / ac * 1000) / 1000 : null;
+
+    res.json({
+      project_id: projectId,
+      project_number: proyek.project_number,
+      bac, bac_source: sumberBac,
+      cutoff: adaEv ? {
+        period_no: terakhir.period_no,
+        cutoff_date: String(terakhir.cutoff_date).slice(0, 10),
+        planned_pct: Number(terakhir.planned_pct),
+        earned_pct: Number(terakhir.earned_pct),
+      } : null,
+      pv, ev, ac,
+      sv: adaEv ? bulat(ev! - pv!) : null,
+      cv: adaEv && ac > 0 ? bulat(ev! - ac) : null,
+      spi, cpi,
+      // EAC hanya dari CPI yang sah. EAC yang dihitung dari CPI setengah data
+      // adalah tebakan yang menyamar sebagai proyeksi.
+      eac: cpi && cpi > 0 ? bulat(bac / cpi) : null,
+      etc: cpi && cpi > 0 ? bulat(bac / cpi - ac) : null,
+      committed: bulat(biaya?.po_total),
+      keterandalan: {
+        // Dinyatakan terbuka supaya angkanya tidak dibaca lebih percaya diri
+        // daripada seharusnya.
+        ada_cutoff_disetujui: adaEv,
+        cakupan_biaya_pct: cakupanBiaya,
+        biaya_belum_dipetakan: bulat(acTotal - ac),
+        catatan: !adaEv
+          ? 'Belum ada periode cut-off yang disetujui, jadi EV belum ada. SPI dan CPI tidak bisa dihitung.'
+          : (cakupanBiaya === null
+              ? 'Belum ada biaya tercatat pada proyek ini, jadi CPI belum bisa dihitung.'
+              : (cakupanBiaya < 100
+                  ? `Baru ${cakupanBiaya}% biaya yang menempel work package. CPI dan EAC dihitung dari bagian itu saja.`
+                  : 'Seluruh biaya sudah menempel work package.')),
+      },
+    });
+  } catch (err: any) {
+    console.error('Error menghitung EVM:', err);
     res.status(500).json({ error: err.message });
   }
 });

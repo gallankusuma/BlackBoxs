@@ -2890,6 +2890,97 @@ negative cross-project test. Fase 1: WBS/CBS + baseline + cost-code handoff.
 Fase 2: schedule logic dan progress cut-off/approval. Fase 3: EVM, S-curve,
 forecast, serta cash-flow terintegrasi.
 
+**[DEV] FASE 3 DITERAPKAN (alokasi biaya + EVM) — 29 Agustus 2026**
+
+Fase 3 bisa dikerjakan setelah biaya punya tempat menempel. Jalan keluarnya
+sudah tertulis di butir ini sendiri — *"backfill ke bucket Unallocated per
+project lalu sediakan workflow mapping tanpa mengubah nilai historis"* — jadi
+tidak perlu menunggu keputusan pemetaan massal.
+
+### Biaya menempel work package
+
+`wbs_id` + `cost_code_id` ditambahkan ke `purchase_orders` dan
+`accounts_payable` (`project_expenses` sudah punya sejak Fase 1). **Nullable,
+dan itu disengaja**: produksi punya 134 AP dan 91 PO yang bahkan belum punya
+`project_id`. Memaksa pemetaan berarti menebak, dan tebakan yang salah lebih
+buruk daripada mengaku belum tahu.
+
+Sengaja **index, bukan foreign key**: `purchase_orders` dan `accounts_payable`
+hidup di modul lain dan sudah berisi data produksi. FK ke `project_wbs` akan
+menautkan siklus hidup dua modul yang selama ini berdiri sendiri — menghapus
+satu work package tidak boleh menyentuh dokumen keuangan. Kesahihannya dijaga di
+jalur tulis, dan tesnya membuktikannya (lintas project 400, dokumen seberang 404).
+
+`PUT /projects/:id/cost-allocation/:jenis/:docId` **tidak pernah menyentuh
+nilai, tanggal, atau status dokumennya** — hanya dua kolom tautan. Itu syarat
+yang membuat pemetaan susulan aman pada data historis: kalau pemetaannya keliru,
+yang salah cuma pengelompokannya, bukan angkanya. Tes memeriksanya bolak-balik
+(petakan → lepas → nilainya tetap utuh).
+
+`GET /projects/:id/cost-allocation` melaporkan yang belum dipetakan **apa
+adanya** sebagai bucket tersendiri. Angka "actual cost per work package" yang
+diam-diam mengabaikan separuh biaya jauh lebih berbahaya daripada angka yang
+mengaku baru mencakup separuh.
+
+Satu ketidakkonsistenan di implementasi pertama saya sendiri, ditemukan tesnya
+dan diperbaiki: ringkasan alokasi sempat menjumlahkan PO ke "total biaya",
+sehingga PO yang sudah dipetakan **menutupi tagihan yang belum** dan cakupannya
+terlihat lebih rapi daripada keadaannya. Komitmen dan biaya kini terpisah sampai
+ke ringkasan, masing-masing dengan cakupannya sendiri.
+
+### EVM
+
+`GET /projects/:id/evm` — PV, EV, AC, SV, CV, SPI, CPI, EAC, ETC. Semuanya
+turunan dari yang sudah ada: BAC dari ledger kontrak (`original + Σ CO approved`,
+dihitung bukan disimpan), EV dari periode cut-off yang **disetujui**, AC dari
+biaya yang menempel work package. Tidak ada satu pun yang boleh diketik orang.
+
+Dua kejujuran yang sengaja dipertahankan:
+
+1. **SPI dan CPI tidak sama tingkat kepercayaannya.** SPI hanya butuh planned
+   dan earned — keduanya lengkap. CPI butuh AC, dan AC hanya selengkap
+   pemetaan biayanya. Karena itu CPI selalu datang bersama `cakupan_biaya_pct`
+   dan catatan yang menyebutkan angkanya, dan `null` kalau belum ada biaya
+   dipetakan — bukan angka tak hingga yang terlihat meyakinkan.
+2. **Belum ada cut-off disetujui = belum ada EV.** Dijawab `null`, bukan nol.
+   Nol berarti "sudah diukur, hasilnya belum ada kemajuan" — klaim berbeda, dan
+   biasanya keliru.
+
+### Tes
+
+`tests/cost-evm.ts` — **49 asersi**, `npm run test:evm`. Mutation check
+(AC menghitung seluruh biaya, bukan hanya yang dipetakan) → **7 kegagalan**, dan
+bentuk kegagalannya persis yang dihindari:
+
+```
+FAIL AC 60 juta (hanya yang dipetakan) → dapat 100000000
+FAIL CPI 1.667                          → dapat 1
+FAIL catatannya memperingatkan          → dapat false
+```
+
+CPI menjadi **tepat 1,0** dan peringatan cakupannya hilang — angka yang terlihat
+sempurna justru karena datanya tidak lengkap.
+
+`test:all` **2508 lulus, 0 gagal**. Residu nol.
+
+### Layar
+
+Kartu EVM (PV/EV/AC/komitmen, SPI/CPI/EAC/cakupan) di tab Progress Cut-off,
+berikut catatan keterandalan yang berubah warna saat cakupan di bawah 100%.
+Tab WBS menambah kolom Komitmen dan spanduk biaya yang belum menempel.
+
+### Yang masih terbuka
+
+- **Pemetaan 134 AP + 91 PO produksi** tetap keputusan Anda. Alatnya sekarang
+  ada dan aman dipakai pada data historis; yang belum diputuskan adalah siapa
+  memetakan dan kapan. Sampai itu terjadi, EVM produksi akan melaporkan cakupan
+  rendah — dan itu **benar**, bukan cacat.
+- MR/PR/GRN dan timesheet belum membawa `wbs_id`.
+- Kurva-S per periode sudah punya datanya (`/progress` → `kurva`) tapi belum
+  digambar sebagai grafik.
+
+---
+
 **[DEV] FASE 2 DITERAPKAN (progress cut-off) — 29 Agustus 2026**
 
 Kriteria terima #3: *"Periodic progress cut-off menyimpan planned, claimed,
