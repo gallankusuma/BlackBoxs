@@ -142,7 +142,59 @@
              lalu berhenti. Mengubahnya jadi penawaran berarti mencari AHSP
              satu per satu di katalog ribuan baris — untuk SETIAP baris MTO.
              Satu pondasi footplate saja menghasilkan enam. -->
-        <div v-if="isEditable" class="mb-4 flex flex-wrap items-center gap-3">
+        <!-- ══ Rekonsiliasi MTO ↔ RAB ══════════════════════════════════════
+             Dua pertanyaan yang sebelumnya tidak bisa dijawab tanpa membuka
+             zona satu per satu: berapa yang sudah dihitung MTO tapi belum
+             masuk anggaran, dan berapa nilai RAB yang kuantitasnya diketik
+             tangan tanpa dasar sama sekali. -->
+        <div v-if="rekon" class="mb-4 rounded-xl border border-gray-200 bg-white p-4">
+          <div class="flex flex-wrap items-center gap-x-6 gap-y-2 mb-3">
+            <span class="text-sm font-semibold text-gray-800">Kuantitas MTO → Anggaran</span>
+            <span class="text-sm">
+              <strong :class="rekon.ringkasan.cakupan_pct >= 100 ? 'text-emerald-700' : 'text-amber-700'">
+                {{ rekon.ringkasan.sudah_di_rab }}/{{ rekon.ringkasan.jml_baris_mto }}
+              </strong>
+              baris sudah berharga
+            </span>
+            <span class="text-sm text-gray-600">
+              Nilai tertelusur
+              <strong :class="(rekon.ringkasan.nilai_tertelusur_pct ?? 0) >= 80 ? 'text-emerald-700' : 'text-amber-700'">
+                {{ rekon.ringkasan.nilai_tertelusur_pct === null ? '—' : rekon.ringkasan.nilai_tertelusur_pct + '%' }}
+              </strong>
+            </span>
+            <button v-if="isEditable" @click="bukaUsulRab"
+              class="ml-auto px-4 py-2 bg-teal-600 text-white rounded-lg text-sm font-semibold hover:bg-teal-700">
+              📐 Buat RAB dari MTO
+            </button>
+            <button v-if="isEditable && rekon.ringkasan.siap_dibuat"
+              @click="buatSemuaDariMto" :disabled="rekonSibuk"
+              class="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-semibold hover:bg-emerald-700 disabled:opacity-50">
+              {{ rekonSibuk ? 'Membuat…' : `Buat ${rekon.ringkasan.siap_dibuat} sisanya sekaligus` }}
+            </button>
+          </div>
+
+          <div class="flex flex-wrap gap-3 text-xs">
+            <span v-if="rekon.ringkasan.belum_di_rab" class="rounded-full bg-amber-100 text-amber-800 px-3 py-1">
+              {{ rekon.ringkasan.belum_di_rab }} baris MTO belum masuk anggaran
+            </span>
+            <!-- Dibedakan tegas: belum dikerjakan vs katalog memang tak punya
+                 padanan. Yang kedua tidak bisa diselesaikan dengan menekan
+                 tombol — ia butuh AHSP ditambahkan. -->
+            <span v-if="rekon.ringkasan.belum_ada_usulan" class="rounded-full bg-rose-100 text-rose-800 px-3 py-1">
+              {{ rekon.ringkasan.belum_ada_usulan }} di antaranya belum punya AHSP padanan di katalog
+            </span>
+            <span v-if="rekon.rab_tanpa_dasar_mto.jumlah" class="rounded-full bg-slate-100 text-slate-700 px-3 py-1">
+              {{ rekon.rab_tanpa_dasar_mto.jumlah }} baris RAB tanpa dasar MTO
+              ({{ formatNumber(rekon.rab_tanpa_dasar_mto.nilai) }})
+            </span>
+          </div>
+
+          <p v-if="rekon.rab_tanpa_dasar_mto.jumlah" class="mt-2 text-xs text-gray-500">
+            {{ rekon.rab_tanpa_dasar_mto.catatan }}
+          </p>
+        </div>
+
+        <div v-else-if="isEditable" class="mb-4 flex flex-wrap items-center gap-3">
           <button @click="bukaUsulRab"
             class="px-4 py-2 bg-teal-600 text-white rounded-lg text-sm font-semibold hover:bg-teal-700">
             📐 Buat RAB dari MTO
@@ -1610,6 +1662,60 @@ const mtoTypeColors: Record<string, string> = {
   slab: '#d1fae5', wall: '#f3f4f6', roof: '#fee2e2'
 };
 
+const rekon = ref<any>(null);
+const rekonSibuk = ref(false);
+
+/** Rekonsiliasi seluruh proposal — dibaca, tidak menulis apa pun. */
+const muatRekon = async () => {
+  try {
+    const { data } = await api.get(`/estimator/proposals/${proposalId}/mto-rab`);
+    // Proposal tanpa MTO sama sekali tidak perlu panel ini.
+    rekon.value = data?.ringkasan?.jml_baris_mto ? data : null;
+  } catch (e) {
+    rekon.value = null;
+    console.error('Gagal memuat rekonsiliasi MTO-RAB', e);
+  }
+};
+
+/**
+ * Buat seluruh baris yang belum berharga, memakai kandidat AHSP teratas.
+ *
+ * Kandidat teratas dipakai karena inilah jalur "banyak sekaligus"; yang butuh
+ * pemilihan teliti tetap lewat 📐 Buat RAB dari MTO. Karena itu konfirmasinya
+ * menyebutkan bahwa yang dipakai adalah usulan teratas — bukan pilihan
+ * pengguna.
+ */
+const buatSemuaDariMto = async () => {
+  if (!rekon.value || rekonSibuk.value) return;
+  const lines: any[] = [];
+  for (const z of rekon.value.zona || []) {
+    for (const b of z.lines || []) {
+      if (b.sudah_di_rab || !b.usulan?.length) continue;
+      lines.push({ element_id: z.element_id, line_code: b.line_code, ahsp_id: b.usulan[0].ahsp_id });
+    }
+  }
+  if (!lines.length) return;
+  if (!confirm(`Buat ${lines.length} item RAB memakai AHSP usulan TERATAS untuk tiap baris?\n\n`
+    + 'Untuk memilih AHSP satu per satu, pakai 📐 Buat RAB dari MTO.')) return;
+
+  rekonSibuk.value = true;
+  try {
+    const { data } = await api.post(`/estimator/proposals/${proposalId}/mto-rab/terapkan`, { lines });
+    await loadProposal();
+    await muatRekon();
+    // Yang dilewati disebut apa adanya, bukan ditelan.
+    const l = (data?.dilewati || []).length;
+    alert(l
+      ? `${data.dibuat.length} item dibuat, ${l} dilewati:\n`
+        + data.dilewati.slice(0, 5).map((x: any) => `· ${x.line_code}: ${x.sebab}`).join('\n')
+      : data?.message || 'Item RAB dibuat.');
+  } catch (e: any) {
+    alert(e?.response?.data?.error || 'Gagal membuat item RAB.');
+  } finally {
+    rekonSibuk.value = false;
+  }
+};
+
 const showUsulRab = ref(false);
 const usulElemenId = ref<any>('');
 const usulRab = ref<any>(null);
@@ -1670,6 +1776,7 @@ const terapkanUsulRab = async () => {
       `/estimator/proposals/${proposalId}/mto/${usulElemenId.value}/rab`, { lines });
     await loadProposal();
     await muatUsulRab();
+    await muatRekon();
     alert(data?.message || 'Item RAB dibuat.');
   } catch (e: any) {
     // Kode galat dibawa apa adanya — UNIT_MISMATCH dan BARIS_SUDAH_TERTAUT
@@ -2474,6 +2581,7 @@ onMounted(async () => {
     loadItems(),
     loadSummary(),
     muatBarisBelumLengkap(),
+    muatRekon(),
   ]);
 });
 </script>

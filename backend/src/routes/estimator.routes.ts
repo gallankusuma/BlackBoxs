@@ -5805,6 +5805,159 @@ router.get('/proposals/:id/mto/:elementId/usul-rab', authMiddleware, bolehLihat,
   });
 
 /**
+ * Rekonsiliasi MTO ↔ RAB untuk SELURUH proposal.
+ *
+ * Jembatan per-zona sudah ada, tapi ia hanya menjawab satu zona pada satu
+ * waktu. Yang tidak bisa dijawab siapa pun sebelum ini: **berapa banyak
+ * pekerjaan yang sudah dihitung MTO tapi belum masuk anggaran**, dan
+ * sebaliknya — berapa nilai RAB yang kuantitasnya diketik tangan tanpa dasar
+ * MTO sama sekali.
+ *
+ * Arah kedua itu yang paling sering luput. Baris RAB tanpa tautan MTO bukan
+ * otomatis salah — ada pekerjaan yang memang tidak punya perhitungan teknis,
+ * mis. mobilisasi atau K3. Tapi ia tidak bisa ditelusuri ke gambar, jadi
+ * jumlahnya harus terlihat, bukan tenggelam di antara ratusan baris.
+ */
+router.get('/proposals/:id/mto-rab', authMiddleware, bolehLihat,
+  async (req: Request, res: Response) => {
+    try {
+      const proposalId = req.params.id;
+      const proposal: any = await dbGet(
+        'SELECT id, proposal_number, total_project FROM proposals WHERE id = ?', [proposalId]);
+      if (!proposal) return res.status(404).json({ error: 'Proposal tidak ditemukan' });
+
+      const elemen: any[] = await dbAll(
+        `SELECT id, element_type, element_name, parameters, sort_order
+         FROM engineering_inputs
+         WHERE scope_type = 'proposal' AND scope_id = ?
+         ORDER BY sort_order, id`, [proposalId]);
+
+      const items: any[] = await dbAll(
+        `SELECT id, ahsp_code_snapshot, ahsp_name_snapshot, unit_snapshot,
+                unit_price_snapshot, qty, total_price, is_section, mto_link
+         FROM proposal_items WHERE proposal_id = ? ORDER BY order_no, id`, [proposalId]);
+
+      // Peta tautan: element_id → line_code → item.
+      const tertaut: Record<string, any> = {};
+      let nilaiBerdasar = 0, nilaiTanpaDasar = 0;
+      const tanpaDasar: any[] = [];
+      for (const it of items) {
+        if (Number(it.is_section) === 1) continue;
+        const nilai = Number(it.total_price) || 0;
+        let link: any = null;
+        try { link = typeof it.mto_link === 'string' ? JSON.parse(it.mto_link) : it.mto_link; } catch {}
+        if (link?.element_id && link?.line_code) {
+          tertaut[`${link.element_id}|${link.line_code}`] = it;
+          nilaiBerdasar += nilai;
+        } else {
+          nilaiTanpaDasar += nilai;
+          tanpaDasar.push({
+            item_id: it.id, kode: it.ahsp_code_snapshot, nama: it.ahsp_name_snapshot,
+            qty: Number(it.qty) || 0, unit: it.unit_snapshot,
+            total: Math.round(nilai * 100) / 100,
+          });
+        }
+      }
+
+      // Katalog dibaca SEKALI untuk seluruh zona — bukan sekali per zona.
+      const katalog: any[] = await dbAll(
+        `SELECT id, kode, name, satuan, harga_satuan FROM ahsp_headers WHERE status = 'active'`, []);
+
+      const bulat = (n: number) => Math.round(n * 100) / 100;
+      let totalBaris = 0, totalTertaut = 0, totalAdaUsulan = 0, totalTanpaUsulan = 0;
+
+      const zona = elemen.map((el: any) => {
+        const params = typeof el.parameters === 'string'
+          ? JSON.parse(el.parameters || '{}') : (el.parameters || {});
+        const mto = calculateMto(el.element_type, params);
+
+        const baris = mto.lines.map(l => {
+          const it = tertaut[`${el.id}|${l.code}`];
+          totalBaris++;
+          if (it) { totalTertaut++; return {
+            line_code: l.code, label: l.label, unit: l.unit,
+            net_quantity: l.net_quantity, sudah_di_rab: true,
+            item_id: it.id, ahsp_code: it.ahsp_code_snapshot,
+            // Perbedaan kuantitas RAB vs MTO ditampilkan, bukan diasumsikan
+            // selalu sinkron — override manual pada item tertaut mungkin saja.
+            qty_rab: Number(it.qty) || 0,
+            selisih_qty: bulat((Number(it.qty) || 0) - l.net_quantity),
+            nilai: bulat(Number(it.total_price) || 0),
+            usulan: [],
+          }; }
+
+          const usulan = usulkanAhsp(
+            { code: l.code, label: l.label, unit: l.unit }, katalog as any, 3);
+          if (usulan.length) totalAdaUsulan++; else totalTanpaUsulan++;
+          return {
+            line_code: l.code, label: l.label, unit: l.unit,
+            net_quantity: l.net_quantity, sudah_di_rab: false,
+            item_id: null, ahsp_code: null, qty_rab: null, selisih_qty: null,
+            // Perkiraan nilai kalau kandidat teratas dipakai — untuk mengukur
+            // besarnya yang belum masuk, bukan untuk dipakai sebagai harga.
+            nilai_perkiraan: usulan.length
+              ? bulat(l.net_quantity * (usulan[0].harga_satuan || 0)) : null,
+            usulan,
+          };
+        });
+
+        const belum = baris.filter(b => !b.sudah_di_rab);
+        return {
+          element_id: el.id, element_type: el.element_type, element_name: el.element_name,
+          variant: mto.variant,
+          lines: baris,
+          ringkasan: {
+            jml_baris: baris.length,
+            sudah_di_rab: baris.length - belum.length,
+            belum_di_rab: belum.length,
+            nilai_di_rab: bulat(baris.filter(b => b.sudah_di_rab)
+              .reduce((a, b: any) => a + (b.nilai || 0), 0)),
+            perkiraan_belum: bulat(belum.reduce((a, b: any) => a + (b.nilai_perkiraan || 0), 0)),
+          },
+        };
+      });
+
+      const totalItem = bulat(nilaiBerdasar + nilaiTanpaDasar);
+      res.json({
+        proposal_id: Number(proposalId),
+        proposal_number: proposal.proposal_number,
+        zona,
+        // Arah sebaliknya — dan ini yang paling sering luput.
+        rab_tanpa_dasar_mto: {
+          items: tanpaDasar,
+          jumlah: tanpaDasar.length,
+          nilai: bulat(nilaiTanpaDasar),
+          catatan: 'Baris ini tidak salah dengan sendirinya — mobilisasi, K3, dan '
+                 + 'sejenisnya memang tidak punya perhitungan teknis. Tapi kuantitasnya '
+                 + 'tidak bisa ditelusuri ke gambar, jadi jumlahnya perlu terlihat.',
+        },
+        ringkasan: {
+          jml_zona: zona.length,
+          jml_baris_mto: totalBaris,
+          sudah_di_rab: totalTertaut,
+          belum_di_rab: totalBaris - totalTertaut,
+          // Dipisah: yang belum masuk karena belum dikerjakan, versus yang
+          // belum masuk karena katalog AHSP-nya memang tidak punya padanan.
+          belum_ada_usulan: totalTanpaUsulan,
+          siap_dibuat: totalAdaUsulan,
+          cakupan_pct: totalBaris > 0
+            ? Math.round(totalTertaut / totalBaris * 10000) / 100 : null,
+          nilai_rab_berdasar_mto: bulat(nilaiBerdasar),
+          nilai_rab_tanpa_dasar: bulat(nilaiTanpaDasar),
+          // Berapa persen NILAI penawaran yang kuantitasnya bisa ditelusuri.
+          // Angka inilah yang menjawab "seberapa bisa dipertanggungjawabkan".
+          nilai_tertelusur_pct: totalItem > 0
+            ? Math.round(nilaiBerdasar / totalItem * 10000) / 100 : null,
+        },
+        tersimpan: false,
+      });
+    } catch (err: any) {
+      console.error('Error rekonsiliasi MTO-RAB:', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+/**
  * Terapkan pilihan estimator: buat item RAB dan tautkan ke baris MTO-nya,
  * dalam SATU transaction.
  *
@@ -5942,6 +6095,156 @@ router.post('/proposals/:id/mto/:elementId/rab', authMiddleware, bolehUbah,
       });
     } catch (err: any) {
       console.error('Error membuat RAB dari MTO:', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+/**
+ * Buat item RAB untuk baris dari BANYAK zona sekaligus, dalam satu transaction.
+ *
+ * Jalur per-zona sudah ada dan tetap dipakai untuk pekerjaan teliti. Yang ini
+ * untuk keadaan yang sebenarnya lebih umum: satu proposal punya delapan zona,
+ * dan mengulang alur yang sama delapan kali membuat orang menyerah di tengah —
+ * lalu separuh MTO-nya tidak pernah masuk anggaran.
+ *
+ * Aturannya tidak dilonggarkan satu pun: satuan tetap disaring keras, baris
+ * yang sudah tertaut tetap ditolak, proposal terkunci tetap 409. Yang berubah
+ * hanya jumlah putarannya.
+ */
+router.post('/proposals/:id/mto-rab/terapkan', authMiddleware, bolehUbah,
+  async (req: Request, res: Response) => {
+    try {
+      const proposalId = req.params.id;
+      const pilihan: any[] = Array.isArray(req.body?.lines) ? req.body.lines : [];
+      if (!pilihan.length) {
+        return res.status(400).json({
+          error: 'Tidak ada baris yang dipilih.', code: 'PILIHAN_KOSONG' });
+      }
+      if (pilihan.length > 300) {
+        return res.status(400).json({
+          error: 'Terlalu banyak baris sekaligus (maksimum 300).', code: 'TERLALU_BANYAK' });
+      }
+
+      const hasil = await withTransaction(async (tx: TxRunner) => {
+        const kunci = await proposalLockTx(proposalId, tx);
+        if (kunci) return { error: kunci.status, body: kunci.body };
+
+        let orderNo = Number((await tx.get(
+          'SELECT COALESCE(MAX(order_no), 0) AS n FROM proposal_items WHERE proposal_id = ?',
+          [proposalId]) as any)?.n || 0);
+
+        // Kalkulator dijalankan sekali per elemen, bukan sekali per baris.
+        const cacheMto: Record<number, any> = {};
+        const ambilMto = async (elementId: number) => {
+          if (cacheMto[elementId]) return cacheMto[elementId];
+          const el: any = await tx.get(
+            `SELECT id, element_type, element_name, parameters FROM engineering_inputs
+             WHERE id = ? AND scope_type = 'proposal' AND scope_id = ? FOR UPDATE`,
+            [elementId, proposalId]);
+          if (!el) return null;
+          const params = typeof el.parameters === 'string'
+            ? JSON.parse(el.parameters || '{}') : (el.parameters || {});
+          const tersimpan = await bacaBarisTersimpan(elementId, tx);
+          cacheMto[elementId] = {
+            el, mto: calculateMto(el.element_type, params),
+            versi: tersimpan?.[0]?.formula_version || FORMULA_VERSION,
+          };
+          return cacheMto[elementId];
+        };
+
+        const dibuat: any[] = [];
+        const dilewati: any[] = [];
+
+        for (const p of pilihan) {
+          const elementId = Number(p?.element_id);
+          const kode = String(p?.line_code || '');
+          const konteks = await ambilMto(elementId);
+          if (!konteks) {
+            dilewati.push({ element_id: elementId, line_code: kode,
+              sebab: 'elemen tidak ditemukan pada proposal ini' });
+            continue;
+          }
+
+          const line = konteks.mto.lines.find((l: any) => l.code === kode);
+          if (!line) {
+            dilewati.push({ element_id: elementId, line_code: kode,
+              sebab: 'baris MTO tidak ada pada elemen ini' });
+            continue;
+          }
+
+          const ahsp: any = await tx.get(
+            `SELECT id, kode, name, satuan, harga_satuan FROM ahsp_headers
+             WHERE id = ? AND status = 'active'`, [p?.ahsp_id]);
+          if (!ahsp) {
+            dilewati.push({ element_id: elementId, line_code: kode,
+              sebab: 'AHSP tidak ditemukan atau tidak aktif' });
+            continue;
+          }
+
+          const cek = checkUnitCompatibility(line.unit, ahsp.satuan);
+          if (!cek.compatible) {
+            dilewati.push({ element_id: elementId, line_code: kode,
+              sebab: cek.reason, mto_unit: line.unit, rab_unit: ahsp.satuan });
+            continue;
+          }
+
+          const adaTaut: any = await tx.get(
+            `SELECT id FROM proposal_items
+             WHERE proposal_id = ? AND mto_link IS NOT NULL
+               AND JSON_EXTRACT(mto_link, '$.element_id') = ?
+               AND JSON_UNQUOTE(JSON_EXTRACT(mto_link, '$.line_code')) = ?`,
+            [proposalId, elementId, kode]);
+          if (adaTaut) {
+            dilewati.push({ element_id: elementId, line_code: kode,
+              sebab: 'baris sudah tertaut ke item RAB', item_id: adaTaut.id });
+            continue;
+          }
+
+          const qty = line.net_quantity;   // RAB selalu net (EST-MTO-R13)
+          const harga = Number(ahsp.harga_satuan) || 0;
+          orderNo++;
+          const ins = await tx.run(
+            `INSERT INTO proposal_items
+              (proposal_id, ahsp_id, ahsp_code_snapshot, ahsp_name_snapshot, unit_snapshot,
+               unit_price_snapshot, qty, total_price, order_no, is_section, mto_link)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+            [proposalId, ahsp.id, ahsp.kode, ahsp.name, ahsp.satuan, harga,
+             qty, Math.round(qty * harga * 100) / 100, orderNo,
+             JSON.stringify({
+               element_id: konteks.el.id, previous_qty: 0,
+               element_type: konteks.el.element_type, element_name: konteks.el.element_name,
+               line_code: line.code, basis: 'net',
+               gross_quantity: line.gross_quantity, waste_percent: line.waste_percent,
+               value: qty, unit: line.unit, formula_version: konteks.versi,
+             })]);
+
+          dibuat.push({
+            item_id: ins.insertId, element_id: elementId, line_code: line.code,
+            label: line.label, ahsp_code: ahsp.kode, qty, unit: ahsp.satuan,
+            total: Math.round(qty * harga * 100) / 100,
+          });
+        }
+
+        await recalculateProposal(proposalId as string, tx);
+        const ringkas: any = await tx.get(
+          'SELECT total_project FROM proposals WHERE id = ?', [proposalId]);
+        await catatAudit(tx, proposalId, (req as any).userId, 'mto_to_rab_massal', 'items',
+          null, `${dibuat.length} item RAB dibuat dari MTO, ${dilewati.length} dilewati`);
+
+        return { ok: true as const, dibuat, dilewati,
+                 total_project: Number(ringkas?.total_project) || 0 };
+      });
+
+      if ((hasil as any).error) return res.status((hasil as any).error).json((hasil as any).body);
+      const d = (hasil as any).dibuat.length, l = (hasil as any).dilewati.length;
+      res.status(201).json({
+        // Yang dilewati disebut apa adanya. Satu baris bermasalah tidak boleh
+        // membatalkan yang lain, tapi juga tidak boleh hilang tanpa kabar.
+        message: l ? `${d} item RAB dibuat, ${l} dilewati.` : `${d} item RAB dibuat.`,
+        ...(hasil as any),
+      });
+    } catch (err: any) {
+      console.error('Error membuat RAB massal dari MTO:', err);
       res.status(500).json({ error: err.message });
     }
   });
