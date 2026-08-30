@@ -1701,7 +1701,13 @@ const buatSemuaDariMto = async () => {
   rekonSibuk.value = true;
   try {
     const { data } = await api.post(`/estimator/proposals/${proposalId}/mto-rab/terapkan`, { lines });
-    await loadProposal();
+    // `loadProposal()` hanya menyegarkan HEADER proposal; tabel RAB dirender
+    // dari `items` yang dimuat `loadItems()`. Tanpa ini, baris yang baru dibuat
+    // tidak pernah muncul — dan yang terlihat tetap baris lama yang volumenya
+    // memang nol, sehingga fiturnya tampak "tidak mengisi qty" padahal
+    // datanya sudah benar di server.
+    await Promise.all([loadItems(), loadSummary(), loadProposal()]);
+    await muatBarisBelumLengkap();
     await muatRekon();
     // Yang dilewati disebut apa adanya, bukan ditelan.
     const l = (data?.dilewati || []).length;
@@ -1774,7 +1780,10 @@ const terapkanUsulRab = async () => {
   try {
     const { data } = await api.post(
       `/estimator/proposals/${proposalId}/mto/${usulElemenId.value}/rab`, { lines });
-    await loadProposal();
+    // Sama seperti jalur massal: daftar item WAJIB ikut dimuat ulang, kalau
+    // tidak baris barunya tidak terlihat sama sekali.
+    await Promise.all([loadItems(), loadSummary(), loadProposal()]);
+    await muatBarisBelumLengkap();
     await muatUsulRab();
     await muatRekon();
     alert(data?.message || 'Item RAB dibuat.');

@@ -220,8 +220,26 @@ async function main() {
     chk('terap tanpa token 401',
       (await call('POST', `/estimator/proposals/${pid}/mto/${elementId}/rab`, { lines: [] })).status, 401);
 
+    console.log('\n12. Layar memuat ulang DAFTAR ITEM, bukan cuma header');
+    // Bug nyata yang dilaporkan pengguna: sesudah "Buat RAB dari MTO", qty di
+    // RAB terlihat tetap nol. Datanya benar di server — yang salah, layar cuma
+    // memanggil loadProposal() (header) sehingga baris baru tidak pernah
+    // muncul, dan yang terlihat tetap baris lama bervolume nol.
+    const { readFileSync } = await import('fs');
+    const { join } = await import('path');
+    const layar = readFileSync(
+      join(__dirname, '..', '..', 'frontend', 'src', 'views', 'EstimatorProposalEditor.vue'), 'utf8');
+    const blokTerap = layar.slice(layar.indexOf('const terapkanUsulRab'),
+      layar.indexOf('const terapkanUsulRab') + 1400);
+    chk('jalur per-zona memuat ulang daftar item', blokTerap.includes('loadItems()'), true);
+    chk('dan ringkasannya', blokTerap.includes('loadSummary()'), true);
+    const blokMassal = layar.slice(layar.indexOf('const buatSemuaDariMto'),
+      layar.indexOf('const buatSemuaDariMto') + 1600);
+    chk('jalur massal memuat ulang daftar item', blokMassal.includes('loadItems()'), true);
+    chk('dan ringkasannya', blokMassal.includes('loadSummary()'), true);
+
   } finally {
-    console.log('\n12. Bersih-bersih');
+    console.log('\n13. Bersih-bersih');
     const disapu = await sapuFixture(stamp, [`MR1.${stamp}`, `MR2.${stamp}`, `MR3.${stamp}`]);
     chk('proposal fixture tersapu', disapu.proposal >= 2, true);
     chk('AHSP fixture tersapu', disapu.ahsp >= 3, true);
