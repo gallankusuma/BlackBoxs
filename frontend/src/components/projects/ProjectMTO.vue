@@ -83,6 +83,10 @@
                    benar sekali tidak perlu diketik ulang tiap proposal. -->
               <button v-if="!readonly" @click="bukaTemplate" class="add-zone-btn"
                 title="Pakai parameter zona yang pernah disimpan">📁 Pakai Template</button>
+              <!-- Untuk proposal yang benar-benar mulai dari nol: sistem yang
+                   bertanya, bukan pengguna yang menebak field mana harus diisi. -->
+              <button v-if="!readonly" @click="bukaWawancara" class="add-zone-btn wwc-btn"
+                title="Sistem menanyakan lingkup, lalu membentuk zonanya">💬 Wawancara Lingkup</button>
             </div>
           </div>
 
@@ -509,6 +513,107 @@
     </div>
   </div>
 
+  <!-- ══ Modal: wawancara lingkup ════════════════════════════════════════════
+       Pertanyaan dimensinya dibangkitkan server dari spesifikasi kalkulator —
+       layar tidak punya daftarnya sendiri, jadi tidak bisa melenceng. -->
+  <div v-if="showWwc" class="tpl-overlay" @click.self="showWwc = false">
+    <div class="tpl-box wwc-box">
+      <div class="tpl-head">
+        <div>
+          <h3>💬 {{ wwc?.judul || 'Wawancara Lingkup' }}</h3>
+          <p>{{ wwc?.penjelasan || 'Menyiapkan pertanyaan…' }}</p>
+        </div>
+        <button @click="showWwc = false" class="tpl-x">×</button>
+      </div>
+
+      <div class="tpl-body">
+        <p v-if="wwcLoading" class="tpl-kosong">Menyiapkan…</p>
+
+        <template v-else-if="wwc && !wwc.selesai">
+          <div v-for="q in wwc.pertanyaan" :key="q.field" class="wwc-q">
+            <label class="wwc-label">
+              {{ q.label }}
+              <span v-if="q.satuan" class="wwc-satuan">({{ q.satuan }})</span>
+              <span v-if="!q.wajib" class="wwc-ops">opsional</span>
+            </label>
+            <p v-if="q.bantuan" class="wwc-bantuan">{{ q.bantuan }}</p>
+
+            <select v-if="q.jenis === 'pilihan'" v-model="wwcJawab[q.field]" class="wwc-input">
+              <option value="">— pilih —</option>
+              <option v-for="o in q.opsi" :key="o.nilai" :value="o.nilai">
+                {{ o.label }}<span v-if="o.catatan"> · {{ o.catatan }}</span>
+              </option>
+            </select>
+
+            <div v-else-if="q.jenis === 'pilihan_ganda'" class="wwc-multi">
+              <label v-for="o in q.opsi" :key="o.nilai" class="wwc-cek">
+                <input type="checkbox" :value="o.nilai" v-model="wwcMulti[q.field]">
+                <span>{{ o.label }}</span>
+                <em v-if="o.catatan">{{ o.catatan }}</em>
+              </label>
+            </div>
+
+            <input v-else type="number" step="any" class="wwc-input"
+              :placeholder="q.saran !== undefined ? `saran: ${q.saran}` : ''"
+              :value="wwcJawab[q.field] ?? ''"
+              @input="wwcJawab[q.field] = ($event.target as HTMLInputElement).value">
+          </div>
+
+          <!-- Asumsi sistem dinyatakan, supaya bisa dikoreksi sebelum dipakai -->
+          <div v-if="wwc.asumsi?.length" class="wwc-asumsi">
+            <strong>Asumsi sistem:</strong>
+            <ul><li v-for="(a, i) in wwc.asumsi" :key="i">{{ a }}</li></ul>
+          </div>
+        </template>
+
+        <template v-else-if="wwc?.selesai">
+          <div v-if="wwc.asumsi?.length" class="wwc-asumsi">
+            <strong>Asumsi sistem — periksa dulu:</strong>
+            <ul><li v-for="(a, i) in wwc.asumsi" :key="i">{{ a }}</li></ul>
+          </div>
+          <div v-for="(z, zi) in wwc.zona" :key="zi" class="wwc-zona"
+               :class="{ 'wwc-zona-off': !z.siap }">
+            <div class="wwc-zona-head">
+              <label class="wwc-cek">
+                <input type="checkbox" v-model="wwcPilih[zi]" :disabled="!z.siap">
+                <span>{{ z.element_name }}</span>
+              </label>
+              <em>{{ z.element_type }} · {{ z.variant }}</em>
+            </div>
+            <!-- Belum lengkap ≠ ditolak: dikatakan apa yang kurang. -->
+            <p v-if="!z.siap" class="wwc-kurang">
+              Belum bisa dipakai — kurang:
+              {{ (z.missing_required || []).map((m: any) => m.label || m.field || m).join(', ') }}
+            </p>
+            <table v-else class="wwc-lines">
+              <tr v-for="l in z.lines" :key="l.code">
+                <td>{{ l.label }}</td>
+                <td class="wwc-num">{{ l.net_quantity }} {{ l.unit }}</td>
+              </tr>
+            </table>
+            <p v-if="z.diturunkan?.length" class="wwc-turunan">
+              Diturunkan dari jawaban sebelumnya: {{ z.diturunkan.join(', ') }}
+            </p>
+          </div>
+        </template>
+      </div>
+
+      <div class="tpl-foot">
+        <span v-if="wwc?.selesai">{{ jmlWwcDipilih }} zona dipilih</span>
+        <span v-else>Langkah: {{ wwc?.langkah || '—' }}</span>
+        <div>
+          <button @click="showWwc = false" class="tpl-batal">Tutup</button>
+          <button v-if="wwc && !wwc.selesai" @click="lanjutWawancara" :disabled="wwcSibuk" class="tpl-ok">
+            {{ wwcSibuk ? 'Memuat…' : 'Lanjut' }}
+          </button>
+          <button v-else-if="wwc?.selesai" @click="terimaWawancara" :disabled="!jmlWwcDipilih || wwcSibuk" class="tpl-ok">
+            {{ wwcSibuk ? 'Menyimpan…' : `Masukkan ${jmlWwcDipilih} zona ke MTO` }}
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
 </template>
 
 <script setup lang="ts">
@@ -837,6 +942,103 @@ const kirimDiskusi = async () => {
 
 const tolakUsul = (i: number) => { usulan.value.splice(i, 1); };
 const tolakSemuaUsul = () => { usulan.value = []; catatanUsul.value = ''; riwayat.value = []; };
+
+// ══ Wawancara lingkup ═════════════════════════════════════════════════════
+//
+// Layar ini sengaja TIDAK punya daftar pertanyaan sendiri. Seluruh pertanyaan
+// datang dari server, yang membangkitkannya dari spesifikasi kalkulator — jadi
+// wawancara tidak mungkin menanyakan field yang sudah tidak berlaku, atau
+// melewatkan field yang baru menjadi wajib.
+const showWwc = ref(false);
+const wwc = ref<any>(null);
+const wwcLoading = ref(false);
+const wwcSibuk = ref(false);
+const wwcJawab = ref<Record<string, any>>({});
+const wwcMulti = ref<Record<string, string[]>>({});
+const wwcDimensi = ref<Record<string, Record<string, any>>>({});
+const wwcPilih = ref<Record<number, boolean>>({});
+
+const jmlWwcDipilih = computed(() => Object.values(wwcPilih.value).filter(Boolean).length);
+
+/** Jawaban dirakit jadi satu bentuk yang dikirim ulang tiap giliran. */
+function rakitJawaban() {
+  const j: Record<string, any> = { ...wwcJawab.value };
+  for (const [k, v] of Object.entries(wwcMulti.value)) j[k] = v;
+  j.dimensi = wwcDimensi.value;
+  return j;
+}
+
+async function panggilWawancara() {
+  wwcLoading.value = true;
+  try {
+    const { data } = await api.post('/estimator/wawancara', { jawaban: rakitJawaban() });
+    wwc.value = data;
+    wwcPilih.value = {};
+    if (data?.selesai) {
+      // Hanya zona yang SIAP yang dicentang otomatis — yang belum lengkap
+      // harus jadi keputusan sadar, bukan ikut terbawa.
+      (data.zona || []).forEach((z: any, i: number) => { if (z.siap) wwcPilih.value[i] = true; });
+    }
+  } catch (e: any) {
+    saveError.value = uraikanGagal(e);
+  } finally {
+    wwcLoading.value = false;
+  }
+}
+
+function bukaWawancara() {
+  showWwc.value = true;
+  wwc.value = null;
+  wwcJawab.value = {}; wwcMulti.value = {}; wwcDimensi.value = {}; wwcPilih.value = {};
+  panggilWawancara();
+}
+
+async function lanjutWawancara() {
+  if (wwcSibuk.value) return;
+  wwcSibuk.value = true;
+  try {
+    // Jawaban langkah dimensi disimpan per tipe elemen — bentuk yang diminta
+    // server, supaya jawaban lama tidak tertimpa saat berpindah elemen.
+    const l = String(wwc.value?.langkah || '');
+    if (l.startsWith('dimensi:')) {
+      const tipe = l.split(':')[1];
+      const kotak = wwcDimensi.value[tipe] || (wwcDimensi.value[tipe] = {});
+      for (const q of wwc.value.pertanyaan || []) {
+        const v = wwcJawab.value[q.field];
+        // Kosong berarti belum diisi, bukan nol.
+        if (v !== undefined && v !== '') kotak[q.field] = Number(v);
+        delete wwcJawab.value[q.field];
+      }
+    }
+    await panggilWawancara();
+  } finally {
+    wwcSibuk.value = false;
+  }
+}
+
+async function terimaWawancara() {
+  if (wwcSibuk.value) return;
+  const zona = (wwc.value?.zona || []).filter((_z: any, i: number) => wwcPilih.value[i]);
+  if (!zona.length) return;
+  wwcSibuk.value = true;
+  try {
+    const { data } = await api.post(`${baseUrl.value}/mto/terima-usulan`, {
+      zones: zona.map((z: any) => ({
+        element_type: z.element_type,
+        element_name: z.element_name,
+        parameters: z.parameters,
+      })),
+    });
+    showWwc.value = false;
+    // Dimuat ulang dari server: yang tampil harus kuantitas tersimpan.
+    await fetchAll();
+    alert(data?.message || 'Zona masuk ke MTO.');
+  } catch (e: any) {
+    saveError.value = uraikanGagal(e);
+  } finally {
+    wwcSibuk.value = false;
+  }
+}
 
 // ══ Template zona ═════════════════════════════════════════════════════════
 //
@@ -1557,4 +1759,30 @@ const f0 = (v:number) => v.toLocaleString('id-ID',{maximumFractionDigits:0});
 .tpl-batal { border: 1px solid #d1d5db; background: #fff; color: #374151; }
 .tpl-ok { border: 0; background: #059669; color: #fff; }
 .tpl-ok:disabled { opacity: .5; cursor: not-allowed; }
+
+/* ── Wawancara ─────────────────────────────────────────────────────────── */
+.wwc-btn { background: #ecfeff !important; border-color: #a5f3fc !important; color: #0e7490 !important; }
+.wwc-box { max-width: 42rem; }
+.wwc-q { margin-bottom: 1rem; }
+.wwc-label { display: block; font-size: .84rem; font-weight: 600; color: #374151; margin-bottom: .2rem; }
+.wwc-satuan { font-weight: 400; color: #6b7280; }
+.wwc-ops { margin-left: .4rem; font-size: .68rem; font-weight: 500; color: #9ca3af; }
+.wwc-bantuan { margin: 0 0 .3rem; font-size: .74rem; color: #6b7280; }
+.wwc-input { width: 100%; border: 1px solid #d1d5db; border-radius: .4rem; padding: .4rem .6rem; font-size: .85rem; }
+.wwc-multi { display: flex; flex-wrap: wrap; gap: .45rem; }
+.wwc-cek { display: flex; align-items: center; gap: .35rem; font-size: .82rem; color: #374151;
+  border: 1px solid #e5e7eb; border-radius: .45rem; padding: .3rem .55rem; cursor: pointer; }
+.wwc-cek em { font-style: normal; font-size: .68rem; color: #9ca3af; }
+.wwc-asumsi { margin-top: .8rem; padding: .6rem .75rem; border-radius: .45rem;
+  background: #fffbeb; border: 1px solid #fde68a; font-size: .76rem; color: #92400e; }
+.wwc-asumsi ul { margin: .3rem 0 0; padding-left: 1.1rem; }
+.wwc-zona { border: 1px solid #e5e7eb; border-radius: .55rem; padding: .65rem .75rem; margin-bottom: .6rem; }
+.wwc-zona-off { background: #fef2f2; border-color: #fecaca; }
+.wwc-zona-head { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+.wwc-zona-head em { font-style: normal; font-size: .7rem; color: #9ca3af; }
+.wwc-kurang { margin: .4rem 0 0; font-size: .76rem; color: #b91c1c; }
+.wwc-lines { width: 100%; margin-top: .4rem; font-size: .78rem; color: #4b5563; }
+.wwc-lines td { padding: .12rem 0; }
+.wwc-num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.wwc-turunan { margin: .35rem 0 0; font-size: .7rem; color: #6b7280; font-style: italic; }
 </style>

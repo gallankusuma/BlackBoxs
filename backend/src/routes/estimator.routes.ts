@@ -15,6 +15,7 @@ import { nextSequentialCode } from './procurement.routes';
 import { buatKontrakDariProposal, checksumBaseline } from './contract.routes';
 import { usulkanAhsp, normalSatuan } from '../modules/estimator/mto/cocok-ahsp';
 import { VARIANT_FIELD } from '../modules/estimator/mto/contract';
+import { langkahWawancara } from '../modules/estimator/mto/wawancara';
 import { uang, bulatUang, jumlahUang } from '../utils/money';
 
 const router = Router();
@@ -5269,6 +5270,65 @@ router.put('/proposals/:id/status', authMiddleware, bolehUbah, async (req: Reque
     }
     console.error('Error updating proposal status:', error);
     res.status(500).json({ error: 'Failed to update status' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Wawancara lingkup — dari percakapan menjadi zona MTO
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Satu giliran wawancara. **Tidak menulis apa pun.**
+ *
+ * Stateless: seluruh jawaban dikirim ulang tiap giliran. Wawancara yang belum
+ * selesai bukan data bisnis, dan menyimpannya hanya menciptakan sampah yang
+ * harus dibersihkan — alasan yang sama dengan `/mto/diskusi`.
+ *
+ * Pada langkah terakhir, respons memuat `zona` **berikut pratinjau kuantitas**
+ * yang dihitung kalkulator yang sama dengan input manual. Menghitungnya di
+ * browser akan membuat angka di layar berbeda dari angka tersimpan.
+ */
+router.post('/wawancara', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const jawaban = req.body?.jawaban || {};
+
+    // Template ikut ditawarkan di langkah dimensi — kalau sudah pernah
+    // disimpan, mengetik ulang dimensinya pekerjaan sia-sia.
+    const tpl: any[] = await dbAll(
+      `SELECT id, name, element_type, variant_raw, parameters, pending_fields
+       FROM mto_zone_templates WHERE is_active = 1 ORDER BY times_used DESC`, []);
+    const templates = tpl.map((t: any) => ({
+      id: t.id, name: t.name, element_type: t.element_type, variant_raw: t.variant_raw,
+      parameters: typeof t.parameters === 'string' ? JSON.parse(t.parameters || '{}') : t.parameters,
+    }));
+
+    const langkah = langkahWawancara(jawaban, templates);
+
+    // Pratinjau kuantitas hanya pada langkah akhir, dan hanya menghitung —
+    // sama sekali tidak menyentuh database.
+    const zona = langkah.zona.map((z: any) => {
+      const mto = calculateMto(z.element_type, z.parameters);
+      return {
+        ...z,
+        variant: mto.variant,
+        lines: mto.lines,
+        notes: mto.notes,
+        missing_required: mto.missing_required || [],
+        // Dinyatakan per zona: mana yang siap diterima, mana yang belum.
+        siap: mto.variant !== 'invalid' && !(mto.missing_required || []).length,
+      };
+    });
+
+    res.json({
+      ...langkah,
+      zona,
+      // Sama seperti usulan gambar: dinyatakan tegas bahwa belum ada yang
+      // tersimpan. Penyimpanan hanya lewat POST /mto/terima-usulan.
+      tersimpan: false,
+    });
+  } catch (err: any) {
+    console.error('Error wawancara MTO:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
