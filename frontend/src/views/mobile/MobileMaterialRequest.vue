@@ -292,6 +292,8 @@ const customUom = ref('pcs');
 const customNotes = ref('');
 const customPhoto = ref('');
 const customPhotoUrl = ref('');
+// Salinan foto yang belum sempat terunggah — dipegang sampai sinyal kembali.
+const customPhotoData = ref('');
 const uploading = ref(false);
 const cameraInput = ref<HTMLInputElement|null>(null);
 let toastTimer: any = null;
@@ -335,22 +337,79 @@ function triggerCamera() {
   cameraInput.value?.click();
 }
 
+/**
+ * Kecilkan foto sebelum apa pun dilakukan padanya.
+ *
+ * Dua alasan, dan keduanya soal lapangan: foto kamera HP 3–5 MB sering GAGAL
+ * terkirim lewat sinyal proyek yang lemah — jadi mengecilkannya memperbaiki
+ * jalur online juga, bukan cuma offline. Dan foto sebesar itu tidak muat
+ * disimpan sebagai antrean (localStorage ±5 MB), sehingga tanpa ini antrean
+ * berfoto tidak mungkin ada.
+ *
+ * 1280px sisi terpanjang cukup untuk memperlihatkan part yang rusak atau merek
+ * barang — yang memang jadi gunanya foto di sini.
+ */
+async function kecilkanFoto(file: File, maks = 1280, mutu = 0.72): Promise<string> {
+  const bitmap = await new Promise<HTMLImageElement>((res, rej) => {
+    const img = new Image();
+    img.onload = () => res(img);
+    img.onerror = rej;
+    img.src = URL.createObjectURL(file);
+  });
+  const skala = Math.min(1, maks / Math.max(bitmap.width, bitmap.height));
+  const w = Math.round(bitmap.width * skala), h = Math.round(bitmap.height * skala);
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  c.getContext('2d')!.drawImage(bitmap, 0, 0, w, h);
+  URL.revokeObjectURL(bitmap.src);
+  return c.toDataURL('image/jpeg', mutu);
+}
+
+function dataUrlKeBlob(dataUrl: string): Blob {
+  const [kepala, isi] = dataUrl.split(',');
+  const mime = kepala.match(/:(.*?);/)?.[1] || 'image/jpeg';
+  const bin = atob(isi);
+  const buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  return new Blob([buf], { type: mime });
+}
+
+async function unggahFoto(dataUrl: string): Promise<string> {
+  const fd = new FormData();
+  fd.append('photo', dataUrlKeBlob(dataUrl), 'foto.jpg');
+  const res = await mobileApi.post('/api/material-requests/upload-photo', fd);
+  return res.data.url;
+}
+
 async function onPhotoCapture(e: Event) {
   const file = (e.target as HTMLInputElement).files?.[0];
   if (!file) return;
-  // Preview
-  customPhoto.value = URL.createObjectURL(file);
-  // Upload to server
   uploading.value = true;
   try {
-    const fd = new FormData();
-    fd.append('photo', file);
-    const res = await mobileApi.post('/api/material-requests/upload-photo', fd);
-    customPhotoUrl.value = res.data.url;
-    showToast('📸 Foto berhasil diupload');
+    // Dikecilkan dulu — hasilnya dipakai sebagai preview SEKALIGUS sebagai
+    // salinan yang disimpan kalau ternyata tidak ada sinyal.
+    const kecil = await kecilkanFoto(file);
+    customPhoto.value = kecil;
+    customPhotoData.value = kecil;
+    try {
+      customPhotoUrl.value = await unggahFoto(kecil);
+      customPhotoData.value = '';   // sudah aman di server
+      showToast('📸 Foto berhasil diupload');
+    } catch (err: any) {
+      if (layakDiantre(err)) {
+        // Fotonya TIDAK dibuang. Sering justru foto itulah inti permintaannya
+        // — "part yang rusak ini" — dan membuangnya membuat permintaannya
+        // kehilangan artinya.
+        customPhotoUrl.value = '';
+        showToast('📥 Tidak ada sinyal — foto disimpan, diunggah otomatis nanti');
+      } else {
+        customPhoto.value = ''; customPhotoData.value = '';
+        showToast(err?.response?.data?.error || 'Foto ditolak server', 'error');
+      }
+    }
   } catch {
-    showToast('Gagal upload foto', 'error');
-    customPhoto.value = '';
+    customPhoto.value = ''; customPhotoData.value = '';
+    showToast('Gagal membaca foto', 'error');
   } finally { uploading.value = false; }
 }
 
@@ -361,6 +420,9 @@ function addCustomItem() {
     item_name: customName.value.trim(),
     spec: customSpec.value.trim() || null,
     image_url: customPhotoUrl.value || null,
+    // Salinan lokal kalau fotonya belum sempat terunggah. Dihapus begitu
+    // unggahannya berhasil, jadi tidak ikut tersimpan permanen.
+    image_data: customPhotoUrl.value ? null : (customPhotoData.value || null),
     quantity: customQty.value || 1,
     uom: customUom.value || 'pcs',
     notes: customNotes.value.trim() || null,
@@ -373,6 +435,7 @@ function addCustomItem() {
   customQty.value = 1;
   customUom.value = 'pcs';
   customNotes.value = '';
+  customPhotoData.value = '';
   customPhoto.value = '';
   customPhotoUrl.value = '';
   showCustomForm.value = false;
@@ -417,9 +480,23 @@ const mengirimAntrean = ref(false);
 function bacaAntrean(): any[] {
   try { return JSON.parse(localStorage.getItem(KUNCI_ANTREAN) || '[]'); } catch { return []; }
 }
-function tulisAntrean(v: any[]) {
-  antrean.value = v;
-  try { localStorage.setItem(KUNCI_ANTREAN, JSON.stringify(v)); } catch { /* kuota penuh */ }
+/**
+ * Menulis antrean, dan MENGATAKAN kalau tidak muat.
+ *
+ * localStorage sekitar 5 MB. Foto yang sudah dikecilkan ±300 KB, jadi belasan
+ * permintaan berfoto masih muat — tapi bukan tak terbatas. Gagal menyimpan
+ * diam-diam berarti permintaan hilang justru pada saat pemakainya paling
+ * yakin sudah tersimpan.
+ */
+function tulisAntrean(v: any[]): boolean {
+  try {
+    localStorage.setItem(KUNCI_ANTREAN, JSON.stringify(v));
+    antrean.value = v;
+    return true;
+  } catch {
+    showToast('Penyimpanan HP penuh — kirim dulu antrean yang ada', 'error');
+    return false;
+  }
 }
 function idPermintaan(): string {
   // crypto.randomUUID tidak ada di sebagian WebView lama.
@@ -448,6 +525,16 @@ async function kirimAntrean(diam = true) {
   const sisa: any[] = [];
   for (const p of isi) {
     try {
+      // Foto yang belum terunggah dikirim LEBIH DULU, lalu URL-nya menggantikan
+      // salinan lokalnya. MR-nya sendiri tidak dibuat sampai fotonya aman —
+      // MR tanpa foto yang seharusnya berfoto sudah kehilangan artinya, dan
+      // tidak ada cara menambahkannya belakangan.
+      for (const it of p.payload.items || []) {
+        if (it.image_data && !it.image_url) {
+          it.image_url = await unggahFoto(it.image_data);
+          delete it.image_data;
+        }
+      }
       await mobileApi.post('/api/material-requests/', p.payload);
       terkirim++;
     } catch (e: any) {
@@ -499,10 +586,16 @@ async function submitMR() {
     await loadHistory();
   } catch (e: any) {
     if (layakDiantre(e)) {
-      tulisAntrean([...bacaAntrean(), {
+      const tersimpan = tulisAntrean([...bacaAntrean(), {
         payload, dibuat_at: new Date().toISOString(), percobaan: 1,
         ringkas: `${payload.items.length} item · ${payload.priority}`,
       }]);
+      if (!tersimpan) {
+        // Gagal disimpan: keranjang DIPERTAHANKAN. Mengosongkannya di sini
+        // membuang permintaan yang tidak tersimpan di mana pun.
+        showToast('Permintaan belum tersimpan — jangan tutup halaman ini', 'error');
+        return;
+      }
       // Keranjang dikosongkan karena permintaannya SUDAH tersimpan di antrean —
       // membiarkannya membuat orang mengirim ulang dan menghasilkan dua entri.
       cart.value = [];

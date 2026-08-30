@@ -202,6 +202,29 @@ async function main() {
       layar.includes("addEventListener('online'"), true);
     chk('dan saat aplikasi dibuka', /onMounted[\s\S]{0,400}kirimAntrean/.test(layar), true);
 
+    console.log('\n7c. Foto offline: tidak dibuang, dan dikecilkan lebih dulu');
+    // Foto sering justru INTI permintaannya ("part yang rusak ini"). Versi lama
+    // membuangnya begitu unggahan gagal.
+    chk('foto dikecilkan sebelum apa pun', layar.includes('function kecilkanFoto'), true);
+    chk('salinan lokal dipegang saat offline', layar.includes('customPhotoData'), true);
+    chk('salinan ikut ke item keranjang', layar.includes('image_data'), true);
+    // MR tidak dibuat sampai fotonya aman — MR tanpa foto yang seharusnya
+    // berfoto sudah kehilangan artinya, dan tidak bisa ditambahkan belakangan.
+    chk('foto diunggah lebih dulu saat antrean dikirim',
+      /it\.image_url = await unggahFoto/.test(layar), true);
+    chk('salinan lokal dihapus sesudah terunggah', layar.includes('delete it.image_data'), true);
+    // Penyimpanan penuh diam-diam lebih buruk daripada gagal kirim.
+    chk('kegagalan menyimpan dikatakan', layar.includes('Penyimpanan HP penuh'), true);
+    chk('dan keranjang dipertahankan kalau gagal simpan',
+      layar.includes('jangan tutup halaman ini'), true);
+
+    console.log('\n7d. Endpoint unggah foto tetap terjaga scope mobile');
+    const fdKosong = new FormData();
+    chk('unggah tanpa token 401',
+      (await fetch(`${API}/material-requests/upload-photo`, { method: 'POST', body: fdKosong })).status, 401);
+    chk('token desktop ditolak', (await fetch(`${API}/material-requests/upload-photo`,
+      { method: 'POST', headers: { Authorization: `Bearer ${master}` }, body: new FormData() })).status, 401);
+
     console.log('\n8. Keadaan PIN terlihat — tanpa itu fitur mobile mati diam-diam');
     const kary = readFileSync(join(fe, 'views', 'Employees.vue'), 'utf8');
     chk('status PIN dimuat', kary.includes('/hr/employees/pin-status'), true);
