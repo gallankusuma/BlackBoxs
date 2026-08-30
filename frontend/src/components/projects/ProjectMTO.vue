@@ -529,7 +529,22 @@
       <div class="tpl-body">
         <p v-if="wwcLoading" class="tpl-kosong">Menyiapkan…</p>
 
-        <template v-else-if="wwc && !wwc.selesai">
+        <!-- Jalan pintas: kalau gambarnya sudah ada, AI mengisi sebanyak yang
+             terbaca dan wawancara hanya menanyakan sisanya. -->
+        <div v-if="wwc && wwc.langkah === 'lingkup'" class="wwc-gambar">
+          <div class="wwc-gambar-teks">
+            <strong>Sudah punya gambar kerja?</strong>
+            <span>Unggah PDF/gambar — dimensinya diisi dari situ, sisanya baru ditanyakan.</span>
+          </div>
+          <label class="wwc-unggah">
+            <input type="file" accept=".pdf,image/*" multiple @change="wawancaraDariGambar" hidden>
+            {{ wwcBacaGambar ? 'Membaca gambar…' : '📄 Pilih gambar' }}
+          </label>
+        </div>
+        <p v-if="wwcGalatAi" class="wwc-galat-ai">{{ wwcGalatAi }}</p>
+
+        <template v-else-if="false"></template>
+        <template v-if="wwc && !wwc.selesai">
           <div v-for="q in wwc.pertanyaan" :key="q.field" class="wwc-q">
             <label class="wwc-label">
               {{ q.label }}
@@ -593,6 +608,11 @@
             </table>
             <p v-if="z.diturunkan?.length" class="wwc-turunan">
               Diturunkan dari jawaban sebelumnya: {{ z.diturunkan.join(', ') }}
+            </p>
+            <!-- Dibedakan tegas: angka yang dibaca AI dari gambar bukan angka
+                 yang diketik pengguna, dan itu perlu terlihat saat memeriksa. -->
+            <p v-if="wwcTerbaca[z.element_type]?.length" class="wwc-dari-gambar">
+              Dari gambar: {{ wwcTerbaca[z.element_type].join(', ') }}
             </p>
           </div>
         </template>
@@ -986,10 +1006,58 @@ async function panggilWawancara() {
   }
 }
 
+const wwcBacaGambar = ref(false);
+const wwcGalatAi = ref('');
+const wwcTerbaca = ref<Record<string, string[]>>({});
+
+/**
+ * Mulai wawancara dari gambar.
+ *
+ * AI hanya membaca DIMENSI; kuantitasnya tetap dihitung server. Yang tidak
+ * terbaca tidak ditebak — ia jadi pertanyaan berikutnya.
+ */
+async function wawancaraDariGambar(e: Event) {
+  const input = e.target as HTMLInputElement;
+  const berkas = Array.from(input.files || []);
+  if (!berkas.length) return;
+  wwcBacaGambar.value = true;
+  wwcGalatAi.value = '';
+  try {
+    const fd = new FormData();
+    for (const f of berkas.slice(0, 10)) fd.append('gambar', f);
+    // Jawaban yang sudah terisi ikut dikirim: gambar MELENGKAPI, bukan
+    // menggantikan apa yang sudah dijawab.
+    fd.append('jawaban', JSON.stringify(rakitJawaban()));
+    const { data } = await api.post('/estimator/wawancara/dari-gambar', fd,
+      { headers: { 'Content-Type': 'multipart/form-data' } });
+    wwc.value = data;
+    wwcTerbaca.value = data?.terbaca_dari_gambar || {};
+    // Jawaban hasil bacaan dipegang klien, karena wawancaranya stateless.
+    const j = data?.jawaban || {};
+    if (j.sistem_struktur) wwcJawab.value.sistem_struktur = j.sistem_struktur;
+    if (Array.isArray(j.elemen)) wwcMulti.value.elemen = j.elemen;
+    wwcDimensi.value = j.dimensi || {};
+    wwcPilih.value = {};
+    if (data?.selesai) {
+      (data.zona || []).forEach((z: any, i: number) => { if (z.siap) wwcPilih.value[i] = true; });
+    }
+  } catch (err: any) {
+    const d = err?.response?.data;
+    // Kuota habis bukan jalan buntu: wawancara manualnya tetap jalan, dan itu
+    // yang perlu dikatakan — bukan sekadar "gagal".
+    wwcGalatAi.value = (d?.error || 'Gagal membaca gambar.')
+      + ' Wawancara manual di bawah tetap bisa dilanjutkan.';
+  } finally {
+    wwcBacaGambar.value = false;
+    input.value = '';
+  }
+}
+
 function bukaWawancara() {
   showWwc.value = true;
   wwc.value = null;
   wwcJawab.value = {}; wwcMulti.value = {}; wwcDimensi.value = {}; wwcPilih.value = {};
+  wwcTerbaca.value = {}; wwcGalatAi.value = '';
   panggilWawancara();
 }
 
@@ -1785,4 +1853,21 @@ const f0 = (v:number) => v.toLocaleString('id-ID',{maximumFractionDigits:0});
 .wwc-lines td { padding: .12rem 0; }
 .wwc-num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .wwc-turunan { margin: .35rem 0 0; font-size: .7rem; color: #6b7280; font-style: italic; }
+
+.wwc-gambar {
+  display: flex; align-items: center; justify-content: space-between; gap: .8rem;
+  padding: .7rem .85rem; margin-bottom: 1rem; border-radius: .55rem;
+  background: #ecfeff; border: 1px solid #a5f3fc;
+}
+.wwc-gambar-teks { display: flex; flex-direction: column; font-size: .8rem; color: #0e7490; }
+.wwc-gambar-teks span { font-size: .74rem; color: #0891b2; }
+.wwc-unggah {
+  flex-shrink: 0; padding: .4rem .8rem; border-radius: .45rem; cursor: pointer;
+  background: #0891b2; color: #fff; font-size: .8rem; font-weight: 600;
+}
+.wwc-galat-ai {
+  margin: 0 0 .9rem; padding: .55rem .75rem; border-radius: .45rem; font-size: .76rem;
+  background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c;
+}
+.wwc-dari-gambar { margin: .2rem 0 0; font-size: .7rem; color: #0e7490; font-style: italic; }
 </style>

@@ -124,6 +124,62 @@ async function main() {
       JSON.stringify(langkahWawancara(dasar)), JSON.stringify(l4));
   }
 
+  console.log('\nB. Gambar → jawaban wawancara — tanpa memanggil AI');
+  {
+    const { jawabanDariGambar, langkahWawancara } = await import('../src/modules/estimator/mto/wawancara');
+
+    // Bentuk yang persis dikembalikan `bentukUsulan()` dari bacaan AI.
+    const usulanAi = [
+      { element_type: 'foundation',
+        parameters: { foundation_type: 'footplate', L: 2, W: 2, H: 0.4, qty: 24, depth: 1.5 } },
+      { element_type: 'column',
+        parameters: { col_type: 'wf', B: 0.4, H: 0.4, qty_per_floor: 20 } },
+    ];
+    const { jawaban, asumsi, terbaca } = jawabanDariGambar(usulanAi);
+
+    chk('elemen terbaca dari gambar', jawaban.elemen, ['foundation', 'column']);
+    chk('dimensi pondasi terbawa', Number(jawaban.dimensi.foundation.L), 2);
+    chk('dimensi kolom terbawa', Number(jawaban.dimensi.column.qty_per_floor), 20);
+    // Varian TIDAK masuk dimensi — ia ditentukan jawaban sistem struktur, supaya
+    // satu proposal tidak bercampur kolom baja dan beton hanya karena satu
+    // lembar gambar terbaca berbeda.
+    chk('varian tidak ikut ke dimensi', jawaban.dimensi.column.col_type, undefined);
+    chk('sistem struktur disimpulkan BAJA dari profil WF', jawaban.sistem_struktur, 'baja');
+    chk('dan disimpulkan BETON kalau tidak ada WF',
+      jawabanDariGambar([{ element_type: 'column', parameters: { col_type: 'concrete', B: 0.4 } }])
+        .jawaban.sistem_struktur, 'beton');
+    chk('kesimpulannya DINYATAKAN sebagai asumsi',
+      asumsi.some(a => a.includes('disimpulkan')), true);
+    chk('yang terbaca dari gambar dicatat per elemen',
+      (terbaca.foundation || []).includes('qty'), true);
+
+    console.log('\n  Yang TIDAK diturunkan dari gambar — dan itu disengaja');
+    // Gambar struktur tidak memberitahu jenis bangunan; menebaknya karangan.
+    chk('jenis bangunan tidak diturunkan', jawaban.jenis_bangunan, undefined);
+    chk('luas & grid tidak diturunkan',
+      jawaban.luas_lantai === undefined && jawaban.grid_x === undefined, true);
+    // Karena itu wawancara TETAP menanyakannya.
+    chk('wawancara tetap menanyakan lingkup',
+      langkahWawancara(jawaban).langkah, 'lingkup');
+
+    console.log('\n  Wawancara melanjutkan dari gambar, tidak mengulang dari nol');
+    const lanjut = langkahWawancara({ ...jawaban, jenis_bangunan: 'gudang', jumlah_lantai: 2 });
+    // Pondasi sudah lengkap dari gambar → tidak ditanya lagi. Kolom WF kurang
+    // tinggi lantai → itu yang ditanyakan.
+    chk('langsung ke dimensi kolom, pondasi dilewati', lanjut.langkah, 'dimensi:column');
+    chk('yang sudah terbaca tidak ditanya ulang',
+      lanjut.pertanyaan.some(p => p.field === 'qty_per_floor'), false);
+    chk('yang belum terbaca ditanyakan',
+      lanjut.pertanyaan.some(p => p.field === 'height_per_floor'), true);
+
+    console.log('\n  Zona kedua bertipe sama tidak menimpa yang pertama');
+    const dua = jawabanDariGambar([
+      { element_type: 'foundation', parameters: { L: 2, W: 2, H: 0.4, qty: 24 } },
+      { element_type: 'foundation', parameters: { L: 3, W: 3, H: 0.5, qty: 6 } },
+    ]);
+    chk('yang pertama menang, tidak tertimpa', Number(dua.jawaban.dimensi.foundation.L), 2);
+  }
+
   console.log('\n0. Lewat HTTP');
   const master: string = (await call('POST', '/auth/login', { email: ADMIN_EMAIL, password: ADMIN_PASS })).json?.token;
   if (!master) { console.log('  FAIL login master'); process.exit(1); }
@@ -192,6 +248,20 @@ async function main() {
     chk('jawaban kosong tetap dijawab langkah pertama',
       (await call('POST', '/estimator/wawancara', {}, master)).json?.langkah, 'lingkup');
 
+    console.log('\n5b. Endpoint dari-gambar terjaga & tidak menulis');
+    // Tanpa berkas: ditolak sebelum menyentuh AI sama sekali — tidak memakai
+    // kuota untuk permintaan yang pasti tidak berguna.
+    const tanpaBerkas = await fetch(`${API}/estimator/wawancara/dari-gambar`, {
+      method: 'POST', headers: { Authorization: `Bearer ${master}` },
+      body: new FormData(),
+    });
+    chk('tanpa gambar ditolak 400', tanpaBerkas.status, 400);
+    chk('tanpa token 401', (await fetch(`${API}/estimator/wawancara/dari-gambar`,
+      { method: 'POST', body: new FormData() })).status, 401);
+    const belumBerubah: any = await dbGet(
+      `SELECT COUNT(*) n FROM engineering_inputs WHERE scope_type='proposal' AND scope_id = ?`, [pid]);
+    chk('tidak ada yang tertulis oleh percobaan itu', Number(belumBerubah?.n), 1);
+
     console.log('\n6. Layar tidak punya daftar pertanyaan sendiri');
     const { readFileSync } = await import('fs');
     const { join } = await import('path');
@@ -207,6 +277,14 @@ async function main() {
       layar.includes('/mto/terima-usulan'), true);
     chk('memuat ulang dari server sesudah diterima',
       /terimaWawancara[\s\S]{0,1200}fetchAll\(\)/.test(layar), true);
+    chk('layar bisa mulai dari gambar',
+      layar.includes('/estimator/wawancara/dari-gambar'), true);
+    // Gambar melengkapi, bukan menggantikan: jawaban yang sudah ada ikut dikirim.
+    chk('jawaban yang sudah ada ikut dikirim bersama gambar',
+      /wawancaraDariGambar[\s\S]{0,900}rakitJawaban\(\)/.test(layar), true);
+    // Kuota habis bukan jalan buntu — wawancara manual harus tetap jalan.
+    chk('kegagalan AI menyatakan wawancara manual tetap bisa dilanjutkan',
+      layar.includes('tetap bisa dilanjutkan'), true);
 
   } finally {
     console.log('\n7. Bersih-bersih');

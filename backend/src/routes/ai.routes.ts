@@ -251,6 +251,8 @@ export async function jalankanTeksAi(
     throw Object.assign(new Error('Tidak ada penyedia AI yang siap — GEMINI_API_KEY maupun OPENAI_API_KEY belum disetel.'),
       { kodeAi: 'AI_BELUM_SIAP' });
   }
+  if (terakhir) terakhir.dicoba = [...dicoba];
+
   throw terakhir || new Error('Semua penyedia AI gagal');
 }
 
@@ -466,6 +468,13 @@ export async function bacaGambarAi(
       // ditolak Google" — padahal kunci Google baik-baik saja dan yang perlu
       // diperbaiki kunci OpenAI. Terjadi sungguhan saat menguji.
       e.penyediaGagal = p;
+      // Seluruh penyedia yang sudah dicoba ikut ditempelkan.
+      //
+      // Tanpa ini pesannya tetap menyesatkan dengan cara lain: saat OpenAI
+      // (yang disetel sebagai utama) kehabisan kuota lalu cadangan Gemini juga,
+      // yang sampai ke pengguna hanya "Kuota Gemini habis" — dan operator yang
+      // tahu ia memakai OpenAI akan mencari masalah di tempat yang salah.
+      e.dicoba = [...dicoba];
       terakhir = e;
       // Bukan soal ketersediaan penyedia — jangan buang kuota kedua untuk
       // mendapat jawaban yang sama.

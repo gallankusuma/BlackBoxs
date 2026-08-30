@@ -15,7 +15,7 @@ import { nextSequentialCode } from './procurement.routes';
 import { buatKontrakDariProposal, checksumBaseline } from './contract.routes';
 import { usulkanAhsp, normalSatuan } from '../modules/estimator/mto/cocok-ahsp';
 import { VARIANT_FIELD } from '../modules/estimator/mto/contract';
-import { langkahWawancara } from '../modules/estimator/mto/wawancara';
+import { langkahWawancara, jawabanDariGambar } from '../modules/estimator/mto/wawancara';
 import { uang, bulatUang, jumlahUang } from '../utils/money';
 
 const router = Router();
@@ -2399,17 +2399,24 @@ ${catatan ? `\nCATATAN DARI PENGGUNA (pakai ini untuk memperjelas):\n${catatan}`
 function galatAi(err: any): { status: number; body: any } {
   const pesan = String(err?.message || '');
   // Nama penyedia yang benar-benar gagal — bukan tebakan dari isi pesannya.
-  const siapa = err?.penyediaGagal === 'openai' ? 'OpenAI'
-    : err?.penyediaGagal === 'gemini' ? 'Gemini' : 'AI';
+  const nama = (p: any) => p === 'openai' ? 'OpenAI' : p === 'gemini' ? 'Gemini' : 'AI';
+  const siapa = nama(err?.penyediaGagal);
+  // Kalau ada penyedia lain yang sudah dicoba lebih dulu, itu disebutkan.
+  // Operator yang menyetel OpenAI sebagai utama lalu membaca "Kuota Gemini
+  // habis" akan mencari masalah di tempat yang salah.
+  const lain: string[] = Array.isArray(err?.dicoba)
+    ? err.dicoba.filter((p: any) => p !== err?.penyediaGagal).map(nama) : [];
+  const rantai = lain.length ? ` (${lain.join(' & ')} sudah dicoba lebih dulu dan juga gagal)` : '';
   if (/quota|rate limit|RESOURCE_EXHAUSTED|429/i.test(pesan)) {
     const detik = pesan.match(/retry in ([\d.]+)s/i)?.[1];
     return {
       status: 429,
       body: {
-        error: `Kuota ${siapa} sedang habis`
+        error: `Kuota ${siapa} sedang habis${rantai}`
           + (detik ? `, coba lagi sekitar ${Math.ceil(Number(detik))} detik lagi.` : ', coba lagi sebentar lagi.')
           + ' Batas gratis terpakai cepat kalau usulan disunting berkali-kali.',
         code: 'AI_KUOTA_HABIS',
+        penyedia_dicoba: Array.isArray(err?.dicoba) ? err.dicoba : [err?.penyediaGagal].filter(Boolean),
         ...(detik ? { coba_lagi_detik: Math.ceil(Number(detik)) } : {}),
       },
     };
@@ -2418,9 +2425,10 @@ function galatAi(err: any): { status: number; body: any } {
     return {
       status: 503,
       body: {
-        error: `Kunci API ${siapa} ditolak. Perlu diperbarui di server.`,
+        error: `Kunci API ${siapa} ditolak${rantai}. Perlu diperbarui di server.`,
         code: 'AI_KUNCI_DITOLAK',
         penyedia: err?.penyediaGagal || null,
+        penyedia_dicoba: Array.isArray(err?.dicoba) ? err.dicoba : [err?.penyediaGagal].filter(Boolean),
       },
     };
   }
@@ -5288,6 +5296,121 @@ router.put('/proposals/:id/status', authMiddleware, bolehUbah, async (req: Reque
  * yang dihitung kalkulator yang sama dengan input manual. Menghitungnya di
  * browser akan membuat angka di layar berbeda dari angka tersimpan.
  */
+/**
+ * Mulai wawancara DARI GAMBAR.
+ *
+ * Gambar dibaca AI, hasilnya diterjemahkan menjadi jawaban wawancara, lalu
+ * wawancara melanjutkan dari sana — menanyakan hanya yang belum terbaca.
+ *
+ * Aturan asisten gambar tetap berlaku penuh dan itu disengaja:
+ *
+ *   - AI **tidak pernah menghasilkan kuantitas**. Ia hanya membaca dimensi;
+ *     volume dihitung `calculateMto()`, kalkulator yang sama dengan input
+ *     manual.
+ *   - Endpoint ini **tidak menulis apa pun** (`tersimpan: false`). Penyimpanan
+ *     tetap hanya lewat `POST /mto/terima-usulan`.
+ *   - Gambar diproses **di memori**, tidak ditulis ke `backend/uploads/`.
+ *
+ * Yang tidak terbaca gambar tidak ditebak — ia menjadi pertanyaan berikutnya.
+ * Itulah bedanya dengan menerima usulan gambar apa adanya: yang kurang tidak
+ * membuat zona gagal, melainkan ditanyakan.
+ */
+router.post('/wawancara/dari-gambar', authMiddleware,
+  unggahGambar.array('gambar', 10), async (req: Request, res: Response) => {
+    try {
+      const daftarBerkas: any[] = (req as any).files?.length
+        ? (req as any).files
+        : ((req as any).file ? [(req as any).file] : []);
+      if (!daftarBerkas.length) {
+        return res.status(400).json({
+          error: 'Tidak ada gambar yang dikirim.', code: 'GAMBAR_KOSONG' });
+      }
+
+      let jawabanAi: string;
+      let penyediaDipakai: string | undefined;
+      try {
+        const hasilBaca = await bacaGambarAi(
+          promptGambar(String(req.body?.catatan || '').slice(0, 2000), daftarBerkas.length),
+          daftarBerkas.map(b => ({ base64: b.buffer.toString('base64'), mimeType: b.mimetype })),
+        );
+        jawabanAi = hasilBaca.teks;
+        penyediaDipakai = hasilBaca.penyedia;
+      } catch (e: any) {
+        if (e?.kodeAi === 'AI_BELUM_SIAP') {
+          return res.status(503).json({
+            error: 'Pembaca gambar belum tersedia — belum ada kunci API AI yang disetel di server.',
+            code: 'AI_BELUM_SIAP' });
+        }
+        throw e;
+      }
+
+      const dibaca = bacaJsonAi(jawabanAi);
+      if (!dibaca.ok) {
+        return res.status(502).json({
+          error: 'Pembaca gambar mengembalikan jawaban yang tidak bisa dibaca.',
+          code: 'AI_JAWABAN_TIDAK_TERBACA',
+          panjang_balasan: dibaca.panjang, cuplikan: dibaca.cuplikan });
+      }
+
+      const usulan = bentukUsulan((dibaca.data as any)?.zones);
+      const { jawaban, asumsi, terbaca } = jawabanDariGambar(usulan);
+
+      // Jawaban yang sudah dipegang klien (mis. jenis bangunan yang sempat
+      // dijawab sebelum mengunggah) tidak dibuang — gambar melengkapi, bukan
+      // menggantikan.
+      let jawabanKlien: any = {};
+      try {
+        jawabanKlien = req.body?.jawaban
+          ? (typeof req.body.jawaban === 'string' ? JSON.parse(req.body.jawaban) : req.body.jawaban)
+          : {};
+      } catch { jawabanKlien = {}; }
+
+      const gabung = {
+        ...jawabanKlien,
+        ...jawaban,
+        dimensi: { ...(jawabanKlien?.dimensi || {}), ...(jawaban.dimensi || {}) },
+      };
+
+      const tpl: any[] = await dbAll(
+        `SELECT id, name, element_type, variant_raw, parameters FROM mto_zone_templates
+         WHERE is_active = 1 ORDER BY times_used DESC`, []);
+      const langkah = langkahWawancara(gabung, tpl.map((t: any) => ({
+        id: t.id, name: t.name, element_type: t.element_type, variant_raw: t.variant_raw,
+        parameters: typeof t.parameters === 'string' ? JSON.parse(t.parameters || '{}') : t.parameters,
+      })));
+
+      const zona = langkah.zona.map((z: any) => {
+        const mto = calculateMto(z.element_type, z.parameters);
+        return {
+          ...z, variant: mto.variant, lines: mto.lines, notes: mto.notes,
+          missing_required: mto.missing_required || [],
+          siap: mto.variant !== 'invalid' && !(mto.missing_required || []).length,
+        };
+      });
+
+      res.json({
+        ...langkah,
+        zona,
+        // Dikembalikan supaya klien meneruskannya di giliran berikutnya —
+        // wawancaranya tetap stateless.
+        jawaban: gabung,
+        // Apa saja yang benar-benar datang dari gambar, per elemen. Tanpa ini,
+        // pengguna tidak bisa membedakan angka yang dibaca AI dari angka yang
+        // diketiknya sendiri.
+        terbaca_dari_gambar: terbaca,
+        asumsi: [...asumsi, ...langkah.asumsi],
+        penyedia: penyediaDipakai,
+        tersimpan: false,
+        catatan_sistem: 'Dimensi dari gambar ini usulan, belum tersimpan. '
+                      + 'Periksa terhadap gambarnya, lengkapi yang ditanyakan, lalu terima.',
+      });
+    } catch (err: any) {
+      console.error('Wawancara dari gambar gagal:', err?.message);
+      const g = galatAi(err);
+      res.status(g.status).json(g.body);
+    }
+  });
+
 router.post('/wawancara', authMiddleware, async (req: Request, res: Response) => {
   try {
     const jawaban = req.body?.jawaban || {};

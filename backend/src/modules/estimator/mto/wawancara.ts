@@ -109,6 +109,75 @@ const angka = (v: any): number | null => {
 };
 
 /**
+ * Ubah hasil bacaan gambar menjadi JAWABAN wawancara.
+ *
+ * Inilah sambungan yang membuat "kirim PDF, sistem mempelajari, lalu masuk MTO"
+ * benar-benar terasa: AI mengisi sebanyak yang terbaca, dan wawancara hanya
+ * menanyakan sisanya — bukan mengulang dari nol.
+ *
+ * Dua hal yang sengaja TIDAK diturunkan dari gambar:
+ *
+ *   `jenis_bangunan` — gambar struktur tidak memberitahunya, dan menebaknya
+ *   dari jumlah kolom adalah karangan. Tetap ditanyakan.
+ *
+ *   `luas_lantai` / grid — kalaupun terbaca, ia hanya dipakai MENYARANKAN
+ *   jumlah; menurunkannya dari gambar berarti angka saran itu terlihat seperti
+ *   fakta. Tetap ditanyakan.
+ *
+ * Yang diturunkan hanyalah yang benar-benar terbaca: elemen apa saja yang ada,
+ * dan dimensinya. Sistem struktur disimpulkan dari varian yang dibaca AI —
+ * kolom WF berarti struktur baja — dan itu **dinyatakan sebagai asumsi**.
+ */
+export const jawabanDariGambar = (
+  usulan: Array<{ element_type: string; parameters?: Record<string, any> }>,
+): { jawaban: Record<string, any>; asumsi: string[]; terbaca: Record<string, string[]> } => {
+  const asumsi: string[] = [];
+  const dimensi: Record<string, Record<string, any>> = {};
+  const terbaca: Record<string, string[]> = {};
+  const elemen: string[] = [];
+
+  let adaBaja = false;
+  for (const z of usulan || []) {
+    const tipe = String(z?.element_type || '');
+    if (!VARIANT_FIELD[tipe] && tipe !== 'foundation') continue;
+    const par = { ...(z?.parameters || {}) };
+    const fieldVarian = VARIANT_FIELD[tipe]?.[0];
+    const varian = fieldVarian ? String(par[fieldVarian] || '').toLowerCase() : '';
+    if (varian === 'wf') adaBaja = true;
+
+    // Varian tidak masuk `dimensi`: ia ditentukan jawaban sistem struktur,
+    // supaya satu proposal tidak bercampur kolom baja dan beton hanya karena
+    // satu lembar gambar terbaca berbeda.
+    if (fieldVarian) delete par[fieldVarian];
+
+    if (!elemen.includes(tipe)) elemen.push(tipe);
+    const kotak = dimensi[tipe] || (dimensi[tipe] = {});
+    const diisi: string[] = [];
+    for (const [k, v] of Object.entries(par)) {
+      const n = Number(v);
+      if (!Number.isFinite(n)) continue;
+      // Zona kedua bertipe sama TIDAK menimpa yang pertama: dua pondasi
+      // berbeda ukuran adalah dua zona, dan meleburnya membuang salah satunya
+      // tanpa jejak. Yang pertama menang, sisanya tetap muncul sebagai zona
+      // terpisah lewat jalur usulan gambar biasa.
+      if (kotak[k] === undefined) { kotak[k] = n; diisi.push(k); }
+    }
+    if (diisi.length) terbaca[tipe] = [...(terbaca[tipe] || []), ...diisi];
+  }
+
+  const jawaban: Record<string, any> = { elemen, dimensi };
+  if (elemen.length) {
+    jawaban.sistem_struktur = adaBaja ? 'baja' : 'beton';
+    asumsi.push(adaBaja
+      ? 'Sistem struktur disimpulkan BAJA karena ada profil WF terbaca di gambar. Ubah kalau keliru.'
+      : 'Sistem struktur disimpulkan BETON karena tidak ada profil baja terbaca. Ubah kalau keliru.');
+    asumsi.push(`${elemen.length} jenis elemen terbaca dari gambar: ${elemen.join(', ')}. `
+              + 'Yang tidak terbaca tetap bisa ditambahkan di langkah pemilihan elemen.');
+  }
+  return { jawaban, asumsi, terbaca };
+};
+
+/**
  * Satu giliran wawancara.
  *
  * `jawaban` memuat seluruh jawaban sejauh ini. Fungsi ini murni — tidak

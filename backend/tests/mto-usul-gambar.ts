@@ -290,7 +290,15 @@ async function main() {
     // "kunci ditolak Google" padahal kunci Google baik-baik saja.
     chk('penyedia yang gagal ikut dicatat di error', ai.includes('e.penyediaGagal = p'), true);
     chk('pesan error menunjuk penyedia yang benar',
-      rute.includes("err?.penyediaGagal === 'openai' ? 'OpenAI'"), true);
+      /penyediaGagal/.test(rute) && /'OpenAI'/.test(rute) && /'Gemini'/.test(rute), true);
+    // Lanjutan: kalau penyedia utama sudah dicoba dan gagal lebih dulu, itu
+    // disebutkan juga. Operator yang menyetel OpenAI sebagai utama lalu membaca
+    // "Kuota Gemini habis" akan mencari masalah di tempat yang salah.
+    chk('seluruh penyedia yang dicoba ditempelkan ke error',
+      ai.includes('e.dicoba = [...dicoba]'), true);
+    chk('dan rantainya disebut di pesan',
+      rute.includes('sudah dicoba lebih dulu dan juga gagal'), true);
+    chk('serta dilaporkan sebagai data', rute.includes('penyedia_dicoba'), true);
     chk('penyedia yang dipakai dilaporkan ke pemanggil',
       rute.includes('penyedia: penyediaDipakai'), true);
 
