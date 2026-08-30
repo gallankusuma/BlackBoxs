@@ -2,111 +2,104 @@
 
 ---
 
-## [DEV] Peta status penyisiran — 30 Agustus 2026
+## [DEV] Peta status penyisiran — 30 Agustus 2026 (final)
 
-Ditulis tim development setelah menyisir seluruh berkas ini. **Latar belakangnya:
-banyak butir sudah diperbaiki di kode tapi belum ditandai di sini**, sehingga
-butir yang benar-benar terbuka tenggelam dan waktu kedua tim habis untuk
+Ditulis tim development setelah menyisir **seluruh** berkas ini. Latar
+belakangnya: banyak butir sudah diperbaiki di kode tapi belum ditandai di sini,
+sehingga butir yang benar-benar terbuka tenggelam dan waktu kedua tim habis
 memverifikasi ulang hal yang sudah beres.
 
-### Angkanya
+> **Koreksi atas versi pertama peta ini.** Sempat saya tulis "258 butir, 98
+> perlu diperiksa manual". Itu **keliru**: pemisah `###` ikut menghitung
+> sub-judul di dalam jawaban `[DEV]` saya sendiri ("Yang dikerjakan", "Angkanya",
+> "Layar") sebagai butir review. Angka di bawah ini sudah dihitung ulang dengan
+> menyaring hanya heading yang benar-benar butir reviewer.
+
+### Angka sebenarnya
 
 | | |
 |---|---|
-| Butir berjudul `###` | 258 |
-| Sudah bertanda penyelesaian | 123 |
-| Belum bertanda | 135 |
+| Heading `###` di berkas | 228 |
+| — sub-judul jawaban `[DEV]` (bukan butir) | 103 |
+| **Butir reviewer sungguhan** | **125** |
+| Sudah bertanda sebelumnya | 73 |
+| Belum bertanda → **disisir hari ini** | 52 |
 
-Dari 135 yang belum bertanda: **14** punya bukti kuat sudah digarap (kode
-butirnya — mis. `DR-P0-05`, `EST-MTO-R35` — muncul di komentar source), **5**
-duplikat judul yang salinannya sudah ditandai, dan **98** perlu pemeriksaan
-manual.
+### Hasil penyisiran 52 butir
 
-Dua percobaan otomatisasi **tidak cukup andal dan tidak saya pakai untuk
-menandai apa pun**: mencocokkan potongan kode yang dikutip butir ternyata lemah,
-karena yang dikutip kebanyakan nama tabel (`client_projects`, `project_id`) yang
-memang tidak hilang saat cacatnya diperbaiki. Menandai berdasarkan itu akan
-menutup butir yang masih terbuka.
+| Kelompok | Jml | Hasil |
+|---|---|---|
+| P1 | 19 | 16 sudah selesai · **3 masih terbuka → diperbaiki hari ini** |
+| P2 | 5 | **5 sudah selesai** — semuanya bahkan memuat komentar yang menyebut butirnya |
+| Ronde pertama (bernomor) | 16 | **15 sudah selesai di kode** · 1 menunggu tindakan pemilik server |
+| P3 | 1 | sudah selesai (`cleanupApprovalDebris` + sapuan fixture payroll) |
+| DESIGN-GAP | 6 | **belum dikerjakan** — 1 sebagian |
+| Sub-judul salah hitung | 5 | bukan butir |
 
-### Yang diperiksa tangan: 18 butir P1
-
-Seluruh P1 yang belum bertanda diperiksa satu per satu di kode. **15 sudah
-selesai, 3 masih terbuka** — dua di antaranya cacat yang sama dilaporkan dua
-kali, jadi 2 cacat berbeda.
-
-**Sudah selesai — dengan buktinya:**
-
-| Butir | Bukti di kode |
-|---|---|
-| BOOT-SCHEMA approval di MySQL kosong | `approval_rules`/`approval_rule_steps` ada di `schema-baseline.sql` **dan** `ensure*Schema`; `condition_value` punya ALTER |
-| Registry salah baca nominal Kasbon | `kasbon_request → table 'kasbon_requests', amountColumn 'amount'` |
-| Tes meninggalkan fixture approval | `cleanupApprovalDebris()` + blok `finally`; residu dev 0 |
-| Baseline RAB bisa diganti/dilepas | `link-proposal` satu transaction, dua relasi disetel, `FOR UPDATE` |
-| `condition_field` diabaikan | tiap rule dievaluasi dengan `condition_field`-nya sendiri |
-| Timesheet memindahkan absensi proyek lain | `withTransaction` + `FOR UPDATE` per baris |
-| `hr.employees.view` membuka angka gaji | dipisah — gaji hanya lewat `hr.payroll.view` |
-| WebAuthn diblokir `office_location_id` | ditolak **sebelum** prompt sidik jari (`OFFICE_LOCATION_REQUIRED`); layar mobile mengirimnya |
-| Dropdown project MR mobile 401 | `GET /material-requests/projects/list` memakai `mobileAuthMiddleware` |
-| Status `success` ditimpa `failed` | UPDATE bersyarat `AND status = 'processing'`; `source_proposal_id` jadi kolom relasional + backfill |
-| Lock project dua transaksi lintas | `FOR UPDATE` pada `client_projects` dan `proposals` |
-| Preview payroll ≠ Save | `hitungSlipGaji()` dipakai kedua jalur; nol angka dari klien |
-| Snapshot tarif & attendance | sama — seluruhnya dihitung server |
-| `npm test` tidak bisa dimulai | berjalan, 19 lulus |
-
-**Masih terbuka — dan ketiganya diperbaiki hari ini:**
+### Tiga P1 yang benar-benar terbuka — diperbaiki hari ini
 
 **1. Delegasi “All Modules” tidak pernah berlaku sekali pun.** Layar menyimpan
-`module || null`, sementara pencariannya `AND module = ?`. Di SQL,
-`NULL = 'procurement'` bernilai **NULL, bukan TRUE** — jadi delegasi itu terlihat
-tersimpan dan tidak pernah cocok dengan modul apa pun. Diperbaiki menjadi
-`(module IS NULL OR module = ?)`.
+`module || null`, pencariannya `AND module = ?`. Di SQL `NULL = 'procurement'`
+bernilai **NULL, bukan TRUE** — delegasi itu terlihat tersimpan dan tidak pernah
+cocok dengan modul apa pun. Kini `(module IS NULL OR module = ?)`.
 
 **2. Rule approval tercampur antar dokumen.** `moduleKeysFor('procurement')`
 mengembalikan `['procurement','pr','po','grn']`, sehingga rule yang sengaja
-dibuat untuk GRN ikut terpilih saat memproses Purchase Request — ambang satu
-dokumen diam-diam berlaku untuk dokumen lain. Sekarang hanya alias milik dokumen
-itu yang ikut; pemanggil tanpa `entity_type` tetap memakai perilaku lama, karena
-mencampur masih lebih baik daripada tidak menemukan rule sama sekali.
+dibuat untuk GRN ikut terpilih saat memproses Purchase Request. Kini hanya alias
+milik dokumen itu; pemanggil tanpa `entity_type` tetap memakai perilaku lama.
 
 **3. Endpoint payroll terbuka lewat hak expense.** `requirePermission` bersifat
-**OR** (`required.some(...)`), jadi
-`requirePermission('hr.payroll.create', 'projects.expenses.create')` pada
-`POST /hr/payslip/generate-expense` berarti pemegang hak *expense* saja bisa
-memanggilnya — dan endpoint itu membaca angka gaji seluruh karyawan. Hak membuat
-pengeluaran proyek bukan hak melihat gaji.
+**OR**, jadi daftar dua hak pada `POST /hr/payslip/generate-expense` berarti
+pemegang hak *expense* saja bisa memanggilnya — dan endpoint itu membaca angka
+gaji seluruh karyawan. Dipersempit ke `hr.payroll.create` **setelah**
+memverifikasi kedua role aktif produksi memegangnya.
 
-Dipersempit ke `hr.payroll.create`, **setelah** memverifikasi produksi: kedua role
-aktif (`Admin`, `Manager Finannce & Acc`) sama-sama memegangnya, jadi tidak ada
-yang kehilangan akses.
+Eksposur produksi dua yang pertama **diukur nol**: `approval_rules`,
+`approval_delegations`, dan `approval_requests` semuanya kosong. Diperbaiki
+sekarang justru karena murah, sebelum ada yang memakainya.
+`tests/sisir-p1.ts` **13 asersi** menjaganya.
 
-⚠️ **Cara memeriksanya, supaya tidak terulang:** `permissions.name` berisi label
-manusia ("Create Payroll"), sedangkan `requirePermission` mencocokkan
-`CONCAT(resource, '.', action)`. Query pertama saya memakai kolom `name` lalu
-menyimpulkan permission-nya tidak ada — keliru, dan hampir membuat saya
-melaporkan endpoint itu terkunci untuk semua orang. Periksa lewat
+### Satu butir ronde pertama yang belum tuntas — dan bukan soal kode
+
+**Akun master `master@admin.com`.** Di kode sudah bersih (nol kemunculan di
+`auth.routes.ts`), tapi **akunnya masih ada di database produksi dengan password
+default** — itulah satu-satunya kegagalan yang dilaporkan `npm run smoke` sejak
+lama. Ini tindakan pemilik server, bukan perubahan kode, dan tim development
+tidak menyentuh kredensial.
+
+Butir ronde pertama lain yang sempat terlihat terbuka ternyata hanya **kutipan
+di komentar** yang menjelaskan cacat lamanya: `admin123`, `JWT_SECRET || '...'`,
+dan JWT dari query parameter tidak ada lagi sebagai kode hidup. `POST /register`
+bahkan sudah dihapus seluruhnya.
+
+### 6 DESIGN-GAP: belum dikerjakan, dan itu dinyatakan apa adanya
+
+| Butir | Status |
+|---|---|
+| “Submit to Client” paket penawaran | **sebagian** — PDF penawaran + revision ledger sudah ada; fase 1 & 3 menunggu keputusan terms komersial |
+| Tender/opportunity lifecycle (CRM→estimate→win/loss) | belum |
+| Asset Maintenance → CMMS | belum |
+| Dokumen engineering → controlled deliverable | belum |
+| HSE operasional | belum |
+| Reporting as-of / scope proyek | belum |
+
+Keenamnya rancangan modul, bukan cacat — jadi tidak ada yang bisa "diverifikasi
+selesai". Empat DESIGN-GAP lain (contract ledger, master schedule, project
+controls, finance subledger) sudah bertanda `[DEV]` di tempatnya masing-masing.
+
+### Cara memeriksa permission — supaya tidak terulang
+
+⚠️ `permissions.name` berisi **label manusia** ("Create Payroll"), sedangkan
+`requirePermission` mencocokkan `CONCAT(resource, '.', action)`. Query pertama
+saya memakai kolom `name`, menyimpulkan permission-nya tidak ada, dan hampir
+membuat saya melaporkan endpoint itu terkunci untuk semua orang. Periksa lewat
 `CONCAT(resource,'.',action)`.
 
-### Eksposur produksi dua cacat pertama: NOL
+### Usul untuk tim reviewer
 
-Diukur, bukan diasumsikan: `approval_rules` **0 baris**, `approval_delegations`
-**0 baris**, `approval_requests` **0 baris**. Keduanya cacat nyata di kode dengan
-risiko data nol hari ini — diperbaiki sekarang justru karena murah, sebelum ada
-yang memakainya.
-
-`tests/sisir-p1.ts` **13 asersi** menjaga ketiganya. Diuji tanpa HTTP, dan itu
-disengaja: dua di antaranya tidak punya data sama sekali, jadi tes berbasis data
-tidak akan pernah menyentuhnya.
-
-### Yang BELUM disisir
-
-**80 butir P2/P3/DESIGN-GAP** belum diperiksa satu per satu, dan sengaja tidak
-saya tandai apa pun — menandai berdasarkan tebakan lebih merugikan daripada
-membiarkannya terbuka.
-
-**Usul untuk tim reviewer:** sebelum melaporkan ulang sebuah butir, periksa dulu
-apakah kodenya memuat komentar yang menyebut butirnya. Sebagian besar perbaikan
-di repo ini menuliskannya, dan itu penanda yang lebih dapat dipercaya daripada
-berkas ini.
+Sebelum melaporkan ulang sebuah butir, periksa dulu apakah kodenya memuat
+komentar yang menyebut butirnya. Sebagian besar perbaikan di repo ini
+menuliskannya — dan itu penanda yang lebih dapat dipercaya daripada berkas ini.
 
 ---
 
