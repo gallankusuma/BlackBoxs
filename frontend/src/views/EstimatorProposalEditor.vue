@@ -117,6 +117,11 @@
             class="px-5 py-2 rounded-lg text-sm font-semibold transition-all">
             📋 RAB / Anggaran
           </button>
+          <button @click="activeProposalTab = 'margin'; muatMargin()"
+            :class="activeProposalTab === 'margin' ? 'bg-emerald-600 text-white shadow' : 'text-gray-500 hover:text-gray-700'"
+            class="px-4 py-2 rounded-lg text-sm font-semibold transition-colors">
+            💰 Margin
+          </button>
           <button @click="activeProposalTab = 'mto'"
             :class="activeProposalTab === 'mto' ? 'bg-blue-600 text-white shadow' : 'text-gray-500 hover:text-gray-700'"
             class="px-5 py-2 rounded-lg text-sm font-semibold transition-all">
@@ -432,6 +437,108 @@
             :contract-mode="isContractQty"
           />
         </div><!-- end MTO tab -->
+
+        <!-- ═══ MARGIN TAB ═══════════════════════════════════════════════
+             Mana yang menyumbang margin, mana yang menggerusnya. Sebelumnya
+             satu-satunya angka yang ada adalah "±10% tertanam di AHSP" untuk
+             seluruh penawaran. -->
+        <div v-show="activeProposalTab === 'margin'" class="space-y-4">
+          <p v-if="!margin" class="text-center text-gray-500 py-10">Memuat analisis margin…</p>
+          <template v-else>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div class="bg-white rounded-xl border border-gray-200 p-4">
+                <p class="text-xs text-gray-500">Margin tertanam di baris</p>
+                <p class="text-lg font-bold text-gray-900">{{ formatNumber(margin.ringkasan.margin_baris) }}</p>
+                <p class="text-xs text-gray-500">{{ margin.ringkasan.margin_baris_pct ?? '—' }}% dari nilai jual</p>
+              </div>
+              <div class="bg-white rounded-xl border border-gray-200 p-4">
+                <p class="text-xs text-gray-500">Overhead + cadangan</p>
+                <p class="text-lg font-bold text-gray-900">
+                  {{ formatNumber(margin.ringkasan.overhead + margin.ringkasan.risk_contingency) }}
+                </p>
+              </div>
+              <div class="bg-white rounded-xl border border-gray-200 p-4">
+                <p class="text-xs text-gray-500">Margin total</p>
+                <p class="text-lg font-bold text-emerald-700">{{ formatNumber(margin.ringkasan.margin_total) }}</p>
+                <p class="text-xs text-gray-500">{{ margin.ringkasan.margin_total_pct ?? '—' }}% dari total</p>
+              </div>
+              <div class="bg-white rounded-xl border border-gray-200 p-4">
+                <p class="text-xs text-gray-500">Cakupan analisis</p>
+                <p class="text-lg font-bold"
+                   :class="(margin.ringkasan.cakupan_pct ?? 0) >= 100 ? 'text-emerald-700' : 'text-amber-700'">
+                  {{ margin.ringkasan.cakupan_pct ?? '—' }}%
+                </p>
+              </div>
+            </div>
+
+            <!-- Baris yang dijual DI BAWAH biaya langsungnya. Ini yang paling
+                 perlu dilihat, dan sebelumnya tidak ada cara menemukannya. -->
+            <div v-if="margin.merugi.length" class="rounded-xl border border-red-300 bg-red-50 p-4">
+              <p class="text-sm font-semibold text-red-800 mb-2">
+                {{ margin.merugi.length }} baris dijual di bawah biaya langsungnya
+              </p>
+              <ul class="text-sm text-red-700 space-y-1">
+                <li v-for="r in margin.merugi" :key="r.item_id">
+                  <span class="text-red-400">{{ r.kode }}</span> {{ r.nama }} —
+                  jual {{ formatNumber(r.jual) }}, biaya {{ formatNumber(r.biaya) }},
+                  <strong>{{ formatNumber(r.margin) }}</strong>
+                </li>
+              </ul>
+            </div>
+
+            <!-- Cakupan di bawah 100% berarti angka margin di atas hanya bicara
+                 tentang sebagian penawaran. Itu harus dikatakan. -->
+            <div v-if="(margin.ringkasan.cakupan_pct ?? 100) < 100"
+                 class="rounded-lg border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm text-amber-900">
+              {{ margin.catatan }}
+              Nilai tanpa basis: {{ formatNumber(margin.ringkasan.nilai_tanpa_basis) }}.
+            </div>
+
+            <div class="bg-white rounded-xl border border-gray-200 overflow-x-auto">
+              <table class="w-full text-sm">
+                <thead class="bg-gray-50 text-gray-600">
+                  <tr>
+                    <th class="text-left px-3 py-2 font-medium">Pekerjaan</th>
+                    <th class="text-right px-3 py-2 font-medium">Volume</th>
+                    <th class="text-right px-3 py-2 font-medium">Jual</th>
+                    <th class="text-right px-3 py-2 font-medium">Biaya</th>
+                    <th class="text-right px-3 py-2 font-medium">Margin</th>
+                    <th class="text-right px-3 py-2 font-medium">%</th>
+                    <th class="text-left px-3 py-2 font-medium">Basis</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="l in margin.lines" :key="l.item_id" class="border-t"
+                      :class="l.margin !== null && l.margin < 0 ? 'bg-red-50' : ''">
+                    <td class="px-3 py-2">
+                      <span class="text-gray-400 mr-1">{{ l.kode }}</span>{{ l.nama }}
+                    </td>
+                    <td class="px-3 py-2 text-right">{{ l.qty }} {{ l.unit }}</td>
+                    <td class="px-3 py-2 text-right">{{ formatNumber(l.total_jual) }}</td>
+                    <td class="px-3 py-2 text-right text-gray-600">
+                      <span v-if="l.total_biaya !== null">{{ formatNumber(l.total_biaya) }}</span>
+                      <span v-else class="text-gray-400">—</span>
+                    </td>
+                    <td class="px-3 py-2 text-right font-semibold"
+                        :class="l.margin === null ? 'text-gray-400' : l.margin < 0 ? 'text-red-600' : 'text-emerald-700'">
+                      <span v-if="l.margin !== null">{{ formatNumber(l.margin) }}</span>
+                      <span v-else>belum diketahui</span>
+                    </td>
+                    <td class="px-3 py-2 text-right">{{ l.margin_pct === null ? '—' : l.margin_pct + '%' }}</td>
+                    <td class="px-3 py-2">
+                      <span class="text-[10px] px-1.5 py-0.5 rounded-full"
+                            :class="l.basis === 'terpotret' ? 'bg-emerald-100 text-emerald-700'
+                                    : l.basis === 'master' ? 'bg-blue-100 text-blue-700'
+                                    : 'bg-gray-200 text-gray-600'">
+                        {{ l.basis === 'terpotret' ? 'terpotret' : l.basis === 'master' ? 'dari master' : 'tidak ada' }}
+                      </span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </template>
+        </div>
 
         <!-- ═══ SCHEDULE TAB ═══ -->
         <div v-show="activeProposalTab === 'schedule'" class="space-y-4">
@@ -1499,7 +1606,7 @@ import ProposalTemplateWizard from '@/components/ProposalTemplateWizard.vue';
 const route = useRoute();
 const router = useRouter();
 const proposalId = Array.isArray(route.params.id) ? route.params.id[0] : route.params.id;
-const activeProposalTab = ref<'rab' | 'mto' | 'schedule' | 'payment'>('rab');
+const activeProposalTab = ref<'rab' | 'mto' | 'schedule' | 'payment' | 'margin'>('rab');
 
 // ── Schedule state ──
 const scheduleData = ref<any>(null);
@@ -1711,6 +1818,18 @@ const mtoTypeColors: Record<string, string> = {
   slab: '#d1fae5', wall: '#f3f4f6', roof: '#fee2e2'
 };
 
+const margin = ref<any>(null);
+
+const muatMargin = async () => {
+  try {
+    const { data } = await api.get(`/estimator/proposals/${proposalId}/margin`);
+    margin.value = data;
+  } catch (e) {
+    margin.value = null;
+    console.error('Gagal memuat analisis margin', e);
+  }
+};
+
 const komersial = ref({
   overhead_mode: 'nominal', overhead: 0, overhead_pct: 0,
   contingency_mode: 'nominal', risk_contingency: 0, contingency_pct: 0,
@@ -1748,6 +1867,7 @@ const simpanKomersial = async () => {
     // dan browser tidak boleh punya versinya sendiri.
     await loadSummary();
     await muatKomersial();
+    if (margin.value) await muatMargin();
   } catch (e: any) {
     alert(e?.response?.data?.error || 'Gagal menyimpan parameter komersial.');
   } finally {

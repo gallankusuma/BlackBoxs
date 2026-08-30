@@ -1498,6 +1498,29 @@ const ensureProposalKomersialSchema = async (connection: any) => {
   }
 };
 
+/**
+ * Basis biaya per baris RAB — supaya margin bisa dihitung tanpa menebak.
+ *
+ * `proposal_items` selama ini hanya memotret harga JUAL
+ * (`unit_price_snapshot`). Untuk mengetahui marginnya, biaya langsungnya harus
+ * dibaca dari `ahsp_headers` **hari ini** — dan itu masalah yang persis sama
+ * dengan yang sudah diperbaiki di jadwal dan sumber daya: harga master
+ * berkembang, sehingga margin penawaran yang sudah dikirim ikut bergerak.
+ *
+ * Kolom ini memotret `harga_langsung` per satuan saat baris dibuat.
+ *
+ * **Sengaja NULL untuk baris lama.** Mengisinya dengan harga master sekarang
+ * berarti mengarang sejarah: angkanya akan terlihat presisi padahal tidak
+ * pernah menjadi basis penawaran itu. Yang NULL dilaporkan apa adanya sebagai
+ * "basis tidak tersedia", dan cakupannya dinyatakan.
+ */
+const ensureItemCostBasisSchema = async (connection: any) => {
+  for (const sql of [
+    "ALTER TABLE proposal_items ADD COLUMN IF NOT EXISTS direct_cost_snapshot DECIMAL(18,2) NULL",
+    "ALTER TABLE proposal_items ADD COLUMN IF NOT EXISTS ovh_profit_snapshot DECIMAL(18,2) NULL",
+  ]) await execSchemaEnsure(connection, sql);
+};
+
 const ensureRouteModuleSchema = async (connection: any) => {
   const statements = [
     `CREATE TABLE IF NOT EXISTS inbox_notifications (
@@ -2798,6 +2821,7 @@ export async function initializeDatabase() {
     await ensureMtoTemplateSchema(connection);
     await ensureIntegrationSchema(connection);
     await ensureProposalKomersialSchema(connection);
+    await ensureItemCostBasisSchema(connection);
     await ensureContractLedgerSchema(connection);
     await ensureMobilePinSchema(connection);
     await ensureAssetDepreciationSchema(connection);

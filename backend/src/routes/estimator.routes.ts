@@ -4407,6 +4407,28 @@ async function recalculateProposal(proposalId: string | number, tx?: TxRunner) {
   const get = tx ? tx.get : dbGet;
   const run = tx ? tx.run : dbRun;
   try {
+    // Basis biaya diisi di SATU tempat, dan hanya kalau bisa dibuktikan cocok.
+    //
+    // Syaratnya: harga jual yang terpotret di baris masih sama persis dengan
+    // `harga_satuan` AHSP-nya sekarang. Kalau masih sama, komposisinya juga
+    // masih sama — jadi `harga_langsung` hari ini memang basis biaya baris itu.
+    //
+    // Begitu harga master bergeser, syaratnya tidak terpenuhi dan kolomnya
+    // DIBIARKAN kosong. Mengisinya dengan harga sekarang berarti mengarang
+    // sejarah: angkanya terlihat presisi padahal tidak pernah menjadi basis
+    // penawaran itu. Yang kosong dilaporkan apa adanya oleh /margin.
+    await run(
+      `UPDATE proposal_items pi
+       JOIN ahsp_headers h ON h.id = pi.ahsp_id
+       SET pi.direct_cost_snapshot = h.harga_langsung,
+           pi.ovh_profit_snapshot = h.overhead_profit
+       WHERE pi.proposal_id = ?
+         AND pi.is_section = 0
+         AND pi.direct_cost_snapshot IS NULL
+         AND ABS(pi.unit_price_snapshot - h.harga_satuan) < 0.01`,
+      [proposalId]
+    );
+
     // Calculate direct cost (sum of all items)
     const result = await get(
       `SELECT COALESCE(SUM(total_price), 0) as direct_cost FROM proposal_items WHERE proposal_id = ?`,
@@ -5414,6 +5436,150 @@ router.put('/proposals/:id/status', authMiddleware, bolehUbah, async (req: Reque
     res.status(500).json({ error: 'Failed to update status' });
   }
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Analisis margin per pekerjaan
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Margin per baris RAB — mana yang menyumbang, mana yang menggerus.
+ *
+ * Sebelum ini, satu-satunya angka margin yang ada adalah "±10% tertanam di
+ * AHSP" untuk seluruh penawaran. Padahal tiap baris punya komposisinya sendiri,
+ * dan baris yang harganya pernah disunting manual bisa saja dijual **di bawah**
+ * biaya langsungnya tanpa satu pun tanda.
+ *
+ * Tiga tingkat keandalan basis biaya, dan dibedakan tegas — karena
+ * menyamakannya membuat angka yang tidak diketahui terlihat seperti nol margin:
+ *
+ *   `terpotret`  — biaya langsung dipotret saat baris dibuat. Paling andal.
+ *   `master`     — belum terpotret, tapi harga jualnya masih sama persis dengan
+ *                  AHSP sekarang, jadi komposisinya bisa dibaca dari master.
+ *   `tidak_ada`  — tidak punya AHSP, atau harganya sudah menyimpang dari master.
+ *                  TIDAK ikut dihitung; nilainya dilaporkan terpisah.
+ */
+router.get('/proposals/:id/margin', authMiddleware, bolehLihat,
+  async (req: Request, res: Response) => {
+    try {
+      const proposalId = req.params.id;
+      const proposal: any = await dbGet(
+        `SELECT id, proposal_number, direct_cost, overhead, risk_contingency, total_project
+         FROM proposals WHERE id = ?`, [proposalId]);
+      if (!proposal) return res.status(404).json({ error: 'Proposal tidak ditemukan' });
+
+      const rows: any[] = await dbAll(
+        `SELECT pi.id, pi.ahsp_code_snapshot, pi.ahsp_name_snapshot, pi.description,
+                pi.unit_snapshot, pi.qty, pi.unit_price_snapshot, pi.total_price,
+                pi.is_section, pi.section_label, pi.order_no,
+                pi.direct_cost_snapshot, pi.ovh_profit_snapshot,
+                h.harga_langsung AS master_langsung, h.harga_satuan AS master_satuan
+         FROM proposal_items pi
+         LEFT JOIN ahsp_headers h ON h.id = pi.ahsp_id
+         WHERE pi.proposal_id = ?
+         ORDER BY pi.order_no, pi.id`, [proposalId]);
+
+      const bulat = (n: number) => Math.round(n * 100) / 100;
+      let jualTerhitung = 0, biayaTerhitung = 0, jualTanpaBasis = 0;
+      let jmlTerpotret = 0, jmlMaster = 0, jmlTanpa = 0;
+      const merugi: any[] = [];
+
+      const baris = rows.filter(r => Number(r.is_section) !== 1).map((r: any) => {
+        const qty = Number(r.qty) || 0;
+        const jual = bulat(Number(r.total_price) || 0);
+
+        let basis: 'terpotret' | 'master' | 'tidak_ada' = 'tidak_ada';
+        let biayaSatuan: number | null = null;
+        if (r.direct_cost_snapshot !== null) {
+          basis = 'terpotret'; biayaSatuan = Number(r.direct_cost_snapshot);
+        } else if (r.master_langsung !== null && r.master_satuan !== null
+                   && Math.abs(Number(r.unit_price_snapshot) - Number(r.master_satuan)) < 0.01) {
+          basis = 'master'; biayaSatuan = Number(r.master_langsung);
+        }
+
+        const biaya = biayaSatuan === null ? null : bulat(biayaSatuan * qty);
+        const margin = biaya === null ? null : bulat(jual - biaya);
+        // Margin dihitung terhadap HARGA JUAL, bukan terhadap biaya. Overhead
+        // 10% dari biaya berarti margin 9,09% dari harga jual — dan yang
+        // dipakai menilai penawaran adalah yang kedua.
+        const marginPct = (biaya === null || jual <= 0) ? null
+          : Math.round((jual - biaya) / jual * 10000) / 100;
+
+        if (basis === 'tidak_ada') { jmlTanpa++; jualTanpaBasis += jual; }
+        else {
+          if (basis === 'terpotret') jmlTerpotret++; else jmlMaster++;
+          jualTerhitung += jual; biayaTerhitung += biaya as number;
+          if ((margin as number) < 0) {
+            merugi.push({ item_id: r.id, kode: r.ahsp_code_snapshot,
+              nama: r.ahsp_name_snapshot || r.description,
+              jual, biaya, margin, margin_pct: marginPct });
+          }
+        }
+
+        return {
+          item_id: r.id, kode: r.ahsp_code_snapshot,
+          nama: r.ahsp_name_snapshot || r.description,
+          unit: r.unit_snapshot, qty,
+          harga_jual_satuan: Number(r.unit_price_snapshot) || 0,
+          biaya_satuan: biayaSatuan,
+          total_jual: jual, total_biaya: biaya,
+          margin, margin_pct: marginPct, basis,
+        };
+      });
+
+      const marginBaris = bulat(jualTerhitung - biayaTerhitung);
+      const ovh = bulat(Number(proposal.overhead) || 0);
+      const con = bulat(Number(proposal.risk_contingency) || 0);
+      const dc = bulat(Number(proposal.direct_cost) || 0);
+      const total = bulat(Number(proposal.total_project) || 0);
+
+      res.json({
+        proposal_id: Number(proposalId),
+        proposal_number: proposal.proposal_number,
+        lines: baris,
+        // Baris yang dijual di bawah biaya langsungnya. Ini yang paling perlu
+        // dilihat, dan sebelumnya tidak ada cara menemukannya.
+        merugi,
+        ringkasan: {
+          jml_baris: baris.length,
+          basis_terpotret: jmlTerpotret,
+          basis_master: jmlMaster,
+          tanpa_basis: jmlTanpa,
+          // Berapa persen NILAI penawaran yang marginnya benar-benar diketahui.
+          // Di bawah 100, angka margin di bawah ini hanya bicara tentang bagian
+          // itu — bukan tentang seluruh penawaran.
+          cakupan_pct: (jualTerhitung + jualTanpaBasis) > 0
+            ? Math.round(jualTerhitung / (jualTerhitung + jualTanpaBasis) * 10000) / 100 : null,
+          nilai_tanpa_basis: bulat(jualTanpaBasis),
+
+          jual_terhitung: bulat(jualTerhitung),
+          biaya_terhitung: bulat(biayaTerhitung),
+          // Margin yang sudah tertanam di harga AHSP tiap baris.
+          margin_baris: marginBaris,
+          margin_baris_pct: jualTerhitung > 0
+            ? Math.round(marginBaris / jualTerhitung * 10000) / 100 : null,
+
+          // Ditambah lapisan komersial di atas biaya langsung.
+          overhead: ovh,
+          risk_contingency: con,
+          direct_cost: dc,
+          total_project: total,
+          // Margin kotor seluruh penawaran: yang tertanam + yang ditambahkan.
+          margin_total: bulat(marginBaris + ovh + con),
+          margin_total_pct: total > 0
+            ? Math.round((marginBaris + ovh + con) / total * 10000) / 100 : null,
+          jml_merugi: merugi.length,
+        },
+        catatan: jmlTanpa
+          ? `${jmlTanpa} baris tidak punya basis biaya (tanpa AHSP, atau harganya sudah `
+            + 'menyimpang dari master). Baris itu tidak ikut dihitung — nilainya '
+            + 'dilaporkan terpisah supaya cakupannya terlihat.'
+          : 'Seluruh baris punya basis biaya.',
+      });
+    } catch (err: any) {
+      console.error('Error analisis margin:', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Lapisan komersial: overhead & cadangan risiko di atas biaya langsung
