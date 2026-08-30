@@ -1119,7 +1119,17 @@ router.get('/mobile/payslip/:employee_id', mobileAuthMiddleware, async (req: Mob
 
 // ===== GENERATE PAYROLL → PROJECT EXPENSE =====
 // Creates project_expenses entries from finalized payslips for a period
-router.post('/payslip/generate-expense', authMiddleware, requirePermission('hr.payroll.create', 'projects.expenses.create'), async (req: Request, res: Response) => {
+// P1 RBAC: guard dipersempit ke hak PAYROLL saja.
+//
+// `requirePermission` bersifat OR (`required.some(...)`), jadi daftar dua hak
+// berarti pemegang `projects.expenses.create` SAJA bisa memanggil endpoint ini
+// — dan endpoint ini membaca angka gaji seluruh karyawan untuk membentuk
+// expense. Hak membuat pengeluaran proyek bukan hak melihat gaji.
+//
+// Diperiksa aman untuk produksi sebelum dipersempit: kedua role aktif
+// (`Admin`, `Manager Finannce & Acc`) sama-sama memegang `hr.payroll.create`,
+// jadi tidak ada satu pun pengguna yang kehilangan akses yang selama ini dipakai.
+router.post('/payslip/generate-expense', authMiddleware, requirePermission('hr.payroll.create'), async (req: Request, res: Response) => {
   try {
     const { period_month, period_year, project_id } = req.body;
     if (!period_month || !period_year || !project_id) {

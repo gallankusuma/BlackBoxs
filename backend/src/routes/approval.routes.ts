@@ -51,9 +51,40 @@ const MODULE_ALIAS: Record<string, string> = {
 };
 const canonicalModule = (m: any): string => MODULE_ALIAS[String(m || '')] || String(m || '');
 
-/** Semua kunci modul yang setara dengan modul kanonik tertentu. */
-const moduleKeysFor = (canonical: string): string[] => {
+/** Kunci lama per jenis dokumen — bukan per modul. */
+const ALIAS_ENTITAS: Record<string, string> = {
+  purchase_request: 'pr',
+  purchase_order: 'po',
+  grn: 'grn',
+  sales_order: 'so',
+  work_order: 'wo',
+  batch_release: 'batch_release',
+};
+
+/**
+ * Kunci modul yang boleh dipakai mencari rule untuk sebuah permintaan.
+ *
+ * P1 APPROVAL-INTEGRITY: sebelumnya fungsi ini mengembalikan SELURUH alias yang
+ * menunjuk modul kanonik yang sama — `procurement` menghasilkan
+ * `['procurement','pr','po','grn']`. Akibatnya rule yang sengaja dibuat khusus
+ * untuk GRN ikut terpilih saat memproses Purchase Request, dan ambang yang
+ * dikonfigurasi untuk satu dokumen diam-diam berlaku untuk dokumen lain.
+ *
+ * Sekarang hanya alias milik dokumen ITU yang ikut, di samping kunci kanoniknya.
+ * Kompatibilitas dengan rule lama tetap terjaga — yang hilang justru
+ * pencampurannya.
+ *
+ * Tanpa `entityType` (pemanggil lama), perilaku lama dipertahankan: mencampur
+ * lebih baik daripada tidak menemukan rule sama sekali, dan pemanggil itu
+ * memang tidak tahu dokumennya apa.
+ */
+const moduleKeysFor = (canonical: string, entityType?: string): string[] => {
   const keys = [canonical];
+  const khusus = entityType ? ALIAS_ENTITAS[String(entityType)] : undefined;
+  if (khusus) {
+    if (!keys.includes(khusus)) keys.push(khusus);
+    return keys;
+  }
   for (const [alias, target] of Object.entries(MODULE_ALIAS)) {
     if (target === canonical) keys.push(alias);
   }
@@ -151,7 +182,7 @@ const selectRuleForRequest = async (
 ): Promise<any> => {
   // Rule bisa tersimpan dengan kunci lama dari layar konfigurasi (`pr`, `po`,
   // `grn`) maupun kunci kanonik. Keduanya dicocokkan.
-  const kunci = moduleKeysFor(canonicalModule(moduleName));
+  const kunci = moduleKeysFor(canonicalModule(moduleName), entityType);
   const rules: any[] = await run.all(
     `SELECT id, sequence, condition_field, min_value, max_value
      FROM approval_rules WHERE module IN (${kunci.map(() => '?').join(',')}) AND is_active = 1
@@ -282,8 +313,15 @@ const resolveApprovalAuthority = async (
 
   // Delegasi aktif: user ini mewarisi penugasan orang yang mendelegasikan.
   const delegasi: any[] = await run.all(
+    // `module IS NULL` berarti "All Modules" — itulah yang disimpan layar
+    // delegasi saat pilihannya dikosongkan (`module || null`).
+    //
+    // P1: sebelumnya syaratnya hanya `module = ?`, dan di SQL
+    // `NULL = 'procurement'` bernilai NULL — bukan TRUE. Jadi delegasi
+    // "All Modules" tidak pernah cocok dengan modul APA PUN: fiturnya terlihat
+    // tersimpan di layar dan tidak pernah berlaku sekali pun.
     `SELECT from_user_id FROM approval_delegations
-     WHERE to_user_id = ? AND is_active = 1 AND module = ?
+     WHERE to_user_id = ? AND is_active = 1 AND (module IS NULL OR module = ?)
        AND (start_date IS NULL OR start_date <= CURDATE())
        AND (end_date IS NULL OR end_date >= CURDATE())`,
     [userId, request.module]
