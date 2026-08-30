@@ -228,6 +228,7 @@ export async function jalankanTeksAi(
       ? ['openai', 'gemini'] : ['gemini', 'openai'];
 
   const dicoba: string[] = [];
+  const kegagalan: Array<{ penyedia: string; sebab: string; pesan: string }> = [];
   let terakhir: any = null;
 
   for (const p of urutan) {
@@ -241,6 +242,9 @@ export async function jalankanTeksAi(
       return { teks, penyedia: p, dicoba };
     } catch (e: any) {
       e.penyediaGagal = p;
+      e.dicoba = [...dicoba];
+      kegagalan.push({ penyedia: p, sebab: sebabGagal(e), pesan: String(e?.message || '').slice(0, 200) });
+      e.kegagalan = [...kegagalan];
       terakhir = e;
       if (!penyediaTakTersedia(e)) throw e;
       console.error(`[AI Teks] ${p} tidak tersedia, mencoba penyedia berikutnya:`, e.message?.slice(0, 100));
@@ -252,6 +256,7 @@ export async function jalankanTeksAi(
       { kodeAi: 'AI_BELUM_SIAP' });
   }
   if (terakhir) terakhir.dicoba = [...dicoba];
+  if (terakhir) terakhir.kegagalan = [...kegagalan];
 
   throw terakhir || new Error('Semua penyedia AI gagal');
 }
@@ -437,6 +442,20 @@ export function penyediaTakTersedia(err: any): boolean {
  * terbaca, mencoba penyedia kedua hanya menghabiskan kuota kedua untuk
  * mendapat jawaban yang sama.
  */
+/**
+ * Klasifikasi sebab kegagalan penyedia — kuota, kunci, atau lainnya.
+ *
+ * Dipisahkan karena tindak lanjutnya berbeda total: kuota habis berarti
+ * menunggu, kunci ditolak berarti memperbaiki. Menyebut keduanya "gagal" saja
+ * membuat orang memilih tindakan yang salah.
+ */
+export const sebabGagal = (e: any): 'kuota' | 'kunci' | 'lain' => {
+  const m = String(e?.message || '');
+  if (/quota|rate limit|RESOURCE_EXHAUSTED|429/i.test(m)) return 'kuota';
+  if (/API key|PERMISSION_DENIED|API_KEY_INVALID|Incorrect API key|401/i.test(m)) return 'kunci';
+  return 'lain';
+};
+
 export async function bacaGambarAi(
   prompt: string, berkas: BerkasVisi[],
 ): Promise<{ teks: string; penyedia: string; dicoba: string[] }> {
@@ -449,6 +468,7 @@ export async function bacaGambarAi(
       ? ['openai', 'gemini'] : ['gemini', 'openai'];
 
   const dicoba: string[] = [];
+  const kegagalan: Array<{ penyedia: string; sebab: string; pesan: string }> = [];
   let terakhir: any = null;
 
   for (const p of urutan) {
@@ -475,6 +495,14 @@ export async function bacaGambarAi(
       // yang sampai ke pengguna hanya "Kuota Gemini habis" — dan operator yang
       // tahu ia memakai OpenAI akan mencari masalah di tempat yang salah.
       e.dicoba = [...dicoba];
+      // Sebab kegagalan TIAP penyedia, bukan hanya yang terakhir.
+      //
+      // Menyatukannya sebagai satu sebab menyesatkan dengan cara yang mahal:
+      // saat OpenAI ditolak kuncinya dan Gemini kehabisan kuota, pesan
+      // "kuota habis" membuat operator MENUNGGU — padahal yang perlu
+      // diperbaiki kuncinya, dan menunggu tidak akan pernah menolongnya.
+      kegagalan.push({ penyedia: p, sebab: sebabGagal(e), pesan: String(e?.message || '').slice(0, 200) });
+      e.kegagalan = [...kegagalan];
       terakhir = e;
       // Bukan soal ketersediaan penyedia — jangan buang kuota kedua untuk
       // mendapat jawaban yang sama.

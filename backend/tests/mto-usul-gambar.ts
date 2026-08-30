@@ -297,8 +297,26 @@ async function main() {
     chk('seluruh penyedia yang dicoba ditempelkan ke error',
       ai.includes('e.dicoba = [...dicoba]'), true);
     chk('dan rantainya disebut di pesan',
-      rute.includes('sudah dicoba lebih dulu dan juga gagal'), true);
+      rute.includes('lebih dulu)') && rute.includes('gagalLain'), true);
     chk('serta dilaporkan sebagai data', rute.includes('penyedia_dicoba'), true);
+
+    // Sebab tiap penyedia dibedakan — kuota, kunci, atau lainnya.
+    //
+    // Ini bukan kosmetik: tindak lanjutnya berbeda total. Kuota habis berarti
+    // MENUNGGU, kunci ditolak berarti MEMPERBAIKI. Terjadi sungguhan saat
+    // menguji — OpenAI kuncinya ditolak sementara Gemini kehabisan kuota
+    // harian, dan pesan gabungan "kuota habis" akan membuat operator menunggu
+    // sesuatu yang tidak akan pernah pulih sendiri.
+    chk('sebab kegagalan diklasifikasi', ai.includes('export const sebabGagal'), true);
+    chk('ketiga sebab dibedakan',
+      /'kuota'/.test(ai) && /'kunci'/.test(ai) && /'lain'/.test(ai), true);
+    chk('dicatat per penyedia, bukan hanya yang terakhir',
+      ai.includes('kegagalan.push({ penyedia: p, sebab: sebabGagal(e)'), true);
+    chk('dipakai kedua lapisan (visi & teks)',
+      (ai.match(/kegagalan\.push\(\{ penyedia: p/g) || []).length, 2);
+    chk('pesan menyebut sebabnya, bukan sekadar "gagal"',
+      rute.includes('kuncinya ditolak') && rute.includes('kuotanya habis'), true);
+    chk('dan rinciannya ikut sebagai data', rute.includes('kegagalan: Array.isArray'), true);
     chk('penyedia yang dipakai dilaporkan ke pemanggil',
       rute.includes('penyedia: penyediaDipakai'), true);
 

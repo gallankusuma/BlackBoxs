@@ -2404,9 +2404,23 @@ function galatAi(err: any): { status: number; body: any } {
   // Kalau ada penyedia lain yang sudah dicoba lebih dulu, itu disebutkan.
   // Operator yang menyetel OpenAI sebagai utama lalu membaca "Kuota Gemini
   // habis" akan mencari masalah di tempat yang salah.
-  const lain: string[] = Array.isArray(err?.dicoba)
-    ? err.dicoba.filter((p: any) => p !== err?.penyediaGagal).map(nama) : [];
-  const rantai = lain.length ? ` (${lain.join(' & ')} sudah dicoba lebih dulu dan juga gagal)` : '';
+  //
+  // Sebab tiap penyedia disebut TERPISAH, karena tindak lanjutnya berbeda
+  // total: kuota habis berarti menunggu, kunci ditolak berarti memperbaiki.
+  // Menyatukannya sebagai "gagal" membuat orang menunggu sesuatu yang tidak
+  // akan pernah pulih sendiri.
+  const kata = (sebab: string) =>
+    sebab === 'kuota' ? 'kuotanya habis'
+    : sebab === 'kunci' ? 'kuncinya ditolak'
+    : 'gagal';
+  const gagalLain: string[] = Array.isArray(err?.kegagalan)
+    ? err.kegagalan
+        .filter((k: any) => k?.penyedia !== err?.penyediaGagal)
+        .map((k: any) => `${nama(k.penyedia)} ${kata(k.sebab)}`)
+    : (Array.isArray(err?.dicoba)
+        ? err.dicoba.filter((p: any) => p !== err?.penyediaGagal).map((p: any) => `${nama(p)} gagal`)
+        : []);
+  const rantai = gagalLain.length ? ` (${gagalLain.join(', ')} lebih dulu)` : '';
   if (/quota|rate limit|RESOURCE_EXHAUSTED|429/i.test(pesan)) {
     const detik = pesan.match(/retry in ([\d.]+)s/i)?.[1];
     return {
@@ -2417,6 +2431,9 @@ function galatAi(err: any): { status: number; body: any } {
           + ' Batas gratis terpakai cepat kalau usulan disunting berkali-kali.',
         code: 'AI_KUOTA_HABIS',
         penyedia_dicoba: Array.isArray(err?.dicoba) ? err.dicoba : [err?.penyediaGagal].filter(Boolean),
+        // Rincian per penyedia: ini yang memberi tahu APA yang harus dilakukan.
+        kegagalan: Array.isArray(err?.kegagalan)
+          ? err.kegagalan.map((k: any) => ({ penyedia: k.penyedia, sebab: k.sebab })) : undefined,
         ...(detik ? { coba_lagi_detik: Math.ceil(Number(detik)) } : {}),
       },
     };
@@ -2429,6 +2446,8 @@ function galatAi(err: any): { status: number; body: any } {
         code: 'AI_KUNCI_DITOLAK',
         penyedia: err?.penyediaGagal || null,
         penyedia_dicoba: Array.isArray(err?.dicoba) ? err.dicoba : [err?.penyediaGagal].filter(Boolean),
+        kegagalan: Array.isArray(err?.kegagalan)
+          ? err.kegagalan.map((k: any) => ({ penyedia: k.penyedia, sebab: k.sebab })) : undefined,
       },
     };
   }
