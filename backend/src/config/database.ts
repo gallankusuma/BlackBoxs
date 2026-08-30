@@ -1618,6 +1618,31 @@ const ensureMaterialRequestOutcomeSchema = async (connection: any) => {
   ]) await execSchemaEnsure(connection, sql);
 };
 
+/**
+ * Material Request dari sinyal yang putus-putus.
+ *
+ * Di lokasi proyek sinyal sering hilang. Saat pengiriman gagal, permintaannya
+ * lenyap begitu saja — keranjang hanya di memori, jadi menutup aplikasi berarti
+ * mengetik ulang semuanya. Orang lalu berhenti mencoba dan menelepon.
+ *
+ * Antrean lokal menyelesaikan itu, tapi memunculkan bahaya baru: kirim ulang
+ * setelah RESPONS hilang (padahal servernya sudah menerima) menghasilkan MR
+ * KEMBAR — dan MR kembar berarti barang dipesan dua kali.
+ *
+ * `client_request_id` dibuat di perangkat sebelum pengiriman pertama dan
+ * dipakai ulang di setiap percobaan. Servernya memakainya untuk mengenali
+ * permintaan yang sama, jadi berapa kali pun dikirim ulang hasilnya satu.
+ */
+const ensureMrIdempotencySchema = async (connection: any) => {
+  for (const sql of [
+    "ALTER TABLE material_requests ADD COLUMN IF NOT EXISTS client_request_id VARCHAR(64) NULL",
+    // UNIQUE per KARYAWAN, bukan global: id dibuat perangkat, dan dua perangkat
+    // berbeda tidak boleh bisa saling menghalangi hanya karena kebetulan
+    // menghasilkan id yang sama.
+    "ALTER TABLE material_requests ADD UNIQUE KEY uq_mr_client_req (employee_id, client_request_id)",
+  ]) await execSchemaEnsure(connection, sql);
+};
+
 const ensureRouteModuleSchema = async (connection: any) => {
   const statements = [
     `CREATE TABLE IF NOT EXISTS inbox_notifications (
@@ -2921,6 +2946,7 @@ export async function initializeDatabase() {
     await ensureItemCostBasisSchema(connection);
     await ensureOpportunitySchema(connection);
     await ensureMaterialRequestOutcomeSchema(connection);
+    await ensureMrIdempotencySchema(connection);
     await ensureContractLedgerSchema(connection);
     await ensureMobilePinSchema(connection);
     await ensureAssetDepreciationSchema(connection);

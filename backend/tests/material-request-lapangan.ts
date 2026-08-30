@@ -133,6 +133,44 @@ async function main() {
     chk('menolak yang sudah ditolak ditolak',
       (await call('PUT', `/material-requests/${mrTolak}/reject`, { reason: 'lagi' }, master)).status, 400);
 
+    console.log('\n6b. INI YANG PALING BERBAHAYA DARI ANTREAN — kirim ulang tidak boleh menggandakan');
+    // Skenario nyata: permintaan sampai ke server, responsnya hilang di jalan,
+    // perangkat mengira gagal lalu mengirim ulang. Tanpa idempotensi, barang
+    // dipesan dua kali.
+    const idKlien = `uji-antre-${stamp}`;
+    const kirim = () => call('POST', '/material-requests', {
+      client_request_id: idKlien, priority: 'normal',
+      items: [{ item_name: `Paku ${stamp}`, quantity: 3, uom: 'kg' }],
+    }, tokMobile);
+
+    const k1 = await kirim();
+    chk('pengiriman pertama membuat MR', k1.status, 201);
+    const k2 = await kirim();
+    chk('pengiriman ulang dijawab 200, bukan galat', k2.status, 200);
+    // 200, bukan 409: dari sisi perangkat ini BERHASIL — permintaannya memang
+    // sudah tercatat. Galat akan membuat antrean mencoba selamanya.
+    chk('dinyatakan duplikat', k2.json?.duplikat, true);
+    chk('MR yang dikembalikan SAMA', k2.json?.data?.id, k1.json?.data?.id);
+    const jml: any = await dbGet(
+      'SELECT COUNT(*) n FROM material_requests WHERE employee_id = ? AND client_request_id = ?',
+      [empId, idKlien]);
+    chk('hanya SATU MR tercatat', Number(jml?.n), 1);
+
+    // Tiga pengiriman bersamaan — yang menahan di sini UNIQUE key, bukan
+    // pemeriksaan di awal handler.
+    await Promise.all([kirim(), kirim(), kirim()]);
+    const jml2: any = await dbGet(
+      'SELECT COUNT(*) n FROM material_requests WHERE employee_id = ? AND client_request_id = ?',
+      [empId, idKlien]);
+    chk('tetap satu walau dikirim bersamaan', Number(jml2?.n), 1);
+
+    // Tanpa client_request_id, perilaku lama dipertahankan: tiap kiriman baru.
+    const t1 = await call('POST', '/material-requests',
+      { items: [{ item_name: `Tanpa id ${stamp}`, quantity: 1 }] }, tokMobile);
+    const t2 = await call('POST', '/material-requests',
+      { items: [{ item_name: `Tanpa id ${stamp}`, quantity: 1 }] }, tokMobile);
+    chk('tanpa id klien, keduanya MR berbeda', t1.json?.data?.id !== t2.json?.data?.id, true);
+
     console.log('\n7. Layar mobile menampilkan alasan dan penandanya');
     const fe = join(__dirname, '..', '..', 'frontend', 'src');
     const layar = readFileSync(join(fe, 'views', 'mobile', 'MobileMaterialRequest.vue'), 'utf8');
@@ -148,6 +186,21 @@ async function main() {
     const iTandai = layar.indexOf('tandai-dibaca');
     chk('penandaan terjadi SESUDAH daftar termuat',
       iMuat >= 0 && iTandai > iMuat, true);
+
+    console.log('\n7b. Antrean offline: terlihat, dan tidak mengantre penolakan');
+    chk('antrean tersimpan lokal', layar.includes('KUNCI_ANTREAN'), true);
+    chk('id permintaan dibuat sekali dan ikut payload',
+      layar.includes('client_request_id: idPermintaan()'), true);
+    // Kegagalan JARINGAN dibedakan dari PENOLAKAN server. Mengantrekan 400
+    // berarti mencoba selamanya untuk yang tidak akan pernah diterima.
+    chk('jaringan dibedakan dari penolakan', layar.includes('function layakDiantre'), true);
+    chk('penolakan server tidak diantre ulang',
+      /layakDiantre[\s\S]{0,200}e\?\.response\) return false/.test(layar), true);
+    // Antrean yang tidak terlihat sama saja hilang dari sisi pemakainya.
+    chk('antrean ditampilkan di layar', layar.includes('belum terkirim'), true);
+    chk('dikirim ulang otomatis saat sinyal kembali',
+      layar.includes("addEventListener('online'"), true);
+    chk('dan saat aplikasi dibuka', /onMounted[\s\S]{0,400}kirimAntrean/.test(layar), true);
 
     console.log('\n8. Keadaan PIN terlihat — tanpa itu fitur mobile mati diam-diam');
     const kary = readFileSync(join(fe, 'views', 'Employees.vue'), 'utf8');

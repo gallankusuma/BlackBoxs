@@ -118,6 +118,31 @@
       <div v-if="belumDibaca" class="mr-kabar">
         {{ belumDibaca }} permintaan sudah diputuskan kantor
       </div>
+
+      <!-- Antrean offline. Permintaan yang tersimpan tapi belum terkirim HARUS
+           terlihat — kalau tidak, dari sisi pemakainya ia sama saja hilang. -->
+      <div v-if="antrean.length" class="antre-box">
+        <div class="antre-head">
+          <span>📥 {{ antrean.length }} belum terkirim</span>
+          <button class="antre-btn" @click="kirimAntrean(false)" :disabled="mengirimAntrean">
+            {{ mengirimAntrean ? 'Mengirim…' : 'Coba kirim' }}
+          </button>
+        </div>
+        <div v-for="q in antrean" :key="q.payload.client_request_id" class="antre-item">
+          <div>
+            <div class="antre-ringkas">{{ q.ringkas }}</div>
+            <div class="antre-meta">
+              disimpan {{ formatDate(q.dibuat_at) }}
+              <span v-if="q.percobaan > 1"> · {{ q.percobaan }}× dicoba</span>
+            </div>
+            <!-- Ditolak server: tidak dicoba lagi, tapi alasannya ditampilkan.
+                 Membuangnya diam-diam membuat permintaan hilang tanpa jejak. -->
+            <div v-if="q.gagal_permanen" class="antre-galat">Ditolak: {{ q.galat }}</div>
+          </div>
+          <button v-if="q.gagal_permanen" class="antre-buang"
+            @click="buangDariAntrean(q.payload.client_request_id)">Hapus</button>
+        </div>
+      </div>
       <div v-for="mr in history" :key="mr.id" class="history-card"
            :class="{ 'mr-baru': Number(mr.keputusan_baru) === 1 }">
         <div class="history-header">
@@ -375,35 +400,132 @@ async function loadProjects() {
   } catch {}
 }
 
+// ══ Antrean offline ════════════════════════════════════════════════════════
+//
+// Di lokasi proyek sinyal sering hilang. Sebelum ini, pengiriman yang gagal
+// membuat permintaannya lenyap — keranjang hanya di memori, jadi menutup
+// aplikasi berarti mengetik ulang semuanya. Orang lalu berhenti mencoba.
+//
+// Yang TIDAK boleh terjadi karena antrean ini: MR kembar. Kirim ulang setelah
+// RESPONS hilang (padahal server sudah menerima) akan membuat barang dipesan
+// dua kali. Karena itu tiap permintaan membawa `client_request_id` yang dibuat
+// SEKALI dan dipakai ulang di setiap percobaan; server mengenalinya.
+const KUNCI_ANTREAN = 'mr_antrean_v1';
+const antrean = ref<any[]>([]);
+const mengirimAntrean = ref(false);
+
+function bacaAntrean(): any[] {
+  try { return JSON.parse(localStorage.getItem(KUNCI_ANTREAN) || '[]'); } catch { return []; }
+}
+function tulisAntrean(v: any[]) {
+  antrean.value = v;
+  try { localStorage.setItem(KUNCI_ANTREAN, JSON.stringify(v)); } catch { /* kuota penuh */ }
+}
+function idPermintaan(): string {
+  // crypto.randomUUID tidak ada di sebagian WebView lama.
+  return (globalThis.crypto as any)?.randomUUID?.()
+    || `mr-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/**
+ * Kegagalan JARINGAN dibedakan dari PENOLAKAN server.
+ *
+ * Hanya yang pertama layak diantre. Mengantrekan penolakan 400 berarti
+ * mencoba selamanya untuk permintaan yang memang tidak akan pernah diterima —
+ * dan pemakainya tidak pernah tahu kenapa.
+ */
+function layakDiantre(e: any): boolean {
+  if (e?.response) return false;           // server menjawab → keputusan, bukan sinyal
+  return true;                              // tidak ada respons → jaringan
+}
+
+async function kirimAntrean(diam = true) {
+  if (mengirimAntrean.value) return;
+  const isi = bacaAntrean();
+  if (!isi.length) return;
+  mengirimAntrean.value = true;
+  let terkirim = 0;
+  const sisa: any[] = [];
+  for (const p of isi) {
+    try {
+      await mobileApi.post('/api/material-requests/', p.payload);
+      terkirim++;
+    } catch (e: any) {
+      if (layakDiantre(e)) {
+        // Masih offline — dipertahankan, percobaannya dihitung.
+        sisa.push({ ...p, percobaan: (p.percobaan || 0) + 1 });
+      } else {
+        // Ditolak server. Dikeluarkan dari antrean supaya tidak mencoba
+        // selamanya, TAPI alasannya disimpan dan ditampilkan — kalau hanya
+        // dibuang, permintaannya hilang tanpa ada yang tahu.
+        sisa.push({ ...p, gagal_permanen: true,
+          galat: e?.response?.data?.error || 'Ditolak server' });
+      }
+    }
+  }
+  tulisAntrean(sisa.filter(x => !x.terkirim));
+  mengirimAntrean.value = false;
+  if (terkirim) {
+    showToast(`✅ ${terkirim} permintaan tertunda berhasil terkirim`);
+    await loadHistory();
+  } else if (!diam && sisa.length) {
+    showToast('Masih belum ada sinyal — permintaan tetap tersimpan', 'error');
+  }
+}
+
+function buangDariAntrean(id: string) {
+  tulisAntrean(bacaAntrean().filter((x: any) => x.payload?.client_request_id !== id));
+}
+
 async function submitMR() {
   if (!cart.value.length) return;
   submitting.value = true;
+  const proj = projectList.value.find(p => p.id === selectedProject.value);
+  const payload = {
+    // Dibuat SEKALI di sini dan ikut ke setiap percobaan berikutnya.
+    client_request_id: idPermintaan(),
+    project_id: selectedProject.value,
+    project_name: proj?.project_name || null,
+    priority: priority.value,
+    needed_by: neededBy.value || null,
+    notes: mrNotes.value || null,
+    items: cart.value,
+  };
   try {
-    const proj = projectList.value.find(p => p.id === selectedProject.value);
-    await mobileApi.post('/api/material-requests/', {
-      project_id: selectedProject.value,
-      project_name: proj?.project_name || null,
-      priority: priority.value,
-      needed_by: neededBy.value || null,
-      notes: mrNotes.value || null,
-      items: cart.value,
-    });
+    await mobileApi.post('/api/material-requests/', payload);
     showToast('✅ Material Request terkirim!');
     cart.value = [];
     tab.value = 'history';
     await loadHistory();
   } catch (e: any) {
-    showToast(e?.response?.data?.error || 'Gagal mengirim', 'error');
+    if (layakDiantre(e)) {
+      tulisAntrean([...bacaAntrean(), {
+        payload, dibuat_at: new Date().toISOString(), percobaan: 1,
+        ringkas: `${payload.items.length} item · ${payload.priority}`,
+      }]);
+      // Keranjang dikosongkan karena permintaannya SUDAH tersimpan di antrean —
+      // membiarkannya membuat orang mengirim ulang dan menghasilkan dua entri.
+      cart.value = [];
+      tab.value = 'history';
+      showToast('📥 Tidak ada sinyal — permintaan disimpan dan akan dikirim otomatis');
+    } else {
+      showToast(e?.response?.data?.error || 'Gagal mengirim', 'error');
+    }
   } finally { submitting.value = false; }
 }
 
 onMounted(() => {
+  antrean.value = bacaAntrean();
+  // Dicoba saat aplikasi dibuka dan setiap kali sinyal kembali — tanpa perlu
+  // pemakainya ingat menekan apa pun.
+  window.addEventListener('online', () => kirimAntrean(true));
   const stored = localStorage.getItem('mobile_employee');
   // Sesi lama (sebelum token mobile diterapkan) tidak punya token — login ulang.
   if (!stored || !getMobileToken()) { router.push('/mobile'); return; }
   emp.value = JSON.parse(stored);
   loadCatalog();
   loadProjects();
+  kirimAntrean(true);
 });
 </script>
 
@@ -535,5 +657,30 @@ onMounted(() => {
 .mr-lanjut {
   margin-top: 8px; background: #ecfdf5; border: 1px solid #a7f3d0; color: #065f46;
   border-radius: 8px; padding: 8px 10px; font-size: 12px;
+}
+
+.antre-box {
+  background: #fffbeb; border: 1px solid #fde68a; border-radius: 12px;
+  padding: 10px 12px; margin-bottom: 12px;
+}
+.antre-head {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 13px; font-weight: 700; color: #92400e; margin-bottom: 6px;
+}
+.antre-btn {
+  border: 0; background: #d97706; color: #fff; border-radius: 8px;
+  padding: 5px 10px; font-size: 12px; font-weight: 700;
+}
+.antre-btn:disabled { opacity: .6; }
+.antre-item {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;
+  border-top: 1px solid #fde68a; padding-top: 8px; margin-top: 8px;
+}
+.antre-ringkas { font-size: 13px; font-weight: 600; color: #78350f; }
+.antre-meta { font-size: 11px; color: #a16207; margin-top: 2px; }
+.antre-galat { font-size: 11px; color: #991b1b; margin-top: 4px; }
+.antre-buang {
+  border: 1px solid #fca5a5; background: #fff; color: #b91c1c;
+  border-radius: 8px; padding: 4px 8px; font-size: 11px; font-weight: 700;
 }
 </style>

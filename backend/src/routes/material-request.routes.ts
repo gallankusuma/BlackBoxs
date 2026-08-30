@@ -180,6 +180,29 @@ router.post('/', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Respo
 
     if (!items?.length) return res.status(400).json({ error: 'At least 1 item required' });
 
+    // Idempotensi untuk antrean offline.
+    //
+    // Perangkat membuat `client_request_id` SEKALI sebelum pengiriman pertama
+    // dan memakainya ulang di tiap percobaan. Tanpa ini, kirim ulang setelah
+    // RESPONS hilang — padahal server sudah menerima — menghasilkan MR kembar,
+    // dan MR kembar berarti barang dipesan dua kali.
+    const clientReqId = String(req.body?.client_request_id || '').trim().slice(0, 64) || null;
+    if (clientReqId) {
+      const sudah: any = await dbGet(
+        `SELECT id, mr_number, status FROM material_requests
+         WHERE employee_id = ? AND client_request_id = ?`, [empId, clientReqId]);
+      if (sudah) {
+        // 200, bukan 409: dari sisi perangkat ini BERHASIL — permintaannya
+        // memang sudah tercatat. Menjawab galat akan membuat antrean mencoba
+        // selamanya untuk sesuatu yang sudah beres.
+        return res.json({
+          message: 'Material Request sudah tercatat sebelumnya',
+          data: { id: sudah.id, mr_number: sudah.mr_number, status: sudah.status },
+          duplikat: true,
+        });
+      }
+    }
+
     // Nama pemohon diambil dari DB, bukan dari body — supaya MR tidak bisa
     // diajukan atas nama orang lain.
     const emp = await dbGet('SELECT name FROM employees WHERE id = ? AND status = ?', [empId, 'ACTIVE']) as any;
@@ -212,9 +235,9 @@ router.post('/', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Respo
     const { mrId, mrNumber } = await withTransaction(async tx => {
       const nomor = await nextSequentialCode('MR', 'material_requests', 'mr_number', tx);
       const result = await tx.run(
-        `INSERT INTO material_requests (mr_number, employee_id, employee_name, project_id, project_name, priority, needed_by, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [nomor, empId, employee_name, project_id || null, projectName, priority || 'normal', needed_by || null, notes || null]
+        `INSERT INTO material_requests (mr_number, employee_id, employee_name, project_id, project_name, priority, needed_by, notes, client_request_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [nomor, empId, employee_name, project_id || null, projectName, priority || 'normal', needed_by || null, notes || null, clientReqId]
       );
       const id = result.insertId;
 
@@ -226,6 +249,18 @@ router.post('/', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Respo
         );
       }
       return { mrId: id, mrNumber: nomor };
+    }).catch(async (e: any) => {
+      // Pagar terakhir untuk balapan: dua percobaan yang berangkat nyaris
+      // bersamaan bisa sama-sama lolos pemeriksaan di atas. UNIQUE key-lah yang
+      // benar-benar menahannya, dan yang kalah balapan mengembalikan MR yang
+      // sudah terbentuk — bukan galat.
+      if (e?.code === 'ER_DUP_ENTRY' && clientReqId) {
+        const ada: any = await dbGet(
+          `SELECT id, mr_number FROM material_requests
+           WHERE employee_id = ? AND client_request_id = ?`, [empId, clientReqId]);
+        if (ada) return { mrId: ada.id, mrNumber: ada.mr_number, duplikat: true };
+      }
+      throw e;
     });
 
     res.status(201).json({ message: 'Material Request created', data: { id: mrId, mr_number: mrNumber } });
