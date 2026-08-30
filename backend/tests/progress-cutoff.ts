@@ -237,6 +237,32 @@ async function main() {
     }
     chk('nol DELETE terhadap periode/baris progress', liar, 0);
 
+    console.log('\n12b. Kurva-S: hanya periode DISETUJUI, dan layar menggambarnya');
+    const kur = await call('GET', `/projects/${projectId}/progress`, undefined, master);
+    // Dua periode disetujui pada titik ini (bagian 4 dan bagian 10).
+    chk('deret kurva berisi periode disetujui saja', (kur.json?.kurva || []).length, 2);
+    chk('tiap titik membawa rencana dan realisasi',
+      (kur.json?.kurva || []).every((t: any) =>
+        t.planned_pct !== undefined && t.earned_pct !== undefined && !!t.cutoff_date), true);
+    // Yang belum disetujui tidak boleh masuk — kurva yang memuat klaim mentah
+    // menunjukkan kemajuan yang belum tentu diakui.
+    chk('jumlah titik ≤ jumlah periode',
+      (kur.json?.kurva || []).length <= (kur.json?.periods || []).length, true);
+    chk('urut menaik menurut nomor periode',
+      (kur.json?.kurva || []).every((t: any, i: number, a: any[]) =>
+        i === 0 || a[i - 1].period_no < t.period_no), true);
+
+    // readFileSync & join sudah diimpor di atas berkas ini — mendeklarasikannya
+    // ulang di sini membuat TDZ dan meruntuhkan tesnya pada baris pertama.
+    const layar = readFileSync(
+      join(__dirname, '..', '..', 'frontend', 'src', 'views', 'ProjectDetail.vue'), 'utf8');
+    chk('layar menggambar kurva dari deret itu', layar.includes('progres.value?.kurva'), true);
+    chk('dua garis dibedakan: rencana & realisasi',
+      layar.includes('garisPlan') && layar.includes('garisEarned'), true);
+    // Deviasi dinyatakan angka, bukan dibiarkan ditafsir dari jarak dua garis.
+    chk('deviasi dinyatakan sebagai angka', layar.includes('kurva.deviasi'), true);
+    chk('digambar tanpa pustaka grafik', /<svg[\s\S]{0,200}viewBox/.test(layar), true);
+
     console.log('\n13. Terjaga auth & id tidak valid');
     chk('baca progress tanpa token 401', (await call('GET', `/projects/${projectId}/progress`)).status, 401);
     chk('setujui tanpa token 401',

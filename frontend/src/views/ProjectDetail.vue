@@ -507,6 +507,64 @@
           </div>
         </template>
 
+        <!-- ══ Kurva-S ═══════════════════════════════════════════════════
+             Datanya sudah ada sejak cut-off pertama disetujui, tapi belum ada
+             yang bisa melihatnya. Digambar SVG langsung — tanpa pustaka grafik,
+             karena satu deret dua garis tidak sepadan dengan satu dependensi.
+
+             Hanya periode DISETUJUI yang masuk: kurva yang memuat klaim belum
+             disetujui akan menunjukkan kemajuan yang belum tentu diakui. -->
+        <div v-if="kurva.titik.length >= 1" class="bg-white rounded-xl border border-gray-200 p-4">
+          <div class="flex flex-wrap items-center gap-x-5 gap-y-1 mb-3">
+            <span class="text-sm font-semibold text-gray-800">Kurva-S</span>
+            <span class="text-xs flex items-center gap-1">
+              <span class="inline-block w-4 h-0.5 bg-gray-400"></span> Rencana
+            </span>
+            <span class="text-xs flex items-center gap-1">
+              <span class="inline-block w-4 h-0.5 bg-emerald-500"></span> Realisasi disetujui
+            </span>
+            <span class="ml-auto text-xs text-gray-500">
+              {{ kurva.titik.length }} periode disetujui
+            </span>
+          </div>
+
+          <svg :viewBox="`0 0 ${kurva.w} ${kurva.h}`" class="w-full" style="max-height:260px">
+            <!-- garis bantu 0/25/50/75/100% -->
+            <g>
+              <template v-for="g in [0, 25, 50, 75, 100]" :key="g">
+                <line :x1="kurva.padL" :x2="kurva.w - 10"
+                      :y1="kurva.y(g)" :y2="kurva.y(g)"
+                      stroke="#e5e7eb" stroke-width="1" />
+                <text :x="kurva.padL - 6" :y="kurva.y(g) + 4" text-anchor="end"
+                      font-size="10" fill="#9ca3af">{{ g }}%</text>
+              </template>
+            </g>
+
+            <!-- rencana -->
+            <polyline :points="kurva.garisPlan" fill="none" stroke="#9ca3af"
+                      stroke-width="2" stroke-dasharray="5 4" />
+            <!-- realisasi yang disetujui -->
+            <polyline :points="kurva.garisEarned" fill="none" stroke="#10b981" stroke-width="2.5" />
+
+            <g v-for="(t, i) in kurva.titik" :key="i">
+              <circle :cx="kurva.x(i)" :cy="kurva.y(t.planned_pct)" r="3" fill="#9ca3af" />
+              <circle :cx="kurva.x(i)" :cy="kurva.y(t.earned_pct)" r="4" fill="#10b981" />
+              <text :x="kurva.x(i)" :y="kurva.h - 8" text-anchor="middle"
+                    font-size="10" fill="#6b7280">{{ t.cutoff_date?.slice(5) }}</text>
+            </g>
+          </svg>
+
+          <!-- Deviasi periode terakhir dinyatakan angka, bukan dibiarkan
+               ditafsir dari jarak dua garis. -->
+          <p v-if="kurva.titik.length" class="mt-2 text-xs"
+             :class="kurva.deviasi < 0 ? 'text-red-700' : 'text-emerald-700'">
+            Periode terakhir: realisasi {{ kurva.terakhir.earned_pct }}% terhadap rencana
+            {{ kurva.terakhir.planned_pct }}% ·
+            {{ kurva.deviasi > 0 ? 'unggul' : kurva.deviasi < 0 ? 'tertinggal' : 'tepat' }}
+            {{ Math.abs(kurva.deviasi) }}%
+          </p>
+        </div>
+
         <div v-if="progres?.periods?.length" class="bg-white rounded-xl border border-gray-200 overflow-x-auto">
           <table class="w-full text-sm">
             <thead class="bg-gray-50 text-gray-600">
@@ -954,6 +1012,34 @@ const loadEvm = async () => {
     console.error('Gagal memuat EVM:', err);
   }
 };
+
+/**
+ * Geometri kurva-S.
+ *
+ * Dihitung sebagai computed, bukan digambar dengan pustaka: dua garis dari satu
+ * deret pendek tidak sepadan dengan menambah dependensi, dan SVG inline tetap
+ * terbaca saat dicetak.
+ */
+const kurva = computed(() => {
+  const w = 720, h = 240, padL = 42, padB = 26, padT = 12;
+  const titik: any[] = progres.value?.kurva || [];
+  const n = titik.length;
+  // Satu titik digambar di tengah supaya tidak menempel di tepi kiri.
+  const x = (i: number) => n <= 1 ? (padL + w - 10) / 2
+    : padL + (i * (w - padL - 10)) / (n - 1);
+  const y = (pct: number) => padT + (100 - Math.max(0, Math.min(100, Number(pct) || 0)))
+    * (h - padT - padB) / 100;
+  const garis = (ambil: (t: any) => number) =>
+    titik.map((t, i) => `${x(i)},${y(ambil(t))}`).join(' ');
+  const terakhir = n ? titik[n - 1] : { planned_pct: 0, earned_pct: 0 };
+  return {
+    w, h, padL, titik, x, y,
+    garisPlan: garis(t => t.planned_pct),
+    garisEarned: garis(t => t.earned_pct),
+    terakhir,
+    deviasi: Math.round((Number(terakhir.earned_pct) - Number(terakhir.planned_pct)) * 100) / 100,
+  };
+});
 
 const progres = ref<any>(null);
 const cutoffBaru = ref('');

@@ -547,9 +547,46 @@ router.get('/ahsp', authMiddleware, async (req: Request, res: Response) => {
     }
     
     query += ` ORDER BY h.work_category_code ASC, h.kode ASC`;
-    
-    const ahsp = await dbAll(query, params);
-    res.json(ahsp);
+
+    // Mode berhalaman bersifat OPT-IN, dan itu disengaja.
+    //
+    // Katalog produksi berisi 3.469 AHSP aktif dan endpoint ini tidak punya
+    // LIMIT sama sekali — setiap pembukaan layar menarik seluruhnya. Tapi
+    // memasang batas diam-diam pada jalur bawaan justru menciptakan cacat yang
+    // lebih buruk: pemilih AHSP di layar lain akan kehilangan baris tanpa ada
+    // yang tahu, dan orang menyimpulkan "AHSP-nya tidak ada" padahal ada.
+    //
+    // Jadi jalur lama tetap utuh, dan yang meminta halaman mendapat TOTAL juga
+    // — supaya layarnya bisa berkata "menampilkan 50 dari 3.469", bukan
+    // menampilkan 50 seolah itu semuanya.
+    const minta = String(req.query.paged || '') === '1'
+      || req.query.limit !== undefined || req.query.offset !== undefined;
+
+    if (!minta) {
+      const ahsp = await dbAll(query, params);
+      return res.json(ahsp);
+    }
+
+    // `LIMIT ?` ditolak MySQL sebagai prepared statement — divalidasi lalu
+    // disisipkan sebagai bilangan bulat.
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? '50'), 10) || 50, 1), 500);
+    const offset = Math.max(parseInt(String(req.query.offset ?? '0'), 10) || 0, 0);
+
+    const totalRow: any = await dbGet(
+      `SELECT COUNT(DISTINCT h.id) AS n
+       FROM ahsp_headers h
+       LEFT JOIN ahsp_sub_discipline_map m ON h.id = m.ahsp_id
+       ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}`, params);
+    const total = Number(totalRow?.n) || 0;
+
+    const ahsp = await dbAll(`${query} LIMIT ${limit} OFFSET ${offset}`, params);
+    res.json({
+      data: ahsp,
+      total,
+      limit,
+      offset,
+      has_more: offset + (ahsp as any[]).length < total,
+    });
   } catch (error) {
     console.error('Error fetching AHSP:', error);
     res.status(500).json({ error: 'Failed to fetch AHSP' });
