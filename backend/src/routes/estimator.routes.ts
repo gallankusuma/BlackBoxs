@@ -14,6 +14,7 @@ import { dbAll, dbGet, dbRun , withTransaction, TxRunner} from '../config/databa
 import { nextSequentialCode } from './procurement.routes';
 import { buatKontrakDariProposal, checksumBaseline } from './contract.routes';
 import { usulkanAhsp, normalSatuan } from '../modules/estimator/mto/cocok-ahsp';
+import { VARIANT_FIELD } from '../modules/estimator/mto/contract';
 import { uang, bulatUang, jumlahUang } from '../utils/money';
 
 const router = Router();
@@ -2722,6 +2723,105 @@ router.post('/proposals/:id/mto/diskusi', authMiddleware, bolehUbah, async (req:
   }
 });
 
+/**
+ * Terima BEBERAPA zona usulan sekaligus.
+ *
+ * Yang diinginkan pengguna: kirim PDF, lalu isinya masuk ke MTO — bukan
+ * menyetujui satu per satu untuk delapan zona.
+ *
+ * Yang TIDAK boleh hilang: jejak bahwa manusia menyetujuinya. Endpoint usulan
+ * gambar tetap `tersimpan: false` dan tetap tidak menulis apa pun; yang berubah
+ * hanyalah persetujuannya bisa dilakukan sekali untuk banyak zona. Satu klik
+ * yang menyebutkan persis apa yang akan ditulis tetap keputusan manusia — yang
+ * dihindari aturan lama adalah tulisan TANPA keputusan, bukan keputusan yang
+ * efisien.
+ *
+ * Zona yang parameternya belum lengkap **dilewati, bukan menggagalkan
+ * seluruhnya**: satu zona yang kurang tinggi kolom tidak boleh membatalkan
+ * tujuh zona lain yang sudah benar. Yang dilewati dilaporkan berikut sebabnya.
+ */
+router.post('/proposals/:id/mto/terima-usulan', authMiddleware, bolehUbah,
+  async (req: Request, res: Response) => {
+    try {
+      const proposalId = req.params.id;
+      const zona: any[] = Array.isArray(req.body?.zones) ? req.body.zones : [];
+      if (!zona.length) return res.status(400).json({
+        error: 'Tidak ada zona yang dikirim.', code: 'PILIHAN_KOSONG' });
+
+      const hasil = await withTransaction(async (tx: TxRunner) => {
+        const kunci = await proposalLockTx(proposalId, tx);
+        if (kunci) return { error: kunci.status, body: kunci.body };
+
+        let urut = Number((await tx.get(
+          `SELECT COALESCE(MAX(sort_order), 0) AS n FROM engineering_inputs
+           WHERE scope_type = 'proposal' AND scope_id = ?`, [proposalId]) as any)?.n || 0);
+
+        const diterima: any[] = [];
+        const dilewati: any[] = [];
+
+        for (const z of zona) {
+          const tipe = String(z?.element_type || '').trim();
+          const nama = String(z?.element_name || tipe || 'Zona').slice(0, 255);
+          const params = z?.parameters || {};
+          if (!tipe) { dilewati.push({ element_name: nama, sebab: 'element_type kosong' }); continue; }
+
+          const mto = calculateMto(tipe, params);
+          if (mto.variant === 'invalid') {
+            dilewati.push({ element_name: nama, sebab: 'parameter tidak valid', problems: mto.notes });
+            continue;
+          }
+          if (mto.missing_required?.length) {
+            dilewati.push({
+              element_name: nama, sebab: 'dimensi wajib belum lengkap',
+              problems: mto.missing_required });
+            continue;
+          }
+
+          const ada: any = await tx.get(
+            `SELECT id FROM engineering_inputs
+             WHERE scope_type = 'proposal' AND scope_id = ? AND element_type = ? AND element_name = ?
+             FOR UPDATE`, [proposalId, tipe, nama]);
+          if (ada) {
+            dilewati.push({ element_name: nama, sebab: 'zona dengan nama itu sudah ada', element_id: ada.id });
+            continue;
+          }
+
+          urut++;
+          const ins = await tx.run(
+            `INSERT INTO engineering_inputs
+              (scope_type, scope_id, proposal_id, element_type, element_name,
+               parameters, quantities, sort_order, formula_version)
+             VALUES ('proposal', ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [proposalId, proposalId, tipe, nama,
+             JSON.stringify(params), JSON.stringify(toLegacyQuantities(mto)),
+             urut, FORMULA_VERSION]);
+          await persistMtoLines(ins.insertId, mto, tx);
+
+          diterima.push({
+            element_id: ins.insertId, element_name: nama, element_type: tipe,
+            variant: mto.variant, lines: mto.lines.length,
+          });
+        }
+
+        await catatAudit(tx, proposalId, (req as any).userId, 'mto_terima_usulan', 'zones',
+          null, `${diterima.length} zona diterima dari usulan gambar, ${dilewati.length} dilewati`);
+        return { ok: true as const, diterima, dilewati };
+      });
+
+      if ((hasil as any).error) return res.status((hasil as any).error).json((hasil as any).body);
+      const d = (hasil as any).diterima.length, l = (hasil as any).dilewati.length;
+      res.status(201).json({
+        message: l
+          ? `${d} zona masuk ke MTO, ${l} dilewati karena belum lengkap.`
+          : `${d} zona masuk ke MTO.`,
+        ...(hasil as any),
+      });
+    } catch (err: any) {
+      console.error('Error menerima usulan zona:', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
 router.post('/proposals/:id/mto/usul-dari-gambar', authMiddleware, bolehUbah,
   unggahGambar.array('gambar', 10), async (req: Request, res: Response) => {
   try {
@@ -5171,6 +5271,239 @@ router.put('/proposals/:id/status', authMiddleware, bolehUbah, async (req: Reque
     res.status(500).json({ error: 'Failed to update status' });
   }
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Template zona MTO — parameter yang dipakai ulang antar proposal
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Daftar template. Filter opsional per tipe elemen. */
+router.get('/mto/templates', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const tipe = String(req.query.element_type || '').trim();
+    const rows: any[] = await dbAll(
+      `SELECT id, code, name, element_type, variant_raw, parameters, description,
+              category, pending_fields, times_used, created_at
+       FROM mto_zone_templates
+       WHERE is_active = 1 ${tipe ? 'AND element_type = ?' : ''}
+       ORDER BY times_used DESC, name`, tipe ? [tipe] : []);
+
+    const urai = (v: any) => {
+      if (v == null) return null;
+      try { return typeof v === 'string' ? JSON.parse(v) : v; } catch { return null; }
+    };
+    res.json({
+      data: rows.map((r: any) => ({
+        ...r,
+        parameters: urai(r.parameters) || {},
+        pending_fields: urai(r.pending_fields) || [],
+      })),
+      count: rows.length,
+    });
+  } catch (err: any) {
+    console.error('Error membaca template MTO:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Simpan template — dari zona yang sudah ada, atau dari parameter langsung.
+ *
+ * Parameternya **divalidasi lewat kalkulator yang sama** dengan jalur simpan
+ * zona. Template yang tidak bisa dihitung adalah template yang akan gagal saat
+ * dipakai, dan kegagalannya baru terlihat di proposal orang lain berbulan-bulan
+ * kemudian.
+ *
+ * Bedanya dengan `POST /mto`: field wajib yang kosong **tidak ditolak** di
+ * sini, melainkan dicatat sebagai `pending_fields`. Template memang wajar tidak
+ * lengkap — jumlah titik pondasi berbeda tiap proyek, dan memaksanya diisi
+ * membuat template kehilangan gunanya.
+ */
+router.post('/mto/templates', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { code, name, element_type, parameters, description, category, from_element_id } = req.body || {};
+
+    let tipe = element_type;
+    let params = parameters;
+
+    // Dari zona yang sudah ada: parameternya diambil dari sana, bukan diketik
+    // ulang — itu justru kasus pemakaian utamanya.
+    if (from_element_id) {
+      const el: any = await dbGet(
+        `SELECT element_type, element_name, parameters FROM engineering_inputs WHERE id = ?`,
+        [from_element_id]);
+      if (!el) return res.status(404).json({
+        error: 'Elemen sumber tidak ditemukan.', code: 'ELEMEN_TIDAK_ADA' });
+      tipe = tipe || el.element_type;
+      params = params || (typeof el.parameters === 'string'
+        ? JSON.parse(el.parameters || '{}') : (el.parameters || {}));
+    }
+
+    if (!tipe) return res.status(400).json({
+      error: 'element_type wajib.', code: 'TIPE_WAJIB' });
+    if (!name || !String(name).trim()) return res.status(400).json({
+      error: 'Template harus punya nama.', code: 'NAMA_WAJIB' });
+    params = params || {};
+
+    const mto = calculateMto(tipe, params);
+    if (mto.variant === 'invalid') {
+      return res.status(422).json({
+        error: 'Parameter template tidak valid, template tidak disimpan.',
+        code: 'INVALID_MTO_PARAMETERS', problems: mto.notes });
+    }
+
+    const kode = String(code || '').trim()
+      || `TPL-${String(tipe).toUpperCase().slice(0, 4)}-${Date.now().toString().slice(-6)}`;
+
+    const field = VARIANT_FIELD[tipe]?.[0];
+    const varianMentah = field ? (params?.[field] ?? null) : null;
+
+    try {
+      const r = await dbRun(
+        `INSERT INTO mto_zone_templates
+          (code, name, element_type, variant_raw, parameters, description, category,
+           pending_fields, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [kode, String(name).trim().slice(0, 255), tipe,
+         varianMentah ? String(varianMentah).slice(0, 50) : null,
+         JSON.stringify(params),
+         description ? String(description).slice(0, 500) : null,
+         category ? String(category).slice(0, 100) : null,
+         JSON.stringify(mto.missing_required || []),
+         (req as any).userId || null]);
+      res.status(201).json({
+        id: r.insertId, code: kode, element_type: tipe, variant: mto.variant,
+        // Dinyatakan terbuka: template ini butuh dilengkapi apa saat dipakai.
+        pending_fields: mto.missing_required || [],
+        message: 'Template tersimpan.',
+      });
+    } catch (e: any) {
+      if (e?.code === 'ER_DUP_ENTRY') {
+        return res.status(409).json({
+          error: `Kode template "${kode}" sudah dipakai.`, code: 'KODE_SUDAH_ADA' });
+      }
+      throw e;
+    }
+  } catch (err: any) {
+    console.error('Error menyimpan template MTO:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** Nonaktifkan template. Tidak dihapus — proposal lama menyebutnya di audit. */
+router.delete('/mto/templates/:id', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const upd: any = await dbRun(
+      'UPDATE mto_zone_templates SET is_active = 0 WHERE id = ? AND is_active = 1',
+      [req.params.id]);
+    if (!upd?.affectedRows) return res.status(404).json({
+      error: 'Template tidak ditemukan atau sudah nonaktif.' });
+    res.json({ message: 'Template dinonaktifkan' });
+  } catch (err: any) {
+    console.error('Error menonaktifkan template MTO:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Pakai template pada sebuah proposal — bisa beberapa sekaligus.
+ *
+ * `overrides` per template menimpa parameter yang memang berbeda tiap proyek
+ * (jumlah titik, dimensi khusus). Kuantitasnya **dihitung ulang**, tidak
+ * disalin: template menyimpan parameter, bukan angka jadi.
+ *
+ * Gerbang yang sama dengan `POST /mto` tetap berlaku — dimensi wajib yang
+ * kosong menolak penyimpanan. Template boleh tidak lengkap; zona tidak boleh.
+ */
+router.post('/proposals/:id/mto/from-template', authMiddleware, bolehUbah,
+  async (req: Request, res: Response) => {
+    try {
+      const proposalId = req.params.id;
+      const daftar: any[] = Array.isArray(req.body?.templates) ? req.body.templates : [];
+      if (!daftar.length) return res.status(400).json({
+        error: 'Tidak ada template yang dipilih.', code: 'PILIHAN_KOSONG' });
+
+      const hasil = await withTransaction(async (tx: TxRunner) => {
+        const kunci = await proposalLockTx(proposalId, tx);
+        if (kunci) return { error: kunci.status, body: kunci.body };
+
+        let urut = Number((await tx.get(
+          `SELECT COALESCE(MAX(sort_order), 0) AS n FROM engineering_inputs
+           WHERE scope_type = 'proposal' AND scope_id = ?`, [proposalId]) as any)?.n || 0);
+
+        const dibuat: any[] = [];
+        for (const t of daftar) {
+          const tpl: any = await tx.get(
+            'SELECT * FROM mto_zone_templates WHERE id = ? AND is_active = 1', [t?.template_id]);
+          if (!tpl) return { error: 404, body: {
+            error: `Template ${t?.template_id} tidak ditemukan atau nonaktif.`,
+            code: 'TEMPLATE_TIDAK_ADA' } };
+
+          const dasar = typeof tpl.parameters === 'string'
+            ? JSON.parse(tpl.parameters || '{}') : (tpl.parameters || {});
+          const params = { ...dasar, ...(t?.overrides || {}) };
+
+          const mto = calculateMto(tpl.element_type, params);
+          if (mto.variant === 'invalid') {
+            return { error: 422, body: {
+              error: `Parameter template "${tpl.name}" tidak valid.`,
+              code: 'INVALID_MTO_PARAMETERS', template_id: tpl.id, problems: mto.notes } };
+          }
+          if (mto.missing_required?.length) {
+            // Inilah gunanya `pending_fields`: layar sudah tahu apa yang harus
+            // ditanyakan sebelum tombol ditekan, jadi ini jaring terakhir.
+            return { error: 422, body: {
+              error: `Template "${tpl.name}" masih perlu dilengkapi sebelum dipakai.`,
+              code: 'MISSING_REQUIRED_PARAMETERS',
+              template_id: tpl.id, problems: mto.missing_required } };
+          }
+
+          const nama = String(t?.element_name || tpl.name).slice(0, 255);
+          const ada: any = await tx.get(
+            `SELECT id FROM engineering_inputs
+             WHERE scope_type = 'proposal' AND scope_id = ? AND element_type = ? AND element_name = ?
+             FOR UPDATE`, [proposalId, tpl.element_type, nama]);
+          if (ada) {
+            return { error: 409, body: {
+              error: `Zona bernama "${nama}" sudah ada pada proposal ini.`,
+              code: 'ZONA_SUDAH_ADA', element_id: ada.id } };
+          }
+
+          urut++;
+          const ins = await tx.run(
+            `INSERT INTO engineering_inputs
+              (scope_type, scope_id, proposal_id, element_type, element_name,
+               parameters, quantities, sort_order, formula_version)
+             VALUES ('proposal', ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [proposalId, proposalId, tpl.element_type, nama,
+             JSON.stringify(params), JSON.stringify(toLegacyQuantities(mto)),
+             urut, FORMULA_VERSION]);
+
+          await persistMtoLines(ins.insertId, mto, tx);
+          await tx.run('UPDATE mto_zone_templates SET times_used = times_used + 1 WHERE id = ?', [tpl.id]);
+
+          dibuat.push({
+            element_id: ins.insertId, element_name: nama,
+            element_type: tpl.element_type, variant: mto.variant,
+            template_id: tpl.id, template_name: tpl.name,
+            lines: mto.lines.length,
+          });
+        }
+
+        await catatAudit(tx, proposalId, (req as any).userId, 'mto_from_template', 'zones',
+          null, `${dibuat.length} zona dibuat dari template`);
+        return { ok: true as const, dibuat };
+      });
+
+      if ((hasil as any).error) return res.status((hasil as any).error).json((hasil as any).body);
+      res.status(201).json({
+        message: `${(hasil as any).dibuat.length} zona dibuat dari template.`,
+        ...(hasil as any),
+      });
+    } catch (err: any) {
+      console.error('Error memakai template MTO:', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MTO → RAB: dari kuantitas menjadi penawaran berharga

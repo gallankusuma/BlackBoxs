@@ -1391,6 +1391,45 @@ const ensureCostAllocationSchema = async (connection: any) => {
   ]) await execSchemaEnsure(connection, sql);
 };
 
+/**
+ * Template zona MTO — parameter yang dipakai ulang antar proposal.
+ *
+ * Pekerjaan EPC berulang: "Pondasi F1 tipikal", "Kolom K-300 lantai 1-3". Tanpa
+ * template, tiap proposal mengisi belasan parameter dari nol, dan angka yang
+ * seharusnya sama antar proyek jadi berbeda hanya karena siapa yang mengetik.
+ *
+ * Templatenya menyimpan PARAMETER, bukan kuantitas — kuantitasnya tetap
+ * dihitung `calculateMto()` saat template dipakai. Menyimpan kuantitas berarti
+ * angka lama ikut terbawa walau formulanya sudah diperbaiki, dan asal-usulnya
+ * berhenti bisa ditelusuri.
+ */
+const ensureMtoTemplateSchema = async (connection: any) => {
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS mto_zone_templates (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      code VARCHAR(50) NOT NULL,
+      name VARCHAR(255) NOT NULL,
+      element_type VARCHAR(50) NOT NULL,
+      -- Varian disimpan apa adanya seperti yang dikirim; kalkulator yang
+      -- menerjemahkannya, jadi template lama tetap terbaca saat alias berubah.
+      variant_raw VARCHAR(50) NULL,
+      parameters JSON NOT NULL,
+      description VARCHAR(500) NULL,
+      category VARCHAR(100) NULL,
+      -- Field wajib yang sengaja DIBIARKAN kosong di template (mis. jumlah
+      -- titik, yang memang berbeda tiap proyek). Dicatat supaya layar bisa
+      -- meminta pengisiannya saat template dipakai, bukan menolak diam-diam.
+      pending_fields JSON NULL,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      times_used INT NOT NULL DEFAULT 0,
+      created_by INT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_tpl_code (code),
+      KEY idx_tpl_tipe (element_type, is_active)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+};
+
 const ensureRouteModuleSchema = async (connection: any) => {
   const statements = [
     `CREATE TABLE IF NOT EXISTS inbox_notifications (
@@ -2688,6 +2727,7 @@ export async function initializeDatabase() {
     await ensureProjectWbsSchema(connection);
     await ensureProgressCutoffSchema(connection);
     await ensureCostAllocationSchema(connection);
+    await ensureMtoTemplateSchema(connection);
     await ensureContractLedgerSchema(connection);
     await ensureMobilePinSchema(connection);
     await ensureAssetDepreciationSchema(connection);
