@@ -1521,6 +1521,80 @@ const ensureItemCostBasisSchema = async (connection: any) => {
   ]) await execSchemaEnsure(connection, sql);
 };
 
+/**
+ * Opportunity register — menyambung CRM ke estimate, proposal, dan menang/kalah.
+ *
+ * `prospects` berhenti pada atribut CRM generik, dan `proposals` tidak punya
+ * satu pun tautan ke prospect/opportunity. Akibatnya nilai pipeline tidak bisa
+ * direkonsiliasi ke penawaran yang benar-benar dikirim, dan **win rate tidak
+ * punya penyebut yang sah** — yang belum diputuskan ikut terhitung, sehingga
+ * angkanya selalu terlihat bagus di awal.
+ *
+ * Yang dibangun di sini tulang punggungnya: register, riwayat tahapan, tautan
+ * ke proposal, dan alasan kalah yang wajib. Tender register penuh
+ * (prekualifikasi, bid bond, adendum, klarifikasi, daftar peserta) **belum** —
+ * dan itu dinyatakan, bukan dikira sudah ada.
+ */
+const ensureOpportunitySchema = async (connection: any) => {
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS opportunities (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      code VARCHAR(50) NOT NULL,
+      title VARCHAR(255) NOT NULL,
+      client_id INT NULL,
+      prospect_id INT NULL,
+      -- Nama pemilik pekerjaan apa adanya kalau belum jadi client terdaftar.
+      client_name VARCHAR(255) NULL,
+      lokasi VARCHAR(255) NULL,
+      scope VARCHAR(500) NULL,
+      -- lead → qualified → bidding → submitted → won | lost | cancelled
+      stage VARCHAR(20) NOT NULL DEFAULT 'lead',
+      -- Perkiraan awal, dipakai selama belum ada penawaran. Begitu ada revisi
+      -- terbit, nilai yang dipakai adalah nilai revisi itu — bukan angka ini.
+      estimated_value DECIMAL(18,2) NULL,
+      probability TINYINT NULL,
+      expected_award_date DATE NULL,
+      submission_deadline DATETIME NULL,
+      source VARCHAR(100) NULL,
+      competitor VARCHAR(255) NULL,
+      owner_user_id INT NULL,
+      -- Wajib saat stage menjadi 'lost'. Kekalahan tanpa alasan tidak
+      -- mengajarkan apa pun, dan itulah satu-satunya nilai dari mencatatnya.
+      lost_reason_code VARCHAR(50) NULL,
+      lost_reason_note VARCHAR(500) NULL,
+      won_at DATETIME NULL,
+      lost_at DATETIME NULL,
+      created_by INT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_opp_code (code),
+      KEY idx_opp_stage (stage),
+      KEY idx_opp_client (client_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS opportunity_stage_history (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      opportunity_id INT NOT NULL,
+      from_stage VARCHAR(20) NULL,
+      to_stage VARCHAR(20) NOT NULL,
+      note VARCHAR(500) NULL,
+      changed_by INT NULL,
+      changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_osh_opp (opportunity_id, changed_at),
+      CONSTRAINT fk_osh_opp FOREIGN KEY (opportunity_id)
+        REFERENCES opportunities(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+  // Satu opportunity bisa punya beberapa proposal (penawaran ulang, paket
+  // terpisah). Index saja, bukan FK: `proposals` sudah berisi data produksi dan
+  // menghapus opportunity tidak boleh menyentuh penawaran yang sudah dikirim.
+  for (const sql of [
+    'ALTER TABLE proposals ADD COLUMN IF NOT EXISTS opportunity_id INT NULL',
+    'ALTER TABLE proposals ADD INDEX idx_prop_opp (opportunity_id)',
+  ]) await execSchemaEnsure(connection, sql);
+};
+
 const ensureRouteModuleSchema = async (connection: any) => {
   const statements = [
     `CREATE TABLE IF NOT EXISTS inbox_notifications (
@@ -2822,6 +2896,7 @@ export async function initializeDatabase() {
     await ensureIntegrationSchema(connection);
     await ensureProposalKomersialSchema(connection);
     await ensureItemCostBasisSchema(connection);
+    await ensureOpportunitySchema(connection);
     await ensureContractLedgerSchema(connection);
     await ensureMobilePinSchema(connection);
     await ensureAssetDepreciationSchema(connection);

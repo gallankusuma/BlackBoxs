@@ -363,6 +363,10 @@ const mainMenus: MenuItem[] = [
       { id: 'contracts', label: 'Contracts', route: '/contracts', permKey: 'projects.projects' },
       { id: 'tasks', label: 'Tasks', route: '/project/tasks', permKey: 'projects.tasks' },
       { id: 'leads', label: 'Leads', route: '/leads', permKey: 'projects.leads' },
+      // Opportunity register — menyambung lead ke penawaran dan menang/kalah.
+      // permKey memakai nama yang SUDAH ada di tabel permissions; mengarang
+      // yang baru berarti menunya hilang untuk semua orang kecuali master.
+      { id: 'opportunities', label: 'Opportunities', route: '/opportunities', permKey: 'projects.leads' },
       // 'Prospects' (/project/prospects) dan 'Notes' (/project/notes) dicabut dari
       // menu: keduanya tidak punya route di router/index.ts dan tidak punya file
       // view sama sekali, jadi mengkliknya hanya memberi area konten kosong.

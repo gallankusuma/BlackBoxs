@@ -4339,6 +4339,68 @@ sesudah perbaikan: **1015 lulus, 0 gagal**.
 
 ### [DESIGN-GAP / ARCH-RISK — prioritas tinggi] Belum ada tender/opportunity lifecycle yang mengikat CRM ke estimate, proposal, dan contract win/loss
 
+**[DEV] TULANG PUNGGUNGNYA DITERAPKAN — 30 Agustus 2026**
+
+Klaimnya diperiksa dan benar: `proposals` **tidak punya satu pun** kolom
+`prospect_id`/`opportunity_id`/`tender_id`, dan `prospects` berhenti pada
+atribut CRM generik. Produksi: 0 prospect, 0 kontrak, 3 proposal — jadi tidak
+ada data yang berisiko, dan ini waktu termurah untuk membangunnya.
+
+### Yang dibangun
+
+`opportunities` + `opportunity_stage_history` + `proposals.opportunity_id`.
+Tahapan `lead → qualified → bidding → submitted → won|lost|cancelled` dengan
+transisi yang **divalidasi eksplisit** — melompat dari `lead` langsung ke `won`
+berarti ada opportunity yang menang tanpa pernah menawar, dan angka pipeline
+berhenti bisa dipercaya.
+
+Tiga aturan yang menjawab langsung keluhan butir ini:
+
+**1. Win rate punya penyebut yang sah.** Penyebutnya **hanya** yang sudah
+diputuskan (menang + kalah). Yang masih terbuka dilaporkan terpisah.
+Memasukkannya membuat angkanya selalu terlihat bagus di awal — 10 terbuka dan
+1 menang membaca "9%" padahal belum ada satu pun yang kalah. Mutasi
+membuktikannya: penyebut berubah 2 → 4 begitu yang terbuka ikut.
+
+**2. Nilai berasal dari penawaran yang benar-benar dikirim.** Begitu ada revisi
+`issued`/`accepted`, nilai itu yang dipakai — bukan taksiran. Sumbernya
+**dinyatakan** (`taksiran` vs `revisi_penawaran`), dan ringkasan melaporkan
+berapa banyak yang masih taksiran. Menyamakan keduanya membuat pipeline
+terlihat presisi padahal separuhnya tebakan.
+
+**3. Menang wajib punya penawaran terbit; kalah wajib beralasan.** Menang tanpa
+penawaran berarti nilai yang dilaporkan hanya taksiran, dan win rate berhenti
+bisa direkonsiliasi. Kekalahan tanpa alasan tidak mengajarkan apa pun — dan
+itulah satu-satunya nilai dari mencatatnya. Alasan kalah direkap per kode.
+
+Satu proposal tidak bisa tertaut ke dua opportunity: memindahkannya memindahkan
+nilainya juga, dan itu menggeser dua pipeline sekaligus tanpa jejak.
+
+### Layar
+
+`/opportunities` — register, ringkasan pipeline (terbuka, tertimbang, menang,
+kalah, win rate), filter per tahap, dan pengubahan tahap yang menanyakan alasan
+kalah di tempat. Win rate `null` ditulis "—", bukan 0% — belum ada yang
+diputuskan bukan berarti belum pernah menang.
+
+### Tes
+
+`tests/opportunity.ts` — **51 asersi**, `npm run test:opportunity`.
+Mutation check (penyebut win rate + syarat penawaran terbit) → **4 kegagalan**.
+`test:all` **2989 lulus, 0 gagal**.
+
+### Yang BELUM — dan dinyatakan, bukan dikira sudah ada
+
+- **Tender register penuh**: prekualifikasi, bid/no-bid score & approval,
+  register dokumen/adendum/klarifikasi, checklist & deadline submission, bid
+  bond/garansi, review commercial/legal/HSE/teknis, daftar peserta.
+- **Party/account canonical** dengan deteksi duplikat — `clients` dan
+  `customers` masih dua master terpisah (lihat catatan FIN-SUBLEDGER).
+- **Probability history** dan versioning opportunity.
+
+---
+
+
 **Kemampuan saat ini.** Backend Prospect sudah menyimpan company/contact, source,
 temperature, status, interest, estimated value, next follow-up, assignee, dan
 statistik. Client mempunyai contact/event/ticket/estimate/invoice; Estimator sudah

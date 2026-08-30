@@ -113,6 +113,12 @@ const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true, title: 'Leads' },
   },
   {
+    path: '/opportunities',
+    name: 'Opportunities',
+    component: () => import('../views/OpportunityRegister.vue'),
+    meta: { requiresAuth: true, title: 'Opportunity Register' },
+  },
+  {
     path: '/leads/:id',
     name: 'LeadDetail',
     component: () => import('../views/LeadDetail.vue'),
