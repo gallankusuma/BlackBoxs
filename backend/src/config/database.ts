@@ -1430,6 +1430,45 @@ const ensureMtoTemplateSchema = async (connection: any) => {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
 };
 
+/**
+ * Integration: konfigurasi yang benar-benar tersimpan, dan webhook yang
+ * benar-benar terdaftar.
+ *
+ * Halaman `/admin/integration` sebelumnya control plane semu — status connector
+ * dimulai dari array lokal `enabled: false` dan tidak pernah dihidrasi, PUT-nya
+ * mengirim `{ value }` sementara backend menuntut `setting_value` sehingga
+ * SELALU 400, errornya ditelan `.catch(() => {})`, dan badge-nya tetap berubah
+ * seolah berhasil. Webhook hanya masuk array di memori browser.
+ *
+ * ⚠️ `system_settings` dibaca `GET /settings/all` yang hanya berpagar
+ * `authMiddleware` — setiap pengguna desktop bisa membacanya. Karena itu ia
+ * **bukan tempat menyimpan rahasia**, dan `is_secret` ada supaya nilai yang
+ * terlanjur bersifat rahasia bisa disamarkan saat dibaca massal.
+ */
+const ensureIntegrationSchema = async (connection: any) => {
+  await execSchemaEnsure(connection,
+    "ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS is_secret TINYINT(1) NOT NULL DEFAULT 0");
+
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS webhook_endpoints (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      event VARCHAR(100) NOT NULL,
+      url VARCHAR(1000) NOT NULL,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      -- Pengiriman belum ada, dan itu dinyatakan apa adanya di kolom ini
+      -- alih-alih dibiarkan tampak aktif. Webhook yang terdaftar tapi tidak
+      -- pernah terkirim lebih berbahaya daripada webhook yang belum didaftarkan:
+      -- orang berhenti memeriksa karena mengira sudah jalan.
+      delivery_status VARCHAR(30) NOT NULL DEFAULT 'belum_aktif',
+      last_delivery_at DATETIME NULL,
+      last_delivery_code INT NULL,
+      created_by INT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_webhook (event, url(255)),
+      KEY idx_webhook_event (event, is_active)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+};
+
 const ensureRouteModuleSchema = async (connection: any) => {
   const statements = [
     `CREATE TABLE IF NOT EXISTS inbox_notifications (
@@ -2728,6 +2767,7 @@ export async function initializeDatabase() {
     await ensureProgressCutoffSchema(connection);
     await ensureCostAllocationSchema(connection);
     await ensureMtoTemplateSchema(connection);
+    await ensureIntegrationSchema(connection);
     await ensureContractLedgerSchema(connection);
     await ensureMobilePinSchema(connection);
     await ensureAssetDepreciationSchema(connection);

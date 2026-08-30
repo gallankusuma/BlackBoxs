@@ -4720,6 +4720,79 @@ snapshot period-close, dan BI/API integration.
 
 ### [DESIGN-GAP][High] Halaman Integration adalah control plane semu: status tidak tersimpan, API key diabaikan, webhook hanya memori, dan belum ada delivery contract
 
+**[DEV] DITERAPKAN SEBAGIAN — 30 Agustus 2026**
+
+Seluruh klaim diperiksa dan **semuanya benar**. Yang diperbaiki: layarnya
+berhenti berbohong. Yang **tidak** dikerjakan dan alasannya ada di bawah:
+delivery contract, dan penyimpanan API key.
+
+### Yang membuatnya berbohong
+
+`updateSetting()` mengirim `{ value }` sementara backend menuntut
+`setting_value` — jadi **setiap** penyimpanan 400. Errornya ditelan
+`.catch(() => {})`, dan badge tetap berubah seolah berhasil. Bahkan setelah
+nama field dibetulkan, PUT hanya meng-UPDATE sementara seed awal cuma membuat
+`company_name`, `currency`, dan `timezone`; seluruh `integration_*` dan `api_*`
+akan tetap 404 selamanya.
+
+Sekarang PUT **upsert** dan menerima kedua nama field (klien lama langsung
+bekerja), status dihidrasi dari server saat halaman dibuka, dan badge diubah
+**sesudah** server menerima — bukan sebelum. Kegagalan ditampilkan.
+
+`saveApiConfig` menembakkan tiga permintaan tanpa `await` lalu langsung
+menampilkan alert sukses — laporan keberhasilan yang tidak memeriksa apa pun.
+Sekarang ditunggu sampai selesai.
+
+Webhook hanya `push()` ke array di memori browser. Sekarang tersimpan di
+`webhook_endpoints`, divalidasi (URL, protokol, duplikat), dan penghapusannya
+memeriksa baris terkena.
+
+### API key: TIDAK dibuat "berfungsi", dan itu perbaikannya
+
+Reviewer mencatat tombol Save tidak pernah menyimpan `apiConfig.apiKey`.
+Memperbaikinya justru akan **membuat kebocoran**: `system_settings` dibaca
+`GET /settings/all` yang hanya berpagar `authMiddleware`, jadi kunci yang
+tersimpan di sana terbaca **seluruh pengguna desktop**.
+
+Jadi kolom inputnya dicabut, dan layar mengatakan sebabnya — rahasia disetel di
+environment server, seperti `GEMINI_API_KEY` yang sudah begitu. Backend menolak
+kunci bernuansa rahasia dengan **400 `RAHASIA_DITOLAK`** (dicocokkan per segmen
+nama; versi pertama saya memakai `_token$` dan meloloskan `slack_token_2`).
+Nilai rahasia yang **terlanjur** ada disamarkan saat dibaca massal — jaring
+pengaman, bukan izin untuk mulai menyimpan rahasia di sana.
+
+### Webhook: terdaftar, dan dikatakan BELUM terkirim
+
+Delivery contract sengaja tidak dibangun, dan bukan karena waktu: mengirim data
+perusahaan keluar ke URL pihak ketiga adalah keputusan Anda, bukan efek samping
+perbaikan layar. Yang penting sekarang, layarnya **tidak lagi berlabel
+"Active"** — ia berbunyi *"terdaftar · pengiriman belum aktif"*, dan endpointnya
+mengembalikan `pengiriman_aktif: false` berikut sebabnya.
+
+Webhook terdaftar yang tidak pernah terkirim lebih berbahaya daripada yang
+belum didaftarkan: orang berhenti memeriksa karena mengira sudah jalan.
+
+### Tes
+
+`tests/integration-settings.ts` — **36 asersi**, `npm run test:integrasi`.
+Mutation check (rahasia boleh disimpan + PUT kembali update-saja) →
+**9 kegagalan**.
+
+`test:all` **2720 lulus, 0 gagal**.
+
+### Yang masih terbuka
+
+- **Delivery contract** (antrian, retry/backoff, penandatanganan, log kirim) —
+  menunggu keputusan Anda karena ia mengirim data keluar.
+- **RBAC**: seluruh endpoint settings masih `authMiddleware` saja. Menggemboknya
+  dengan `admin.integration` perlu verifikasi role produksi lebih dulu — aturan
+  yang sama dengan procurement di CLAUDE.md.
+- Enam connector masih tombol on/off tanpa perilaku di baliknya. Itu bukan
+  kebohongan lagi (statusnya benar-benar tersimpan), tapi juga belum kemampuan.
+
+---
+
+
 **Irisan yang diaudit:** integration settings, webhook, dan kontrak konfigurasi
 frontend-backend. Temuan permission/RBAC umum tetap mengacu DR-P1-02; gap baru
 ini membuktikan bahwa alur konfigurasi integration yang terlihat di UI tidak
