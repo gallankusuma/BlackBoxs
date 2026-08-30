@@ -735,13 +735,51 @@
                 <span>DIRECT COST</span>
                 <span>{{ formatNumber(summary.direct_cost) }}</span>
               </div>
-              <div class="flex justify-between text-gray-600">
-                <span>OVERHEAD</span>
-                <span>{{ formatNumber(summary.overhead) }}</span>
+              <!-- Sebelumnya kedua baris ini HANYA menampilkan angka, dan
+                   tidak ada satu pun jalur untuk mengisinya — sehingga seluruh
+                   penawaran berakhir nol dan total = biaya langsung. -->
+              <div class="flex justify-between items-center text-gray-600 gap-2">
+                <span class="shrink-0">OVERHEAD</span>
+                <template v-if="isEditable">
+                  <select v-model="komersial.overhead_mode" class="border border-gray-300 rounded px-1 py-0.5 text-xs">
+                    <option value="nominal">Rp</option>
+                    <option value="persen">%</option>
+                  </select>
+                  <input v-if="komersial.overhead_mode === 'persen'" v-model.number="komersial.overhead_pct"
+                    type="number" step="0.01" min="0" max="100"
+                    class="w-20 border border-gray-300 rounded px-2 py-0.5 text-xs text-right">
+                  <input v-else v-model.number="komersial.overhead" type="number" step="1" min="0"
+                    class="w-28 border border-gray-300 rounded px-2 py-0.5 text-xs text-right">
+                </template>
+                <span class="ml-auto font-medium">{{ formatNumber(summary.overhead) }}</span>
               </div>
-              <div class="flex justify-between text-gray-600">
-                <span>RISK / CONTINGENCY</span>
-                <span>{{ formatNumber(summary.risk_contingency) }}</span>
+              <div class="flex justify-between items-center text-gray-600 gap-2">
+                <span class="shrink-0">RISK / CONTINGENCY</span>
+                <template v-if="isEditable">
+                  <select v-model="komersial.contingency_mode" class="border border-gray-300 rounded px-1 py-0.5 text-xs">
+                    <option value="nominal">Rp</option>
+                    <option value="persen">%</option>
+                  </select>
+                  <input v-if="komersial.contingency_mode === 'persen'" v-model.number="komersial.contingency_pct"
+                    type="number" step="0.01" min="0" max="100"
+                    class="w-20 border border-gray-300 rounded px-2 py-0.5 text-xs text-right">
+                  <input v-else v-model.number="komersial.risk_contingency" type="number" step="1" min="0"
+                    class="w-28 border border-gray-300 rounded px-2 py-0.5 text-xs text-right">
+                </template>
+                <span class="ml-auto font-medium">{{ formatNumber(summary.risk_contingency) }}</span>
+              </div>
+              <div v-if="isEditable" class="flex items-center gap-3 pt-1">
+                <button @click="simpanKomersial" :disabled="komersialSibuk"
+                  class="px-3 py-1 bg-blue-600 text-white rounded text-xs font-semibold hover:bg-blue-700 disabled:opacity-50">
+                  {{ komersialSibuk ? 'Menyimpan…' : 'Terapkan markup' }}
+                </button>
+                <!-- Mode persen ikut bergerak saat volume berubah; nominal tidak.
+                     Bedanya dinyatakan supaya tidak perlu ditebak. -->
+                <span class="text-[11px] text-gray-500">
+                  {{ komersial.overhead_mode === 'persen' || komersial.contingency_mode === 'persen'
+                     ? 'Mode % dihitung ulang saat volume berubah.'
+                     : 'Mode Rp tetap walau volume berubah.' }}
+                </span>
               </div>
             </div>
             
@@ -750,6 +788,17 @@
                 <span>TOTAL PROJECT</span>
                 <span>{{ formatNumber(summary.total_project) }}</span>
               </div>
+              <!-- Markup efektif: angka yang sebenarnya dipakai memutuskan, dan
+                   yang paling sering salah dihitung di kepala. Harga AHSP sudah
+                   memuat ~10% overhead+profit; ini TAMBAHAN di atasnya. -->
+              <div v-if="markupEfektif !== null" class="flex justify-between text-xs mt-1"
+                   :class="markupEfektif > 0 ? 'text-emerald-700' : 'text-amber-700'">
+                <span>Markup di atas biaya langsung</span>
+                <span class="font-semibold">{{ markupEfektif }}%</span>
+              </div>
+              <p v-if="markupEfektif === 0" class="text-[11px] text-amber-700 mt-1">
+                Belum ada markup. Margin satu-satunya adalah ±10% yang tertanam di harga AHSP.
+              </p>
             </div>
           </div>
         </div>
@@ -1660,6 +1709,50 @@ const mtoTypeIcons: Record<string, string> = {
 const mtoTypeColors: Record<string, string> = {
   foundation: '#fef9c3', column: '#dbeafe', beam: '#ede9fe',
   slab: '#d1fae5', wall: '#f3f4f6', roof: '#fee2e2'
+};
+
+const komersial = ref({
+  overhead_mode: 'nominal', overhead: 0, overhead_pct: 0,
+  contingency_mode: 'nominal', risk_contingency: 0, contingency_pct: 0,
+});
+const komersialSibuk = ref(false);
+
+/** Markup efektif terhadap biaya langsung — dihitung dari angka server. */
+const markupEfektif = computed(() => {
+  const dc = Number(summary.value?.direct_cost) || 0;
+  if (!dc) return null;
+  const tot = Number(summary.value?.total_project) || 0;
+  return Math.round((tot - dc) / dc * 10000) / 100;
+});
+
+const muatKomersial = async () => {
+  try {
+    const { data } = await api.get(`/estimator/proposals/${proposalId}`);
+    komersial.value = {
+      overhead_mode: data?.overhead_mode || 'nominal',
+      overhead: Number(data?.overhead) || 0,
+      overhead_pct: Number(data?.overhead_pct) || 0,
+      contingency_mode: data?.contingency_mode || 'nominal',
+      risk_contingency: Number(data?.risk_contingency) || 0,
+      contingency_pct: Number(data?.contingency_pct) || 0,
+    };
+  } catch (e) { console.error('Gagal memuat parameter komersial', e); }
+};
+
+const simpanKomersial = async () => {
+  if (komersialSibuk.value) return;
+  komersialSibuk.value = true;
+  try {
+    await api.put(`/estimator/proposals/${proposalId}/komersial`, komersial.value);
+    // Ringkasan dimuat ulang dari server: nominal mode persen dihitung di sana,
+    // dan browser tidak boleh punya versinya sendiri.
+    await loadSummary();
+    await muatKomersial();
+  } catch (e: any) {
+    alert(e?.response?.data?.error || 'Gagal menyimpan parameter komersial.');
+  } finally {
+    komersialSibuk.value = false;
+  }
 };
 
 const rekon = ref<any>(null);
@@ -2591,6 +2684,7 @@ onMounted(async () => {
     loadSummary(),
     muatBarisBelumLengkap(),
     muatRekon(),
+    muatKomersial(),
   ]);
 });
 </script>

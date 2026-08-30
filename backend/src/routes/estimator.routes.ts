@@ -1966,8 +1966,9 @@ async function bekukanRevisi(
     `INSERT INTO proposal_revisions
       (proposal_id, revision_no, status, project_name, client_name, lokasi, proposal_type,
        direct_cost, overhead, risk_contingency, total_project, design_params,
-       lines_checksum, line_count, issued_at, issued_by)
-     VALUES (?, ?, 'issued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?)`,
+       lines_checksum, line_count, issued_at, issued_by,
+       overhead_mode, overhead_pct, contingency_mode, contingency_pct)
+     VALUES (?, ?, 'issued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?)`,
     [proposalId, nomor, proposal.project_name || null, proposal.client || null,
      proposal.lokasi || null, proposal.proposal_type || null,
      bulatUang(proposal.direct_cost), bulatUang(proposal.overhead),
@@ -1975,7 +1976,11 @@ async function bekukanRevisi(
      typeof proposal.design_params === 'string'
        ? proposal.design_params
        : (proposal.design_params ? JSON.stringify(proposal.design_params) : null),
-     checksum, baris.length, userId || null]
+     checksum, baris.length, userId || null,
+     // Mode ikut dibekukan: tanpa ini, revisi terbit hanya menyimpan nominalnya
+     // dan tidak ada yang bisa menjelaskan angka itu berasal dari persen berapa.
+     proposal.overhead_mode || 'nominal', proposal.overhead_pct ?? null,
+     proposal.contingency_mode || 'nominal', proposal.contingency_pct ?? null]
   );
   const revId = res.insertId;
 
@@ -4365,10 +4370,27 @@ async function recalculateProposal(proposalId: string | number, tx?: TxRunner) {
     // Overhead kantor, indirect, dan risk allowance yang melindungi margin
     // hilang tanpa jejak.
     const header: any = await get(
-      'SELECT overhead, risk_contingency FROM proposals WHERE id = ?', [proposalId]
+      `SELECT overhead, risk_contingency, overhead_mode, overhead_pct,
+              contingency_mode, contingency_pct
+       FROM proposals WHERE id = ?`, [proposalId]
     );
-    const overhead = uang(header?.overhead);
-    const riskContingency = uang(header?.risk_contingency);
+
+    // Mode 'persen' DIHITUNG ULANG tiap kali biaya langsung berubah — itu
+    // seluruh gunanya. Mode 'nominal' dipertahankan apa adanya: angka yang
+    // dihitung estimator dari rencana site tidak boleh ikut bergerak hanya
+    // karena satu volume disunting.
+    const dariMode = (mode: any, pct: any, nominal: any): number => {
+      if (String(mode) === 'persen') {
+        const p = Number(pct);
+        if (!Number.isFinite(p) || p <= 0) return 0;
+        return bulatUang(directCost * p / 100);
+      }
+      return uang(nominal);
+    };
+
+    const overhead = dariMode(header?.overhead_mode, header?.overhead_pct, header?.overhead);
+    const riskContingency = dariMode(
+      header?.contingency_mode, header?.contingency_pct, header?.risk_contingency);
     const totalProject = bulatUang(directCost + overhead + riskContingency);
 
     await run(
@@ -5336,6 +5358,113 @@ router.put('/proposals/:id/status', authMiddleware, bolehUbah, async (req: Reque
     res.status(500).json({ error: 'Failed to update status' });
   }
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Lapisan komersial: overhead & cadangan risiko di atas biaya langsung
+// ═══════════════════════════════════════════════════════════════════════════
+
+const MODE_MARKUP = ['persen', 'nominal'];
+
+/**
+ * Setel overhead dan cadangan risiko sebuah penawaran.
+ *
+ * Sampai sekarang kolomnya ada, `recalculateProposal()` sudah membacanya, tapi
+ * **tidak ada jalur untuk mengisinya** — sehingga seluruh penawaran produksi
+ * berakhir nol dan total penawaran persis sama dengan biaya langsung.
+ *
+ * Dua mode, dan modenya WAJIB dinyatakan bukan disimpulkan:
+ *
+ *   `persen`  — dihitung ulang tiap biaya langsung berubah. Dipakai kalau
+ *               markup memang proporsional terhadap nilai pekerjaan.
+ *   `nominal` — angka tetap. Dipakai kalau overhead dihitung dari rencana site
+ *               (gaji pengawas, direksi keet) dan tidak ada hubungannya dengan
+ *               besar kecilnya volume.
+ *
+ * Kenapa modenya disimpan alih-alih ditebak dari ada/tidaknya nilai persen:
+ * nominal 150 juta bisa berarti "angka yang saya hitung" atau "5% yang kebetulan
+ * segitu". Setahun kemudian saat penawaran itu diaudit, keduanya harus bisa
+ * dibedakan — yang pertama tetap, yang kedua ikut bergerak.
+ */
+router.put('/proposals/:id/komersial', authMiddleware, bolehUbah,
+  async (req: Request, res: Response) => {
+    try {
+      const proposalId = req.params.id;
+      const kunci = await proposalLock(proposalId);
+      if (kunci) return res.status(kunci.status).json(kunci.body);
+
+      const baca = (modeRaw: any, pctRaw: any, nominalRaw: any, label: string) => {
+        const mode = String(modeRaw ?? 'nominal');
+        if (!MODE_MARKUP.includes(mode)) {
+          return { galat: { error: `Mode ${label} harus "persen" atau "nominal".`,
+                            code: 'MODE_TIDAK_DIKENAL' } };
+        }
+        if (mode === 'persen') {
+          const p = Number(pctRaw);
+          // Batas atas 100% bukan kesopanan: markup di atas biaya langsung
+          // yang melebihi biayanya sendiri hampir pasti salah ketik, dan
+          // menerimanya diam-diam menghasilkan penawaran yang dua kali lipat.
+          if (!Number.isFinite(p) || p < 0 || p > 100) {
+            return { galat: { error: `Persen ${label} harus antara 0 dan 100.`,
+                              code: 'PERSEN_DI_LUAR_RENTANG' } };
+          }
+          return { mode, pct: Math.round(p * 10000) / 10000, nominal: null };
+        }
+        const n = Number(nominalRaw);
+        if (!Number.isFinite(n) || n < 0) {
+          return { galat: { error: `Nominal ${label} tidak boleh negatif.`,
+                            code: 'NOMINAL_TIDAK_VALID' } };
+        }
+        return { mode, pct: null, nominal: Math.round(n * 100) / 100 };
+      };
+
+      const ovh = baca(req.body?.overhead_mode, req.body?.overhead_pct,
+                       req.body?.overhead, 'overhead');
+      if ('galat' in ovh) return res.status(400).json(ovh.galat);
+      const con = baca(req.body?.contingency_mode, req.body?.contingency_pct,
+                       req.body?.risk_contingency, 'cadangan risiko');
+      if ('galat' in con) return res.status(400).json(con.galat);
+
+      await dbRun(
+        `UPDATE proposals SET
+           overhead_mode = ?, overhead_pct = ?, overhead = ?,
+           contingency_mode = ?, contingency_pct = ?, risk_contingency = ?
+         WHERE id = ?`,
+        [ovh.mode, ovh.pct, ovh.nominal ?? 0,
+         con.mode, con.pct, con.nominal ?? 0, proposalId]);
+
+      // Dihitung ulang lewat jalur yang sama dengan perubahan item — supaya
+      // nominal mode 'persen' langsung terisi dan tidak ada dua rumus.
+      await recalculateProposal(String(proposalId));
+
+      const hasil: any = await dbGet(
+        `SELECT direct_cost, overhead, overhead_mode, overhead_pct,
+                risk_contingency, contingency_mode, contingency_pct, total_project
+         FROM proposals WHERE id = ?`, [proposalId]);
+
+      const dc = Number(hasil?.direct_cost) || 0;
+      res.json({
+        message: 'Parameter komersial tersimpan',
+        direct_cost: dc,
+        overhead: Number(hasil?.overhead) || 0,
+        overhead_mode: hasil?.overhead_mode,
+        overhead_pct: hasil?.overhead_pct === null ? null : Number(hasil.overhead_pct),
+        risk_contingency: Number(hasil?.risk_contingency) || 0,
+        contingency_mode: hasil?.contingency_mode,
+        contingency_pct: hasil?.contingency_pct === null ? null : Number(hasil.contingency_pct),
+        total_project: Number(hasil?.total_project) || 0,
+        // Markup efektif terhadap biaya langsung — angka yang sebenarnya
+        // dilihat orang saat memutuskan, dan yang paling sering salah dihitung
+        // di kepala.
+        markup_efektif_pct: dc > 0
+          ? Math.round(((Number(hasil?.total_project) || 0) - dc) / dc * 10000) / 100 : null,
+        catatan: 'Harga satuan AHSP sudah memuat overhead & profit sekitar 10% '
+               + '(standar SNI). Angka di sini bertambah DI ATAS itu.',
+      });
+    } catch (err: any) {
+      console.error('Error menyetel parameter komersial:', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Wawancara lingkup — dari percakapan menjadi zona MTO

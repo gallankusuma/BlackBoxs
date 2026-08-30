@@ -1469,6 +1469,35 @@ const ensureIntegrationSchema = async (connection: any) => {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
 };
 
+/**
+ * Lapisan komersial penawaran: overhead dan cadangan risiko.
+ *
+ * Kolom `overhead` dan `risk_contingency` sudah lama ada dan
+ * `recalculateProposal()` sudah membacanya dengan benar — **tapi tidak ada satu
+ * pun jalur untuk mengisinya**. Akibatnya seluruh penawaran produksi berakhir
+ * `overhead = 0` dan `risk_contingency = 0`: total penawaran persis sama dengan
+ * biaya langsung, dan satu-satunya margin adalah 10% yang tertanam di harga
+ * AHSP (standar SNI). Proyek berisiko tinggi dan pekerjaan rutin dihargai sama.
+ *
+ * Yang ditambahkan di sini adalah CARA menentukannya, dan cara itu wajib
+ * dinyatakan: nominal 150 juta bisa berarti "angka yang saya hitung sendiri"
+ * atau "5% dari biaya langsung yang kebetulan segitu". Saat diaudit setahun
+ * kemudian, keduanya harus bisa dibedakan — karena yang pertama tetap, yang
+ * kedua ikut bergerak saat volumenya berubah.
+ */
+const ensureProposalKomersialSchema = async (connection: any) => {
+  for (const t of ['proposals', 'proposal_revisions']) {
+    for (const sql of [
+      // 'persen' | 'nominal' — dinyatakan, bukan disimpulkan dari ada/tidaknya
+      // nilai persen.
+      `ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS overhead_mode VARCHAR(10) NOT NULL DEFAULT 'nominal'`,
+      `ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS overhead_pct DECIMAL(7,4) NULL`,
+      `ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS contingency_mode VARCHAR(10) NOT NULL DEFAULT 'nominal'`,
+      `ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS contingency_pct DECIMAL(7,4) NULL`,
+    ]) await execSchemaEnsure(connection, sql);
+  }
+};
+
 const ensureRouteModuleSchema = async (connection: any) => {
   const statements = [
     `CREATE TABLE IF NOT EXISTS inbox_notifications (
@@ -2768,6 +2797,7 @@ export async function initializeDatabase() {
     await ensureCostAllocationSchema(connection);
     await ensureMtoTemplateSchema(connection);
     await ensureIntegrationSchema(connection);
+    await ensureProposalKomersialSchema(connection);
     await ensureContractLedgerSchema(connection);
     await ensureMobilePinSchema(connection);
     await ensureAssetDepreciationSchema(connection);
