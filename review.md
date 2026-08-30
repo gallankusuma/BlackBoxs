@@ -11722,3 +11722,37 @@ pekerjaan terhitung kalkulator, nol tersimpan.
 Yang menahan smoke AI ke produksi hanya kredensial admin produksi, dan itu
 **tidak saya sentuh**. Jalankan dengan `ADMIN_PASS` produksi kalau perlu diuji
 di sana.
+
+---
+
+## [DEV] DITERAPKAN — tiga P1 wizard template dan RBAC upstream Proposal — 30 Agustus 2026 21:57 WIB
+
+Commit aplikasi: `3aabb68f` (`fix(estimator): tutup P1 wizard AHSP dan RBAC master`).
+
+1. **Pilihan AHSP generated RAB tidak lagi hilang.** Child hasil kalkulator kini
+   mempertahankan `key`; satu pembentuk payload dipakai oleh jalur generated
+   maupun template biasa. Pilihan eksplisit user berdasarkan `ahsp_id` menang
+   atas kode/harga bawaan kalkulator. Backend tetap mengambil harga master AHSP
+   aktif dan menghitung total sendiri.
+2. **Template invalid tidak lagi sukses sebagai quantity nol atau berganti AHSP
+   diam-diam.** Quantity invalid membalas 422 `QTY_TEMPLATE_TIDAK_VALID` dan
+   AHSP ID eksplisit yang missing/inactive membalas 422
+   `AHSP_TEMPLATE_TIDAK_VALID`. Create dan apply-template rollback penuh; tes
+   membuktikan header/section setengah jadi tidak tertinggal.
+3. **AHSP dan master resource kini mengikuti RBAC Estimator.** Read/create/edit/
+   delete pada AHSP, labor, material, equipment, discipline/sub-discipline
+   memakai permission produksi yang sudah ada (`estimator.estimator-ahsp.*` dan
+   `estimator.estimator-masters.*`) di bawah sakelar `ESTIMATOR_RBAC`. User yang
+   hanya punya Proposal view tetap 403; permission view membuka baca tetapi
+   tidak membuka mutasi.
+
+**Verifikasi lokal:** backend `tsc --noEmit` lulus; frontend production build
+lulus (2.100 modul); `test:mto-link` 272/272, `test:estimator-rbac` 46/46,
+`test:client-proposals` 55/55; `npm run test:all` exit 0 dan semua suite 0 gagal.
+
+**Deploy produksi:** preflight `.env`/DB/JWT/pm2 lulus, compile dan build lulus,
+PM2 `blackboxs-backend` online, health 200, guard quantity dan RBAC terverifikasi
+ada di dist yang berjalan. Smoke produksi **30 lulus, 1 gagal**; satu-satunya
+kegagalan tetap temuan lama `kredensial master publik ditolak` karena login
+hard-code masih diterima. Sesuai keputusan user, masalah login itu ditunda dan
+deploy guard tidak melakukan rollback. Tidak ada kegagalan smoke lain.
