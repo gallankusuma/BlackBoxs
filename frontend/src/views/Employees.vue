@@ -21,10 +21,18 @@
           📥 Import CSV
           <input type="file" accept=".csv" class="hidden" @change="onFileSelected" ref="fileInput" />
         </label>
-        <!-- Migrasi awal PIN mobile -->
+        <!-- Migrasi awal PIN mobile.
+             Tombolnya sudah lama ada, tapi tidak ada yang memperlihatkan bahwa
+             belum satu pun karyawan punya PIN — sehingga seluruh fitur mobile
+             (absensi, slip gaji, material request) tidak bisa dipakai siapa pun
+             tanpa ada tanda apa-apa. Sekarang keadaannya terlihat. -->
         <button @click="generateMissingPins"
-          class="px-3 py-2 text-sm border border-amber-300 text-amber-700 rounded-lg bg-amber-50 hover:bg-amber-100">
+          class="px-3 py-2 text-sm border rounded-lg"
+          :class="pinStatus && pinStatus.belum > 0
+                  ? 'border-red-400 text-red-700 bg-red-50 hover:bg-red-100 font-semibold'
+                  : 'border-amber-300 text-amber-700 bg-amber-50 hover:bg-amber-100'">
           🔑 Buat PIN yang Belum Ada
+          <span v-if="pinStatus && pinStatus.belum > 0">({{ pinStatus.belum }})</span>
         </button>
         <button @click="showForm = true"
           class="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 text-sm">
@@ -264,6 +272,15 @@
   </div>
 
   <!-- Hasil reset PIN — hanya ditampilkan sekali -->
+  <!-- Tanpa PIN, seluruh fitur mobile tidak bisa dipakai siapa pun — dan itu
+       tidak terlihat di mana pun sebelumnya. -->
+  <div v-if="pinStatus && pinStatus.belum > 0"
+       class="mb-4 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">
+    <strong>{{ pinStatus.belum }} dari {{ pinStatus.total }} karyawan belum punya PIN mobile.</strong>
+    Selama belum punya, mereka tidak bisa login untuk absensi, slip gaji, maupun
+    material request. Tekan <em>Buat PIN yang Belum Ada</em> — PIN hanya ditampilkan sekali.
+  </div>
+
   <div v-if="pinResult.length" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" @click.self="pinResult = []">
     <div class="bg-white rounded-lg shadow-xl max-w-lg w-full max-h-[80vh] flex flex-col">
       <div class="px-5 py-4 border-b">
@@ -350,6 +367,21 @@ const importResult = ref<{ type: 'success' | 'error'; message: string } | null>(
 // ─── PIN login mobile ────────────────────────────────────────────────────────
 // PIN di-hash di server, jadi nilai aslinya hanya ada di respons ini — sekali.
 const pinResult = ref<{ id: number; code: string; name: string; pin: string }[]>([]);
+const pinStatus = ref<{ total: number; punya: number; belum: number } | null>(null);
+
+/** Berapa karyawan yang benar-benar bisa login mobile. */
+async function muatPinStatus() {
+  try {
+    const { data } = await api.get('/hr/employees/pin-status');
+    const rows: any[] = data?.data || data || [];
+    const punya = rows.filter((r: any) => Number(r.has_pin) === 1).length;
+    pinStatus.value = { total: rows.length, punya, belum: rows.length - punya };
+  } catch {
+    // Tidak berhak melihat status PIN bukan kegagalan yang perlu diteriakkan —
+    // spanduknya cukup tidak muncul.
+    pinStatus.value = null;
+  }
+}
 
 async function resetPin(employee: Employee) {
   if (!confirm(`Reset PIN mobile untuk ${employee.first_name}?\n\nPIN lama langsung tidak berlaku, dan PIN baru hanya ditampilkan sekali.`)) return;
@@ -367,6 +399,7 @@ async function generateMissingPins() {
     const res = await api.post('/hr/employees/generate-missing-pins');
     if (!res.data.count) { alert('Semua karyawan aktif sudah punya PIN.'); return; }
     pinResult.value = res.data.data || [];
+    await muatPinStatus();
   } catch (err: any) {
     alert(err?.response?.data?.error || 'Gagal membuat PIN');
   }
@@ -414,6 +447,7 @@ const rowsToImport = computed(() => {
 });
 
 onMounted(async () => {
+  muatPinStatus();
   await fetchEmployees();
   await fetchDepartments();
 });

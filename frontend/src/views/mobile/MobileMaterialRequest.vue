@@ -115,13 +115,34 @@
 
     <!-- HISTORY TAB -->
     <template v-if="tab === 'history'">
-      <div v-for="mr in history" :key="mr.id" class="history-card">
+      <div v-if="belumDibaca" class="mr-kabar">
+        {{ belumDibaca }} permintaan sudah diputuskan kantor
+      </div>
+      <div v-for="mr in history" :key="mr.id" class="history-card"
+           :class="{ 'mr-baru': Number(mr.keputusan_baru) === 1 }">
         <div class="history-header">
-          <span class="mr-number">{{ mr.mr_number }}</span>
+          <span class="mr-number">
+            {{ mr.mr_number }}
+            <!-- Keputusan yang belum dilihat ditandai — tanpa ini, satu-satunya
+                 cara mengetahui nasib permintaan adalah membuka aplikasi
+                 berulang kali dan membandingkan sendiri. -->
+            <span v-if="Number(mr.keputusan_baru) === 1" class="mr-dot">baru</span>
+          </span>
           <span class="mr-status" :class="mr.status">{{ mr.status }}</span>
         </div>
         <div class="history-meta">{{ mr.project_name || '-' }} · {{ mr.item_count }} item · {{ formatDate(mr.created_at) }}</div>
         <div v-if="mr.priority && mr.priority !== 'normal'" class="mr-priority" :class="mr.priority">{{ mr.priority }}</div>
+
+        <!-- Alasan penolakan. Inilah yang membuat tim lapangan tahu apa yang
+             harus diperbaiki, alih-alih mengajukan ulang hal yang sama. -->
+        <div v-if="mr.status === 'rejected' && mr.rejection_reason" class="mr-alasan">
+          <strong>Ditolak:</strong> {{ mr.rejection_reason }}
+        </div>
+        <!-- Yang disetujui: nomor PR-nya, supaya bisa ditanyakan ke kantor
+             dengan rujukan yang benar. -->
+        <div v-else-if="mr.status === 'approved' && mr.linked_pr_number" class="mr-lanjut">
+          Diteruskan ke PR <strong>{{ mr.linked_pr_number }}</strong>
+        </div>
       </div>
       <div v-if="!history.length" class="empty">Belum ada Material Request</div>
     </template>
@@ -228,6 +249,7 @@ const products = ref<any[]>([]);
 const categories = ref<any[]>([]);
 const cart = ref<any[]>([]);
 const history = ref<any[]>([]);
+const belumDibaca = ref(0);
 const detailProduct = ref<any>(null);
 const submitting = ref(false);
 const toast = ref('');
@@ -335,6 +357,14 @@ async function loadHistory() {
   try {
     const res = await mobileApi.get('/api/material-requests/my');
     history.value = res.data.data || [];
+    // Dihitung server, bukan di layar: badge yang dihitung browser akan berbeda
+    // antar perangkat milik orang yang sama.
+    belumDibaca.value = Number(res.data.belum_dibaca) || 0;
+    // Ditandai dibaca SESUDAH ditampilkan, bukan sebelum — kalau gagal muat,
+    // kabarnya tidak boleh hilang tanpa pernah terlihat.
+    if (belumDibaca.value) {
+      try { await mobileApi.put('/api/material-requests/my/tandai-dibaca'); } catch {}
+    }
   } catch {}
 }
 
@@ -488,4 +518,22 @@ onMounted(() => {
 .nav-item.active, .nav-item.router-link-active { color: #3b82f6; }
 .nav-ico { font-size: 22px; }
 .nav-txt { font-size: 10px; font-weight: 600; }
+
+.mr-baru { border-left: 3px solid #2563eb; }
+.mr-dot {
+  margin-left: 6px; font-size: 9px; font-weight: 800; letter-spacing: .04em;
+  background: #2563eb; color: #fff; border-radius: 6px; padding: 2px 6px; text-transform: uppercase;
+}
+.mr-kabar {
+  background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af;
+  border-radius: 10px; padding: 10px 12px; font-size: 13px; font-weight: 600; margin-bottom: 10px;
+}
+.mr-alasan {
+  margin-top: 8px; background: #fef2f2; border: 1px solid #fecaca; color: #991b1b;
+  border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.45;
+}
+.mr-lanjut {
+  margin-top: 8px; background: #ecfdf5; border: 1px solid #a7f3d0; color: #065f46;
+  border-radius: 8px; padding: 8px 10px; font-size: 12px;
+}
 </style>

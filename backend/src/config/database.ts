@@ -1595,6 +1595,29 @@ const ensureOpportunitySchema = async (connection: any) => {
   ]) await execSchemaEnsure(connection, sql);
 };
 
+/**
+ * Material Request: penolakan yang menjelaskan, dan hasil yang sampai ke pemohon.
+ *
+ * `PUT /material-requests/:id/reject` sebelumnya hanya menyetel status menjadi
+ * `rejected` — tanpa alasan, dan tanpa satu pun cara memberitahu pemohonnya.
+ *
+ * Di lapangan konsekuensinya langsung: tim tahu permintaannya ditolak tapi
+ * tidak tahu kenapa, jadi mereka mengajukan ulang barang yang sama, atau
+ * berhenti memakai fitur ini dan kembali menelepon. Keduanya membuat catatan
+ * kebutuhan lapangan berhenti mencerminkan keadaan.
+ */
+const ensureMaterialRequestOutcomeSchema = async (connection: any) => {
+  for (const sql of [
+    "ALTER TABLE material_requests ADD COLUMN IF NOT EXISTS rejection_reason VARCHAR(500) NULL",
+    "ALTER TABLE material_requests ADD COLUMN IF NOT EXISTS rejected_by INT NULL",
+    "ALTER TABLE material_requests ADD COLUMN IF NOT EXISTS rejected_at DATETIME NULL",
+    // Kapan pemohon benar-benar MELIHAT keputusannya. Dipakai menandai yang
+    // belum terbaca di layar mobile — bukan untuk mengukur orangnya, tapi
+    // supaya keputusan tidak menggantung tanpa ada yang tahu.
+    "ALTER TABLE material_requests ADD COLUMN IF NOT EXISTS outcome_seen_at DATETIME NULL",
+  ]) await execSchemaEnsure(connection, sql);
+};
+
 const ensureRouteModuleSchema = async (connection: any) => {
   const statements = [
     `CREATE TABLE IF NOT EXISTS inbox_notifications (
@@ -2897,6 +2920,7 @@ export async function initializeDatabase() {
     await ensureProposalKomersialSchema(connection);
     await ensureItemCostBasisSchema(connection);
     await ensureOpportunitySchema(connection);
+    await ensureMaterialRequestOutcomeSchema(connection);
     await ensureContractLedgerSchema(connection);
     await ensureMobilePinSchema(connection);
     await ensureAssetDepreciationSchema(connection);

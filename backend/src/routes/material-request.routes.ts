@@ -79,15 +79,44 @@ router.get('/my', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Resp
     const empId = req.employeeId;
     const rows = await dbAll(
       `SELECT mr.*, cp.project_name as proj_name, cp.project_number,
-              (SELECT COUNT(*) FROM material_request_items WHERE mr_id = mr.id) as item_count
+              (SELECT COUNT(*) FROM material_request_items WHERE mr_id = mr.id) as item_count,
+              -- Keputusan yang belum dilihat pemohonnya. Tanpa penanda ini,
+              -- satu-satunya cara mengetahui nasib permintaan adalah membuka
+              -- aplikasi berulang kali dan membandingkan sendiri.
+              (mr.status <> 'pending' AND mr.outcome_seen_at IS NULL) AS keputusan_baru
        FROM material_requests mr
        LEFT JOIN client_projects cp ON mr.project_id = cp.id
        WHERE mr.employee_id = ?
        ORDER BY mr.created_at DESC
        LIMIT 50`,
       [empId]
-    );
-    res.json({ data: rows });
+    ) as any[];
+    res.json({
+      data: rows,
+      // Dihitung server, bukan di layar: badge yang dihitung browser akan
+      // berbeda antar perangkat yang sama pemiliknya.
+      belum_dibaca: rows.filter((r: any) => Number(r.keputusan_baru) === 1).length,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Tandai keputusan sudah dibaca pemohonnya.
+ *
+ * Dipanggil layar mobile saat daftar dibuka. Hanya menyentuh MR MILIK pemohon
+ * — id dari token, bukan dari body: tanpa itu, siapa pun bisa menandai
+ * permintaan orang lain sudah dibaca dan menghilangkan penandanya.
+ */
+router.put('/my/tandai-dibaca', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Response) => {
+  try {
+    const upd: any = await dbRun(
+      `UPDATE material_requests
+         SET outcome_seen_at = NOW()
+       WHERE employee_id = ? AND status <> 'pending' AND outcome_seen_at IS NULL`,
+      [req.employeeId]);
+    res.json({ message: 'Ditandai dibaca', jml: upd?.affectedRows || 0 });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -264,7 +293,7 @@ router.put('/:id/approve', authMiddleware, async (req: Request, res: Response) =
       // approve melempar SETELAH status berubah dan PR terlanjur dibuat.
       await tx.run(
         `UPDATE material_requests
-         SET status = 'approved', approved_at = NOW(), linked_pr_id = ?, linked_pr_number = ?
+         SET outcome_seen_at = NULL, status = 'approved', approved_at = NOW(), linked_pr_id = ?, linked_pr_number = ?
          WHERE id = ?`,
         [prResult.insertId, prNumber, mrId]
       );
@@ -286,14 +315,46 @@ router.put('/:id/approve', authMiddleware, async (req: Request, res: Response) =
 });
 
 // PUT /:id/reject — reject MR
+/**
+ * Tolak MR — dengan alasan yang WAJIB.
+ *
+ * Versi lama hanya menyetel status. Tim lapangan lalu tahu permintaannya
+ * ditolak tanpa tahu kenapa: barang salah nama? sudah ada stok? project-nya
+ * keliru? Tanpa jawaban itu mereka mengajukan ulang hal yang sama, atau
+ * berhenti memakai fitur ini dan kembali menelepon — dan catatan kebutuhan
+ * lapangan berhenti mencerminkan keadaan.
+ *
+ * Alasannya dikirim balik ke pemohon lewat `/my`, jadi ia benar-benar sampai.
+ */
 router.put('/:id/reject', authMiddleware, async (req: Request, res: Response) => {
   try {
+    const alasan = String(req.body?.reason || req.body?.rejection_reason || '').trim();
+    if (!alasan) {
+      return res.status(400).json({
+        error: 'Penolakan harus menyebutkan alasannya — tim lapangan perlu tahu '
+             + 'apa yang harus diperbaiki.',
+        code: 'ALASAN_WAJIB',
+      });
+    }
+
     const mr = await dbGet('SELECT status FROM material_requests WHERE id = ?', [req.params.id]) as any;
     if (!mr) return res.status(404).json({ error: 'MR not found' });
     if (mr.status !== 'pending') return res.status(400).json({ error: `MR already ${mr.status}` });
 
-    await dbRun('UPDATE material_requests SET status = ? WHERE id = ?', ['rejected', req.params.id]);
-    res.json({ message: 'MR rejected' });
+    // Baris terkena diperiksa: nol berarti statusnya berubah di sela pemeriksaan
+    // dan penulisan — bukan "berhasil" yang tidak mengubah apa pun.
+    const upd: any = await dbRun(
+      `UPDATE material_requests
+         SET status = 'rejected', rejection_reason = ?, rejected_by = ?, rejected_at = NOW(),
+             outcome_seen_at = NULL
+       WHERE id = ? AND status = 'pending'`,
+      [alasan.slice(0, 500), (req as any).userId || null, req.params.id]);
+    if (!upd?.affectedRows) {
+      return res.status(409).json({
+        error: 'Status MR berubah sebelum penolakan tersimpan. Muat ulang.',
+        code: 'STATUS_BERUBAH' });
+    }
+    res.json({ message: 'MR rejected', rejection_reason: alasan });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
