@@ -247,6 +247,15 @@ async function main() {
     chk('client_id tidak dikenal ditolak', idPalsu.status, 400);
     chk('kodenya CLIENT_TIDAK_DITEMUKAN', idPalsu.json?.code, 'CLIENT_TIDAK_DITEMUKAN');
 
+    // Jalur create memakai validator yang sama. Error terstruktur sebelumnya
+    // dilempar dari transaction tetapi catch mengubahnya menjadi 500.
+    const idPalsuBuat = await call('POST', '/estimator/proposals', {
+      project_name: `Uji client palsu ${stamp}`, client: 'Y', client_id: 999999999,
+    }, master);
+    chk('create dengan client_id tidak dikenal ditolak 400', idPalsuBuat.status, 400);
+    chk('create membawa kode CLIENT_TIDAK_DITEMUKAN',
+      idPalsuBuat.json?.code, 'CLIENT_TIDAK_DITEMUKAN');
+
     // Layar juga melepas relasinya saat mengetik manual.
     const { readFileSync: bacaLst } = await import('node:fs');
     const vueLst = bacaLst(

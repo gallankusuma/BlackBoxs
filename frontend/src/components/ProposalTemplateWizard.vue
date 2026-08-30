@@ -281,6 +281,7 @@ import ColumnTypePicker from './projects/mto/ColumnTypePicker.vue';
 import RoofTypePicker from './projects/mto/RoofTypePicker.vue';
 import { useWarehouseGeometry } from '@/composables/useWarehouseGeometry';
 import { api } from '@/lib/api';
+import { terapkanPilihanAhsp } from '@/lib/proposalTemplatePayload';
 import { formatCurrency } from '@/utils/format';
 
 interface SubItem {
@@ -1052,7 +1053,9 @@ function doGenerateRAB() {
     code: sectionCode, name: sectionName,
     children: items.map((it, i) => {
       const a = AHSP[it.ahsp];
-      return { num: `${i+1}.`, name: a.name, volume: it.vol, unit: a.unit, ahsp_code: a.code, unit_price: a.price, total: +(it.vol * a.price).toFixed(0) };
+      // `key` mempertahankan hubungan ke pilihan AHSP pengguna. Tanpanya,
+      // generated RAB tidak bisa menggabungkan `ahspSelections` saat disimpan.
+      return { key: it.key, num: `${i+1}.`, name: a.name, volume: it.vol, unit: a.unit, ahsp_code: a.code, unit_price: a.price, total: +(it.vol * a.price).toFixed(0) };
     })
   });
   generatedRabItems.value = [
@@ -1113,32 +1116,27 @@ function doGenerateRAB() {
 }
 
 // Public API
-const getResult = () => ({
-  type: selectedType.value,
-  design_params: { ...design.value },
-  mto_quantities: mtoCalc.value || {},
-  mto_rab_items: generatedRabItems.value,
-  warehouse_mto_zones: warehouseMtoZones.value,
-  ahsp_selections: ahspSelections.value,
-  template_sections: (generatedRabItems.value.length ? generatedRabItems.value : templateSections.value
-    .filter(sec => sec.children.some((c: any) => checkedItems.value.has(c.key))))
-    .map((sec: any) => ({
-      code: sec.code,
-      name: sec.name,
-      description: '',
-      children: (sec.children || []).filter((c: any) => !c.key || checkedItems.value.has(c.key)).map((c: any) => {
-        const sel = ahspSelections.value[c.key];
-        return {
-          num: c.num, name: c.name,
-          volume: c.volume, unit: c.unit || sel?.satuan,
-          ahsp_code: c.ahsp_code || sel?.kode,
-          ahsp_id: c.ahsp_id || sel?.id,
-          unit_price: c.unit_price || sel?.harga,
-          total: c.total || (c.volume && sel ? c.volume * sel.harga : undefined),
-        };
-      }),
-    })),
-});
+const getResult = () => {
+  const sumber = generatedRabItems.value.length
+    ? generatedRabItems.value
+    : templateSections.value
+      .filter(sec => sec.children.some((c: any) => checkedItems.value.has(c.key)))
+      .map((sec: any) => ({
+        ...sec,
+        children: (sec.children || []).filter((c: any) => !c.key || checkedItems.value.has(c.key)),
+      }));
+  const sections = terapkanPilihanAhsp(sumber, ahspSelections.value);
+
+  return {
+    type: selectedType.value,
+    design_params: { ...design.value },
+    mto_quantities: mtoCalc.value || {},
+    mto_rab_items: sections,
+    warehouse_mto_zones: warehouseMtoZones.value,
+    ahsp_selections: ahspSelections.value,
+    template_sections: sections,
+  };
+};
 
 defineExpose({ getResult, templateSections, selectedType });
 </script>

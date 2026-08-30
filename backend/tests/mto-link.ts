@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { sapuFixture } from './_bersih';
+import { terapkanPilihanAhsp } from '../../frontend/src/lib/proposalTemplatePayload';
 /**
  * Tes tautan MTO → RAB (EST-MTO-013..016).
  * Prasyarat: backend jalan. Jalankan: npm run test:mto-link
@@ -1363,6 +1364,21 @@ async function main() {
   // ───────────────────────────────────────────────────────────────────────────
   console.log('\n13. Volume & pilihan AHSP dari wizard benar-benar tersimpan');
 
+  // Kontrak frontend sungguhan: generated RAB membawa `key`, lalu pilihan user
+  // mengalahkan kode/harga bawaan kalkulator. Tes lama hanya merakit payload
+  // akhir secara manual sehingga bug pada getResult() tidak pernah terlihat.
+  const payloadUi = terapkanPilihanAhsp([{
+    code: 'A', name: 'Utama', children: [{
+      key: 'beton', num: '1', name: 'Beton bawaan', volume: 3,
+      unit: 'm3', ahsp_code: 'AHSP-PU-LAMA', unit_price: 1, total: 3,
+    }],
+  }], {
+    beton: { id: 77, kode: 'MASTER-AKTIF', name: 'Beton master', harga: 900000, satuan: 'm3' },
+  });
+  chk('generated RAB mempertahankan AHSP ID pilihan', payloadUi[0].children[0].ahsp_id, 77);
+  chk('pilihan user mengalahkan kode bawaan', payloadUi[0].children[0].ahsp_code, 'MASTER-AKTIF');
+  chk('preview pilihan dihitung ulang', payloadUi[0].children[0].total, 2700000);
+
   const ahspWiz = await call('POST', '/estimator/ahsp', {
     kode: `TWIZ.${stamp}`, name: `AHSP Wizard ${stamp}`, satuan: 'm3', status: 'active',
     items: [{ section: 'B', resource_type: 'material', resource_name: 'Bahan',
@@ -1430,6 +1446,43 @@ async function main() {
   chk('harga dari klien diabaikan', Number(anakPalsu?.unit_price_snapshot), hargaWiz);
   chk('total memakai harga master', Math.round(Number(anakPalsu?.total_price) * 100),
     Math.round(2 * hargaWiz * 100));
+
+  // Angka liar harus membatalkan transaction, bukan berubah menjadi qty 0 dan
+  // tetap mendapat response sukses.
+  const namaQtyBuruk = `Uji qty buruk ${stamp}`;
+  const qtyBuruk = await call('POST', '/estimator/proposals', {
+    project_name: namaQtyBuruk,
+    template_sections: [{ code: 'A', name: 'Utama', children: [
+      { num: '1', name: 'Volume negatif', volume: -5, ahsp_id: ahspWizId },
+    ] }],
+  }, master);
+  chk('volume template negatif ditolak', qtyBuruk.status, 422);
+  chk('kode error quantity stabil', qtyBuruk.json?.code, 'QTY_TEMPLATE_TIDAK_VALID');
+  const { dbGet } = await import('../src/config/database');
+  const sisaQtyBuruk: any = await dbGet('SELECT COUNT(*) AS n FROM proposals WHERE project_name = ?', [namaQtyBuruk]);
+  chk('header ikut rollback saat volume invalid', Number(sisaQtyBuruk?.n), 0);
+
+  const sebelumApplyBuruk = (await call('GET', `/estimator/proposals/${wizId}/items`, undefined, master)).json;
+  const jumlahSebelum = Array.isArray(sebelumApplyBuruk) ? sebelumApplyBuruk.length : (sebelumApplyBuruk?.data || []).length;
+  const applyBuruk = await call('POST', `/estimator/proposals/${wizId}/apply-template`, {
+    template_sections: [{ code: 'B', name: 'Tambahan', children: [
+      { num: '1', name: 'Bukan angka', volume: 'abc', ahsp_id: ahspWizId },
+    ] }],
+  }, master);
+  chk('apply-template invalid ditolak', applyBuruk.status, 422);
+  chk('apply-template membawa kode quantity', applyBuruk.json?.code, 'QTY_TEMPLATE_TIDAK_VALID');
+  const sesudahApplyBuruk = (await call('GET', `/estimator/proposals/${wizId}/items`, undefined, master)).json;
+  const jumlahSesudah = Array.isArray(sesudahApplyBuruk) ? sesudahApplyBuruk.length : (sesudahApplyBuruk?.data || []).length;
+  chk('apply-template invalid rollback seluruh section', jumlahSesudah, jumlahSebelum);
+
+  const ahspHilang = await call('POST', '/estimator/proposals', {
+    project_name: `Uji AHSP hilang ${stamp}`,
+    template_sections: [{ code: 'A', name: 'Utama', children: [
+      { num: '1', name: 'Pilihan hilang', volume: 2, ahsp_id: 999999999 },
+    ] }],
+  }, master);
+  chk('AHSP pilihan missing/inactive ditolak', ahspHilang.status, 422);
+  chk('kode error AHSP stabil', ahspHilang.json?.code, 'AHSP_TEMPLATE_TIDAK_VALID');
 
   await call('DELETE', `/estimator/proposals/${wizId}`, undefined, master);
   await call('DELETE', `/estimator/proposals/${palsuId}`, undefined, master);

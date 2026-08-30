@@ -117,6 +117,10 @@ async function main() {
     ] as const) {
       chk(`${label} ditolak 403`, (await call('GET', path, undefined, tanpa.tok)).status, 403);
     }
+    chk('katalog AHSP ditolak 403',
+      (await call('GET', '/estimator/ahsp', undefined, tanpa.tok)).status, 403);
+    chk('master resource ditolak 403',
+      (await call('GET', '/estimator/masters/labor', undefined, tanpa.tok)).status, 403);
 
     // ── 2. Mutasi ditolak ───────────────────────────────────────────────────
     console.log('\n2. Perubahan RAB/MTO/jadwal ditolak');
@@ -131,6 +135,14 @@ async function main() {
         { element_type: 'foundation', element_name: 'X', parameters: {} }, tanpa.tok)).status, 403);
     chk('hapus proposal ditolak',
       (await call('DELETE', `/estimator/proposals/${pid}`, undefined, tanpa.tok)).status, 403);
+    chk('buat AHSP ditolak',
+      (await call('POST', '/estimator/ahsp', {
+        kode: `SISIP-AHSP-${stamp}`, name: 'Sisipan', satuan: 'm3', status: 'active',
+      }, tanpa.tok)).status, 403);
+    chk('buat resource master ditolak',
+      (await call('POST', '/estimator/masters/labor', {
+        code: `SISIP-LBR-${stamp}`, name: 'Sisipan', satuan: 'OH', harga: 1,
+      }, tanpa.tok)).status, 403);
 
     // ── 3. Transisi komersial ditolak ───────────────────────────────────────
     console.log('\n3. Submit & Deal menuntut permission approve');
@@ -194,6 +206,37 @@ async function main() {
       (await call('DELETE', `/estimator/proposals/${pid}`, undefined, uv.tok)).status, 403);
     chk('view-saja TIDAK boleh mengubah status',
       (await call('PUT', `/estimator/proposals/${pid}/status`, { status: 'draft' }, uv.tok)).status, 403);
+    chk('view Proposal saja TIDAK membuka AHSP',
+      (await call('GET', '/estimator/ahsp', undefined, uv.tok)).status, 403);
+    chk('view Proposal saja TIDAK membuka master resource',
+      (await call('GET', '/estimator/masters/materials', undefined, uv.tok)).status, 403);
+
+    // Permission katalog berdiri sendiri: setelah hak view AHSP/master benar-
+    // benar diberikan, endpoint baca terbuka tetapi mutasinya tetap tertutup.
+    const permAhspView: any = await dbGet(
+      "SELECT id FROM permissions WHERE resource='estimator.estimator-ahsp' AND action='view'");
+    const permMasterView: any = await dbGet(
+      "SELECT id FROM permissions WHERE resource='estimator.estimator-masters' AND action='view'");
+    chk('permission view AHSP & master ada di katalog',
+      !!permAhspView?.id && !!permMasterView?.id, true);
+    if (permAhspView?.id && permMasterView?.id) {
+      await dbRun('INSERT IGNORE INTO role_permissions (role_id, permission_id) VALUES (?, ?), (?, ?)',
+        [roleViewId, permAhspView.id, roleViewId, permMasterView.id]);
+    }
+    const tokKatalog = (await call('POST', '/auth/login',
+      { email: `ujiview${stamp}@uji.test`, password: `Uji-${stamp}-xyz` })).json?.token;
+    chk('permission AHSP view membuka katalog',
+      (await call('GET', '/estimator/ahsp', undefined, tokKatalog)).status, 200);
+    chk('permission master view membuka resource',
+      (await call('GET', '/estimator/masters/labor', undefined, tokKatalog)).status, 200);
+    chk('view AHSP tetap tidak boleh membuat AHSP',
+      (await call('POST', '/estimator/ahsp', {
+        kode: `VIEW-AHSP-${stamp}`, name: 'Tidak boleh', satuan: 'm3', status: 'active',
+      }, tokKatalog)).status, 403);
+    chk('view master tetap tidak boleh membuat resource',
+      (await call('POST', '/estimator/masters/labor', {
+        code: `VIEW-LBR-${stamp}`, name: 'Tidak boleh', satuan: 'OH', harga: 1,
+      }, tokKatalog)).status, 403);
 
     // ── 4. Master tetap bisa ────────────────────────────────────────────────
     console.log('\n4. Yang berwenang tidak ikut terkunci');

@@ -46,6 +46,17 @@ const P_UBAH    = 'estimator.estimator-proposals.edit';
 const P_HAPUS   = 'estimator.estimator-proposals.delete';
 const P_SETUJU  = 'estimator.estimator-proposals.approve';
 
+const P_AHSP_LIHAT  = 'estimator.estimator-ahsp.view';
+const P_AHSP_BUAT   = 'estimator.estimator-ahsp.create';
+const P_AHSP_UBAH   = 'estimator.estimator-ahsp.edit';
+const P_AHSP_HAPUS  = 'estimator.estimator-ahsp.delete';
+const P_AHSP_SETUJU = 'estimator.estimator-ahsp.approve';
+
+const P_MASTER_LIHAT = 'estimator.estimator-masters.view';
+const P_MASTER_BUAT  = 'estimator.estimator-masters.create';
+const P_MASTER_UBAH  = 'estimator.estimator-masters.edit';
+const P_MASTER_HAPUS = 'estimator.estimator-masters.delete';
+
 /**
  * Sakelar penegakan.
  *
@@ -74,12 +85,29 @@ const bolehUbah   = gembok(P_UBAH);
 const bolehHapus  = gembok(P_HAPUS);
 const bolehSetuju = gembok(P_SETUJU);
 
+// AHSP dan resource master adalah sumber harga Proposal, bukan katalog publik
+// untuk setiap token desktop. Permission-nya sudah ada dan sudah dipetakan ke
+// Admin produksi; gunakan sakelar Estimator yang sama agar UI dan API sependapat.
+const bolehLihatAhsp = gembok(P_AHSP_LIHAT, P_AHSP_BUAT, P_AHSP_UBAH, P_AHSP_HAPUS, P_AHSP_SETUJU);
+const bolehBuatAhsp  = gembok(P_AHSP_BUAT, P_AHSP_UBAH);
+const bolehUbahAhsp  = gembok(P_AHSP_UBAH);
+const bolehHapusAhsp = gembok(P_AHSP_HAPUS);
+
+const bolehLihatMaster = gembok(P_MASTER_LIHAT, P_MASTER_BUAT, P_MASTER_UBAH, P_MASTER_HAPUS);
+const bolehBuatMaster  = gembok(P_MASTER_BUAT, P_MASTER_UBAH);
+const bolehUbahMaster  = gembok(P_MASTER_UBAH);
+const bolehHapusMaster = gembok(P_MASTER_HAPUS);
+const bolehLihatStrukturEstimator = gembok(
+  P_MASTER_LIHAT, P_MASTER_BUAT, P_MASTER_UBAH, P_MASTER_HAPUS,
+  P_AHSP_LIHAT, P_AHSP_BUAT, P_AHSP_UBAH, P_AHSP_HAPUS, P_AHSP_SETUJU,
+);
+
 // ============================================
 // MASTER DATA ENDPOINTS
 // ============================================
 
 // Get all disciplines
-router.get('/disciplines', authMiddleware, async (_req: Request, res: Response) => {
+router.get('/disciplines', authMiddleware, bolehLihatStrukturEstimator, async (_req: Request, res: Response) => {
   try {
     const disciplines = await dbAll(
       `SELECT id, code, name, order_no, is_active 
@@ -95,7 +123,7 @@ router.get('/disciplines', authMiddleware, async (_req: Request, res: Response) 
 });
 
 // Get sub-disciplines by discipline
-router.get('/disciplines/:disciplineId/sub-disciplines', authMiddleware, async (req: Request, res: Response) => {
+router.get('/disciplines/:disciplineId/sub-disciplines', authMiddleware, bolehLihatStrukturEstimator, async (req: Request, res: Response) => {
   try {
     const subDisciplines = await dbAll(
       `SELECT id, discipline_id, code, name, order_no, is_active
@@ -112,7 +140,7 @@ router.get('/disciplines/:disciplineId/sub-disciplines', authMiddleware, async (
 });
 
 // Create sub-discipline
-router.post('/disciplines/:disciplineId/sub-disciplines', authMiddleware, async (req: Request, res: Response) => {
+router.post('/disciplines/:disciplineId/sub-disciplines', authMiddleware, bolehBuatMaster, async (req: Request, res: Response) => {
   try {
     const { disciplineId } = req.params;
     const { code, name } = req.body;
@@ -151,7 +179,7 @@ router.post('/disciplines/:disciplineId/sub-disciplines', authMiddleware, async 
 });
 
 // Get all labor
-router.get('/masters/labor', authMiddleware, async (_req: Request, res: Response) => {
+router.get('/masters/labor', authMiddleware, bolehLihatMaster, async (_req: Request, res: Response) => {
   try {
     const labor = await dbAll(
       `SELECT id, code, name, satuan, harga, is_active
@@ -167,7 +195,7 @@ router.get('/masters/labor', authMiddleware, async (_req: Request, res: Response
 });
 
 // Create labor
-router.post('/masters/labor', authMiddleware, async (req: Request, res: Response) => {
+router.post('/masters/labor', authMiddleware, bolehBuatMaster, async (req: Request, res: Response) => {
   try {
     const { code, name, satuan, harga } = req.body;
 
@@ -193,7 +221,7 @@ router.post('/masters/labor', authMiddleware, async (req: Request, res: Response
 });
 
 // Update labor
-router.put('/masters/labor/:id', authMiddleware, async (req: Request, res: Response) => {
+router.put('/masters/labor/:id', authMiddleware, bolehUbahMaster, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { code, name, satuan, harga } = req.body;
@@ -225,7 +253,7 @@ router.put('/masters/labor/:id', authMiddleware, async (req: Request, res: Respo
 });
 
 // Delete labor (soft delete)
-router.delete('/masters/labor/:id', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/masters/labor/:id', authMiddleware, bolehHapusMaster, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const existing = await dbGet('SELECT id FROM master_labor WHERE id = ?', [id]);
@@ -242,7 +270,7 @@ router.delete('/masters/labor/:id', authMiddleware, async (req: Request, res: Re
 });
 
 // Get all materials
-router.get('/masters/materials', authMiddleware, async (_req: Request, res: Response) => {
+router.get('/masters/materials', authMiddleware, bolehLihatMaster, async (_req: Request, res: Response) => {
   try {
     const materials = await dbAll(
       `SELECT m.id, m.code, m.jenis, m.name, m.satuan, m.harga, m.vendor_id, v.name as vendor_name, m.is_active
@@ -259,7 +287,7 @@ router.get('/masters/materials', authMiddleware, async (_req: Request, res: Resp
 });
 
 // Create material
-router.post('/masters/materials', authMiddleware, async (req: Request, res: Response) => {
+router.post('/masters/materials', authMiddleware, bolehBuatMaster, async (req: Request, res: Response) => {
   try {
     const { code, jenis, name, satuan, harga, vendor_id } = req.body;
 
@@ -285,7 +313,7 @@ router.post('/masters/materials', authMiddleware, async (req: Request, res: Resp
 });
 
 // Update material
-router.put('/masters/materials/:id', authMiddleware, async (req: Request, res: Response) => {
+router.put('/masters/materials/:id', authMiddleware, bolehUbahMaster, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { code, jenis, name, satuan, harga, vendor_id } = req.body;
@@ -317,7 +345,7 @@ router.put('/masters/materials/:id', authMiddleware, async (req: Request, res: R
 });
 
 // Delete material (soft delete)
-router.delete('/masters/materials/:id', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/masters/materials/:id', authMiddleware, bolehHapusMaster, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const existing = await dbGet('SELECT id FROM master_materials WHERE id = ?', [id]);
@@ -334,7 +362,7 @@ router.delete('/masters/materials/:id', authMiddleware, async (req: Request, res
 });
 
 // Get all equipment
-router.get('/masters/equipment', authMiddleware, async (_req: Request, res: Response) => {
+router.get('/masters/equipment', authMiddleware, bolehLihatMaster, async (_req: Request, res: Response) => {
   try {
     const equipment = await dbAll(
       `SELECT e.id, e.code, e.name, e.satuan, e.harga, e.vendor_id, v.name as vendor_name, e.is_active
@@ -351,7 +379,7 @@ router.get('/masters/equipment', authMiddleware, async (_req: Request, res: Resp
 });
 
 // Create equipment
-router.post('/masters/equipment', authMiddleware, async (req: Request, res: Response) => {
+router.post('/masters/equipment', authMiddleware, bolehBuatMaster, async (req: Request, res: Response) => {
   try {
     const { code, name, satuan, harga, vendor_id } = req.body;
 
@@ -377,7 +405,7 @@ router.post('/masters/equipment', authMiddleware, async (req: Request, res: Resp
 });
 
 // Update equipment
-router.put('/masters/equipment/:id', authMiddleware, async (req: Request, res: Response) => {
+router.put('/masters/equipment/:id', authMiddleware, bolehUbahMaster, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { code, name, satuan, harga, vendor_id } = req.body;
@@ -409,7 +437,7 @@ router.put('/masters/equipment/:id', authMiddleware, async (req: Request, res: R
 });
 
 // Delete equipment (soft delete)
-router.delete('/masters/equipment/:id', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/masters/equipment/:id', authMiddleware, bolehHapusMaster, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const existing = await dbGet('SELECT id FROM master_equipment WHERE id = ?', [id]);
@@ -430,7 +458,7 @@ router.delete('/masters/equipment/:id', authMiddleware, async (req: Request, res
 // ============================================
 
 // Get next AHSP code
-router.get('/ahsp/next-code', authMiddleware, async (req: Request, res: Response) => {
+router.get('/ahsp/next-code', authMiddleware, bolehBuatAhsp, async (req: Request, res: Response) => {
   try {
     const { sub_discipline_id, discipline_id } = req.query;
     
@@ -474,7 +502,7 @@ router.get('/ahsp/next-code', authMiddleware, async (req: Request, res: Response
 });
 
 // Delete AHSP (Soft Delete)
-router.delete('/ahsp/:id', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/ahsp/:id', authMiddleware, bolehHapusAhsp, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     console.log(`Attempting to delete AHSP with id: ${id}`);
@@ -489,7 +517,7 @@ router.delete('/ahsp/:id', authMiddleware, async (req: Request, res: Response) =
 
 
 // GET /ahsp-categories - distinct work categories
-router.get('/ahsp-categories', authMiddleware, async (_req: Request, res: Response) => {
+router.get('/ahsp-categories', authMiddleware, bolehLihatAhsp, async (_req: Request, res: Response) => {
   try {
     const cats = await dbAll(`
       SELECT work_category_code, work_category, COUNT(*) AS jumlah
@@ -506,7 +534,7 @@ router.get('/ahsp-categories', authMiddleware, async (_req: Request, res: Respon
 });
 
 // Get AHSP list (with optional filtering by sub-discipline, category, or search)
-router.get('/ahsp', authMiddleware, async (req: Request, res: Response) => {
+router.get('/ahsp', authMiddleware, bolehLihatAhsp, async (req: Request, res: Response) => {
   try {
     const { sub_discipline_id, search, work_category } = req.query;
     
@@ -595,7 +623,7 @@ router.get('/ahsp', authMiddleware, async (req: Request, res: Response) => {
 
 
 // Get AHSP detail with items breakdown
-router.get('/ahsp/:id', authMiddleware, async (req: Request, res: Response) => {
+router.get('/ahsp/:id', authMiddleware, bolehLihatAhsp, async (req: Request, res: Response) => {
   try {
     const ahsp = await dbGet(
       `SELECT h.*, sdm.sub_discipline_id
@@ -622,7 +650,7 @@ router.get('/ahsp/:id', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // Create AHSP
-router.post('/ahsp', authMiddleware, async (req: Request, res: Response) => {
+router.post('/ahsp', authMiddleware, bolehBuatAhsp, async (req: Request, res: Response) => {
   try {
     const { kode, name, satuan, version, status, items, discipline_id, sub_discipline_id } = req.body;
     
@@ -700,7 +728,7 @@ router.post('/ahsp', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // Update AHSP
-router.put('/ahsp/:id', authMiddleware, async (req: Request, res: Response) => {
+router.put('/ahsp/:id', authMiddleware, bolehUbahAhsp, async (req: Request, res: Response) => {
   try {
     const ahspId = req.params.id;
     const { kode, name, satuan, version, status, discipline_id, sub_discipline_id, items } = req.body;
@@ -793,7 +821,7 @@ router.put('/ahsp/:id', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // Calculate AHSP unit price (recalculate from items)
-router.post('/ahsp/:id/calculate', authMiddleware, async (req: Request, res: Response) => {
+router.post('/ahsp/:id/calculate', authMiddleware, bolehUbahAhsp, async (req: Request, res: Response) => {
   try {
     const ahspId = req.params.id;
     
@@ -1583,6 +1611,20 @@ const barisDariTemplate = async (
       `SELECT id, kode, name, satuan, harga_satuan FROM ahsp_headers WHERE id = ? AND status = 'active'`,
       [child.ahsp_id]
     );
+    // ID hanya hadir ketika pengguna memilih master secara eksplisit. Jangan
+    // diam-diam menggantinya lewat kode/nama bila master itu hilang/inactive.
+    if (!ahsp) {
+      throw Object.assign(new Error('AHSP_TEMPLATE_TIDAK_VALID'), { lock: {
+        status: 422,
+        body: {
+          error: `AHSP pilihan untuk "${child?.name || 'item template'}" tidak ditemukan atau tidak aktif.`,
+          code: 'AHSP_TEMPLATE_TIDAK_VALID',
+          section: section?.code || null,
+          item: child?.num || child?.name || null,
+          ahsp_id: child.ahsp_id,
+        },
+      } });
+    }
   }
   if (!ahsp && child?.ahsp_code) {
     ahsp = await get(
@@ -1595,7 +1637,19 @@ const barisDariTemplate = async (
   // Volume dari wizard dipakai, tapi tetap lewat validasi yang sama dengan
   // input manual — angka liar tidak boleh masuk lewat pintu template.
   const cek = validasiQty(child?.volume);
-  const qty = cek.ok ? cek.qty : 0;
+  if (!cek.ok) {
+    throw Object.assign(new Error('QTY_TEMPLATE_TIDAK_VALID'), { lock: {
+      status: 422,
+      body: {
+        error: `Volume "${child?.name || 'item template'}" tidak valid: ${cek.pesan}.`,
+        code: 'QTY_TEMPLATE_TIDAK_VALID',
+        section: section?.code || null,
+        item: child?.num || child?.name || null,
+        value: child?.volume,
+      },
+    } });
+  }
+  const qty = cek.qty;
 
   const harga = ahsp ? uang(ahsp.harga_satuan) : 0;
 
@@ -3523,8 +3577,9 @@ router.post('/proposals', authMiddleware, bolehBuat, async (req: Request, res: R
       id: proposalId,
       proposal_number: proposalNumber 
     });
-  } catch (error) {
+  } catch (error: any) {
     console.error('Error creating proposal:', error);
+    if (error?.lock) return res.status(error.lock.status).json(error.lock.body);
     res.status(500).json({ error: 'Failed to create proposal' });
   }
 });
@@ -3775,8 +3830,9 @@ router.post('/proposals/:id/apply-template', authMiddleware, bolehUbah, async (r
 
     if ('error' in applied) return res.status(applied.error).json(applied.body);
     res.json({ message: 'Template applied', items_added: applied.itemsAdded });
-  } catch (error) {
+  } catch (error: any) {
     console.error('Error applying template:', error);
+    if (error?.lock) return res.status(error.lock.status).json(error.lock.body);
     res.status(500).json({ error: 'Failed to apply template' });
   }
 });
@@ -7627,4 +7683,3 @@ router.delete('/proposals/:id/items/:itemId/mto-link', authMiddleware, bolehHapu
 });
 
 export default router;
-
