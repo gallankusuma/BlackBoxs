@@ -79,6 +79,10 @@
                 accept="application/pdf,image/png,image/jpeg,image/webp"
                 style="display:none" @change="unggahGambar" />
               <button v-if="!readonly" @click="addZone" class="add-zone-btn">＋ Tambah Zona</button>
+              <!-- Pekerjaan EPC berulang; template membuat zona yang sudah
+                   benar sekali tidak perlu diketik ulang tiap proposal. -->
+              <button v-if="!readonly" @click="bukaTemplate" class="add-zone-btn"
+                title="Pakai parameter zona yang pernah disimpan">📁 Pakai Template</button>
             </div>
           </div>
 
@@ -239,6 +243,13 @@
               <!-- Tombol hapus yang bisa dilihat. Sebelumnya satu-satunya jalan
                    menghapus zona adalah "×" kecil di dalam pill, yang praktis
                    tidak ketemu kalau tidak sengaja dicari. -->
+              <!-- Hanya untuk zona yang SUDAH tersimpan: template dibentuk dari
+                   parameter yang benar-benar tersimpan, bukan dari isian yang
+                   belum sempat divalidasi server. -->
+              <button v-if="!readonly && activeZone?.element_id" @click="simpanTemplate"
+                class="zone-tpl-btn" title="Simpan parameter zona ini sebagai template">
+                📌 Simpan sebagai template
+              </button>
               <button v-if="!readonly" @click="removeZone(activeZoneIdx)" class="zone-hapus-btn"
                 title="Hapus zona ini beserta kuantitas MTO-nya">
                 🗑 Hapus zona
@@ -428,6 +439,76 @@
     </div><!-- mto-content -->
 
   </div><!-- mto-wrap -->
+  <!-- ══ Modal: pakai template zona ══════════════════════════════════════════
+       Template menyimpan PARAMETER, bukan kuantitas — kuantitasnya dihitung
+       ulang saat dipakai, jadi perbaikan formula ikut terbawa. -->
+  <div v-if="showTemplate" class="tpl-overlay" @click.self="showTemplate = false">
+    <div class="tpl-box">
+      <div class="tpl-head">
+        <div>
+          <h3>📁 Pakai Template — {{ activeModule.label }}</h3>
+          <p>Parameter yang pernah disimpan. Kuantitas dihitung ulang saat dipakai.</p>
+        </div>
+        <button @click="showTemplate = false" class="tpl-x">×</button>
+      </div>
+
+      <div class="tpl-body">
+        <p v-if="tplLoading" class="tpl-kosong">Memuat…</p>
+        <p v-else-if="!templates.length" class="tpl-kosong">
+          Belum ada template untuk {{ activeModule.label.toLowerCase() }}.
+          Simpan satu dari zona yang sudah benar lewat tombol
+          <strong>📌 Simpan sebagai template</strong>.
+        </p>
+        <div v-else class="tpl-list">
+          <label v-for="t in templates" :key="t.id" class="tpl-item"
+                 :class="{ 'tpl-item-on': !!tplPilih[t.id] }">
+            <input type="checkbox" v-model="tplPilih[t.id]">
+            <div class="tpl-info">
+              <div class="tpl-nama">{{ t.name }}</div>
+              <div class="tpl-meta">
+                {{ t.code }}
+                <span v-if="t.category"> · {{ t.category }}</span>
+                <span v-if="t.times_used"> · dipakai {{ t.times_used }}×</span>
+              </div>
+              <div v-if="t.description" class="tpl-desc">{{ t.description }}</div>
+
+              <!-- Field yang memang berbeda tiap proyek ditanyakan di sini,
+                   bukan ditolak diam-diam saat tombol ditekan. -->
+              <div v-if="tplPilih[t.id] && t.pending_fields?.length" class="tpl-pending">
+                <p>Perlu dilengkapi untuk proyek ini:</p>
+                <div class="tpl-fields">
+                  <label v-for="f in t.pending_fields" :key="f.field || f">
+                    <span>{{ f.label || f.field || f }}</span>
+                    <input type="number" step="any"
+                      :value="tplOverride[t.id]?.[f.field || f] ?? ''"
+                      @input="setOverride(t.id, f.field || f, ($event.target as HTMLInputElement).value)">
+                  </label>
+                </div>
+              </div>
+              <div v-if="tplPilih[t.id]" class="tpl-nama-zona">
+                <label>
+                  <span>Nama zona</span>
+                  <input type="text" :value="tplNama[t.id] ?? t.name"
+                    @input="tplNama[t.id] = ($event.target as HTMLInputElement).value">
+                </label>
+              </div>
+            </div>
+          </label>
+        </div>
+      </div>
+
+      <div class="tpl-foot">
+        <span>{{ jmlTplDipilih }} template dipilih</span>
+        <div>
+          <button @click="showTemplate = false" class="tpl-batal">Batal</button>
+          <button @click="pakaiTemplate" :disabled="!jmlTplDipilih || tplSibuk" class="tpl-ok">
+            {{ tplSibuk ? 'Membuat…' : 'Buat zona' }}
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
 </template>
 
 <script setup lang="ts">
@@ -756,6 +837,102 @@ const kirimDiskusi = async () => {
 
 const tolakUsul = (i: number) => { usulan.value.splice(i, 1); };
 const tolakSemuaUsul = () => { usulan.value = []; catatanUsul.value = ''; riwayat.value = []; };
+
+// ══ Template zona ═════════════════════════════════════════════════════════
+//
+// Templatenya berlaku lintas proposal — itu justru gunanya. Parameter yang
+// sudah benar sekali tidak perlu diketik ulang, dan angka yang seharusnya
+// sama antar proyek berhenti berbeda hanya karena siapa yang mengetik.
+const showTemplate = ref(false);
+const templates = ref<any[]>([]);
+const tplLoading = ref(false);
+const tplSibuk = ref(false);
+const tplPilih = ref<Record<number, boolean>>({});
+const tplOverride = ref<Record<number, Record<string, any>>>({});
+const tplNama = ref<Record<number, string>>({});
+
+const jmlTplDipilih = computed(() =>
+  Object.values(tplPilih.value).filter(Boolean).length);
+
+function setOverride(id: number, field: string, nilai: string) {
+  const kotak = tplOverride.value[id] || (tplOverride.value[id] = {});
+  // Kosong berarti "belum diisi", bukan nol — nol adalah dimensi yang sah dan
+  // akan lolos gerbang wajib dengan angka yang salah.
+  if (nilai === '') delete kotak[field];
+  else kotak[field] = Number(nilai);
+}
+
+async function bukaTemplate() {
+  showTemplate.value = true;
+  tplPilih.value = {}; tplOverride.value = {}; tplNama.value = {};
+  tplLoading.value = true;
+  try {
+    const { data } = await api.get('/estimator/mto/templates', {
+      params: { element_type: activeTab.value },
+    });
+    templates.value = data?.data || [];
+  } catch (e: any) {
+    templates.value = [];
+    saveError.value = uraikanGagal(e);
+  } finally {
+    tplLoading.value = false;
+  }
+}
+
+async function simpanTemplate() {
+  const z = activeZone.value;
+  if (!z?.element_id) return;
+  const nama = prompt('Nama template:', z.name || activeModule.value.label);
+  if (!nama) return;
+  try {
+    const { data } = await api.post('/estimator/mto/templates', {
+      name: nama,
+      from_element_id: z.element_id,
+      category: activeModule.value.label,
+    });
+    // Field yang sengaja dibiarkan kosong dikatakan sekarang, bukan nanti saat
+    // template dipakai orang lain dan gagal tanpa sebab yang jelas.
+    const kurang = (data?.pending_fields || []).length;
+    alert(kurang
+      ? `Template "${nama}" tersimpan. ${kurang} dimensi akan ditanyakan tiap kali dipakai.`
+      : `Template "${nama}" tersimpan.`);
+  } catch (e: any) {
+    saveError.value = uraikanGagal(e);
+  }
+}
+
+async function pakaiTemplate() {
+  if (tplSibuk.value) return;
+  const dipilih = templates.value.filter(t => tplPilih.value[t.id]);
+  if (!dipilih.length) return;
+  tplSibuk.value = true;
+  try {
+    const { data } = await api.post(`${baseUrl.value}/mto/from-template`, {
+      templates: dipilih.map(t => ({
+        template_id: t.id,
+        element_name: tplNama.value[t.id] || t.name,
+        overrides: tplOverride.value[t.id] || {},
+      })),
+    });
+    showTemplate.value = false;
+    // Dimuat ulang dari server, bukan disisipkan ke layar: zona yang tampil
+    // harus yang benar-benar tersimpan, dengan kuantitas hasil hitung server.
+    await fetchAll();
+    alert(data?.message || 'Zona dibuat dari template.');
+  } catch (e: any) {
+    // 422 membawa daftar dimensi yang kurang — itu yang paling berguna
+    // ditampilkan, bukan pesan umum.
+    const d = e?.response?.data;
+    if (d?.code === 'MISSING_REQUIRED_PARAMETERS' && d?.problems?.length) {
+      alert(`${d.error}\n\nYang kurang: ` +
+        d.problems.map((x: any) => x.label || x.field || x).join(', '));
+    } else {
+      saveError.value = uraikanGagal(e);
+    }
+  } finally {
+    tplSibuk.value = false;
+  }
+}
 
 function addZone() {
   const mod = activeTab.value;
@@ -1317,4 +1494,67 @@ const f0 = (v:number) => v.toLocaleString('id-ID',{maximumFractionDigits:0});
 .rekap-total .rs-odd td{background:#1e293b;}
 .tc{text-align:center;}
 .small{font-size:.72rem;}
+
+/* ── Template zona ─────────────────────────────────────────────────────── */
+.zone-tpl-btn {
+  margin-left: .5rem; padding: .3rem .7rem; border-radius: .5rem;
+  border: 1px solid #c7d2fe; background: #eef2ff; color: #4338ca;
+  font-size: .78rem; font-weight: 600; cursor: pointer;
+}
+.zone-tpl-btn:hover { background: #e0e7ff; }
+
+.tpl-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 60;
+  display: flex; align-items: center; justify-content: center; padding: 1rem;
+}
+.tpl-box {
+  background: #fff; border-radius: .9rem; width: 100%; max-width: 46rem;
+  max-height: 88vh; display: flex; flex-direction: column;
+  box-shadow: 0 20px 45px rgba(0,0,0,.25);
+}
+.tpl-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 1rem; padding: .9rem 1.2rem; border-bottom: 1px solid #e5e7eb;
+}
+.tpl-head h3 { margin: 0; font-size: 1rem; font-weight: 700; color: #111827; }
+.tpl-head p  { margin: .15rem 0 0; font-size: .78rem; color: #6b7280; }
+.tpl-x { border: 0; background: none; font-size: 1.5rem; line-height: 1; cursor: pointer; color: #9ca3af; }
+.tpl-body { flex: 1; overflow-y: auto; padding: 1rem 1.2rem; }
+.tpl-kosong { text-align: center; color: #6b7280; font-size: .85rem; padding: 2rem 0; }
+.tpl-list { display: flex; flex-direction: column; gap: .6rem; }
+.tpl-item {
+  display: flex; gap: .7rem; align-items: flex-start; padding: .7rem .8rem;
+  border: 1px solid #e5e7eb; border-radius: .6rem; cursor: pointer;
+}
+.tpl-item-on { border-color: #6366f1; background: #f5f3ff; }
+.tpl-info { flex: 1; }
+.tpl-nama { font-weight: 600; font-size: .9rem; color: #111827; }
+.tpl-meta { font-size: .72rem; color: #6b7280; margin-top: .1rem; }
+.tpl-desc { font-size: .78rem; color: #4b5563; margin-top: .25rem; }
+.tpl-pending {
+  margin-top: .55rem; padding: .55rem .7rem; border-radius: .45rem;
+  background: #fffbeb; border: 1px solid #fde68a;
+}
+.tpl-pending p { margin: 0 0 .4rem; font-size: .74rem; color: #92400e; font-weight: 600; }
+.tpl-fields { display: flex; flex-wrap: wrap; gap: .5rem; }
+.tpl-fields label, .tpl-nama-zona label {
+  display: flex; flex-direction: column; gap: .15rem; font-size: .72rem; color: #4b5563;
+}
+.tpl-fields input, .tpl-nama-zona input {
+  border: 1px solid #d1d5db; border-radius: .35rem; padding: .25rem .45rem; font-size: .8rem;
+}
+.tpl-fields input { width: 7rem; }
+.tpl-nama-zona { margin-top: .5rem; }
+.tpl-nama-zona input { width: 18rem; max-width: 100%; }
+.tpl-foot {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: .8rem 1.2rem; border-top: 1px solid #e5e7eb; font-size: .82rem; color: #4b5563;
+}
+.tpl-foot > div { display: flex; gap: .5rem; }
+.tpl-batal, .tpl-ok {
+  padding: .45rem .9rem; border-radius: .5rem; font-size: .82rem; font-weight: 600; cursor: pointer;
+}
+.tpl-batal { border: 1px solid #d1d5db; background: #fff; color: #374151; }
+.tpl-ok { border: 0; background: #059669; color: #fff; }
+.tpl-ok:disabled { opacity: .5; cursor: not-allowed; }
 </style>

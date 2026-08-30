@@ -210,8 +210,21 @@ async function main() {
     chk('daftar tanpa token 401', (await call('GET', '/estimator/mto/templates')).status, 401);
     chk('simpan tanpa token 401', (await call('POST', '/estimator/mto/templates', { name: 'x' })).status, 401);
 
+    console.log('\n12. Layar benar-benar tersambung ke endpointnya');
+    const { readFileSync } = await import('fs');
+    const { join } = await import('path');
+    const layar = readFileSync(
+      join(__dirname, '..', '..', 'frontend', 'src', 'components', 'projects', 'ProjectMTO.vue'), 'utf8');
+    chk('layar memanggil daftar template', layar.includes("'/estimator/mto/templates'"), true);
+    chk('layar memanggil pemakaian template', layar.includes('/mto/from-template'), true);
+    chk('tombol simpan template ada', layar.includes('simpanTemplate'), true);
+    // Zona harus dimuat ulang dari server sesudah dipakai — bukan disisipkan
+    // ke layar, supaya yang tampil adalah kuantitas hasil hitung server.
+    chk('memuat ulang dari server sesudah dipakai',
+      /pakaiTemplate[\s\S]{0,1200}fetchAll\(\)/.test(layar), true);
+
   } finally {
-    console.log('\n12. Bersih-bersih');
+    console.log('\n13. Bersih-bersih');
     await dbRun('DELETE FROM mto_zone_templates WHERE code LIKE ?', [`TPL-%${stamp}`]);
     const disapu = await sapuFixture(stamp);
     chk('proposal fixture tersapu', disapu.proposal >= 3, true);
