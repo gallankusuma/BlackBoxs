@@ -4539,6 +4539,177 @@ router.get('/proposals/:id/revisions', authMiddleware, bolehLihat, async (req: R
 });
 
 /** Isi satu revisi — potret BOQ apa adanya saat diterbitkan. */
+// ⚠️ `/banding` didaftarkan SEBELUM `/:revId`. Kalau terbalik, Express
+// mencocokkannya sebagai revId bernama "banding" dan endpoint ini tidak
+// akan pernah terpanggil — jebakan yang sudah dua kali terjadi di repo ini.
+// ═══════════════════════════════════════════════════════════════════════════
+// Pembandingan antar revisi — apa yang berubah, dan KENAPA nilainya berubah
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Bandingkan dua revisi penawaran.
+ *
+ * Ledger sudah menyimpan tiap revisi utuh sejak PROP-REV-R52, tapi tidak ada
+ * yang menyandingkannya. Saat client bertanya "kenapa naik 180 juta", satu-
+ * satunya jawaban adalah membuka dua PDF dan membandingkannya baris per baris.
+ *
+ * Yang membuat ini berguna bukan sekadar daftar selisih, melainkan
+ * **penguraiannya**: perubahan nilai tiap baris dipecah menjadi efek VOLUME dan
+ * efek HARGA.
+ *
+ *   Δnilai      = qty₂×harga₂ − qty₁×harga₁
+ *   efek volume = (qty₂ − qty₁) × harga₁
+ *   efek harga  = qty₂ × (harga₂ − harga₁)
+ *
+ * Keduanya berjumlah persis Δnilai — itu identitas aljabar, bukan pendekatan,
+ * dan tesnya memeriksanya. Tanpa penguraian ini, "beton naik 180 juta" tidak
+ * bisa dijawab: apakah volumenya bertambah, atau harganya yang naik? Kedua
+ * jawaban itu punya konsekuensi komersial yang sama sekali berbeda.
+ */
+router.get('/proposals/:id/revisions/banding', authMiddleware, bolehLihat,
+  async (req: Request, res: Response) => {
+    try {
+      const proposalId = req.params.id;
+      const semua: any[] = await dbAll(
+        `SELECT id, revision_no, status, total_project, direct_cost, overhead,
+                risk_contingency, issued_at, line_count
+         FROM proposal_revisions WHERE proposal_id = ? ORDER BY revision_no`, [proposalId]);
+      if (semua.length < 2) {
+        // Dibedakan tegas dari "tidak ada selisih": belum ada pembanding sama
+        // sekali, dan itu keadaan yang berbeda.
+        return res.json({
+          proposal_id: Number(proposalId),
+          bisa_dibandingkan: false,
+          sebab: semua.length === 0
+            ? 'Proposal ini belum punya revisi.'
+            : 'Baru ada satu revisi — belum ada pembandingnya.',
+          revisions: semua.map((r: any) => ({ id: r.id, revision_no: r.revision_no, status: r.status })),
+        });
+      }
+
+      const cari = (v: any) => {
+        const n = Number(v);
+        return semua.find((r: any) => Number(r.revision_no) === n || Number(r.id) === n);
+      };
+      const ke = req.query.ke ? cari(req.query.ke) : semua[semua.length - 1];
+      const dari = req.query.dari ? cari(req.query.dari) : semua[semua.length - 2];
+      if (!dari || !ke) {
+        return res.status(404).json({
+          error: 'Revisi pembanding tidak ditemukan.', code: 'REVISI_TIDAK_ADA',
+          tersedia: semua.map((r: any) => r.revision_no) });
+      }
+      if (Number(dari.id) === Number(ke.id)) {
+        return res.status(400).json({
+          error: 'Dua revisi yang dibandingkan tidak boleh sama.', code: 'REVISI_SAMA' });
+      }
+
+      const ambil = async (revId: number) => dbAll(
+        `SELECT line_no, is_section, section_label, ahsp_code, description, unit,
+                qty, unit_price, amount, source_item_id
+         FROM proposal_revision_lines WHERE revision_id = ? ORDER BY line_no`, [revId]);
+      const [barisA, barisB] = await Promise.all([ambil(dari.id), ambil(ke.id)]);
+
+      // Dicocokkan lewat `source_item_id` lebih dulu — itu identitas baris yang
+      // sesungguhnya. Nama dan kode bisa disunting antar revisi; id itemnya
+      // tidak. Yang tidak punya id jatuh ke kode+deskripsi.
+      const kunci = (l: any) => l.source_item_id != null
+        ? `id:${l.source_item_id}`
+        : `k:${String(l.ahsp_code || '').trim()}|${String(l.description || '').trim()}`;
+
+      const petaA = new Map<string, any>();
+      for (const l of barisA as any[]) if (Number(l.is_section) !== 1) petaA.set(kunci(l), l);
+      const petaB = new Map<string, any>();
+      for (const l of barisB as any[]) if (Number(l.is_section) !== 1) petaB.set(kunci(l), l);
+
+      const bulat = (n: number) => Math.round(n * 100) / 100;
+      const b4 = (n: number) => Math.round(n * 10000) / 10000;
+      const perubahan: any[] = [];
+      let efekVolume = 0, efekHarga = 0, nilaiDitambah = 0, nilaiDihapus = 0;
+
+      for (const [k, b] of petaB) {
+        const a = petaA.get(k);
+        const qtyB = Number(b.qty) || 0, hargaB = Number(b.unit_price) || 0;
+        if (!a) {
+          nilaiDitambah += Number(b.amount) || 0;
+          perubahan.push({
+            jenis: 'ditambah', kode: b.ahsp_code, nama: b.description, unit: b.unit,
+            qty_dari: null, qty_ke: b4(qtyB), harga_dari: null, harga_ke: bulat(hargaB),
+            nilai_dari: 0, nilai_ke: bulat(Number(b.amount) || 0),
+            delta_nilai: bulat(Number(b.amount) || 0),
+            efek_volume: null, efek_harga: null,
+          });
+          continue;
+        }
+        const qtyA = Number(a.qty) || 0, hargaA = Number(a.unit_price) || 0;
+        const nilaiA = Number(a.amount) || 0, nilaiB = Number(b.amount) || 0;
+        if (Math.abs(qtyA - qtyB) < 0.00005 && Math.abs(hargaA - hargaB) < 0.005) continue;
+
+        const eV = (qtyB - qtyA) * hargaA;
+        const eH = qtyB * (hargaB - hargaA);
+        efekVolume += eV; efekHarga += eH;
+        perubahan.push({
+          jenis: 'berubah', kode: b.ahsp_code, nama: b.description, unit: b.unit,
+          qty_dari: b4(qtyA), qty_ke: b4(qtyB),
+          harga_dari: bulat(hargaA), harga_ke: bulat(hargaB),
+          nilai_dari: bulat(nilaiA), nilai_ke: bulat(nilaiB),
+          delta_nilai: bulat(nilaiB - nilaiA),
+          efek_volume: bulat(eV), efek_harga: bulat(eH),
+        });
+      }
+      for (const [k, a] of petaA) {
+        if (petaB.has(k)) continue;
+        nilaiDihapus += Number(a.amount) || 0;
+        perubahan.push({
+          jenis: 'dihapus', kode: a.ahsp_code, nama: a.description, unit: a.unit,
+          qty_dari: b4(Number(a.qty) || 0), qty_ke: null,
+          harga_dari: bulat(Number(a.unit_price) || 0), harga_ke: null,
+          nilai_dari: bulat(Number(a.amount) || 0), nilai_ke: 0,
+          delta_nilai: bulat(-(Number(a.amount) || 0)),
+          efek_volume: null, efek_harga: null,
+        });
+      }
+
+      // Terbesar dulu menurut besaran mutlak — yang paling menggerakkan angka
+      // adalah yang pertama ditanyakan client.
+      perubahan.sort((x, y) => Math.abs(y.delta_nilai) - Math.abs(x.delta_nilai));
+
+      const dcA = Number(dari.direct_cost) || 0, dcB = Number(ke.direct_cost) || 0;
+      const totA = Number(dari.total_project) || 0, totB = Number(ke.total_project) || 0;
+      const deltaOvh = bulat((Number(ke.overhead) || 0) - (Number(dari.overhead) || 0));
+      const deltaCon = bulat((Number(ke.risk_contingency) || 0) - (Number(dari.risk_contingency) || 0));
+
+      res.json({
+        proposal_id: Number(proposalId),
+        bisa_dibandingkan: true,
+        dari: { id: dari.id, revision_no: dari.revision_no, status: dari.status,
+                issued_at: dari.issued_at, total_project: bulat(totA), direct_cost: bulat(dcA) },
+        ke:   { id: ke.id, revision_no: ke.revision_no, status: ke.status,
+                issued_at: ke.issued_at, total_project: bulat(totB), direct_cost: bulat(dcB) },
+        perubahan,
+        ringkasan: {
+          jml_berubah: perubahan.filter(p => p.jenis === 'berubah').length,
+          jml_ditambah: perubahan.filter(p => p.jenis === 'ditambah').length,
+          jml_dihapus: perubahan.filter(p => p.jenis === 'dihapus').length,
+          // Penguraian: keempatnya berjumlah persis selisih biaya langsung.
+          efek_volume: bulat(efekVolume),
+          efek_harga: bulat(efekHarga),
+          nilai_ditambah: bulat(nilaiDitambah),
+          nilai_dihapus: bulat(-nilaiDihapus),
+          delta_direct_cost: bulat(dcB - dcA),
+          // Lapisan komersial dilaporkan terpisah — kenaikan karena markup
+          // bukan kenaikan karena pekerjaan bertambah, dan client berhak tahu
+          // bedanya.
+          delta_overhead: deltaOvh,
+          delta_contingency: deltaCon,
+          delta_total: bulat(totB - totA),
+        },
+      });
+    } catch (err: any) {
+      console.error('Error membandingkan revisi:', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
 router.get('/proposals/:id/revisions/:revId', authMiddleware, bolehLihat, async (req: Request, res: Response) => {
   try {
     const rev: any = await dbGet(

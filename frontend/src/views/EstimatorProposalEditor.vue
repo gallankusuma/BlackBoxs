@@ -117,6 +117,11 @@
             class="px-5 py-2 rounded-lg text-sm font-semibold transition-all">
             📋 RAB / Anggaran
           </button>
+          <button @click="activeProposalTab = 'revisi'; muatBanding()"
+            :class="activeProposalTab === 'revisi' ? 'bg-amber-600 text-white shadow' : 'text-gray-500 hover:text-gray-700'"
+            class="px-4 py-2 rounded-lg text-sm font-semibold transition-colors">
+            🔀 Banding Revisi
+          </button>
           <button @click="activeProposalTab = 'margin'; muatMargin()"
             :class="activeProposalTab === 'margin' ? 'bg-emerald-600 text-white shadow' : 'text-gray-500 hover:text-gray-700'"
             class="px-4 py-2 rounded-lg text-sm font-semibold transition-colors">
@@ -437,6 +442,112 @@
             :contract-mode="isContractQty"
           />
         </div><!-- end MTO tab -->
+
+        <!-- ═══ BANDING REVISI ═══════════════════════════════════════════
+             Saat client bertanya "kenapa naik 180 juta", jawabannya bukan
+             daftar selisih — melainkan apakah VOLUME-nya bertambah atau
+             HARGA-nya yang naik. Konsekuensi komersialnya berbeda sama sekali. -->
+        <div v-show="activeProposalTab === 'revisi'" class="space-y-4">
+          <p v-if="!banding" class="text-center text-gray-500 py-10">Memuat…</p>
+          <div v-else-if="!banding.bisa_dibandingkan"
+               class="rounded-xl border border-gray-200 bg-gray-50 px-5 py-4 text-sm text-gray-600">
+            {{ banding.sebab }}
+          </div>
+          <template v-else>
+            <div class="flex flex-wrap items-center gap-3">
+              <span class="text-sm text-gray-600">Bandingkan</span>
+              <select v-model="bandingDari" @change="muatBanding" class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+                <option v-for="r in bandingPilihan" :key="'d'+r" :value="r">Revisi #{{ r }}</option>
+              </select>
+              <span class="text-sm text-gray-600">→</span>
+              <select v-model="bandingKe" @change="muatBanding" class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+                <option v-for="r in bandingPilihan" :key="'k'+r" :value="r">Revisi #{{ r }}</option>
+              </select>
+            </div>
+
+            <!-- Penguraian: inilah jawaban atas "kenapa". Keempatnya berjumlah
+                 persis selisih biaya langsung. -->
+            <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+              <div class="bg-white rounded-xl border border-gray-200 p-3">
+                <p class="text-xs text-gray-500">Karena volume</p>
+                <p class="text-sm font-bold" :class="banding.ringkasan.efek_volume >= 0 ? 'text-gray-900' : 'text-emerald-700'">
+                  {{ formatNumber(banding.ringkasan.efek_volume) }}
+                </p>
+              </div>
+              <div class="bg-white rounded-xl border border-gray-200 p-3">
+                <p class="text-xs text-gray-500">Karena harga</p>
+                <p class="text-sm font-bold" :class="banding.ringkasan.efek_harga >= 0 ? 'text-gray-900' : 'text-emerald-700'">
+                  {{ formatNumber(banding.ringkasan.efek_harga) }}
+                </p>
+              </div>
+              <div class="bg-white rounded-xl border border-gray-200 p-3">
+                <p class="text-xs text-gray-500">Baris baru</p>
+                <p class="text-sm font-bold">{{ formatNumber(banding.ringkasan.nilai_ditambah) }}</p>
+              </div>
+              <div class="bg-white rounded-xl border border-gray-200 p-3">
+                <p class="text-xs text-gray-500">Baris dihapus</p>
+                <p class="text-sm font-bold">{{ formatNumber(banding.ringkasan.nilai_dihapus) }}</p>
+              </div>
+              <div class="bg-amber-50 rounded-xl border border-amber-300 p-3">
+                <p class="text-xs text-amber-800">Selisih total</p>
+                <p class="text-sm font-bold text-amber-900">{{ formatNumber(banding.ringkasan.delta_total) }}</p>
+              </div>
+            </div>
+
+            <!-- Kenaikan karena markup bukan kenaikan karena pekerjaan
+                 bertambah — client berhak tahu bedanya. -->
+            <p v-if="banding.ringkasan.delta_overhead || banding.ringkasan.delta_contingency"
+               class="text-xs text-gray-600">
+              Termasuk perubahan lapisan komersial:
+              overhead {{ formatNumber(banding.ringkasan.delta_overhead) }},
+              cadangan risiko {{ formatNumber(banding.ringkasan.delta_contingency) }} —
+              di luar selisih biaya langsung {{ formatNumber(banding.ringkasan.delta_direct_cost) }}.
+            </p>
+
+            <div class="bg-white rounded-xl border border-gray-200 overflow-x-auto">
+              <table class="w-full text-sm">
+                <thead class="bg-gray-50 text-gray-600">
+                  <tr>
+                    <th class="text-left px-3 py-2 font-medium">Pekerjaan</th>
+                    <th class="text-right px-3 py-2 font-medium">Volume</th>
+                    <th class="text-right px-3 py-2 font-medium">Harga satuan</th>
+                    <th class="text-right px-3 py-2 font-medium">Δ nilai</th>
+                    <th class="text-right px-3 py-2 font-medium">karena volume</th>
+                    <th class="text-right px-3 py-2 font-medium">karena harga</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(c, i) in banding.perubahan" :key="i" class="border-t">
+                    <td class="px-3 py-2">
+                      <span class="text-[10px] px-1.5 py-0.5 rounded-full mr-1"
+                            :class="c.jenis === 'ditambah' ? 'bg-emerald-100 text-emerald-700'
+                                    : c.jenis === 'dihapus' ? 'bg-red-100 text-red-700'
+                                    : 'bg-blue-100 text-blue-700'">{{ c.jenis }}</span>
+                      <span class="text-gray-400 mr-1">{{ c.kode }}</span>{{ c.nama }}
+                    </td>
+                    <td class="px-3 py-2 text-right whitespace-nowrap">
+                      {{ c.qty_dari ?? '—' }} → {{ c.qty_ke ?? '—' }}
+                    </td>
+                    <td class="px-3 py-2 text-right whitespace-nowrap text-gray-600">
+                      {{ c.harga_dari === null ? '—' : formatNumber(c.harga_dari) }} →
+                      {{ c.harga_ke === null ? '—' : formatNumber(c.harga_ke) }}
+                    </td>
+                    <td class="px-3 py-2 text-right font-semibold"
+                        :class="c.delta_nilai >= 0 ? 'text-gray-900' : 'text-emerald-700'">
+                      {{ formatNumber(c.delta_nilai) }}
+                    </td>
+                    <td class="px-3 py-2 text-right text-gray-600">
+                      {{ c.efek_volume === null ? '—' : formatNumber(c.efek_volume) }}
+                    </td>
+                    <td class="px-3 py-2 text-right text-gray-600">
+                      {{ c.efek_harga === null ? '—' : formatNumber(c.efek_harga) }}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </template>
+        </div>
 
         <!-- ═══ MARGIN TAB ═══════════════════════════════════════════════
              Mana yang menyumbang margin, mana yang menggerusnya. Sebelumnya
@@ -1606,7 +1717,7 @@ import ProposalTemplateWizard from '@/components/ProposalTemplateWizard.vue';
 const route = useRoute();
 const router = useRouter();
 const proposalId = Array.isArray(route.params.id) ? route.params.id[0] : route.params.id;
-const activeProposalTab = ref<'rab' | 'mto' | 'schedule' | 'payment' | 'margin'>('rab');
+const activeProposalTab = ref<'rab' | 'mto' | 'schedule' | 'payment' | 'margin' | 'revisi'>('rab');
 
 // ── Schedule state ──
 const scheduleData = ref<any>(null);
@@ -1816,6 +1927,34 @@ const mtoTypeIcons: Record<string, string> = {
 const mtoTypeColors: Record<string, string> = {
   foundation: '#fef9c3', column: '#dbeafe', beam: '#ede9fe',
   slab: '#d1fae5', wall: '#f3f4f6', roof: '#fee2e2'
+};
+
+const banding = ref<any>(null);
+const bandingDari = ref<number | null>(null);
+const bandingKe = ref<number | null>(null);
+const bandingPilihan = ref<number[]>([]);
+
+const muatBanding = async () => {
+  try {
+    const q = (bandingDari.value && bandingKe.value)
+      ? `?dari=${bandingDari.value}&ke=${bandingKe.value}` : '';
+    const { data } = await api.get(`/estimator/proposals/${proposalId}/revisions/banding${q}`);
+    banding.value = data;
+    if (data?.bisa_dibandingkan) {
+      // Daftar pilihan diambil sekali dari respons pertama; sesudah itu
+      // pilihan pengguna yang menentukan.
+      if (!bandingPilihan.value.length) {
+        const maks = Math.max(Number(data.ke?.revision_no) || 1, Number(data.dari?.revision_no) || 1);
+        bandingPilihan.value = Array.from({ length: maks }, (_, i) => i + 1);
+      }
+      bandingDari.value = Number(data.dari?.revision_no);
+      bandingKe.value = Number(data.ke?.revision_no);
+    }
+  } catch (e: any) {
+    // Dua revisi sama / tidak ada: pesannya dari server, bukan ditebak layar.
+    banding.value = { bisa_dibandingkan: false,
+      sebab: e?.response?.data?.error || 'Gagal memuat pembandingan revisi.' };
+  }
 };
 
 const margin = ref<any>(null);
