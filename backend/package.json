@@ -60,7 +60,8 @@
     "test:wbs": "tsx tests/project-wbs.ts",
     "test:cutoff": "tsx tests/progress-cutoff.ts",
     "test:evm": "tsx tests/cost-evm.ts",
-    "test:mto-rab": "tsx tests/mto-ke-rab.ts"
+    "test:mto-rab": "tsx tests/mto-ke-rab.ts",
+    "peta:cakupan": "tsx tests/peta-cakupan.ts"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

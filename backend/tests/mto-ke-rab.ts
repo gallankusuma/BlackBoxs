@@ -41,7 +41,45 @@ async function main() {
   const stamp = Date.now().toString().slice(-7);
   const { dbGet, dbAll, dbRun } = await import('../src/config/database');
 
-  console.log('0. Persiapan — AHSP yang cocok, yang salah satuan, dan yang tak relevan');
+  console.log('A. Pencocokan itu sendiri — tanpa HTTP, tanpa database');
+  {
+    const { usulkanAhsp } = await import('../src/modules/estimator/mto/cocok-ahsp');
+    // Katalog tiruan yang memuat jebakan yang benar-benar pernah terjadi.
+    const kat: any[] = [
+      { id: 1, kode: 'GAL.1', satuan: 'm3', harga_satuan: 85000,
+        name: 'Penggalian 1 m3 tanah biasa (Lihat Peraturan Menteri Pekerjaan Umum dan Perumahan Rakyat)' },
+      { id: 2, kode: 'BTN.1', satuan: 'm3', harga_satuan: 1200000, name: 'Pembuatan 1 m3 beton mutu K-300' },
+      { id: 3, kode: 'TUL.1', satuan: 'kg', harga_satuan: 22000,
+        name: '1 kg Penulangan slab untuk BjTS diameter < 12 mm, cara Manual' },
+      { id: 4, kode: 'KRM.1', satuan: 'm2', harga_satuan: 210000, name: 'Pemasangan 1 m2 lantai keramik 60x60' },
+    ];
+
+    // Cacat nyata: pencocokan substring membuat "Lantai KERJA" cocok dengan
+    // "PeKERJAan Umum", sehingga GALIAN TANAH diusulkan untuk lantai kerja.
+    const lean = usulkanAhsp({ code: 'FND-LEAN', label: 'Lantai Kerja', unit: 'm3' }, kat);
+    chk('galian TIDAK diusulkan untuk lantai kerja',
+      lean.some(u => u.kode === 'GAL.1'), false);
+    chk('beton yang diusulkan untuk lantai kerja', lean[0]?.kode, 'BTN.1');
+
+    // Sengkang tidak punya AHSP sendiri di SNI — masuk penulangan per kg.
+    const seng = usulkanAhsp({ code: 'COL-STIRRUP', label: 'Sengkang D10', unit: 'kg' }, kat);
+    chk('sengkang dipetakan ke penulangan', seng[0]?.kode, 'TUL.1');
+
+    // Satuan tetap saringan keras.
+    chk('keramik m2 tidak muncul untuk baris m3',
+      usulkanAhsp({ code: 'SLB-TILE', label: 'Keramik 60x60', unit: 'm3' }, kat).length, 0);
+    chk('dan muncul untuk baris m2',
+      usulkanAhsp({ code: 'SLB-TILE', label: 'Keramik 60x60', unit: 'm2' }, kat)[0]?.kode, 'KRM.1');
+
+    // Tanpa kata kunci jenis pekerjaan, jangan mengusulkan apa pun.
+    chk('kode tak dikenal tidak menghasilkan usulan asal-asalan',
+      usulkanAhsp({ code: 'XX-ENTAH', label: 'Pekerjaan tanah', unit: 'm3' }, kat).length, 0);
+    chk('hasilnya sama tiap dipanggil (deterministik)',
+      JSON.stringify(usulkanAhsp({ code: 'FND-LEAN', label: 'Lantai Kerja', unit: 'm3' }, kat)),
+      JSON.stringify(lean));
+  }
+
+  console.log('\n0. Persiapan — AHSP yang cocok, yang salah satuan, dan yang tak relevan');
   const master: string = (await call('POST', '/auth/login', { email: ADMIN_EMAIL, password: ADMIN_PASS })).json?.token;
   if (!master) { console.log('  FAIL login master'); process.exit(1); }
   pass++; console.log('  ok   login master');
