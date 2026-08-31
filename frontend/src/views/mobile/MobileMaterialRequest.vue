@@ -113,6 +113,19 @@
       </template>
     </template>
 
+    <!-- SERING DIMINTA — yang paling sering harus paling dekat dijangkau. -->
+    <template v-if="tab === 'catalog' && sering.length">
+      <div class="sering-box">
+        <div class="sering-judul">⚡ Sering Anda minta</div>
+        <div class="sering-baris">
+          <button v-for="(x, i) in sering" :key="i" class="sering-chip" @click="tambahDariSering(x)">
+            {{ x.item_name }}
+            <span class="sering-kali">{{ x.kali }}×</span>
+          </button>
+        </div>
+      </div>
+    </template>
+
     <!-- HISTORY TAB -->
     <template v-if="tab === 'history'">
       <div v-if="belumDibaca" class="mr-kabar">
@@ -157,6 +170,13 @@
         </div>
         <div class="history-meta">{{ mr.project_name || '-' }} · {{ mr.item_count }} item · {{ formatDate(mr.created_at) }}</div>
         <div v-if="mr.priority && mr.priority !== 'normal'" class="mr-priority" :class="mr.priority">{{ mr.priority }}</div>
+
+        <!-- Kebutuhan lapangan sangat berulang. Tanpa ini, permintaan yang sama
+             berarti menelusuri katalog dari awal di layar HP sambil berdiri di
+             lokasi. -->
+        <button class="mr-ulang" @click="mintaLagi(mr)" :disabled="memuatUlang">
+          🔁 Minta lagi
+        </button>
 
         <!-- Alasan penolakan. Inilah yang membuat tim lapangan tahu apa yang
              harus diperbaiki, alih-alih mengajukan ulang hal yang sama. -->
@@ -564,6 +584,73 @@ function buangDariAntrean(id: string) {
   tulisAntrean(bacaAntrean().filter((x: any) => x.payload?.client_request_id !== id));
 }
 
+const sering = ref<any[]>([]);
+const memuatUlang = ref(false);
+
+async function loadSering() {
+  try {
+    const res = await mobileApi.get('/api/material-requests/my/sering');
+    sering.value = res.data.data || [];
+  } catch { sering.value = []; }
+}
+
+function tambahDariSering(x: any) {
+  cart.value.push({
+    product_id: x.product_id || null,
+    item_name: x.item_name,
+    spec: x.spec || null,
+    image_url: null,
+    quantity: Number(x.qty_terakhir) || 1,
+    uom: x.uom || 'pcs',
+    notes: null,
+    is_custom: !x.product_id,
+  });
+  showToast(`${x.item_name} ditambahkan`);
+}
+
+/**
+ * Salin isi permintaan lama ke keranjang.
+ *
+ * Produk yang sudah tidak aktif TETAP dibawa dan ditandai, bukan dibuang
+ * diam-diam: membuangnya membuat "minta lagi" menghasilkan permintaan yang
+ * lebih sedikit dari aslinya tanpa ada yang sadar, dan barang yang hilang itu
+ * justru yang paling mungkin dibutuhkan.
+ */
+async function mintaLagi(mr: any) {
+  if (memuatUlang.value) return;
+  memuatUlang.value = true;
+  try {
+    const res = await mobileApi.get(`/api/material-requests/my/${mr.id}`);
+    const items = res.data?.data?.items || [];
+    if (!items.length) { showToast('Permintaan itu tidak punya item', 'error'); return; }
+
+    let takAktif = 0;
+    for (const it of items) {
+      const masihAda = it.product_id ? Number(it.produk_masih_ada) === 1 : true;
+      if (!masihAda) takAktif++;
+      cart.value.push({
+        product_id: masihAda ? it.product_id : null,
+        item_name: it.item_name,
+        spec: it.spec || null,
+        image_url: it.image_url || null,
+        quantity: Number(it.quantity) || 1,
+        uom: it.uom || 'pcs',
+        notes: it.notes || null,
+        // Produk yang sudah tidak ada di katalog diteruskan sebagai item bebas
+        // — tetap bisa diminta, tinggal kantor yang memutuskan.
+        is_custom: !masihAda || !it.product_id,
+        tidak_aktif: !masihAda,
+      });
+    }
+    tab.value = 'cart';
+    showToast(takAktif
+      ? `${items.length} item disalin — ${takAktif} sudah tidak ada di katalog, periksa dulu`
+      : `${items.length} item disalin dari ${mr.mr_number}`);
+  } catch (e: any) {
+    showToast(e?.response?.data?.error || 'Gagal menyalin permintaan', 'error');
+  } finally { memuatUlang.value = false; }
+}
+
 async function submitMR() {
   if (!cart.value.length) return;
   submitting.value = true;
@@ -618,6 +705,7 @@ onMounted(() => {
   emp.value = JSON.parse(stored);
   loadCatalog();
   loadProjects();
+  loadSering();
   kirimAntrean(true);
 });
 </script>
@@ -776,4 +864,21 @@ onMounted(() => {
   border: 1px solid #fca5a5; background: #fff; color: #b91c1c;
   border-radius: 8px; padding: 4px 8px; font-size: 11px; font-weight: 700;
 }
+
+.mr-ulang {
+  margin-top: 8px; width: 100%; border: 1px solid #bfdbfe; background: #eff6ff;
+  color: #1d4ed8; border-radius: 8px; padding: 7px; font-size: 12px; font-weight: 700;
+}
+.mr-ulang:disabled { opacity: .5; }
+.sering-box {
+  background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 12px;
+  padding: 10px 12px; margin-bottom: 12px;
+}
+.sering-judul { font-size: 12px; font-weight: 800; color: #166534; margin-bottom: 8px; }
+.sering-baris { display: flex; flex-wrap: wrap; gap: 6px; }
+.sering-chip {
+  border: 1px solid #86efac; background: #fff; color: #166534;
+  border-radius: 999px; padding: 6px 10px; font-size: 12px; font-weight: 600;
+}
+.sering-kali { color: #16a34a; font-weight: 800; margin-left: 4px; font-size: 10px; }
 </style>

@@ -122,6 +122,72 @@ router.put('/my/tandai-dibaca', mobileAuthMiddleware, async (req: MobileAuthRequ
   }
 });
 
+/**
+ * Barang yang SERING diminta pemohon ini.
+ *
+ * Kebutuhan lapangan sangat berulang — semen, besi, kawat, sarung tangan. Tanpa
+ * ini, tiap permintaan berarti menelusuri katalog dari awal di layar HP,
+ * sambil berdiri di lokasi. Diurutkan menurut seberapa sering, bukan menurut
+ * abjad: yang paling sering diminta harus paling dekat dijangkau.
+ *
+ * ⚠️ Didaftarkan SEBELUM `/my/:id` — kalau terbalik, Express membacanya sebagai
+ * id bernama "sering" dan endpoint ini tidak pernah terpanggil.
+ */
+router.get('/my/sering', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Response) => {
+  try {
+    const rows = await dbAll(
+      `SELECT i.item_name, i.uom, i.product_id, i.spec,
+              COUNT(*) AS kali, MAX(m.created_at) AS terakhir,
+              SUBSTRING_INDEX(GROUP_CONCAT(i.quantity ORDER BY m.created_at DESC), ',', 1) AS qty_terakhir
+       FROM material_request_items i
+       JOIN material_requests m ON m.id = i.mr_id
+       WHERE m.employee_id = ?
+       GROUP BY i.item_name, i.uom, i.product_id, i.spec
+       ORDER BY kali DESC, terakhir DESC
+       LIMIT 12`, [req.employeeId]);
+    res.json({ data: rows });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Satu MR milik pemohon ini, berikut itemnya — untuk "minta lagi".
+ *
+ * Discope ke `employee_id` dari TOKEN, bukan dari parameter: tanpa itu, siapa
+ * pun bisa membaca isi permintaan orang lain hanya dengan menebak id.
+ */
+router.get('/my/:id', mobileAuthMiddleware, async (req: MobileAuthRequest, res: Response) => {
+  try {
+    const mr: any = await dbGet(
+      `SELECT id, mr_number, status, priority, project_id, project_name, notes, created_at
+       FROM material_requests WHERE id = ? AND employee_id = ?`,
+      [req.params.id, req.employeeId]);
+    if (!mr) {
+      // 404, bukan 403: memberi tahu bahwa MR itu ADA tapi milik orang lain
+      // sudah membocorkan keberadaannya.
+      return res.status(404).json({ error: 'Permintaan tidak ditemukan' });
+    }
+
+    // Produk yang sudah tidak aktif ikut dibawa, TAPI ditandai. Membuangnya
+    // diam-diam membuat "minta lagi" menghasilkan permintaan yang lebih sedikit
+    // dari aslinya tanpa ada yang tahu.
+    const items = await dbAll(
+      `SELECT i.id, i.product_id, i.item_name, i.quantity, i.uom, i.notes,
+              i.image_url, i.spec,
+              (p.id IS NOT NULL AND p.active = 1) AS produk_masih_ada,
+              p.name AS nama_sekarang
+       FROM material_request_items i
+       LEFT JOIN products p ON p.id = i.product_id
+       WHERE i.mr_id = ?
+       ORDER BY i.id`, [req.params.id]);
+
+    res.json({ data: { ...mr, items } });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /all — list all MRs (for admin/office)
 router.get('/all', authMiddleware, async (req: Request, res: Response) => {
   try {

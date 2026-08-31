@@ -218,6 +218,49 @@ async function main() {
     chk('dan keranjang dipertahankan kalau gagal simpan',
       layar.includes('jangan tutup halaman ini'), true);
 
+    console.log('\n7e. Minta lagi: hanya milik sendiri, dan yang tak aktif TIDAK dibuang');
+    const detail = await call('GET', `/material-requests/my/${mrSetuju}`, undefined, tokMobile);
+    chk('MR sendiri terbaca berikut itemnya', (detail.json?.data?.items || []).length > 0, true);
+    // 404, bukan 403: memberi tahu bahwa MR itu ADA tapi milik orang lain sudah
+    // membocorkan keberadaannya.
+    chk('MR orang lain 404', (await call('GET',
+      `/material-requests/my/${mrLain.insertId}`, undefined, tokMobile)).status, 404);
+    chk('tanpa token 401', (await call('GET', `/material-requests/my/${mrSetuju}`)).status, 401);
+
+    // Item dengan produk yang sudah tidak aktif tetap ikut, dan ditandai.
+    const prod: any = await dbRun(
+      `INSERT INTO products (sku, name, active) VALUES (?, ?, 0)`,
+      [`SKU-MATI-${stamp}`, `Barang mati ${stamp}`]);
+    const mrMati: any = await dbRun(
+      `INSERT INTO material_requests (mr_number, employee_id, employee_name, status)
+       VALUES (?, ?, ?, 'pending')`, [`MRZ-${stamp}`, empId, `Pekerja Uji ${stamp}`]);
+    await dbRun(
+      `INSERT INTO material_request_items (mr_id, product_id, item_name, quantity, uom)
+       VALUES (?, ?, ?, 2, 'pcs')`, [mrMati.insertId, prod.insertId, `Barang mati ${stamp}`]);
+    const dMati = await call('GET', `/material-requests/my/${mrMati.insertId}`, undefined, tokMobile);
+    const itMati = (dMati.json?.data?.items || [])[0];
+    chk('item tetap dibawa, tidak dibuang', !!itMati, true);
+    chk('tapi ditandai produknya tidak aktif', Number(itMati?.produk_masih_ada), 0);
+
+    console.log('\n7f. Sering diminta: diurutkan menurut frekuensi, bukan abjad');
+    const sering = await call('GET', '/material-requests/my/sering', undefined, tokMobile);
+    chk('terbaca', sering.status, 200);
+    const daftarSering: any[] = sering.json?.data || [];
+    chk('ada isinya', daftarSering.length > 0, true);
+    chk('menurun menurut jumlah kali',
+      daftarSering.every((x: any, i: number) => i === 0 || Number(daftarSering[i-1].kali) >= Number(x.kali)), true);
+    chk('membawa qty terakhir untuk mengisi otomatis',
+      daftarSering[0]?.qty_terakhir !== undefined, true);
+    // Rute literal tidak boleh tertelan /my/:id.
+    chk('/my/sering bukan dibaca sebagai id', Array.isArray(sering.json?.data), true);
+    chk('sering tanpa token 401', (await call('GET', '/material-requests/my/sering')).status, 401);
+
+    console.log('\n7g. Layar menyediakan keduanya');
+    chk('tombol minta lagi ada', layar.includes('mintaLagi'), true);
+    chk('yang tidak aktif diberitahukan, bukan disembunyikan',
+      layar.includes('sudah tidak ada di katalog'), true);
+    chk('chip sering diminta ada', layar.includes('tambahDariSering'), true);
+
     console.log('\n7d. Endpoint unggah foto tetap terjaga scope mobile');
     const fdKosong = new FormData();
     chk('unggah tanpa token 401',
@@ -244,6 +287,7 @@ async function main() {
     await dbRun('DELETE FROM material_requests WHERE mr_number LIKE ?', [`%${stamp}%`]);
     await dbRun('DELETE FROM material_requests WHERE employee_name LIKE ?', [`%${stamp}%`]);
     await dbRun('DELETE FROM employees WHERE code LIKE ?', [`MR%${stamp}`]);
+    await dbRun('DELETE FROM products WHERE sku LIKE ?', [`SKU-MATI-%${stamp}`]);
     const sisa: any = await dbGet('SELECT COUNT(*) n FROM employees WHERE code LIKE ?', [`MR%${stamp}`]);
     chk('karyawan fixture tersapu', Number(sisa?.n), 0);
     const yatim: any = await dbGet(
