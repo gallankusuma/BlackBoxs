@@ -11818,3 +11818,130 @@ ada di dist yang berjalan. Smoke produksi **30 lulus, 1 gagal**; satu-satunya
 kegagalan tetap temuan lama `kredensial master publik ditolak` karena login
 hard-code masih diterima. Sesuai keputusan user, masalah login itu ditunda dan
 deploy guard tidak melakukan rollback. Tidak ada kegagalan smoke lain.
+
+---
+
+## [DEV] DITERAPKAN — modul perencanaan anggaran tahunan CAPEX/OPEX — 31 Agustus 2026
+
+**Bukan butir reviewer.** Ini permintaan langsung user, yang membingkai ulang
+seluruh sistem: aplikasi ini melayani **satu departemen engineering di pabrik
+kimia**, yang scope-nya mengelola **CAPEX dan OPEX tahunan** — dari perencanaan
+akhir tahun bersama departemen terkait, lewat proposal teknis/komersial (sudah
+ada di Estimator), sampai realisasi akhir.
+
+### Lubang yang ditutup
+
+Sebelum ini tidak ada satu pun layar yang bisa menjawab **"pagu CAPEX tahun ini
+sudah habis berapa?"**. Estimator menghitung penawaran, Project mengeksekusi,
+Finance mencatat tagihan — tetapi tidak ada tempat yang memegang *batas*. Rantai
+perencanaan → penawaran → pelaksanaan putus di ujung hulunya.
+
+### Yang dibangun
+
+`ensureBudgetSchema` (`config/database.ts`) + `routes/budget.routes.ts` +
+`views/AnnualBudget.vue` (menu **Estimator → Anggaran Tahunan**, di atas
+Proposal karena memang di hulunya).
+
+| Tabel | Isi |
+|---|---|
+| `budget_years` | tahun (UNIQUE), status `planning/approved/active/closed`, pagu CAPEX & OPEX |
+| `budget_lines` | pekerjaan yang direncanakan: jenis, judul, departemen pemohon, justifikasi, prioritas, nilai rencana, status, `is_unplanned` + alasannya |
+| `proposals.budget_line_id` | tautan proposal ke baris anggaran — **INDEX, bukan FK** |
+
+Endpoint: `GET/POST /budget/years`, `PUT /years/:id/status`,
+`POST /years/:id/lines`, `GET /years/:id/lines`, `GET /years/:id/serapan`,
+`PUT /lines/:id/status`, `PUT /lines/:id/proposal/:proposalId`.
+
+### Dua keputusan pemilik yang dikunci di skema
+
+1. **Satu pagu dipegang Engineering.** `requesting_department` adalah atribut
+   baris, bukan sumbu anggaran — departemen lain mengajukan, Engineering yang
+   memegang pagunya.
+2. **Pekerjaan di luar rencana memakai tabel yang SAMA** dengan bendera
+   `is_unplanned`, bukan tabel terpisah. Alasannya: harus ada **satu** tempat
+   yang menjawab "berapa yang boleh dibelanjakan".
+
+### Empat angka yang sengaja tidak digabung
+
+Menggabungkannya adalah cara paling umum sebuah laporan anggaran menipu
+pembacanya di pertengahan tahun:
+
+- **pagu** — batas yang disetujui manajemen
+- **rencana** — jumlah baris yang sudah **disetujui** (bisa jauh di bawah pagu;
+  selisihnya dilaporkan sebagai `belum_dialokasikan`, bukan diam-diam dianggap
+  sudah direncanakan)
+- **terikat** — sudah ada kontrak/deal
+- **realisasi** — sudah jadi tagihan/biaya nyata
+
+**`sisa_pagu` memakai TERIKAT, bukan realisasi.** Uangnya pergi saat kontrak
+diteken, bukan saat invoice dibayar; memakai realisasi membuat pagu terlihat
+longgar sepanjang tahun lalu habis mendadak di bulan terakhir. Mutasi
+`pagu − realisasi` membuat sisa terbaca 900 jt padahal 200 jt — tes menangkapnya.
+
+Nilai terikat diambil dari **kontrak** (`original_value` + Σ CO `approved`) kalau
+ada, baru jatuh ke revisi penawaran terbit. CO `submitted` **tidak** ikut. Tes
+sengaja memasang revisi 300 jt di atas kontrak 350 jt+CO 50 jt: kalau laporan
+salah memakai revisi, angkanya meleset dan tes gagal.
+
+### Penjagaan yang ditegakkan
+
+- Baris yang **masih usulan tidak bisa dibebani proposal** (`BARIS_BELUM_DISETUJUI`)
+  — pekerjaan tidak boleh jalan di atas pagu yang belum ada.
+- Tahun yang sudah `approved`/`active` **hanya menerima baris unplanned**
+  (`HARUS_UNPLANNED`), dan unplanned **wajib beralasan**
+  (`ALASAN_UNPLANNED_WAJIB`). Tanpa ini, "rencana" dan "yang muncul di tengah
+  jalan" tidak bisa dibedakan lagi di akhir tahun — padahal `porsi_unplanned_pct`
+  adalah satu-satunya angka yang menilai kualitas perencanaan tahun sebelumnya.
+- Baris yang sudah dipakai proposal **tidak bisa dibatalkan diam-diam**
+  (`BARIS_SUDAH_DIPAKAI`, menyebut jumlah proposalnya).
+- Proposal **tidak bisa dipindah antar baris** (`PROPOSAL_SUDAH_DIBEBANKAN`) —
+  memindahkannya menggeser dua pagu sekaligus tanpa jejak.
+- Tahun `closed` **tidak bisa dibuka lagi** — angka yang sudah dilaporkan ke
+  manajemen tidak boleh berubah setelah dilaporkan.
+- **Melebihi pagu ditampilkan negatif**, tidak dipotong ke nol. Sisa yang dipaksa
+  nol menyembunyikan justru keadaan yang paling perlu dilihat.
+- Dua proposal di satu project **tidak menggandakan realisasi** — AP dan biaya
+  melekat pada project, bukan proposal.
+- `proposals.budget_line_id` sengaja INDEX, bukan FK: merapikan baris anggaran
+  tidak boleh melenyapkan proposal yang sudah dikirim ke pihak lain. Diuji.
+
+### Verifikasi
+
+`tests/budget.ts` — **69 lulus, 0 gagal**. `npm run test:all`: **3162 lulus,
+0 gagal**. `tsc --noEmit` bersih, `npm run build` frontend bersih.
+
+Lima mutasi dijalankan, semuanya tertangkap; satu mutasi kontrol (perubahan tanpa
+efek) lulus seperti seharusnya:
+
+| Mutasi | Hasil |
+|---|---|
+| `sisa_pagu` pakai realisasi | 2 gagal |
+| dedup realisasi per project dilepas | 1 gagal |
+| CO `submitted` ikut dihitung | 6 gagal |
+| baris belum disetujui boleh dibebani | 1 gagal |
+| tahun berjalan terima rencana baru diam-diam | 2 gagal |
+| *kontrol:* tambahan tanpa efek | 0 gagal ✓ |
+
+### PERLU KLARIFIKASI — sambungan ke Asset Management
+
+User menyatakan: *"nanti setelah selesai pelaksanaan akan di integrasikan dengan
+modul aset management"*. Itu memang pasangan alami CAPEX — pekerjaan selesai →
+**aset lahir dengan biaya aktualnya**, dan itulah yang membedakan CAPEX dari
+OPEX secara akuntansi.
+
+Rantainya sudah tersambung sampai project (`budget_line → proposal → project →
+contract`), jadi serah-terima ke aset tinggal satu mata rantai terakhir. Yang
+belum bisa saya putuskan sendiri, dan **belum saya bangun**:
+
+1. **Biaya perolehan aset diambil dari mana** — nilai kontrak (terikat), atau
+   realisasi aktual (AP + biaya project)? Keduanya sah; yang kedua lebih benar
+   secara akuntansi tapi baru final setelah semua tagihan masuk.
+2. **Satu baris CAPEX = satu aset, atau bisa banyak?** Revamp reaktor bisa
+   melahirkan beberapa asset tag sekaligus, dan biayanya harus dialokasikan.
+3. **Pemicunya apa** — project berstatus selesai, atau tindakan manual
+   "kapitalisasi" oleh yang berwenang? Otomatis berisiko melahirkan aset dari
+   project yang ditutup karena batal.
+
+Saya sengaja **tidak menebak** ketiganya: kolom `asset_id` yang dipasang sekarang
+tanpa jawaban ini akan mengunci pilihan yang salah. Modul anggaran ini berdiri
+utuh tanpanya, dan sambungan aset bisa dipasang setelah ketiganya diputuskan.

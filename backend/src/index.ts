@@ -50,6 +50,7 @@ import ppicRoutes from './routes/ppic.routes';
 import webauthnRoutes from './routes/webauthn.routes';
 import documentsRoutes from './routes/documents.routes';
 import materialRequestRoutes from './routes/material-request.routes';
+import budgetRoutes from './routes/budget.routes';
 import assetRoutes from './routes/asset.routes';
 
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
@@ -181,6 +182,7 @@ app.use('/api/ppic', ppicRoutes);
 app.use('/api/webauthn', webauthnRoutes);
 app.use('/api/documents', documentsRoutes);
 app.use('/api/material-requests', materialRequestRoutes);
+app.use('/api/budget', budgetRoutes);
 // ==================== BERKAS UNGGAHAN (DR-P0-05) ====================
 //
 // Dulu SELURUH folder `uploads` dilayani statis tanpa auth, melewati semua route

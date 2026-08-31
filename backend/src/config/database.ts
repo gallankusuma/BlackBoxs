@@ -1643,6 +1643,93 @@ const ensureMrIdempotencySchema = async (connection: any) => {
   ]) await execSchemaEnsure(connection, sql);
 };
 
+/**
+ * Perencanaan CAPEX & OPEX tahunan — hulu dari seluruh alur.
+ *
+ * Sistem ini semula mengalir dari penawaran ke luar: opportunity → proposal →
+ * menang → kontrak → project. Itu bentuk kontraktor yang menjual ke client.
+ *
+ * Untuk departemen engineering di dalam pabrik, titik awalnya berbeda: bukan
+ * tender, melainkan **anggaran tahunan yang disetujui**. Yang menentukan boleh
+ * tidaknya sebuah pekerjaan berjalan bukan menang tender, tapi apakah masih ada
+ * pagu.
+ *
+ * Dua keputusan pemilik yang membentuk skema ini:
+ *
+ * 1. **Satu pagu dipegang Engineering** (bukan per departemen pengusul).
+ *    Departemen lain mengusulkan; yang membebani pagu adalah PEKERJAANNYA.
+ *    Karena itu `requesting_department` hanya atribut, bukan sumbu pagu.
+ *
+ * 2. **Pekerjaan di luar rencana boleh jalan** asal disetujui dan tercatat.
+ *    Itu tidak dibuat sebagai konsep terpisah: ia tetap baris anggaran, hanya
+ *    ditandai `is_unplanned`. Dengan begitu tetap ada SATU tempat yang menjawab
+ *    "apa yang boleh dibelanjakan", dan laporan tinggal memisahkannya. Konsep
+ *    kedua akan berarti dua sumber kebenaran untuk pertanyaan yang sama.
+ */
+const ensureBudgetSchema = async (connection: any) => {
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS budget_years (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      year SMALLINT NOT NULL,
+      -- planning → approved → active → closed
+      status VARCHAR(20) NOT NULL DEFAULT 'planning',
+      -- Pagu total yang disetujui manajemen. Baris anggaran di bawahnya harus
+      -- muat di dalamnya, dan selisihnya dilaporkan — bukan diam-diam lewat.
+      capex_ceiling DECIMAL(18,2) NULL,
+      opex_ceiling DECIMAL(18,2) NULL,
+      approved_by INT NULL,
+      approved_at DATETIME NULL,
+      closed_at DATETIME NULL,
+      note VARCHAR(500) NULL,
+      created_by INT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_budget_year (year)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS budget_lines (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      budget_year_id INT NOT NULL,
+      code VARCHAR(50) NOT NULL,
+      -- capex | opex. Dipisah karena persetujuan, pelaporan, dan perlakuan
+      -- akuntansinya memang berbeda.
+      type VARCHAR(10) NOT NULL,
+      title VARCHAR(255) NOT NULL,
+      description VARCHAR(1000) NULL,
+      -- Departemen PENGUSUL — atribut, bukan pemilik pagu.
+      requesting_department VARCHAR(100) NULL,
+      category VARCHAR(100) NULL,
+      justification VARCHAR(1000) NULL,
+      priority VARCHAR(20) NOT NULL DEFAULT 'normal',
+      planned_amount DECIMAL(18,2) NOT NULL DEFAULT 0,
+      -- usulan → disetujui | ditolak | dibatalkan
+      status VARCHAR(20) NOT NULL DEFAULT 'usulan',
+      -- Pekerjaan yang tidak ada di rencana tahunan. Boleh jalan, tapi harus
+      -- disetujui dan alasannya tercatat — dan laporan memisahkannya, karena
+      -- porsi unplanned yang membesar adalah gejala perencanaan yang meleset.
+      is_unplanned TINYINT(1) NOT NULL DEFAULT 0,
+      unplanned_reason VARCHAR(500) NULL,
+      approved_by INT NULL,
+      approved_at DATETIME NULL,
+      rejected_reason VARCHAR(500) NULL,
+      created_by INT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_budget_line_code (budget_year_id, code),
+      KEY idx_bl_year (budget_year_id, type, status),
+      CONSTRAINT fk_bl_year FOREIGN KEY (budget_year_id)
+        REFERENCES budget_years(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+  // Proposal membebani satu baris anggaran. Index saja, bukan FK: proposal
+  // sudah berisi data produksi dan menghapus baris anggaran tidak boleh
+  // menyentuh penawaran yang sudah dikirim.
+  for (const sql of [
+    'ALTER TABLE proposals ADD COLUMN IF NOT EXISTS budget_line_id INT NULL',
+    'ALTER TABLE proposals ADD INDEX idx_prop_budget (budget_line_id)',
+  ]) await execSchemaEnsure(connection, sql);
+};
+
 const ensureRouteModuleSchema = async (connection: any) => {
   const statements = [
     `CREATE TABLE IF NOT EXISTS inbox_notifications (
@@ -2947,6 +3034,7 @@ export async function initializeDatabase() {
     await ensureOpportunitySchema(connection);
     await ensureMaterialRequestOutcomeSchema(connection);
     await ensureMrIdempotencySchema(connection);
+    await ensureBudgetSchema(connection);
     await ensureContractLedgerSchema(connection);
     await ensureMobilePinSchema(connection);
     await ensureAssetDepreciationSchema(connection);

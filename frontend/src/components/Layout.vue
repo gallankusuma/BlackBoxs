@@ -342,6 +342,14 @@ const mainMenus: MenuItem[] = [
     label: 'Estimator',
     icon: 'calculator',
     submenus: [
+      // Anggaran tahunan berada di HULU proposal: baris anggaran yang disetujui
+      // adalah pagu yang kemudian dibebani proposal. Karena itu ia dipasang di
+      // atas 'Proposal', bukan di modul Finance.
+      //
+      // permKey memakai resource yang SUDAH ada di tabel permissions (dijaga
+      // `test:rbac`); mengarang nama baru berarti menunya hilang untuk semua
+      // orang kecuali master. Audiensnya sama dengan yang menyusun proposal.
+      { id: 'annual-budget', label: 'Anggaran Tahunan', route: '/budget', permKey: 'estimator.estimator-proposals' },
       { id: 'estimator-proposals', label: 'Proposal', route: '/estimator', permKey: 'estimator.estimator-proposals' },
       { id: 'estimator-ahsp', label: 'AHSP', route: '/estimator/ahsp', permKey: 'estimator.estimator-ahsp' },
       { id: 'estimator-masters', label: 'Satuan Dasar Harga', route: '/estimator/masters', permKey: 'estimator.estimator-masters' },
