@@ -3,6 +3,7 @@ import { dbAll, dbGet, dbRun, withTransaction, TxRunner } from '../config/databa
 import { authMiddleware } from '../middleware/auth';
 import { requirePermission } from '../middleware/permission';
 import { validateUpload, storeValidatedFile, removeStoredFile } from '../utils/file-validation';
+import { hargaVendorAktif } from '../utils/vendor-price';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
@@ -1157,9 +1158,10 @@ router.post('/purchase-requests/:prId/bids', authMiddleware, requirePermission('
     if (vendor_id) {
       try {
         const vprices = await dbAll(
-          `SELECT product_id, price, lead_time_days FROM vendor_prices 
-           WHERE vendor_id = ? AND (valid_until IS NULL OR valid_until >= CURDATE())
-           ORDER BY effective_date DESC`,
+          `SELECT vp.product_id, vp.price, vp.lead_time_days FROM vendor_prices vp
+           WHERE vp.vendor_id = ? AND (vp.valid_until IS NULL OR vp.valid_until >= CURDATE())
+             AND ${hargaVendorAktif()}
+           ORDER BY vp.effective_date DESC`,
           [vendor_id]
         ) as any[];
         // Map by product_id (first match = latest effective_date)
@@ -3370,7 +3372,7 @@ router.get('/price-search', authMiddleware, requirePermission('procurement.vendo
                 v.name AS vendor_name, v.code AS vendor_code
          FROM vendor_prices vp
          LEFT JOIN vendors v ON vp.vendor_id = v.id
-         WHERE vp.product_id = ?
+         WHERE vp.product_id = ? AND ${hargaVendorAktif()}
          ORDER BY vp.effective_date DESC
          LIMIT 5`,
         [prod.id]
@@ -3458,15 +3460,23 @@ router.get('/products/:product_id/last-po-price', authMiddleware, requirePermiss
 // Vendor Price List
 router.get('/vendor-prices', authMiddleware, requirePermission('procurement.vendor-price-list.view'), async (req: Request, res: Response) => {
   try {
-    const { vendor_id, product_id } = req.query;
+    const { vendor_id, product_id, status } = req.query;
     let query = `
       SELECT vp.*, v.name as vendor_name, v.code as vendor_code,
              p.name as product_name, p.sku as product_sku,
-             u.full_name as created_by_name
+             u.full_name as created_by_name,
+             sup.full_name as approved_by_supervisor_name,
+             mgr.full_name as approved_by_manager_name,
+             rej.full_name as rejected_by_name,
+             induk.price as harga_sebelumnya
       FROM vendor_prices vp
       LEFT JOIN vendors v ON vp.vendor_id = v.id
       LEFT JOIN products p ON vp.product_id = p.id
       LEFT JOIN users u ON vp.created_by = u.id
+      LEFT JOIN users sup ON vp.approved_by_supervisor_id = sup.id
+      LEFT JOIN users mgr ON vp.approved_by_manager_id = mgr.id
+      LEFT JOIN users rej ON vp.rejected_by = rej.id
+      LEFT JOIN vendor_prices induk ON vp.revision_of = induk.id
       WHERE 1=1
     `;
     const params: any[] = [];
@@ -3479,6 +3489,17 @@ router.get('/vendor-prices', authMiddleware, requirePermission('procurement.vend
       query += ' AND vp.product_id = ?';
       params.push(product_id);
     }
+
+    // Layar INI justru harus bisa melihat baris yang menunggu persetujuan —
+    // di sinilah orang menyetujuinya. Yang tidak boleh melihatnya adalah modul
+    // lain yang memakai harganya; itu urusan hargaVendorAktif() di query
+    // masing-masing, bukan di sini.
+    if (status === 'menunggu') query += ' AND vp.approval_status < 2 AND vp.rejected_at IS NULL AND vp.superseded_at IS NULL';
+    else if (status === 'pending') query += ' AND vp.approval_status = 0 AND vp.rejected_at IS NULL AND vp.superseded_at IS NULL';
+    else if (status === 'partial') query += ' AND vp.approval_status = 1 AND vp.superseded_at IS NULL';
+    else if (status === 'approved') query += ` AND ${hargaVendorAktif()}`;
+    else if (status === 'rejected') query += ' AND vp.rejected_at IS NOT NULL';
+    else if (status === 'superseded') query += ' AND vp.superseded_at IS NOT NULL';
     
     query += ' ORDER BY vp.effective_date DESC, vp.created_at DESC';
     
@@ -3506,10 +3527,14 @@ router.post('/vendor-prices', authMiddleware, requirePermission('procurement.ven
     }
 
     console.log('[VendorPrice] userId:', userId, 'createdBy:', createdBy);
+    // approval_status ditulis EKSPLISIT 0, tidak menumpang default kolom.
+    // Default kolom pernah harus bernilai 2 sesaat saat migrasi menandai data
+    // warisan; menggantungkan status harga baru pada nilai default membuat
+    // gerbang ini bergantung pada urutan migrasi, bukan pada niat kode.
     const insertSql = `
       INSERT INTO vendor_prices 
-      (vendor_id, product_id, price, currency, effective_date, valid_until, min_order_qty, lead_time_days, notes, created_by)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (vendor_id, product_id, price, currency, effective_date, valid_until, min_order_qty, lead_time_days, notes, created_by, approval_status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
     `;
     const insertParams = [
       vendor_id,
@@ -3538,7 +3563,11 @@ router.post('/vendor-prices', authMiddleware, requirePermission('procurement.ven
     
     const vpId = result.insertId;
     
-    res.status(201).json({ message: 'Vendor price created', data: { id: vpId } });
+    res.status(201).json({
+      message: 'Harga vendor dibuat dan menunggu persetujuan. Harga ini belum dipakai PR/PO sampai disetujui.',
+      approval_status: 0,
+      data: { id: vpId }
+    });
   } catch (error: any) {
     console.error('Error creating vendor price:', error);
     res.status(500).json({ error: 'Failed to create vendor price' });
@@ -3548,15 +3577,105 @@ router.post('/vendor-prices', authMiddleware, requirePermission('procurement.ven
 router.put('/vendor-prices/:id', authMiddleware, requirePermission('procurement.vendor-price-list.edit'), async (req: Request, res: Response) => {
   try {
     const { price, currency, effective_date, valid_until, min_order_qty, lead_time_days, notes } = req.body;
-    
+    const userId = (req as any).user?.userId;
+
+    const row: any = await dbGet('SELECT * FROM vendor_prices WHERE id = ?', [req.params.id]);
+    if (!row) return res.status(404).json({ error: 'Harga vendor tidak ditemukan' });
+
+    if (row.superseded_at) {
+      return res.status(409).json({
+        error: 'Harga ini sudah digantikan revisi yang lebih baru, jadi tidak bisa diubah lagi.',
+        code: 'SUDAH_DIGANTIKAN',
+        superseded_by: row.superseded_by,
+      });
+    }
+
+    // Harga yang sudah berlaku TIDAK diubah di tempat. PR dan PO yang sedang
+    // berjalan memakainya sebagai dasar; menimpanya berarti mengubah dasar
+    // harga tanpa satu pun persetujuan, dan angka lamanya hilang tanpa jejak.
+    // Perubahan menjadi baris revisi yang menunggu persetujuan sendiri.
+    if (Number(row.approval_status) === 2) {
+      const revisiTerbuka: any = await dbGet(
+        'SELECT id FROM vendor_prices WHERE revision_of = ? AND approval_status < 2 AND rejected_at IS NULL LIMIT 1',
+        [row.id]
+      );
+      // Dua revisi terbuka atas induk yang sama akan sama-sama bisa disetujui,
+      // dan yang kedua menggantikan induk yang sudah digantikan yang pertama —
+      // harga mana yang berlaku menjadi tidak bisa dijawab.
+      if (revisiTerbuka) {
+        return res.status(409).json({
+          error: 'Harga ini sudah punya revisi yang menunggu persetujuan. Selesaikan revisi itu dulu.',
+          code: 'REVISI_MASIH_TERBUKA',
+          revision_id: revisiTerbuka.id,
+        });
+      }
+
+      let createdBy: number | null = null;
+      if (userId) {
+        const u = await dbGet('SELECT id FROM users WHERE id = ?', [userId]);
+        if (u) createdBy = userId;
+      }
+
+      // vendor_id dan product_id diambil dari baris INDUK, bukan dari body.
+      // Revisi yang boleh menunjuk vendor/produk lain bukan revisi — ia harga
+      // baru yang menyamar, dan persetujuannya akan mematikan harga yang tidak
+      // ada hubungannya dengannya.
+      const ins = await dbRun(
+        `INSERT INTO vendor_prices
+         (vendor_id, product_id, price, currency, effective_date, valid_until,
+          min_order_qty, lead_time_days, notes, created_by, approval_status, revision_of)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+        [
+          row.vendor_id, row.product_id,
+          price ?? row.price,
+          currency || row.currency || 'IDR',
+          effective_date || row.effective_date,
+          valid_until || null,
+          min_order_qty ?? null,
+          lead_time_days ?? null,
+          notes ?? null,
+          createdBy,
+          row.id,
+        ]
+      );
+
+      return res.status(201).json({
+        message: 'Perubahan disimpan sebagai revisi dan menunggu persetujuan. Harga lama tetap berlaku sampai revisi ini disetujui.',
+        revision: true,
+        approval_status: 0,
+        data: { id: ins.insertId, revision_of: row.id },
+      });
+    }
+
+    // Masih menunggu, disetujui sebagian, atau pernah ditolak → boleh diubah di
+    // tempat. Tapi persetujuan yang sudah terkumpul DICABUT: supervisor
+    // menyetujui angka tertentu, dan begitu angkanya berubah persetujuan itu
+    // tidak lagi berlaku atas apa pun.
     await dbRun(`
       UPDATE vendor_prices 
       SET price = ?, currency = ?, effective_date = ?, valid_until = ?, 
-          min_order_qty = ?, lead_time_days = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
+          min_order_qty = ?, lead_time_days = ?, notes = ?,
+          approval_status = 0,
+          approved_by_supervisor_id = NULL, approved_at_supervisor = NULL,
+          approved_by_manager_id = NULL, approved_at_manager = NULL,
+          rejected_by = NULL, rejected_at = NULL, rejection_reason = NULL,
+          updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
-    `, [price, currency, effective_date, valid_until, min_order_qty, lead_time_days, notes, req.params.id]);
+    `, [
+      price ?? row.price,
+      currency || row.currency || 'IDR',
+      effective_date || row.effective_date,
+      valid_until || null,
+      min_order_qty ?? null,
+      lead_time_days ?? null,
+      notes ?? null,
+      req.params.id,
+    ]);
     
-    res.json({ message: 'Vendor price updated' });
+    res.json({
+      message: 'Harga diperbarui dan kembali menunggu persetujuan dari awal',
+      approval_status: 0,
+    });
   } catch (error) {
     console.error('Error updating vendor price:', error);
     res.status(500).json({ error: 'Failed to update vendor price' });
@@ -3565,11 +3684,239 @@ router.put('/vendor-prices/:id', authMiddleware, requirePermission('procurement.
 
 router.delete('/vendor-prices/:id', authMiddleware, requirePermission('procurement.vendor-price-list.delete'), async (req: Request, res: Response) => {
   try {
-    await dbRun('DELETE FROM vendor_prices WHERE id = ?', [req.params.id]);
-    res.json({ message: 'Vendor price deleted' });
+    const row: any = await dbGet(
+      'SELECT id, approval_status, superseded_at, revision_of FROM vendor_prices WHERE id = ?',
+      [req.params.id]
+    );
+    if (!row) return res.status(404).json({ error: 'Harga vendor tidak ditemukan' });
+
+    // Baris yang punya revisi terbuka tidak dihapus lebih dulu: revisinya akan
+    // menunjuk induk yang tidak ada, dan saat disetujui ia mencari baris yang
+    // sudah lenyap untuk ditandai digantikan.
+    const revisiTerbuka: any = await dbGet(
+      'SELECT id FROM vendor_prices WHERE revision_of = ? AND approval_status < 2 AND rejected_at IS NULL LIMIT 1',
+      [row.id]
+    );
+    if (revisiTerbuka) {
+      return res.status(409).json({
+        error: 'Harga ini punya revisi yang menunggu persetujuan. Tolak atau hapus revisi itu dulu.',
+        code: 'REVISI_MASIH_TERBUKA',
+        revision_id: revisiTerbuka.id,
+      });
+    }
+
+    // Menghapus baris yang belum disetujui tidak berakibat apa-apa — ia memang
+    // belum pernah dipakai siapa pun. Menghapus harga yang SUDAH BERLAKU
+    // langsung mencabutnya dari auto-fill PR dan price-search, jadi itu setara
+    // dengan membatalkan persetujuan dan menuntut wewenang yang sama.
+    if (Number(row.approval_status) === 2 && !row.superseded_at) {
+      const userLevel = await approverLevel(req);
+      if (userLevel < 3) {
+        return res.status(403).json({
+          error: 'Harga yang sudah disetujui hanya boleh dihapus Manager ke atas. Untuk mengoreksi angkanya, ubah saja harganya — sistem akan membuat revisi.',
+          code: 'BUTUH_LEVEL_MANAGER',
+        });
+      }
+    }
+
+    await withTransaction(async (tx: TxRunner) => {
+      await tx.run('DELETE FROM vendor_prices WHERE id = ?', [req.params.id]);
+
+      // Kalau yang dihapus adalah revisi yang sudah menggantikan induknya,
+      // induk itu dipulihkan. Tanpa ini produknya tidak punya harga aktif sama
+      // sekali padahal harga lamanya masih ada — hanya tersembunyi karena
+      // ditandai digantikan oleh baris yang barusan lenyap.
+      if (row.revision_of) {
+        await tx.run(
+          'UPDATE vendor_prices SET superseded_by = NULL, superseded_at = NULL WHERE id = ? AND superseded_by = ?',
+          [row.revision_of, row.id]
+        );
+      }
+    });
+
+    res.json({ message: 'Harga vendor dihapus' });
   } catch (error) {
     console.error('Error deleting vendor price:', error);
     res.status(500).json({ error: 'Failed to delete vendor price' });
+  }
+});
+
+/**
+ * ========== APPROVAL HARGA VENDOR (PROC-VPL-01) ==========
+ *
+ * Dua tingkat, meniru purchase_requests supaya penyetuju yang sama tidak perlu
+ * belajar dua alur: 0 (menunggu) -> 1 (supervisor) -> 2 (final, mulai berlaku).
+ *
+ * ⚠️ Otorisasinya lewat approverLevel(), BUKAN requirePermission — alasannya
+ * sama persis dengan approval PR/PO di berkas ini: role "Manager Finannce &
+ * Acc" yang dipakai penyetuju aktif di produksi tidak memegang satu pun
+ * permission `procurement.*.approve*`. Menggemboknya dengan permission berarti
+ * TIDAK ADA seorang pun yang bisa menyetujui harga, dan seluruh price list
+ * membeku di hari deploy.
+ */
+router.post('/vendor-prices/:id/approve', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.userId;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const userLevel = await approverLevel(req);
+    if (userLevel < 2) {
+      return res.status(403).json({
+        error: 'Level Anda tidak berwenang menyetujui harga vendor',
+        code: 'LEVEL_KURANG',
+      });
+    }
+
+    const approverRow = await dbGet('SELECT id FROM users WHERE id = ?', [userId]) as any;
+    const approverId = approverRow ? userId : null;
+
+    const hasil = await withTransaction(async (tx: TxRunner) => {
+      // Dikunci karena dua penyetuju yang menekan tombol pada saat yang sama
+      // akan sama-sama lolos pemeriksaan status, lalu keduanya menandai induk
+      // yang sama sebagai digantikan oleh baris yang berbeda.
+      //
+      // Cabang penolakan di bawah TIDAK menulis apa pun sebelum return, jadi
+      // aman meski withTransaction meng-commit nilai yang dikembalikan —
+      // yang di-commit adalah transaksi kosong.
+      const row: any = await tx.get('SELECT * FROM vendor_prices WHERE id = ? FOR UPDATE', [req.params.id]);
+      if (!row) return { kode: 404, body: { error: 'Harga vendor tidak ditemukan' } };
+
+      if (row.superseded_at) {
+        return { kode: 409, body: { error: 'Harga ini sudah digantikan revisi lain', code: 'SUDAH_DIGANTIKAN' } };
+      }
+      if (row.rejected_at) {
+        return { kode: 409, body: {
+          error: 'Harga ini sudah ditolak. Ubah dulu angkanya supaya kembali masuk antrean persetujuan.',
+          code: 'SUDAH_DITOLAK',
+        } };
+      }
+
+      const status = Number(row.approval_status || 0);
+      if (status >= 2) {
+        return { kode: 400, body: { error: 'Harga ini sudah disetujui penuh', approval_status: 2 } };
+      }
+
+      let statusBaru: number | null = null;
+      if (userLevel >= 4) statusBaru = 2;                      // Director/Master: langsung tuntas
+      else if (userLevel === 2 && status === 0) statusBaru = 1; // Supervisor
+      else if (userLevel === 3 && status === 1) statusBaru = 2; // Manager
+
+      if (statusBaru === null) {
+        return { kode: 400, body: {
+          error: status === 0
+            ? 'Persetujuan Supervisor (1/2) harus lebih dulu'
+            : 'Level Anda tidak cocok untuk tahap persetujuan ini',
+          debug: { userLevel, currentStatus: status },
+        } };
+      }
+
+      if (statusBaru === 1) {
+        await tx.run(
+          'UPDATE vendor_prices SET approval_status = 1, approved_by_supervisor_id = ?, approved_at_supervisor = CURRENT_TIMESTAMP WHERE id = ?',
+          [approverId, row.id]
+        );
+        return { kode: 200, body: { message: 'Harga disetujui Supervisor (1/2)', approval_status: 1 } };
+      }
+
+      // Lompatan langsung oleh Director/Master tetap mencatat tahap supervisor
+      // atas namanya sendiri — sama seperti PR. Kalau dibiarkan kosong,
+      // riwayatnya terbaca seolah tahap itu dilewati tanpa ada yang
+      // bertanggung jawab atasnya.
+      await tx.run(
+        `UPDATE vendor_prices
+         SET approval_status = 2,
+             approved_by_supervisor_id = COALESCE(approved_by_supervisor_id, ?),
+             approved_at_supervisor = COALESCE(approved_at_supervisor, CURRENT_TIMESTAMP),
+             approved_by_manager_id = ?,
+             approved_at_manager = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [approverId, approverId, row.id]
+      );
+
+      // BARU DI SINI harga lama berhenti berlaku. Selama revisi masih
+      // menunggu, harga lama tetap melayani PR/PO — itu justru inti dari model
+      // revisi ini: tidak ada jeda produk tanpa harga.
+      let menggantikan: number | null = null;
+      if (row.revision_of) {
+        const r = await tx.run(
+          'UPDATE vendor_prices SET superseded_by = ?, superseded_at = CURRENT_TIMESTAMP WHERE id = ? AND superseded_at IS NULL',
+          [row.id, row.revision_of]
+        );
+        if (r.affectedRows > 0) menggantikan = Number(row.revision_of);
+      }
+
+      return { kode: 200, body: {
+        message: 'Harga disetujui penuh (2/2) dan mulai berlaku',
+        approval_status: 2,
+        menggantikan,
+      } };
+    });
+
+    return res.status(hasil.kode).json(hasil.body);
+  } catch (error) {
+    console.error('Error approving vendor price:', error);
+    res.status(500).json({ error: 'Gagal menyetujui harga vendor' });
+  }
+});
+
+router.post('/vendor-prices/:id/reject', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.userId;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const userLevel = await approverLevel(req);
+    if (userLevel < 2) {
+      return res.status(403).json({ error: 'Level Anda tidak berwenang menolak harga vendor', code: 'LEVEL_KURANG' });
+    }
+
+    // Alasan diwajibkan, bukan basa-basi: yang mengajukan harus tahu angka mana
+    // yang salah supaya bisa memperbaikinya. Penolakan tanpa alasan hanya
+    // memutar dokumen bolak-balik.
+    const alasan = String(req.body?.reason ?? req.body?.rejection_reason ?? '').trim();
+    if (!alasan) {
+      return res.status(400).json({ error: 'Alasan penolakan wajib diisi', code: 'ALASAN_WAJIB' });
+    }
+
+    const rejecterRow = await dbGet('SELECT id FROM users WHERE id = ?', [userId]) as any;
+    const rejecterId = rejecterRow ? userId : null;
+
+    const row: any = await dbGet(
+      'SELECT id, approval_status, superseded_at, rejected_at FROM vendor_prices WHERE id = ?',
+      [req.params.id]
+    );
+    if (!row) return res.status(404).json({ error: 'Harga vendor tidak ditemukan' });
+    if (row.superseded_at) {
+      return res.status(409).json({ error: 'Harga ini sudah digantikan revisi lain', code: 'SUDAH_DIGANTIKAN' });
+    }
+    if (row.rejected_at) {
+      return res.status(409).json({ error: 'Harga ini sudah ditolak sebelumnya', code: 'SUDAH_DITOLAK' });
+    }
+
+    // Harga yang SUDAH berlaku tidak ditolak. PR/PO sudah memakainya; menariknya
+    // kembali ke antrean membuat dokumen yang sudah terbit kehilangan dasar
+    // harganya secara diam-diam. Koreksinya lewat revisi — jalur yang sama
+    // dengan perubahan harga biasa.
+    if (Number(row.approval_status) >= 2) {
+      return res.status(409).json({
+        error: 'Harga yang sudah berlaku tidak bisa ditolak. Koreksi angkanya lewat Edit — sistem akan membuat revisi yang menunggu persetujuan.',
+        code: 'SUDAH_BERLAKU',
+      });
+    }
+
+    await dbRun(
+      `UPDATE vendor_prices
+       SET approval_status = 0,
+           approved_by_supervisor_id = NULL, approved_at_supervisor = NULL,
+           approved_by_manager_id = NULL, approved_at_manager = NULL,
+           rejected_by = ?, rejected_at = CURRENT_TIMESTAMP, rejection_reason = ?
+       WHERE id = ?`,
+      [rejecterId, alasan, req.params.id]
+    );
+
+    res.json({ message: 'Harga vendor ditolak', approval_status: 0, rejection_reason: alasan });
+  } catch (error) {
+    console.error('Error rejecting vendor price:', error);
+    res.status(500).json({ error: 'Gagal menolak harga vendor' });
   }
 });
 
@@ -3689,7 +4036,7 @@ router.get('/vendors-for-product/:product_id', authMiddleware, requirePermission
         SELECT DISTINCT v.id, v.code, v.name, v.supply_category
         FROM vendor_prices vp
         JOIN vendors v ON vp.vendor_id = v.id
-        WHERE vp.product_id = ?
+        WHERE vp.product_id = ? AND ${hargaVendorAktif()}
         ORDER BY v.name ASC
       `, [product_id]);
     } catch (tableErr: any) {
@@ -3763,7 +4110,7 @@ router.get('/vendor-price-details/:vendor_id/:product_id', authMiddleware, requi
       pricing = await dbGet(`
         SELECT vp.id, vp.price, vp.currency, vp.lead_time_days, vp.min_order_qty, vp.effective_date, vp.valid_until
         FROM vendor_prices vp
-        WHERE vp.vendor_id = ? AND vp.product_id = ?
+        WHERE vp.vendor_id = ? AND vp.product_id = ? AND ${hargaVendorAktif()}
         ORDER BY vp.effective_date DESC
         LIMIT 1
       `, [vendor_id, product_id]);

@@ -2856,6 +2856,89 @@ const PERMISSION_CATALOG: { actions: string[]; resources: string[] }[] = [
 ];
 // Total: 484 permission dari 88 resource
 
+// ==================== APPROVAL HARGA VENDOR (PROC-VPL-01) ====================
+// Sebelum ini `POST/PUT /vendor-prices` menulis langsung ke tabel dan harganya
+// SAAT ITU JUGA dipakai auto-fill PR, price-search, dan pemilihan vendor. Tidak
+// ada satu pun pemeriksaan di antaranya: satu nol yang kelebihan langsung
+// menjadi dasar penawaran dan pesanan.
+//
+// Modelnya menyalin purchase_requests supaya orang yang sama tidak perlu
+// belajar dua alur: approval_status 0 (pending) -> 1 (supervisor) -> 2 (final).
+// Yang dipakai modul lain HANYA baris berstatus 2 yang belum digantikan.
+//
+// Mengubah harga yang sudah disetujui TIDAK menyentuh barisnya. Ia melahirkan
+// baris revisi berstatus pending (`revision_of`), dan harga lama tetap
+// melayani PR/PO sampai revisi itu disetujui — baru kemudian ditandai
+// `superseded_at`. Tanpa itu setiap koreksi harga membuat produknya kehilangan
+// harga selama menunggu persetujuan.
+const ensureVendorPriceApprovalSchema = async (connection: any) => {
+  // Diperiksa SEBELUM kolomnya dibuat. Baris yang sudah ada saat migrasi ini
+  // pertama kali jalan adalah harga yang memang sudah dipakai produksi selama
+  // ini; kalau semuanya menjadi pending, auto-fill PR dan price-search
+  // mendadak kosong di hari deploy.
+  //
+  // Penandaannya HARUS sekali saja. Kalau UPDATE di bawah jalan tiap boot, ia
+  // akan menyetujui sendiri setiap harga yang sedang menunggu persetujuan —
+  // persis meniadakan fitur ini.
+  let firstRun = false;
+  try {
+    const [existing]: any = await connection.execute(
+      `SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'vendor_prices' AND COLUMN_NAME = 'approval_status'`,
+      [activeDatabaseName]
+    );
+    firstRun = !(Array.isArray(existing) && existing[0] && Number(existing[0].c) > 0);
+  } catch (err: any) {
+    console.warn('Vendor price approval: gagal memeriksa kolom -', err.message.substring(0, 120));
+    return;
+  }
+
+  const statements = [
+    `ALTER TABLE vendor_prices ADD COLUMN IF NOT EXISTS approval_status INT NOT NULL DEFAULT 0`,
+    `ALTER TABLE vendor_prices ADD COLUMN IF NOT EXISTS approved_by_supervisor_id INT NULL`,
+    `ALTER TABLE vendor_prices ADD COLUMN IF NOT EXISTS approved_at_supervisor TIMESTAMP NULL`,
+    `ALTER TABLE vendor_prices ADD COLUMN IF NOT EXISTS approved_by_manager_id INT NULL`,
+    `ALTER TABLE vendor_prices ADD COLUMN IF NOT EXISTS approved_at_manager TIMESTAMP NULL`,
+    `ALTER TABLE vendor_prices ADD COLUMN IF NOT EXISTS rejected_by INT NULL`,
+    `ALTER TABLE vendor_prices ADD COLUMN IF NOT EXISTS rejected_at TIMESTAMP NULL`,
+    `ALTER TABLE vendor_prices ADD COLUMN IF NOT EXISTS rejection_reason TEXT NULL`,
+    `ALTER TABLE vendor_prices ADD COLUMN IF NOT EXISTS revision_of INT NULL`,
+    `ALTER TABLE vendor_prices ADD COLUMN IF NOT EXISTS superseded_by INT NULL`,
+    `ALTER TABLE vendor_prices ADD COLUMN IF NOT EXISTS superseded_at TIMESTAMP NULL`,
+  ];
+
+  for (const statement of statements) {
+    await execSchemaEnsure(connection, statement);
+  }
+
+  if (firstRun) {
+    // MySQL 8 tidak punya `CREATE INDEX IF NOT EXISTS`, jadi indeksnya dibuat
+    // hanya di jalur sekali-jalan ini — bukan supaya hemat, tapi supaya log
+    // boot tidak dipenuhi peringatan duplikat tiap restart.
+    for (const statement of [
+      `CREATE INDEX idx_vendor_prices_aktif ON vendor_prices (approval_status, superseded_at)`,
+      `CREATE INDEX idx_vendor_prices_revision ON vendor_prices (revision_of)`,
+    ]) {
+      await execSchemaEnsure(connection, statement);
+    }
+
+    try {
+      const [r]: any = await connection.execute(
+        `UPDATE vendor_prices SET approval_status = 2 WHERE approval_status = 0`
+      );
+      // Kolom approver sengaja DIBIARKAN KOSONG. Tidak ada seorang pun yang
+      // pernah menyetujui baris-baris ini; mengisinya dengan nama siapa pun
+      // akan mengarang persetujuan yang tidak pernah terjadi. Layarnya
+      // menampilkannya sebagai "data warisan".
+      console.log(`✅ Harga vendor warisan ditandai aktif: ${r.affectedRows} baris (tanpa approver — memang tidak pernah disetujui siapa pun)`);
+    } catch (err: any) {
+      console.warn('Vendor price approval: backfill gagal -', err.message.substring(0, 120));
+    }
+  }
+
+  console.log('✅ Skema approval harga vendor ensured');
+};
+
 const ensurePermissionCatalog = async (connection: any) => {
   const rows: [string, string, string][] = [];
   for (const g of PERMISSION_CATALOG) {
@@ -3136,6 +3219,7 @@ export async function initializeDatabase() {
     await ensureProposalItemOrderUnique(connection);
     await ensureDisposalSchema(connection);
     await ensureAssetStatusHistorySchema(connection);
+    await ensureVendorPriceApprovalSchema(connection);
     await ensurePermissionCatalog(connection);
     await ensureMasterUserRow(connection);
     // Harus paling akhir: semua permission dari ensure* di atas sudah ada

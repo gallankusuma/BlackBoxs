@@ -12050,3 +12050,102 @@ kapitalisasi berikut "Alasan membatalkan", dan keempat endpoint baru menjawab
 401 tanpa token. **Smoke produksi 30 lulus, 1 gagal** — hanya temuan lama
 `kredensial master publik ditolak`, yang menunggu tindakan pemilik server dan
 tidak saya sentuh.
+
+---
+
+## [DEV] Fitur baru di luar antrean review — approval harga vendor (PROC-VPL-01) — 1 September 2026
+
+Permintaan pemilik project: modul Procurement, layar **Vendor Price List**,
+dibuatkan sistem approval.
+
+### Apa yang sebenarnya terbuka
+
+`POST/PUT/DELETE /vendor-prices` menulis langsung ke tabel tanpa gerbang apa
+pun, dan angkanya **saat itu juga** dibaca enam tempat lain: auto-fill PR
+(`procurement.routes.ts`), `price-search`, `vendors-for-product`,
+`vendor-price-details`, plus dua query di `ai.routes.ts`. Jadi approval yang
+hanya ditempel di layar tidak akan mengubah apa pun — angkanya tetap mengalir
+ke dokumen yang mengikat. Keenam pembaca itu ikut disaring.
+
+### Keputusan pemilik (ditanyakan lebih dulu, bukan diasumsikan)
+
+| Pertanyaan | Keputusan |
+|---|---|
+| Berapa tingkat | **Dua, seperti PR** — 0 → 1 (supervisor lv2) → 2 (manager lv3), lv≥4 langsung tuntas |
+| Edit harga yang sudah berlaku | **Revisi baru**; harga lama tetap dipakai sampai revisi disetujui |
+| Otorisasi | **`user_level`**, sama dengan approval PR/PO |
+
+### Yang dibangun
+
+`ensureVendorPriceApprovalSchema` (11 kolom + 2 indeks), lima endpoint
+tersentuh + dua endpoint baru (`/vendor-prices/:id/approve`, `/reject`),
+`utils/vendor-price.ts` sebagai satu-satunya definisi predikat "harga yang boleh
+dipakai", dan `VendorPriceList.vue` ditulis ulang (badge status, tombol
+approve/reject, dialog alasan, filter status, ringkasan antrean).
+
+Otorisasi approve/reject sengaja memakai `approverLevel()`, **bukan
+`requirePermission`** — konsisten dengan catatan yang sudah ada di berkas ini
+soal role `Manager Finannce & Acc`. Permission `procurement.vendor-price-list.approve`
+sudah ada di katalog, tapi memasangnya sekarang berarti tidak ada seorang pun di
+produksi yang bisa menyetujui harga.
+
+### Yang paling berisiko, dan bagaimana ia diuji
+
+**Data lama.** Produksi punya ratusan baris harga yang dipakai sehari-hari.
+Kalau semuanya lahir sebagai "pending", auto-fill PR dan price-search kosong di
+hari deploy. Backfill menandainya `approval_status = 2` **sekali saja** —
+dijaga dengan memeriksa keberadaan kolom sebelum kolomnya dibuat. Kalau UPDATE
+itu lepas ke jalur boot biasa, tiap restart akan menyetujui sendiri semua harga
+yang sedang menunggu, tanpa satu pun error.
+
+Diverifikasi langsung, bukan diasumsikan: tabel dikembalikan ke bentuk lama,
+diisi 3 harga, `initializeDatabase()` dijalankan → ketiganya berlaku, approver
+kosong (tidak mengarang persetujuan yang tidak pernah terjadi). Lalu satu harga
+pending ditambahkan dan boot diulang **dua kali** → tetap pending. 8 asersi.
+
+### Verifikasi
+
+`tests/vendor-price-approval.ts` — **53 lulus, 0 gagal**. Regresi:
+`test:procurement` 184 lulus, `test:rbac` 181 lulus. `tsc --noEmit` bersih,
+`npm run build` frontend bersih (exit 0).
+
+Lima mutasi dijalankan, semuanya tertangkap:
+
+| Mutasi | Asersi gagal |
+|---|---|
+| konsumen tidak lagi disaring | 5 |
+| supervisor langsung tuntas (tangga jadi 1 tingkat) | 12 |
+| edit harga berlaku menimpa di tempat, bukan revisi | 1 |
+| sunting tidak mencabut persetujuan supervisor | 2 |
+| hapus revisi tidak memulihkan induk | 7 |
+
+⚠️ Percobaan mutasi pertama sempat melaporkan **0 tertangkap untuk semuanya**.
+Itu cacat harness saya, bukan kode: `tsx watch` belum selesai restart saat tes
+ditembakkan, jadi seluruhnya menguji server versi lama. Setelah menunggu PID
+proses benar-benar berganti, hasilnya seperti tabel di atas. Dicatat karena
+"mutasi tidak tertangkap" nyaris saya baca sebagai tes yang lemah.
+
+### BUG LAMA yang ikut ketahuan saat memvalidasi query
+
+Saat menembakkan keenam query yang disaring langsung ke MySQL, satu di antaranya
+gagal: `ai.routes.ts` memilih **`vp.min_qty`**, sedangkan kolomnya bernama
+`min_order_qty`. Query itu **tidak pernah berhasil sekali pun** — ia dibungkus
+`catch {}` berkomentar *"vendor_prices table may not exist; silently skip"*,
+jadi kegagalannya selalu terbaca sebagai "tabelnya belum ada" dan endpoint AI
+diam-diam menerima daftar harga vendor kosong sejak awal.
+
+Diperbaiki (satu kata). Ini **bukan** akibat perubahan approval — tapi tanpa
+perbaikan ini, siapa pun yang nanti mendapati harga vendor tidak sampai ke AI
+akan menyalahkan penyaringan approval yang baru.
+
+⚠️ Yang membuatnya tak terlihat selama ini adalah `catch {}` tanpa log, dan pola
+itu **belum** saya ubah — menyentuhnya di luar permintaan. Layak dipertimbangkan
+terpisah.
+
+### Belum dikerjakan — perlu keputusan pemilik
+
+**Pemisahan tugas.** Pembuat harga yang levelnya cukup masih bisa menyetujui
+harganya sendiri. Ini vektor yang nyata untuk price list, tapi menutupnya bisa
+mengunci tim kecil yang orangnya memang sama. Tidak diputuskan sepihak.
+
+**Belum di-deploy.** Menunggu instruksi pemilik.

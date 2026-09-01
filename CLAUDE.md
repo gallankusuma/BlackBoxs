@@ -276,6 +276,49 @@ Konsekuensi yang harus dijaga:
   semacam itu hanya masuk akal untuk model partial delivery, dan menambahkannya
   setengah jalan akan membuat dua sumber kebenaran untuk jumlah yang diterima.
 
+### Approval harga vendor (PROC-VPL-01)
+
+`vendor_prices` dulu ditulis tanpa gerbang apa pun, dan angkanya **saat itu juga**
+dipakai auto-fill PR, `price-search`, pemilihan vendor, dan analisis AI. Sekarang
+harga melewati approval **dua tingkat, meniru PR**: `approval_status` 0 → 1
+(supervisor, lv2) → 2 (manager, lv3); Director/Master (lv≥4) langsung tuntas.
+
+Empat aturan yang harus dijaga:
+
+1. **Setiap pembaca `vendor_prices` untuk dipakai modul lain wajib memasang
+   `hargaVendorAktif()`** dari [utils/vendor-price.ts](backend/src/utils/vendor-price.ts)
+   (`approval_status = 2 AND superseded_at IS NULL`). Gerbang yang hanya ada di
+   layar daftar harga sementara angkanya tetap mengalir ke PR adalah hiasan,
+   bukan kendali. Pengecualiannya cuma dua: `GET /vendor-prices` (layar
+   persetujuan memang harus melihat yang pending) dan pembacaan per-id di jalur
+   tulis/approval. `tests/vendor-price-approval.ts` memindai kedua berkas rute
+   untuk menangkap pembaca baru yang lupa memasangnya.
+2. **Status 1 belum membuat harga berlaku.** Ini titik yang paling mudah salah —
+   di layar ia sudah terlihat "disetujui".
+3. **Mengubah harga yang sudah berlaku tidak menyentuh barisnya.** Ia melahirkan
+   baris revisi pending (`revision_of`), dan harga lama tetap melayani PR/PO
+   sampai revisi itu disetujui — baru kemudian induknya ditandai
+   `superseded_at`. Tanpa ini setiap koreksi harga membuat produknya kehilangan
+   harga selama menunggu persetujuan. Hanya boleh ada **satu revisi terbuka**
+   per induk (`REVISI_MASIH_TERBUKA`); dua revisi yang sama-sama disetujui
+   membuat "harga mana yang berlaku" tidak bisa dijawab.
+4. **Backfill data warisan hanya boleh jalan sekali.** `ensureVendorPriceApprovalSchema`
+   memeriksa keberadaan kolom `approval_status` **sebelum** membuatnya; kalau
+   UPDATE itu lepas ke jalur boot biasa, setiap restart akan menyetujui sendiri
+   semua harga yang sedang menunggu — meniadakan seluruh fitur ini tanpa satu
+   pun error. Baris warisan sengaja **tidak diberi approver**: tidak ada yang
+   pernah menyetujuinya, dan layar menampilkannya sebagai "Berlaku (warisan)".
+
+⚠️ Otorisasi approve/reject memakai `approverLevel()`, **bukan
+`requirePermission`** — alasannya sama dengan approval PR/PO di atas: role
+`Manager Finannce & Acc` di produksi tidak memegang satu pun permission
+`procurement.*.approve*`. Menghapus harga yang **sedang berlaku** butuh lv≥3,
+karena itu setara mencabutnya dari PR/PO.
+
+**Yang sengaja TIDAK dipasang:** pemisahan tugas (pembuat harga masih boleh
+menyetujui harganya sendiri kalau levelnya cukup). Menutupnya bisa mengunci tim
+kecil yang orangnya sama — keputusan pemilik, belum diambil.
+
 ## Kondisi repo
 
 - Remote: `github.com/gallankusuma/BlackBoxs` — **repo publik**. Jangan pernah commit kredensial; `.env`, `ecosystem.config.*`, dan dump data sudah masuk `.gitignore`.

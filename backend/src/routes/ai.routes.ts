@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { dbAll } from '../config/database';
+import { hargaVendorAktif } from '../utils/vendor-price';
 import { authMiddleware } from '../middleware/auth';
 import https from 'https';
 
@@ -731,10 +732,10 @@ router.post('/price-check', authMiddleware, async (req: Request, res: Response) 
     try {
       if (product_id) {
         vendorPrices = await dbAll(
-          `SELECT vp.price, vp.min_qty, vp.lead_time_days, v.name AS vendor_name
+          `SELECT vp.price, vp.min_order_qty, vp.lead_time_days, v.name AS vendor_name
            FROM vendor_prices vp
            JOIN vendors v ON vp.vendor_id = v.id
-           WHERE vp.product_id = ?
+           WHERE vp.product_id = ? AND ${hargaVendorAktif()}
            ORDER BY vp.price ASC`,
           [product_id]
         ) as any[];
@@ -962,7 +963,8 @@ router.post('/po-advisor', authMiddleware, async (req: Request, res: Response) =
         vendorPrices = await dbAll(
           `SELECT vp.price, v.name as vendor_name FROM vendor_prices vp
            JOIN vendors v ON vp.vendor_id = v.id
-           WHERE vp.product_id = ? ORDER BY vp.price ASC LIMIT 5`,
+           WHERE vp.product_id = ? AND ${hargaVendorAktif()}
+           ORDER BY vp.price ASC LIMIT 5`,
           [item.product_id]
         ) as any[];
       } catch {}
