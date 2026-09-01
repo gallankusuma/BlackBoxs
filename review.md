@@ -12038,3 +12038,15 @@ Lima mutasi dijalankan, semuanya tertangkap:
 | boleh melebihi realisasi | 5+ gagal |
 | OPEX boleh jadi aset | 1 gagal |
 | reversal tidak mencabut aset yang lahir | 1 gagal |
+
+**Deploy produksi:** percobaan pertama **dikembalikan otomatis oleh guard**
+(rollback berjalan, versi lama kembali melayani, health 200) — sebabnya tidak
+tercatat karena keluaran skripnya saya potong, jadi saya tidak mengklaim tahu
+apa yang gagal. Percobaan kedua tuntas tanpa rollback.
+
+Terverifikasi live: `budget.routes.js` di `dist` memuat `asset_capitalizations`
+(7 rujukan), bundel `AnnualBudget.*.js` yang dilayani nginx memuat panel
+kapitalisasi berikut "Alasan membatalkan", dan keempat endpoint baru menjawab
+401 tanpa token. **Smoke produksi 30 lulus, 1 gagal** — hanya temuan lama
+`kredensial master publik ditolak`, yang menunggu tindakan pemilik server dan
+tidak saya sentuh.
