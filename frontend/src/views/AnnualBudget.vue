@@ -136,6 +136,10 @@
                   class="text-xs font-semibold text-emerald-700 hover:underline">Setujui</button>
                 <button v-if="l.status === 'usulan'" @click="tolak(l)"
                   class="ml-2 text-xs font-semibold text-red-700 hover:underline">Tolak</button>
+                <!-- CAPEX yang sudah punya realisasi bisa diserahkan ke register
+                     aset. OPEX tidak pernah — itu justru yang membedakannya. -->
+                <button v-if="l.type === 'capex' && l.status === 'disetujui'" @click="bukaKapitalisasi(l)"
+                  class="ml-2 text-xs font-semibold text-indigo-700 hover:underline">Kapitalisasi</button>
               </td>
             </tr>
             <tr v-if="!tersaring.length">
@@ -203,6 +207,128 @@
           <button @click="showBaris = false" class="px-4 py-2 text-sm">Batal</button>
           <button @click="simpanBaris" :disabled="sibuk"
             class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-semibold disabled:opacity-50">Simpan</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Kapitalisasi CAPEX → aset -->
+    <div v-if="showKap" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" @click.self="showKap = false">
+      <div class="bg-white rounded-xl w-full max-w-3xl p-5 space-y-4 max-h-[92vh] overflow-y-auto">
+        <div>
+          <h3 class="font-bold text-lg">Kapitalisasi — {{ kapBaris?.title }}</h3>
+          <p class="text-xs text-gray-500">{{ kapBaris?.code }} · pekerjaan CAPEX menjadi aset terdaftar</p>
+        </div>
+
+        <div v-if="kap" class="grid grid-cols-3 gap-3 text-sm">
+          <div class="rounded-lg border border-gray-200 p-3">
+            <p class="text-xs text-gray-500">Realisasi aktual</p>
+            <p class="font-bold text-gray-900">{{ rp(kap.realisasi.total) }}</p>
+            <p class="text-[11px] text-gray-500">AP {{ rp(kap.realisasi.ap) }} + biaya {{ rp(kap.realisasi.biaya) }}</p>
+          </div>
+          <div class="rounded-lg border border-gray-200 p-3">
+            <p class="text-xs text-gray-500">Sudah jadi aset</p>
+            <p class="font-bold text-gray-900">{{ rp(kap.dikapitalisasi) }}</p>
+          </div>
+          <div class="rounded-lg border p-3" :class="kap.belum_dikapitalisasi > 0 ? 'border-indigo-300 bg-indigo-50' : 'border-gray-200'">
+            <p class="text-xs text-gray-500">Belum dikapitalisasi</p>
+            <p class="font-bold" :class="kap.belum_dikapitalisasi > 0 ? 'text-indigo-700' : 'text-gray-500'">
+              {{ rp(kap.belum_dikapitalisasi) }}</p>
+          </div>
+        </div>
+
+        <!-- Basisnya dinyatakan terang-terangan: aset lahir dari biaya yang
+             benar-benar keluar, bukan dari nilai kontrak yang dijanjikan. -->
+        <p class="text-xs text-gray-500">
+          Harga perolehan diambil dari <b>realisasi aktual</b> (AP + biaya project), bukan nilai kontrak.
+          Tagihan yang datang belakangan muncul di sini sebagai sisa — harga aset yang sudah berjalan tidak diubah diam-diam.
+        </p>
+
+        <div v-if="kap && !kap.bisa_dikapitalisasi" class="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-sm text-amber-900">
+          {{ kap.alasan_tidak_bisa }}
+        </div>
+
+        <!-- Riwayat -->
+        <div v-if="kap?.events?.length" class="space-y-2">
+          <h4 class="text-sm font-semibold text-gray-700">Riwayat kapitalisasi</h4>
+          <div v-for="e in kap.events" :key="e.id" class="rounded-lg border p-3"
+            :class="e.status === 'reversed' ? 'border-gray-200 bg-gray-50' : 'border-gray-200'">
+            <div class="flex items-center justify-between text-sm">
+              <div>
+                <span class="font-semibold">#{{ e.seq }} · {{ rp(e.basis_amount) }}</span>
+                <span v-if="e.status === 'reversed'" class="ml-2 text-xs font-bold text-gray-500 bg-gray-200 px-1.5 py-0.5 rounded">dibatalkan</span>
+                <span class="ml-2 text-xs text-gray-500">{{ (e.capitalized_at || '').toString().slice(0, 10) }} · {{ e.oleh || '—' }}</span>
+              </div>
+              <button v-if="e.status === 'posted'" @click="batalkan(e)"
+                class="text-xs font-semibold text-red-700 hover:underline">Batalkan</button>
+            </div>
+            <p v-if="e.reversal_reason" class="text-xs text-red-600 mt-1">{{ e.reversal_reason }}</p>
+            <ul class="mt-2 text-xs text-gray-600 space-y-0.5">
+              <li v-for="a in e.assets" :key="a.id" class="flex justify-between">
+                <span>{{ a.asset_code }} — {{ a.asset_name }}<span v-if="a.is_new_asset" class="ml-1 text-emerald-700">(baru)</span></span>
+                <span>{{ rp(a.allocated_cost) }}</span>
+              </li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- Formulir alokasi -->
+        <template v-if="kap?.bisa_dikapitalisasi && kap.belum_dikapitalisasi > 0">
+          <div class="border-t border-gray-200 pt-3 space-y-3">
+            <div class="flex items-center justify-between">
+              <h4 class="text-sm font-semibold text-gray-700">Aset yang lahir dari pekerjaan ini</h4>
+              <button @click="tambahAlokasi" class="text-xs font-semibold text-blue-700 hover:underline">+ Aset</button>
+            </div>
+
+            <div v-for="(a, i) in alokasi" :key="i" class="rounded-lg border border-gray-200 p-3 space-y-2">
+              <div class="flex items-center gap-3 text-xs">
+                <label class="flex items-center gap-1"><input type="radio" :value="'baru'" v-model="a.mode" /> Aset baru</label>
+                <label class="flex items-center gap-1"><input type="radio" :value="'ada'" v-model="a.mode" /> Tambah ke aset yang ada</label>
+                <button @click="alokasi.splice(i, 1)" class="ml-auto text-red-600 hover:underline">hapus</button>
+              </div>
+              <div v-if="a.mode === 'baru'" class="grid grid-cols-3 gap-2">
+                <input v-model="a.name" placeholder="Nama aset" class="col-span-2 px-2 py-1.5 border border-gray-300 rounded text-sm" />
+                <select v-model.number="a.category_id" class="px-2 py-1.5 border border-gray-300 rounded text-sm">
+                  <option :value="null">Kategori…</option>
+                  <option v-for="k in kategori" :key="k.id" :value="k.id">{{ k.name }}</option>
+                </select>
+                <input v-model="a.location" placeholder="Lokasi" class="px-2 py-1.5 border border-gray-300 rounded text-sm" />
+                <input v-model="a.pnid_tag" placeholder="Tag P&ID" class="px-2 py-1.5 border border-gray-300 rounded text-sm" />
+                <input v-model.number="a.useful_life_years" type="number" placeholder="Umur (thn)" class="px-2 py-1.5 border border-gray-300 rounded text-sm" />
+              </div>
+              <div v-else class="grid grid-cols-3 gap-2">
+                <input v-model.number="a.asset_id" type="number" placeholder="ID aset yang ada"
+                  class="px-2 py-1.5 border border-gray-300 rounded text-sm" />
+                <input v-model="a.allocation_note" placeholder="Catatan alokasi"
+                  class="col-span-2 px-2 py-1.5 border border-gray-300 rounded text-sm" />
+              </div>
+              <input v-model.number="a.allocated_cost" type="number" placeholder="Alokasi biaya (Rp)"
+                class="w-full px-2 py-1.5 border border-gray-300 rounded text-sm" />
+            </div>
+
+            <div class="grid grid-cols-2 gap-3 items-end">
+              <label class="block text-sm">Nilai yang dikapitalisasi
+                <input v-model.number="kapNilai" type="number" class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg" /></label>
+              <!-- Nilai dan jumlah alokasi ditulis terpisah dengan sengaja: dua
+                   pernyataan mandiri yang harus setuju, supaya salah ketik pada
+                   satu alokasi tertangkap sebelum dikirim. -->
+              <div class="text-sm">
+                <p class="text-gray-500">Jumlah alokasi: <b>{{ rp(jumlahAlokasi) }}</b></p>
+                <p :class="selisihAlokasi === 0 ? 'text-emerald-700' : 'text-red-700'" class="font-semibold">
+                  {{ selisihAlokasi === 0 ? 'Cocok' : 'Selisih ' + rp(selisihAlokasi) }}
+                </p>
+              </div>
+            </div>
+            <p v-if="galatKap" class="text-sm text-red-700">{{ galatKap }}</p>
+          </div>
+        </template>
+
+        <div class="flex justify-end gap-2 pt-2">
+          <button @click="showKap = false" class="px-4 py-2 text-sm">Tutup</button>
+          <button v-if="kap?.bisa_dikapitalisasi && kap.belum_dikapitalisasi > 0"
+            @click="simpanKapitalisasi" :disabled="sibuk || selisihAlokasi !== 0 || !alokasi.length"
+            class="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold disabled:opacity-50">
+            Catat sebagai aset
+          </button>
         </div>
       </div>
     </div>
@@ -323,6 +449,78 @@ function tolak(l: any) {
   const alasan = window.prompt(`Alasan menolak "${l.title}"?`);
   if (!alasan || !alasan.trim()) return;
   ubahStatus(l, 'ditolak', alasan.trim());
+}
+
+// ── Kapitalisasi CAPEX → Asset Management ───────────────────────────────────
+const showKap = ref(false);
+const kapBaris = ref<any>(null);
+const kap = ref<any>(null);
+const kategori = ref<any[]>([]);
+const alokasi = ref<any[]>([]);
+const kapNilai = ref<number>(0);
+const galatKap = ref('');
+
+const jumlahAlokasi = computed(() =>
+  alokasi.value.reduce((t, a) => t + (Number(a.allocated_cost) || 0), 0));
+const selisihAlokasi = computed(() =>
+  Math.round((jumlahAlokasi.value - (Number(kapNilai.value) || 0)) * 100) / 100);
+
+function tambahAlokasi() {
+  alokasi.value.push({
+    mode: 'baru', name: '', category_id: kategori.value[0]?.id ?? null,
+    location: '', pnid_tag: '', useful_life_years: null,
+    asset_id: null, allocation_note: '', allocated_cost: null,
+  });
+}
+
+async function bukaKapitalisasi(l: any) {
+  kapBaris.value = l; kap.value = null; alokasi.value = []; galatKap.value = '';
+  showKap.value = true;
+  try {
+    const [a, b] = await Promise.all([
+      api.get(`/budget/lines/${l.id}/kapitalisasi`),
+      kategori.value.length ? Promise.resolve({ data: { categories: kategori.value } }) : api.get('/budget/kategori-aset'),
+    ]);
+    kap.value = a.data;
+    kategori.value = b.data?.categories || [];
+    // Sisa yang belum dikapitalisasi adalah tawaran awal, bukan keharusan —
+    // kapitalisasi sebagian itu sah dan sering terjadi.
+    kapNilai.value = Number(kap.value?.belum_dikapitalisasi || 0);
+    if (kap.value?.bisa_dikapitalisasi && kapNilai.value > 0) tambahAlokasi();
+  } catch (e: any) {
+    galatKap.value = e?.response?.data?.error || 'Gagal memuat posisi kapitalisasi.';
+  }
+}
+
+async function simpanKapitalisasi() {
+  galatKap.value = ''; sibuk.value = true;
+  try {
+    await api.post(`/budget/lines/${kapBaris.value.id}/kapitalisasi`, {
+      amount: kapNilai.value,
+      allocations: alokasi.value.map((a) => a.mode === 'ada'
+        ? { asset_id: a.asset_id, allocated_cost: a.allocated_cost, allocation_note: a.allocation_note }
+        : { allocated_cost: a.allocated_cost, asset_baru: {
+            name: a.name, category_id: a.category_id, location: a.location,
+            pnid_tag: a.pnid_tag, useful_life_years: a.useful_life_years } }),
+    });
+    await bukaKapitalisasi(kapBaris.value);
+    await muatTahun();
+  } catch (e: any) {
+    galatKap.value = e?.response?.data?.error || 'Gagal mencatat kapitalisasi.';
+  } finally { sibuk.value = false; }
+}
+
+async function batalkan(e: any) {
+  // Pembatalan mencabut nilai dari aset yang sudah terdaftar — alasannya wajib,
+  // dan ditanyakan di sini supaya tidak dikirim setengah jadi.
+  const alasan = window.prompt(`Alasan membatalkan kapitalisasi #${e.seq}?`);
+  if (!alasan || !alasan.trim()) return;
+  try {
+    await api.put(`/budget/kapitalisasi/${e.id}/reversal`, { reason: alasan.trim() });
+    await bukaKapitalisasi(kapBaris.value);
+  } catch (err: any) {
+    galatKap.value = err?.response?.data?.error || 'Gagal membatalkan kapitalisasi.';
+  }
 }
 
 onMounted(muat);

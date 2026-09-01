@@ -11945,3 +11945,96 @@ belum bisa saya putuskan sendiri, dan **belum saya bangun**:
 Saya sengaja **tidak menebak** ketiganya: kolom `asset_id` yang dipasang sekarang
 tanpa jawaban ini akan mengunci pilihan yang salah. Modul anggaran ini berdiri
 utuh tanpanya, dan sambungan aset bisa dipasang setelah ketiganya diputuskan.
+
+---
+
+## [DEV] DITERAPKAN — kapitalisasi CAPEX: anggaran/project → Asset Management — 31 Agustus 2026
+
+Menutup butir **PERLU KLARIFIKASI** di entri sebelumnya. User memutuskan ketiganya:
+
+| Pertanyaan | Keputusan |
+|---|---|
+| Basis biaya perolehan | **Realisasi aktual** (AP + biaya project), bukan nilai kontrak |
+| Satu baris CAPEX | **Boleh melahirkan banyak aset**, dengan alokasi eksplisit |
+| Pemicu | **Manual** |
+
+### Yang dibangun
+
+`ensureAssetCapitalizationSchema` + tujuh endpoint di `budget.routes.ts` +
+panel kapitalisasi di `AnnualBudget.vue`.
+
+| Tabel | Isi |
+|---|---|
+| `asset_capitalizations` | satu event kapitalisasi: snapshot basis (`basis_amount`, `basis_ap`, `basis_expenses`, `basis_kumulatif`), `seq`, status `posted`/`reversed`, siapa & kapan |
+| `asset_capitalization_lines` | alokasi biaya per aset, menyimpan kode/nama aset sebagai snapshot |
+| `assets.source_budget_line_id` | asal-usul aset — "aset ini dari proyek mana" tidak lagi bergantung ingatan orang |
+
+`GET/POST /budget/lines/:id/kapitalisasi`, `PUT /budget/kapitalisasi/:id/reversal`,
+`GET /budget/years/:id/kapitalisasi`, `GET /budget/kategori-aset`.
+
+### Kenapa snapshot, bukan hitung-saat-dibaca
+
+Realisasi **terus bergerak** setelah aset didaftarkan — tagihan susulan datang
+berbulan-bulan kemudian. Kalau harga perolehan dihitung ulang tiap kali dibaca,
+nilai aset yang sudah berjalan penyusutannya akan bergeser sendiri tanpa ada
+yang memutuskan. Karena itu tiap event **membekukan** angkanya, dan biaya
+susulan muncul sebagai **sisa yang belum dikapitalisasi** — terlihat, dan
+menunggu keputusan manusia. Diuji: AP susulan 80 jt menaikkan realisasi
+200→280 jt sementara harga aset tetap 100 jt.
+
+### Penjagaan yang ditegakkan
+
+- **OPEX tidak pernah menjadi aset** (`BUKAN_CAPEX`) — itu justru yang
+  membedakannya dari CAPEX secara akuntansi.
+- **Nilai kontrak tidak pernah menjadi harga perolehan.** Fixture sengaja
+  memasang kontrak 500 jt di atas realisasi 200 jt; kapitalisasi 300 jt ditolak
+  `MELEBIHI_REALISASI`. Kalau kode diam-diam memakai kontrak, aset akan lahir
+  2,5× lebih mahal dari kenyataannya.
+- **`amount` dan jumlah alokasi wajib cocok** (`ALOKASI_TIDAK_COCOK`, menyebut
+  selisihnya). Keduanya ditulis terpisah dengan sengaja — dua pernyataan mandiri
+  yang harus setuju, supaya salah ketik pada satu alokasi tertangkap dan bukan
+  diam-diam mengapitalisasi angka lain.
+- **Pembatalan beralasan, bukan penghapusan.** Event tetap ada berstatus
+  `reversed`; nilai aset dikembalikan; aset yang **lahir** dari event itu
+  di-soft-delete, aset yang sudah ada sebelumnya hanya dikurangi nilainya.
+  Sisanya terbuka kembali untuk dikapitalisasi ulang.
+- **Tidak ada satu pun jalur otomatis.** Project yang ditutup karena batal juga
+  "selesai"; melahirkan aset dari status itu akan mengisi register dengan barang
+  yang tidak pernah ada. Ada tes yang memindai berkas rutenya untuk memastikan
+  jalur otomatis itu tidak muncul belakangan.
+- Umur manfaat **tidak dikarang.** Kalau tidak diisi, kolomnya tidak ditulis dan
+  default kolom yang berlaku — mengarang umur berarti menerbitkan jadwal
+  penyusutan yang tidak pernah diputuskan siapa pun.
+- `GET /budget/kategori-aset` dilayani dari modul anggaran, bukan
+  `/assets/categories`, karena endpoint itu menuntut `assets.view`/`assets.manage`
+  sementara yang mengapitalisasi belum tentu memegang modul aset. Yang dibuka
+  hanya id dan nama kategori aktif.
+
+### BUG NYATA yang ditemukan tes sendiri
+
+Versi pertama memvalidasi aset **di tengah loop penulisan**. `withTransaction`
+di repo ini **COMMIT** kalau handler mengembalikan `{error, body}` — hanya
+`throw` yang rollback. Akibatnya penolakan `NAMA_ASET_WAJIB` dan
+`KATEGORI_ASET_WAJIB` tetap meninggalkan **header kapitalisasi yang ter-commit
+tanpa satu pun alokasi**: 20 juta "hantu" yang memakan sisa realisasi dan
+membuat aset berikutnya tidak bisa dikapitalisasi penuh.
+
+Ditemukan karena tes memeriksa sisa setelah kapitalisasi (`50 jt`) dan
+mendapat `30 jt`. Diperbaiki dengan memvalidasi **seluruh** alokasi sebelum satu
+baris pun ditulis. Alasannya ditulis sebagai komentar di titik itu supaya tidak
+diurai balik nanti.
+
+### Verifikasi
+
+`tests/kapitalisasi.ts` — **62 lulus, 0 gagal**. `npm run test:all`:
+**3190 lulus, 0 gagal**. `tsc --noEmit` bersih, `npm run build` frontend bersih.
+
+Lima mutasi dijalankan, semuanya tertangkap:
+
+| Mutasi | Hasil |
+|---|---|
+| reversal tidak membebaskan sisa | 5+ gagal |
+| alokasi tidak wajib cocok | 5+ gagal |
+| boleh melebihi realisasi | 5+ gagal |
+| OPEX boleh jadi aset | 1 gagal |
+| reversal tidak mencabut aset yang lahir | 1 gagal |

@@ -484,4 +484,399 @@ router.get('/years/:id/serapan', authMiddleware, async (req: Request, res: Respo
   }
 });
 
+// ── Kapitalisasi CAPEX → Asset Management ───────────────────────────────────
+//
+// Keputusan pemilik (31 Agustus 2026):
+//   basis = realisasi aktual · satu baris boleh melahirkan banyak aset ·
+//   pemicunya manual.
+//
+// Tidak ada satu pun jalur otomatis di berkas ini yang melahirkan aset. Project
+// yang ditutup karena batal juga "selesai" — melahirkan aset dari status itu
+// akan mengisi register aset dengan barang yang tidak pernah ada.
+
+/** Realisasi aktual satu baris: AP + biaya project, dedup per project. */
+async function realisasiBaris(runner: { all: Function; get: Function }, lineId: number) {
+  const proyek: any[] = await runner.all(
+    `SELECT DISTINCT p.project_id AS id FROM proposals p
+     WHERE p.budget_line_id = ? AND p.status = 'deal' AND p.project_id IS NOT NULL`,
+    [lineId]);
+  if (!proyek.length) return { ap: 0, biaya: 0, total: 0, jml_project: 0 };
+  const tanda = proyek.map(() => '?').join(',');
+  const ids = proyek.map((r) => r.id);
+  const a: any = await runner.get(
+    `SELECT COALESCE(SUM(amount), 0) v FROM accounts_payable WHERE project_id IN (${tanda})`, ids);
+  const b: any = await runner.get(
+    `SELECT COALESCE(SUM(amount), 0) v FROM project_expenses WHERE project_id IN (${tanda})`, ids);
+  const ap = uang(a?.v), biaya = uang(b?.v);
+  return { ap, biaya, total: uang(ap + biaya), jml_project: proyek.length };
+}
+
+/** Berapa yang sudah dikapitalisasi dari satu baris (yang direversal tidak dihitung). */
+async function sudahDikapitalisasi(runner: { get: Function }, lineId: number) {
+  const r: any = await runner.get(
+    `SELECT COALESCE(SUM(basis_amount), 0) v FROM asset_capitalizations
+     WHERE budget_line_id = ? AND status = 'posted'`, [lineId]);
+  return uang(r?.v);
+}
+
+/** Posisi kapitalisasi satu baris CAPEX, berikut riwayat dan asetnya. */
+router.get('/lines/:id/kapitalisasi', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    if (!idValid(req.params.id)) return res.status(400).json({ error: 'Id tidak valid' });
+    const l: any = await dbGet(
+      `SELECT l.*, y.year FROM budget_lines l
+       JOIN budget_years y ON y.id = l.budget_year_id WHERE l.id = ?`, [req.params.id]);
+    if (!l) return res.status(404).json({ error: 'Baris anggaran tidak ditemukan' });
+
+    const runner = { all: dbAll, get: dbGet };
+    const real = await realisasiBaris(runner, Number(req.params.id));
+    const sudah = await sudahDikapitalisasi(runner, Number(req.params.id));
+
+    const events: any[] = await dbAll(
+      `SELECT c.*, u.username AS oleh FROM asset_capitalizations c
+       LEFT JOIN users u ON u.id = c.capitalized_by
+       WHERE c.budget_line_id = ? ORDER BY c.seq`, [req.params.id]);
+    for (const e of events) {
+      e.basis_amount = uang(e.basis_amount);
+      e.assets = await dbAll(
+        `SELECT * FROM asset_capitalization_lines WHERE capitalization_id = ? ORDER BY id`, [e.id]);
+      for (const a of e.assets) a.allocated_cost = uang(a.allocated_cost);
+    }
+
+    res.json({
+      line: { id: l.id, code: l.code, title: l.title, type: l.type, status: l.status, year: l.year },
+      // OPEX tidak pernah menjadi aset — itu justru yang membedakannya dari CAPEX.
+      bisa_dikapitalisasi: l.type === 'capex' && l.status === 'disetujui',
+      alasan_tidak_bisa: l.type !== 'capex' ? 'Baris ini OPEX, bukan CAPEX.'
+        : l.status !== 'disetujui' ? `Baris masih "${l.status}".` : null,
+      realisasi: real,
+      dikapitalisasi: sudah,
+      // Biaya yang datang setelah aset didaftarkan muncul di sini, bukan
+      // diam-diam mengubah harga perolehan aset yang sudah berjalan.
+      belum_dikapitalisasi: uang(real.total - sudah),
+      events,
+    });
+  } catch (e: any) {
+    console.error('Error membaca kapitalisasi:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/**
+ * Kapitalisasi manual: satu baris CAPEX → satu atau banyak aset.
+ *
+ * `amount` dan jumlah alokasi WAJIB cocok. Keduanya dituliskan terpisah dengan
+ * sengaja — dua pernyataan mandiri yang harus setuju, supaya salah ketik pada
+ * satu alokasi tertangkap dan bukan diam-diam mengapitalisasi angka lain.
+ */
+router.post('/lines/:id/kapitalisasi', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    if (!idValid(req.params.id)) return res.status(400).json({ error: 'Id tidak valid' });
+    const lineId = Number(req.params.id);
+    const nilai = Number(req.body?.amount);
+    const alokasi: any[] = Array.isArray(req.body?.allocations) ? req.body.allocations : [];
+    const tanggal = String(req.body?.date || '').trim() || new Date().toISOString().slice(0, 10);
+
+    if (!Number.isFinite(nilai) || nilai <= 0) {
+      return res.status(400).json({
+        error: 'Nilai kapitalisasi harus lebih dari nol.', code: 'NILAI_TIDAK_VALID' });
+    }
+    if (!alokasi.length) {
+      return res.status(400).json({
+        error: 'Sebutkan aset yang lahir dari pekerjaan ini beserta alokasi biayanya.',
+        code: 'ALOKASI_KOSONG' });
+    }
+
+    const hasil = await withTransaction(async (tx: TxRunner) => {
+      const l: any = await tx.get(
+        `SELECT l.*, y.year FROM budget_lines l
+         JOIN budget_years y ON y.id = l.budget_year_id WHERE l.id = ? FOR UPDATE`, [lineId]);
+      if (!l) return { error: 404, body: { error: 'Baris anggaran tidak ditemukan' } };
+      if (l.type !== 'capex') {
+        return { error: 400, body: {
+          error: 'Hanya pekerjaan CAPEX yang menjadi aset. Baris ini OPEX.',
+          code: 'BUKAN_CAPEX' } };
+      }
+      if (l.status !== 'disetujui') {
+        return { error: 409, body: {
+          error: `Baris masih "${l.status}". Hanya yang disetujui bisa dikapitalisasi.`,
+          code: 'BARIS_BELUM_DISETUJUI' } };
+      }
+
+      const real = await realisasiBaris(tx, lineId);
+      if (real.total <= 0) {
+        return { error: 409, body: {
+          error: 'Belum ada realisasi biaya pada pekerjaan ini. Aset lahir dari biaya yang benar-benar dikeluarkan, bukan dari nilai kontrak.',
+          code: 'BELUM_ADA_REALISASI' } };
+      }
+      const sudah = await sudahDikapitalisasi(tx, lineId);
+      const sisa = uang(real.total - sudah);
+      if (sisa <= 0) {
+        return { error: 409, body: {
+          error: 'Seluruh realisasi pekerjaan ini sudah dikapitalisasi.',
+          code: 'SUDAH_DIKAPITALISASI_PENUH', realisasi: real.total, dikapitalisasi: sudah } };
+      }
+      if (nilai > sisa + 0.005) {
+        return { error: 422, body: {
+          error: `Nilai kapitalisasi ${nilai} melebihi realisasi yang tersisa (${sisa}).`,
+          code: 'MELEBIHI_REALISASI',
+          realisasi: real.total, dikapitalisasi: sudah, sisa } };
+      }
+
+      let jumlahAlokasi = 0;
+      for (const a of alokasi) {
+        const v = Number(a?.allocated_cost);
+        if (!Number.isFinite(v) || v <= 0) {
+          return { error: 422, body: {
+            error: 'Setiap aset harus punya alokasi biaya lebih dari nol.',
+            code: 'ALOKASI_TIDAK_VALID' } };
+        }
+        jumlahAlokasi += v;
+      }
+      jumlahAlokasi = uang(jumlahAlokasi);
+      if (Math.abs(jumlahAlokasi - uang(nilai)) > 0.005) {
+        return { error: 422, body: {
+          error: `Jumlah alokasi ${jumlahAlokasi} tidak sama dengan nilai kapitalisasi ${uang(nilai)}.`,
+          code: 'ALOKASI_TIDAK_COCOK',
+          selisih: uang(jumlahAlokasi - uang(nilai)) } };
+      }
+
+      // Seluruh alokasi divalidasi dan diselesaikan LEBIH DULU, sebelum satu
+      // baris pun ditulis.
+      //
+      // Ini bukan gaya penulisan — `withTransaction` di berkas ini COMMIT kalau
+      // handler-nya mengembalikan `{error, body}`; hanya `throw` yang rollback.
+      // Versi pertama memvalidasi aset di tengah loop penulisan, jadi penolakan
+      // "nama aset wajib" tetap meninggalkan header kapitalisasi yang sudah
+      // ter-commit tanpa satu pun alokasi — 20 jt hantu yang memakan sisa
+      // realisasi. Tes yang menangkapnya ada di `tests/kapitalisasi.ts`.
+      const siap: any[] = [];
+      for (const a of alokasi) {
+        const biaya = uang(a.allocated_cost);
+        if (a.asset_id) {
+          if (!idValid(a.asset_id)) {
+            return { error: 400, body: { error: 'asset_id tidak valid', code: 'ASET_TIDAK_VALID' } };
+          }
+          const as: any = await tx.get(
+            'SELECT id, asset_code, name, is_deleted FROM assets WHERE id = ? FOR UPDATE', [a.asset_id]);
+          if (!as || Number(as.is_deleted) === 1) {
+            return { error: 404, body: {
+              error: `Aset #${a.asset_id} tidak ditemukan.`, code: 'ASET_TIDAK_DITEMUKAN' } };
+          }
+          siap.push({ baru: false, assetId: Number(a.asset_id), kode: as.asset_code, nama: as.name,
+                      biaya, note: a.allocation_note });
+        } else {
+          const nb = a.asset_baru || {};
+          if (!nb.name || !String(nb.name).trim()) {
+            return { error: 422, body: { error: 'Aset baru harus punya nama.', code: 'NAMA_ASET_WAJIB' } };
+          }
+          if (!idValid(nb.category_id)) {
+            return { error: 422, body: { error: 'Aset baru harus punya kategori.', code: 'KATEGORI_ASET_WAJIB' } };
+          }
+          siap.push({ baru: true, nb, biaya, note: a.allocation_note,
+                      nama: String(nb.name).trim().slice(0, 255) });
+        }
+      }
+
+      const seqRow: any = await tx.get(
+        'SELECT COALESCE(MAX(seq), 0) s FROM asset_capitalizations WHERE budget_line_id = ?', [lineId]);
+      const seq = Number(seqRow?.s || 0) + 1;
+
+      const cap = await tx.run(
+        `INSERT INTO asset_capitalizations
+          (budget_line_id, budget_line_code, budget_line_title, budget_year, seq,
+           basis_amount, basis_ap, basis_expenses, basis_kumulatif, note, capitalized_by, capitalized_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [lineId, l.code, l.title, l.year, seq, uang(nilai), real.ap, real.biaya, real.total,
+         req.body?.note ? String(req.body.note).slice(0, 1000) : null,
+         (req as any).userId || null, tanggal]);
+      const capId = cap.insertId;
+
+      const dibuat: any[] = [];
+      for (const it of siap) {
+        let assetId: number, kode: string;
+        if (it.baru) {
+          const nb = it.nb;
+          kode = String(nb.asset_code || '').trim()
+            || `AST-${l.year}-${lineId}-${seq}-${dibuat.length + 1}`;
+          const kolom = ['asset_code', 'name', 'category_id', 'location', 'pnid_tag',
+                         'purchase_date', 'purchase_price', 'depreciation_method',
+                         'in_service_date', 'status', 'source_budget_line_id', 'notes', 'created_by'];
+          const isi: any[] = [kode, it.nama, nb.category_id,
+            nb.location ? String(nb.location).slice(0, 255) : null,
+            nb.pnid_tag ? String(nb.pnid_tag).slice(0, 100) : null,
+            tanggal, it.biaya, nb.depreciation_method || 'straight_line',
+            nb.in_service_date || tanggal, 'active', lineId,
+            `Lahir dari kapitalisasi ${l.code} — ${l.title}`,
+            (req as any).userId || null];
+          // Umur manfaat hanya ditulis kalau memang diisi. `assets` menolak NULL
+          // di kolom ini, dan mengarang angka umur berarti menerbitkan jadwal
+          // penyusutan yang tidak pernah diputuskan siapa pun — biarkan default
+          // kolomnya yang berlaku.
+          if (nb.useful_life_years != null && nb.useful_life_years !== '') {
+            kolom.push('useful_life_years'); isi.push(Number(nb.useful_life_years));
+          }
+          const ins = await tx.run(
+            `INSERT INTO assets (${kolom.join(', ')})
+             VALUES (${kolom.map(() => '?').join(', ')})`, isi);
+          assetId = ins.insertId;
+        } else {
+          // Penambahan pada aset yang sudah ada menaikkan nilai perolehannya —
+          // perlakuan yang benar untuk revamp/improvement. Jejaknya tersimpan
+          // sebagai baris kapitalisasi, jadi kenaikannya bisa dijelaskan.
+          await tx.run(
+            `UPDATE assets SET purchase_price = COALESCE(purchase_price, 0) + ?,
+               source_budget_line_id = COALESCE(source_budget_line_id, ?)
+             WHERE id = ?`, [it.biaya, lineId, it.assetId]);
+          assetId = it.assetId; kode = it.kode;
+        }
+
+        await tx.run(
+          `INSERT INTO asset_capitalization_lines
+            (capitalization_id, asset_id, asset_code, asset_name, is_new_asset, allocated_cost, allocation_note)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [capId, assetId, kode, it.nama, it.baru ? 1 : 0, it.biaya,
+           it.note ? String(it.note).slice(0, 500) : null]);
+        dibuat.push({ asset_id: assetId, asset_code: kode, name: it.nama, baru: it.baru, allocated_cost: it.biaya });
+      }
+
+      return { ok: true as const, capId, seq, assets: dibuat,
+               sisa_setelah: uang(sisa - uang(nilai)) };
+    });
+
+    if ((hasil as any).error) return res.status((hasil as any).error).json((hasil as any).body);
+    const h = hasil as any;
+    res.status(201).json({
+      id: h.capId, seq: h.seq, amount: uang(nilai), assets: h.assets,
+      belum_dikapitalisasi: h.sisa_setelah,
+      message: `${h.assets.length} aset dicatat dari kapitalisasi ini`,
+    });
+  } catch (e: any) {
+    console.error('Error kapitalisasi:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/**
+ * Pembatalan kapitalisasi — beralasan, dan mengembalikan nilai aset.
+ *
+ * Bukan penghapusan: eventnya tetap ada dengan status `reversed`. Aset yang
+ * LAHIR dari event ini di-soft-delete; aset yang sudah ada sebelumnya hanya
+ * dikembalikan nilai perolehannya.
+ */
+router.put('/kapitalisasi/:id/reversal', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    if (!idValid(req.params.id)) return res.status(400).json({ error: 'Id tidak valid' });
+    const alasan = String(req.body?.reason || '').trim();
+    if (!alasan) {
+      return res.status(400).json({
+        error: 'Pembatalan kapitalisasi harus menyebutkan alasannya.', code: 'ALASAN_WAJIB' });
+    }
+
+    const hasil = await withTransaction(async (tx: TxRunner) => {
+      const c: any = await tx.get(
+        'SELECT * FROM asset_capitalizations WHERE id = ? FOR UPDATE', [req.params.id]);
+      if (!c) return { error: 404, body: { error: 'Kapitalisasi tidak ditemukan' } };
+      if (c.status !== 'posted') {
+        return { error: 409, body: {
+          error: 'Kapitalisasi ini sudah dibatalkan.', code: 'SUDAH_DIREVERSAL' } };
+      }
+      const baris: any[] = await tx.all(
+        'SELECT * FROM asset_capitalization_lines WHERE capitalization_id = ?', [req.params.id]);
+      for (const b of baris) {
+        await tx.run(
+          `UPDATE assets SET purchase_price = GREATEST(COALESCE(purchase_price, 0) - ?, 0) WHERE id = ?`,
+          [uang(b.allocated_cost), b.asset_id]);
+        if (Number(b.is_new_asset) === 1) {
+          await tx.run(
+            `UPDATE assets SET is_deleted = 1, deleted_at = NOW(), deleted_by = ?, deletion_reason = ?
+             WHERE id = ?`,
+            [(req as any).userId || null,
+             `Kapitalisasi dibatalkan: ${alasan}`.slice(0, 500), b.asset_id]);
+        }
+      }
+      await tx.run(
+        `UPDATE asset_capitalizations
+         SET status = 'reversed', reversed_at = NOW(), reversed_by = ?, reversal_reason = ?
+         WHERE id = ?`,
+        [(req as any).userId || null, alasan.slice(0, 1000), req.params.id]);
+      return { ok: true as const, jml: baris.length };
+    });
+
+    if ((hasil as any).error) return res.status((hasil as any).error).json((hasil as any).body);
+    res.json({ message: `Kapitalisasi dibatalkan, ${(hasil as any).jml} aset dikembalikan` });
+  } catch (e: any) {
+    console.error('Error membatalkan kapitalisasi:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/**
+ * Kategori aset untuk formulir kapitalisasi.
+ *
+ * Sengaja dilayani dari sini, bukan `/assets/categories` — endpoint itu menuntut
+ * `assets.view`/`assets.manage`, sementara yang mengapitalisasi anggaran belum
+ * tentu memegang modul aset. Yang dibuka hanya id dan nama kategori aktif:
+ * data acuan, bukan data bisnis.
+ */
+router.get('/kategori-aset', authMiddleware, async (_req: Request, res: Response) => {
+  try {
+    const rows = await dbAll(
+      'SELECT id, name FROM asset_categories WHERE is_active = 1 ORDER BY order_no, id', []);
+    res.json({ categories: rows });
+  } catch (e: any) {
+    console.error('Error mengambil kategori aset:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** Ringkasan kapitalisasi satu tahun: berapa CAPEX yang sudah menjadi aset. */
+router.get('/years/:id/kapitalisasi', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    if (!idValid(req.params.id)) return res.status(400).json({ error: 'Id tidak valid' });
+    const y: any = await dbGet('SELECT * FROM budget_years WHERE id = ?', [req.params.id]);
+    if (!y) return res.status(404).json({ error: 'Tahun anggaran tidak ditemukan' });
+
+    const lines: any[] = await dbAll(
+      `SELECT id, code, title FROM budget_lines
+       WHERE budget_year_id = ? AND type = 'capex' AND status = 'disetujui'
+       ORDER BY code`, [req.params.id]);
+
+    const runner = { all: dbAll, get: dbGet };
+    const hasil: any[] = [];
+    let totRealisasi = 0, totKapital = 0, siap = 0;
+    for (const l of lines) {
+      const real = await realisasiBaris(runner, Number(l.id));
+      const sudah = await sudahDikapitalisasi(runner, Number(l.id));
+      const belum = uang(real.total - sudah);
+      const aset: any = await dbGet(
+        `SELECT COUNT(DISTINCT cl.asset_id) n FROM asset_capitalization_lines cl
+         JOIN asset_capitalizations c ON c.id = cl.capitalization_id
+         WHERE c.budget_line_id = ? AND c.status = 'posted'`, [l.id]);
+      totRealisasi += real.total; totKapital += sudah;
+      if (belum > 0) siap++;
+      hasil.push({
+        ...l, realisasi: real.total, dikapitalisasi: sudah,
+        belum_dikapitalisasi: belum, jml_aset: Number(aset?.n || 0),
+        // null berarti belum ada realisasi sama sekali — berbeda dari 0%,
+        // yang berarti ada biaya tapi belum satu pun dikapitalisasi.
+        pct: real.total > 0 ? Math.round((sudah / real.total) * 1000) / 10 : null,
+      });
+    }
+
+    res.json({
+      year: { id: y.id, year: y.year, status: y.status },
+      total: {
+        realisasi: uang(totRealisasi), dikapitalisasi: uang(totKapital),
+        belum_dikapitalisasi: uang(totRealisasi - totKapital),
+        jml_baris: lines.length, jml_siap_dikapitalisasi: siap,
+      },
+      lines: hasil,
+    });
+  } catch (e: any) {
+    console.error('Error ringkasan kapitalisasi:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 export default router;

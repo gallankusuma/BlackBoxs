@@ -1730,6 +1730,81 @@ const ensureBudgetSchema = async (connection: any) => {
   ]) await execSchemaEnsure(connection, sql);
 };
 
+/**
+ * Kapitalisasi CAPEX — serah-terima dari anggaran/project ke Asset Management.
+ *
+ * Tiga keputusan pemilik (31 Agustus 2026) yang dikunci di skema ini:
+ *
+ *   1. **Basis biaya = realisasi aktual**, bukan nilai kontrak. Aset lahir
+ *      dengan biaya yang benar-benar dikeluarkan (AP + biaya project), bukan
+ *      dengan angka yang dijanjikan kontrak.
+ *   2. **Satu baris CAPEX boleh melahirkan banyak aset.** Karena itu alokasi
+ *      biayanya eksplisit per aset, dan jumlahnya wajib pas dengan nilai yang
+ *      dikapitalisasi — bukan dibagi rata diam-diam.
+ *   3. **Pemicunya manual.** Tidak ada satu pun jalur otomatis yang melahirkan
+ *      aset dari project yang selesai; project yang ditutup karena batal tidak
+ *      boleh menjadi aset.
+ *
+ * Realisasi terus bergerak setelah aset didaftarkan (tagihan susulan). Karena
+ * itu tiap kapitalisasi **membekukan** angkanya sebagai snapshot, dan biaya
+ * yang datang belakangan dilaporkan sebagai sisa yang belum dikapitalisasi —
+ * bukan diam-diam mengubah harga perolehan aset yang sudah berjalan
+ * penyusutannya.
+ *
+ * `budget_line_id` sengaja INDEX, bukan FK: merapikan anggaran tidak boleh
+ * melenyapkan catatan aset. Kode dan judul barisnya ikut disalin supaya
+ * catatannya tetap bisa dibaca sendiri kalau barisnya sudah tidak ada.
+ */
+const ensureAssetCapitalizationSchema = async (connection: any) => {
+  const statements = [
+    `CREATE TABLE IF NOT EXISTS asset_capitalizations (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      budget_line_id INT NOT NULL,
+      budget_line_code VARCHAR(50),
+      budget_line_title VARCHAR(255),
+      budget_year SMALLINT,
+      seq INT NOT NULL DEFAULT 1,
+      basis_amount DECIMAL(18,2) NOT NULL DEFAULT 0,
+      basis_ap DECIMAL(18,2) NOT NULL DEFAULT 0,
+      basis_expenses DECIMAL(18,2) NOT NULL DEFAULT 0,
+      basis_kumulatif DECIMAL(18,2) NOT NULL DEFAULT 0,
+      status VARCHAR(20) NOT NULL DEFAULT 'posted',
+      note TEXT,
+      reversed_at DATETIME NULL,
+      reversed_by INT NULL,
+      reversal_reason TEXT,
+      capitalized_by INT,
+      capitalized_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_cap_line_seq (budget_line_id, seq),
+      INDEX idx_cap_line (budget_line_id),
+      INDEX idx_cap_status (status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+
+    `CREATE TABLE IF NOT EXISTS asset_capitalization_lines (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      capitalization_id INT NOT NULL,
+      asset_id INT NOT NULL,
+      asset_code VARCHAR(100),
+      asset_name VARCHAR(255),
+      is_new_asset TINYINT(1) NOT NULL DEFAULT 0,
+      allocated_cost DECIMAL(18,2) NOT NULL DEFAULT 0,
+      allocation_note VARCHAR(500),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_capline_cap (capitalization_id),
+      INDEX idx_capline_asset (asset_id),
+      FOREIGN KEY (capitalization_id) REFERENCES asset_capitalizations(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+
+    // Asal-usul aset. Aset yang lahir dari CAPEX harus bisa ditelusuri balik ke
+    // baris anggaran yang membiayainya — tanpa ini, "aset ini dari proyek mana"
+    // hanya bisa dijawab dari ingatan orang.
+    `ALTER TABLE assets ADD COLUMN IF NOT EXISTS source_budget_line_id INT NULL`,
+    `ALTER TABLE assets ADD INDEX idx_assets_budget_line (source_budget_line_id)`,
+  ];
+  for (const sql of statements) await execSchemaEnsure(connection, sql);
+};
+
 const ensureRouteModuleSchema = async (connection: any) => {
   const statements = [
     `CREATE TABLE IF NOT EXISTS inbox_notifications (
@@ -3035,6 +3110,7 @@ export async function initializeDatabase() {
     await ensureMaterialRequestOutcomeSchema(connection);
     await ensureMrIdempotencySchema(connection);
     await ensureBudgetSchema(connection);
+    await ensureAssetCapitalizationSchema(connection);
     await ensureContractLedgerSchema(connection);
     await ensureMobilePinSchema(connection);
     await ensureAssetDepreciationSchema(connection);
