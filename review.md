@@ -12149,3 +12149,40 @@ harganya sendiri. Ini vektor yang nyata untuk price list, tapi menutupnya bisa
 mengunci tim kecil yang orangnya memang sama. Tidak diputuskan sepihak.
 
 **Belum di-deploy.** Menunggu instruksi pemilik.
+
+### Deploy produksi — 1 September 2026
+
+Commit `e9e98d56`. Tuntas tanpa rollback.
+
+Skrip keluar dengan kode 1 karena smoke test, tapi **rilisnya sengaja tidak
+dikembalikan**: dari 31 pemeriksaan, 30 lulus dan satu-satunya yang gagal adalah
+temuan lama `kredensial master publik ditolak` — menunggu tindakan pemilik
+server, tidak disentuh tim development. Skripnya sendiri yang menyatakan itu
+("Rilis ini TIDAK dikembalikan").
+
+**Migrasi data lama — yang paling menentukan, diperiksa langsung ke produksi:**
+
+| | |
+|---|---|
+| Harga vendor di produksi | **1517** |
+| Ditandai berlaku (grandfathered) | **1517** |
+| Menggantung sebagai pending | **0** |
+| Tanpa approver (jujur: tidak ada yang pernah menyetujuinya) | 1517 |
+| Produk yang masih punya harga | 1354 |
+| Vendor yang masih terdaftar sebagai pemasok | 131 |
+
+Angka terakhir itu tujuannya: kalau backfill tidak jalan, 1517 harga menjadi
+pending dan auto-fill PR + price-search kosong seketika. Diperiksa dengan
+predikat yang persis dipakai konsumennya (`approval_status = 2 AND superseded_at
+IS NULL`) — hasilnya 1517, tidak ada yang hilang.
+
+**Terverifikasi live:** 11 kolom + 2 indeks terpasang; `dist/routes/procurement.routes.js`
+memuat `hargaVendorAktif` (6 rujukan), `dist/routes/ai.routes.js` (2),
+`dist/utils/vendor-price.js` ada; `/vendor-prices`, `/approve`, `/reject`
+menjawab 401 tanpa token; health 200. Bundel `js/VendorPriceList.DZvEe4wO.js`
+yang dilayani nginx menjawab 200 dan memuat "Menunggu Supervisor", "Menunggu
+Manager", "Alasan penolakan", "Berlaku (warisan)", dan "Ajukan Revisi".
+
+**Konsekuensi operasional yang harus diketahui pengguna:** harga vendor yang
+dibuat **mulai sekarang** tidak langsung dipakai PR/PO — ia menunggu persetujuan
+Supervisor lalu Manager. Harga yang sudah ada sebelumnya tidak terpengaruh.
