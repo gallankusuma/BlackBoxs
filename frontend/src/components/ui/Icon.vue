@@ -68,6 +68,10 @@ const ICONS: Record<string, Def> = {
   eye:        { p: ['M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z'], c: [[12, 12, 3]] },
   trash:      { p: ['M3 6h18', 'M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2',
                     'M19 6l-1 14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1L5 6', 'M10 11v6', 'M14 11v6'] },
+  pencil:     { p: ['M12 20h9', 'M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4z'] },
+  lock:       { p: ['M5 11h14a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-8a1 1 0 0 1 1-1z',
+                    'M8 11V7a4 4 0 0 1 8 0v4'] },
+  'check-circle': { p: ['m8.5 12 2.5 2.5 4.5-5'], c: [[12, 12, 9]] },
 };
 
 const def = computed<Def>(() => ICONS[props.name] || ICONS.grid);

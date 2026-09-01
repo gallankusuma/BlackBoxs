@@ -123,17 +123,39 @@
               <td class="px-4 py-2 text-sm text-right">{{ price.min_order_qty || '-' }}</td>
               <td class="px-4 py-2 text-sm text-right">{{ price.lead_time_days ? price.lead_time_days + ' days' : '-' }}</td>
               <td class="px-4 py-2 text-sm text-right whitespace-nowrap">
-                <button v-if="bisaSetujui(price)" @click="setujui(price)"
-                  class="bg-green-600 text-white px-2 py-1 rounded text-xs hover:bg-green-700 mr-1">
-                  Approve
-                </button>
-                <button v-if="bisaTolak(price)" @click="bukaTolak(price)"
-                  class="bg-red-600 text-white px-2 py-1 rounded text-xs hover:bg-red-700 mr-2">
-                  Reject
-                </button>
-                <button v-if="!price.superseded_at" @click="editPrice(price)" class="text-blue-600 hover:text-blue-800 mr-2">Edit</button>
-                <button v-if="!price.superseded_at" @click="deletePrice(price)" class="text-red-600 hover:text-red-800">Delete</button>
-                <span v-if="price.superseded_at" class="text-gray-400 text-xs">terkunci</span>
+                <!-- Aksi berbentuk ikon; setiap tombol wajib punya title + aria-label,
+                     alasannya sama dengan PurchaseRequests.vue. Judul tombol Edit
+                     berubah sesuai akibatnya: pada harga yang sudah berlaku ia
+                     melahirkan revisi, bukan menimpa angkanya. -->
+                <div class="flex items-center justify-end gap-1">
+                  <button v-if="bisaSetujui(price)" @click="setujui(price)"
+                    title="Setujui harga ini" aria-label="Setujui harga"
+                    class="inline-flex items-center justify-center w-7 h-7 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-white bg-green-600 hover:bg-green-700">
+                    <Icon name="check" :size="15" />
+                  </button>
+                  <button v-if="bisaTolak(price)" @click="bukaTolak(price)"
+                    title="Tolak harga ini (wajib beralasan)" aria-label="Tolak harga"
+                    class="inline-flex items-center justify-center w-7 h-7 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-white bg-red-600 hover:bg-red-700">
+                    <Icon name="x" :size="15" />
+                  </button>
+                  <button v-if="!price.superseded_at" @click="editPrice(price)"
+                    :title="Number(price.approval_status) === 2 ? 'Ubah harga — akan dibuat sebagai revisi yang menunggu persetujuan' : 'Ubah harga'"
+                    aria-label="Ubah harga"
+                    class="inline-flex items-center justify-center w-7 h-7 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-blue-600 hover:bg-blue-50">
+                    <Icon name="pencil" :size="16" />
+                  </button>
+                  <button v-if="!price.superseded_at" @click="deletePrice(price)"
+                    title="Hapus harga" aria-label="Hapus harga"
+                    class="inline-flex items-center justify-center w-7 h-7 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-red-600 hover:bg-red-50">
+                    <Icon name="trash" :size="16" />
+                  </button>
+                  <span v-if="price.superseded_at"
+                    title="Terkunci — sudah digantikan revisi yang lebih baru"
+                    class="inline-flex items-center justify-center w-7 h-7 text-gray-400">
+                    <Icon name="lock" :size="15" />
+                    <span class="sr-only">Terkunci, sudah digantikan revisi</span>
+                  </span>
+                </div>
               </td>
             </tr>
           </tbody>
@@ -242,6 +264,7 @@
 </template>
 
 <script setup lang="ts">
+import Icon from '@/components/ui/Icon.vue';
 import { computed, onMounted, reactive, ref } from 'vue';
 import { api } from '@/lib/api';
 import { useToast } from 'vue-toastification';

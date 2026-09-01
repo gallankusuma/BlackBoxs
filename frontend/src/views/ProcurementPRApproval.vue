@@ -79,16 +79,25 @@
               <span v-if="!pr.approved_by_supervisor_id && !pr.approved_by_manager_id" class="text-gray-400">—</span>
             </td>
             <td class="px-4 py-3 text-center">
+              <!-- Aksi berbentuk ikon; setiap tombol wajib punya title + aria-label.
+                   "Completed" menjadi ikon centang berlingkar dengan tooltip —
+                   ia status, bukan tombol, jadi tetap span dan tidak bisa diklik. -->
               <div class="flex gap-1 justify-center">
                 <button v-if="canApprove(pr.approval_status)" @click="approve(pr)"
-                  class="bg-green-600 text-white px-3 py-1 rounded text-xs hover:bg-green-700">
-                  Approve
+                  title="Setujui PR" aria-label="Setujui PR"
+                  class="inline-flex items-center justify-center w-7 h-7 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-white bg-green-600 hover:bg-green-700">
+                  <Icon name="check" :size="15" />
                 </button>
                 <button v-if="canReject(pr.approval_status)" @click="openReject(pr)"
-                  class="bg-red-600 text-white px-3 py-1 rounded text-xs hover:bg-red-700">
-                  Reject
+                  title="Tolak PR" aria-label="Tolak PR"
+                  class="inline-flex items-center justify-center w-7 h-7 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-white bg-red-600 hover:bg-red-700">
+                  <Icon name="x" :size="15" />
                 </button>
-                <span v-if="pr.approval_status >= 2" class="text-green-600 text-xs font-medium">Completed</span>
+                <span v-if="pr.approval_status >= 2" title="Sudah disetujui penuh (2/2)"
+                  class="inline-flex items-center justify-center w-7 h-7 text-green-600">
+                  <Icon name="check-circle" :size="16" />
+                  <span class="sr-only">Sudah disetujui penuh</span>
+                </span>
               </div>
             </td>
           </tr>
@@ -115,6 +124,7 @@
 </template>
 
 <script setup lang="ts">
+import Icon from '@/components/ui/Icon.vue';
 import { ref, computed, onMounted } from 'vue';
 import { useProcurementStore } from '../stores/procurement';
 import { useApprovalWorkflow } from '../composables/useApprovalWorkflow';
