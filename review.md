@@ -12186,3 +12186,68 @@ Manager", "Alasan penolakan", "Berlaku (warisan)", dan "Ajukan Revisi".
 **Konsekuensi operasional yang harus diketahui pengguna:** harga vendor yang
 dibuat **mulai sekarang** tidak langsung dipakai PR/PO — ia menunggu persetujuan
 Supervisor lalu Manager. Harga yang sudah ada sebelumnya tidak terpengaruh.
+
+---
+
+## [DEV] Kolom Action modul procurement jadi ikon — 1 September 2026
+
+Permintaan pemilik: kolom Action memakan tempat. Di daftar PR ia bisa memuat
+lima tombol berteks sekaligus ("Convert to PO ✓", "Approve", "Reject", "View",
+"Delete"); PO empat; Vendor Price List empat plus teks "terkunci"; layar PR/PO
+Approval dua plus "Completed".
+
+Lima layar disamakan memakai `ui/Icon.vue` yang sudah ada — SVG ditanam langsung,
+tanpa pustaka, tanpa emoji (alasannya sudah tertulis di berkas itu: bentuk emoji
+ditentukan sistem operasi dan tidak bisa mengikuti warna teks). Ditambahkan:
+`eye`, `trash`, `pencil`, `lock`, `check-circle`.
+
+**Yang dijaga:**
+
+- **20 tombol ikon, nol tanpa `title` + `aria-label`.** Ikon tanpa keduanya
+  berarti aksinya hanya bisa ditebak dari bentuk, dan pembaca layar tidak
+  membacakan apa pun selain "tombol". Tiga span status (`Completed`, `terkunci`)
+  membawa `sr-only`.
+- **Yang bukan aksi tetap bukan tombol.** "Completed" dan "terkunci" jadi span
+  berikon, tidak bisa diklik — sama seperti sebelumnya.
+- **Persentase penawaran dipertahankan sebagai angka** di sebelah ikon pada state
+  "PO 60% ↗". Itu data, bukan label; tidak muncul di kolom lain mana pun, jadi
+  memindahkannya ke tooltip berarti menghilangkannya dari pandangan.
+- **Tombol Reject di dalam dialog tetap berteks.** Tombol konfirmasi yang
+  menentukan tindakan tidak boleh hanya berupa bentuk.
+- Teks bantuan Bid Tabulation ikut disesuaikan — ia menyuruh menekan tombol
+  "Approve" yang sekarang tidak lagi berteks.
+
+⚠️ `Icon.vue` jatuh ke ikon `grid` **tanpa error** kalau namanya tidak terdaftar,
+dan path SVG yang salah bentuk juga tidak menghasilkan error. Jadi build yang
+bersih tidak membuktikan ikonnya benar. Kesepuluh nama diperiksa terdaftar, dan
+kelima path baru dirender ke halaman uji lalu dilihat.
+
+**Koreksi atas hitungan saya sendiri:** sempat saya laporkan "18 tombol ikon".
+Regex pemeriksanya menuntut `<Icon` tepat setelah tag pembuka, sehingga tombol
+yang isinya diawali atribut multi-baris terlewat. Yang benar **20 tombol + 3 span
+= 23 ikon**. Kesimpulannya tidak berubah (nol tanpa label), tapi angkanya salah.
+
+### Deploy — percobaan pertama DIKEMBALIKAN oleh guard
+
+Smoke test setelah restart melaporkan **dua** kegagalan: temuan lama kredensial
+master, plus `dokumen aset tertutup — HTTP 0 — DOKUMEN BISNIS TERBUKA TANPA
+TOKEN`. Karena ada kegagalan di luar temuan lama, skrip menggulung balik rilis
+dan versi lama kembali melayani (health 200). Guard bekerja persis sebagaimana
+mestinya.
+
+**Tapi kegagalan itu semu.** `HTTP 0` berarti permintaannya gagal tersambung,
+bukan menjawab 200 — sedangkan pesannya berbunyi seolah dokumen bisnis terbuka.
+Perubahan ini murni frontend (lima `.vue` + `Icon.vue`), tidak menyentuh apa pun
+di jalur `/uploads`. Diverifikasi: path yang sama menjawab **403 lima kali
+berturut-turut**, dan `npm run smoke` ulang bersih **30/31**. Deploy kedua tuntas
+tanpa rollback dengan kegagalan yang sama-satu-itu saja.
+
+Terverifikasi live: kelima chunk terunggah ulang (`aria-label` 8/4/4/2/2 = 20),
+dilayani nginx 200, health 200, `/uploads/asset_documents/` tetap 403, dan
+endpoint approval harga vendor tetap 401 — fitur kemarin tidak tergeser.
+
+**Usul yang BELUM dikerjakan (di luar permintaan):** smoke test ditembak tepat
+setelah `pm2 restart`, tanpa jeda pemanasan dan tanpa retry. Satu paket yang
+nyangkut sudah cukup untuk menggulung balik rilis yang sehat. Mengulang sekali
+khusus untuk kegagalan bertipe `HTTP 0` sebelum memvonis akan menutup itu tanpa
+melemahkan gerbangnya — menunggu keputusan pemilik.
