@@ -64,65 +64,101 @@
                   {{ approvalLabel(pr) }}
                 </span>
               </td>
-              <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium space-x-2">
-                <!-- State 1: Has winner → Convert to PO (full green) -->
-                <button
-                  v-if="(pr.approval_status || 0) === 2 && getBidProgress(pr.id).has_winner"
-                  @click="convertToPO(pr)"
-                  class="inline-flex items-center px-3 py-1 rounded text-white text-xs bg-purple-600 hover:bg-purple-700"
-                  :disabled="submitting"
-                >
-                  Convert to PO ✓
-                </button>
-                <!-- State 2: Has bids with prices but no winner → can still convert to PO -->
-                <button
-                  v-else-if="(pr.approval_status || 0) === 2 && getBidProgress(pr.id).percentage > 0"
-                  @click="convertToPO(pr)"
-                  class="inline-flex items-center px-3 py-1 rounded text-white text-xs bg-blue-500 hover:bg-blue-600"
-                  :disabled="submitting"
-                >
-                  PO {{ getBidProgress(pr.id).percentage }}% ↗
-                </button>
-                <!-- State 3: Has bids added but no prices yet → show bidding in progress -->
-                <button
-                  v-else-if="(pr.approval_status || 0) === 2 && getBidProgress(pr.id).total_bids > 0"
-                  @click="viewPR(pr)"
-                  class="inline-flex items-center px-3 py-1 rounded text-white text-xs bg-cyan-500 hover:bg-cyan-600"
-                >
-                  Bidding 0%
-                </button>
-                <!-- State 4: Approved but no bidding data → show that bidding is required -->
-                <button
-                  v-else-if="(pr.approval_status || 0) === 2"
-                  @click="viewPR(pr)"
-                  class="inline-flex items-center px-3 py-1 rounded text-white text-xs bg-orange-400 hover:bg-orange-500"
-                >
-                  ⚠ Bidding
-                </button>
-                <button
-                  v-if="canApprove(pr.approval_status || 0)"
-                  @click="approvePR(pr.id)"
-                  class="inline-flex items-center px-3 py-1 bg-green-600 text-white rounded hover:bg-green-700"
-                  :disabled="submitting"
-                >
-                  Approve
-                </button>
-                <button
-                  v-if="canReject(pr.approval_status || 0)"
-                  @click="rejectPR(pr.id)"
-                  class="inline-flex items-center px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700"
-                  :disabled="submitting"
-                >
-                  Reject
-                </button>
-                <button @click="viewPR(pr)" class="text-blue-600 hover:text-blue-900">View</button>
-                <button
-                  v-if="(pr.approval_status || 0) === 0"
-                  @click="deletePR(pr.id)"
-                  class="text-red-600 hover:text-red-900"
-                >
-                  Delete
-                </button>
+              <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                <!--
+                  Aksi berbentuk ikon, bukan teks: kolom ini pernah memuat lima
+                  tombol berteks sekaligus ("Convert to PO ✓", "Approve",
+                  "Reject", "View", "Delete") dan lebarnya mendorong kolom lain
+                  keluar layar.
+
+                  Setiap tombol WAJIB punya `title` + `aria-label`. Ikon tanpa
+                  keduanya berarti aksinya hanya bisa ditebak dari bentuk — dan
+                  pembaca layar tidak membacakan apa pun selain "tombol".
+                -->
+                <div class="flex items-center justify-end gap-1">
+                  <!-- State 1: sudah ada pemenang → jadikan PO -->
+                  <button
+                    v-if="(pr.approval_status || 0) === 2 && getBidProgress(pr.id).has_winner"
+                    @click="convertToPO(pr)"
+                    :disabled="submitting"
+                    title="Jadikan Purchase Order — pemenang sudah ditentukan"
+                    aria-label="Jadikan Purchase Order"
+                    class="inline-flex items-center justify-center w-7 h-7 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-white bg-purple-600 hover:bg-purple-700"
+                  >
+                    <Icon name="cart" :size="15" />
+                  </button>
+                  <!-- State 2: ada penawaran berharga tapi belum ada pemenang.
+                       Persentasenya DIPERTAHANKAN sebagai angka: ia data, bukan
+                       label, dan tidak muncul di kolom lain mana pun. -->
+                  <button
+                    v-else-if="(pr.approval_status || 0) === 2 && getBidProgress(pr.id).percentage > 0"
+                    @click="convertToPO(pr)"
+                    :disabled="submitting"
+                    :title="`Jadikan Purchase Order — penawaran terisi ${getBidProgress(pr.id).percentage}%`"
+                    aria-label="Jadikan Purchase Order"
+                    class="inline-flex items-center gap-1 h-7 px-1.5 rounded text-white text-[11px] leading-none bg-blue-500 hover:bg-blue-600 transition-colors disabled:opacity-40"
+                  >
+                    <Icon name="cart" :size="14" />{{ getBidProgress(pr.id).percentage }}%
+                  </button>
+                  <!-- State 3: vendor sudah dimasukkan, harga belum ada -->
+                  <button
+                    v-else-if="(pr.approval_status || 0) === 2 && getBidProgress(pr.id).total_bids > 0"
+                    @click="viewPR(pr)"
+                    title="Penawaran berjalan — belum ada harga yang masuk"
+                    aria-label="Lihat penawaran yang sedang berjalan"
+                    class="inline-flex items-center justify-center w-7 h-7 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-white bg-cyan-500 hover:bg-cyan-600"
+                  >
+                    <Icon name="clock" :size="15" />
+                  </button>
+                  <!-- State 4: sudah disetujui tapi penawaran belum dimulai -->
+                  <button
+                    v-else-if="(pr.approval_status || 0) === 2"
+                    @click="viewPR(pr)"
+                    title="Perlu penawaran — belum ada vendor yang dimasukkan"
+                    aria-label="Perlu penawaran"
+                    class="inline-flex items-center justify-center w-7 h-7 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-white bg-orange-400 hover:bg-orange-500"
+                  >
+                    <Icon name="alert" :size="15" />
+                  </button>
+
+                  <button
+                    v-if="canApprove(pr.approval_status || 0)"
+                    @click="approvePR(pr.id)"
+                    :disabled="submitting"
+                    title="Setujui PR"
+                    aria-label="Setujui PR"
+                    class="inline-flex items-center justify-center w-7 h-7 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-white bg-green-600 hover:bg-green-700"
+                  >
+                    <Icon name="check" :size="15" />
+                  </button>
+                  <button
+                    v-if="canReject(pr.approval_status || 0)"
+                    @click="rejectPR(pr.id)"
+                    :disabled="submitting"
+                    title="Tolak PR"
+                    aria-label="Tolak PR"
+                    class="inline-flex items-center justify-center w-7 h-7 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-white bg-red-600 hover:bg-red-700"
+                  >
+                    <Icon name="x" :size="15" />
+                  </button>
+                  <button
+                    @click="viewPR(pr)"
+                    title="Lihat detail PR"
+                    aria-label="Lihat detail PR"
+                    class="inline-flex items-center justify-center w-7 h-7 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-blue-600 hover:bg-blue-50"
+                  >
+                    <Icon name="eye" :size="16" />
+                  </button>
+                  <button
+                    v-if="(pr.approval_status || 0) === 0"
+                    @click="deletePR(pr.id)"
+                    title="Hapus PR"
+                    aria-label="Hapus PR"
+                    class="inline-flex items-center justify-center w-7 h-7 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-red-600 hover:bg-red-50"
+                  >
+                    <Icon name="trash" :size="16" />
+                  </button>
+                </div>
               </td>
             </tr>
             <tr v-if="store.purchaseRequests.length === 0">
@@ -280,7 +316,7 @@
               <div v-else-if="currentPR && (currentPR.approval_status || 0) < 2" class="p-6 text-center bg-yellow-50 rounded-lg border border-yellow-200">
                 <div class="text-3xl mb-2">🔒</div>
                 <p class="text-sm font-semibold text-yellow-800">PR belum diapprove</p>
-                <p class="text-xs text-yellow-600 mt-1">Bid Tabulation hanya dapat diisi setelah PR mendapat approval. Gunakan tombol <strong>Approve</strong> di daftar PR.</p>
+                <p class="text-xs text-yellow-600 mt-1">Bid Tabulation hanya dapat diisi setelah PR mendapat approval. Gunakan tombol centang hijau (<strong>✓</strong>) pada kolom Action di daftar PR.</p>
               </div>
               <!-- Bid table for EXISTING PR (only when approved) -->
               <template v-else-if="currentPR && (currentPR.approval_status || 0) >= 2">
@@ -656,6 +692,7 @@
 
 
 <script setup lang="ts">
+import Icon from '@/components/ui/Icon.vue';
 import { computed, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { useProcurementStore } from '../stores/procurement';

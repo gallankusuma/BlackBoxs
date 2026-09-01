@@ -69,32 +69,49 @@
                   {{ approvalLabel(po) }}
                 </span>
               </td>
-              <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium space-x-2">
-                <button
-                  v-if="canApprove(po.approval_status || 0)"
-                  @click="approvePO(po.id)"
-                  class="inline-flex items-center px-3 py-1 bg-green-600 text-white rounded hover:bg-green-700"
-                  :disabled="submitting"
-                >
-                  Approve
-                </button>
-                <button
-                  v-if="canReject(po.approval_status || 0)"
-                  @click="rejectPO(po.id)"
-                  class="inline-flex items-center px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700"
-                  :disabled="submitting"
-                >
-                  Reject
-                </button>
-                <button @click="viewPO(po)" class="text-blue-600 hover:text-blue-900">View</button>
-                <button
-                  v-if="(po.approval_status || 0) === 0"
-                  @click="handleDeletePO(po.id)"
-                  class="text-red-600 hover:text-red-900"
-                  :disabled="submitting"
-                >
-                  Delete
-                </button>
+              <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                <!-- Aksi berbentuk ikon; alasan & aturan title/aria-label sama
+                     dengan PurchaseRequests.vue. -->
+                <div class="flex items-center justify-end gap-1">
+                  <button
+                    v-if="canApprove(po.approval_status || 0)"
+                    @click="approvePO(po.id)"
+                    :disabled="submitting"
+                    title="Setujui PO"
+                    aria-label="Setujui PO"
+                    class="inline-flex items-center justify-center w-7 h-7 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-white bg-green-600 hover:bg-green-700"
+                  >
+                    <Icon name="check" :size="15" />
+                  </button>
+                  <button
+                    v-if="canReject(po.approval_status || 0)"
+                    @click="rejectPO(po.id)"
+                    :disabled="submitting"
+                    title="Tolak PO"
+                    aria-label="Tolak PO"
+                    class="inline-flex items-center justify-center w-7 h-7 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-white bg-red-600 hover:bg-red-700"
+                  >
+                    <Icon name="x" :size="15" />
+                  </button>
+                  <button
+                    @click="viewPO(po)"
+                    title="Lihat detail PO"
+                    aria-label="Lihat detail PO"
+                    class="inline-flex items-center justify-center w-7 h-7 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-blue-600 hover:bg-blue-50"
+                  >
+                    <Icon name="eye" :size="16" />
+                  </button>
+                  <button
+                    v-if="(po.approval_status || 0) === 0"
+                    @click="handleDeletePO(po.id)"
+                    :disabled="submitting"
+                    title="Hapus PO"
+                    aria-label="Hapus PO"
+                    class="inline-flex items-center justify-center w-7 h-7 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-red-600 hover:bg-red-50"
+                  >
+                    <Icon name="trash" :size="16" />
+                  </button>
+                </div>
               </td>
             </tr>
             <tr v-if="purchaseOrders.length === 0">
@@ -1173,6 +1190,7 @@
 </template>
 
 <script setup lang="ts">
+import Icon from '@/components/ui/Icon.vue';
 import { ref, computed, onMounted, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import { api } from '../lib/api';
