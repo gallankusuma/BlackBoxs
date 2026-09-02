@@ -278,6 +278,38 @@ keputusan terms komersial.
 
 ### Aturan bisnis procurement
 
+### Satu PR boleh melahirkan beberapa PO (PROC-PARTIAL-01)
+
+⚠️ **Jangan disamakan dengan "satu PO = satu GRN" di bawah.** Yang dibatasi satu
+lawan satu adalah PO → GRN (penerimaan barang). PR → PO memang **bertahap**:
+layar Purchase Order dibangun untuk itu, lengkap dengan sisa per item
+("Remaining: 4") dan tombol "Max".
+
+Sampai 2 September 2026 ada penolakan mentah begitu `pr.status = 'PO_GENERATED'`
+("PR tidak bisa digunakan lagi untuk PO baru") yang membuat pemeriksaan sisa
+per-item di bawahnya **tidak pernah tercapai**. Sudah dibuang. Yang menjaga
+sekarang hanya satu: PO ditolak kalau kuantitasnya **melebihi sisa** PR.
+
+⚠️ **`pr_bid_items` tidak punya kolom `product_id`** — hanya `item_index` dan
+`item_name`. PO hasil tabulasi bid karena itu dulu lahir dengan `product_id`
+NULL, dan barang yang sudah dipesan **tidak terhitung sebagai teralokasi**:
+sisanya tampak masih utuh. Dua hal menutup itu:
+
+1. `generate-pos` memulihkan `product_id` lewat `item_index`, yang menunjuk
+   posisi item di dalam notes PR.
+2. Perhitungan sisa (di `POST /purchase-orders` maupun
+   `GET /purchase-orders/allocations`) memulihkan identitas item lama lewat
+   **nama** terhadap notes PR — jadi baris warisan yang sudah terlanjur NULL
+   tetap terhitung, tanpa perlu migrasi data.
+
+⚠️ Nama itu dipulihkan **menjadi `product_id`**, bukan dipakai sebagai kunci
+`name:` sendiri. Percobaan pertama memakai kunci `name:` di sisi teralokasi dan
+`pid:` di sisi PR — **kedua sisi tidak pernah bertemu**, yang sudah dipesan
+terhitung nol, dan gerbangnya terbuka tanpa penjaga. Tertangkap
+`npm run test:po-partial`.
+
+### Aturan lain
+
 **Satu PO = satu GRN aktif.** Ini keputusan pemilik bisnis (Agustus 2026), bukan
 keterbatasan teknis. Partial delivery — PO qty 100 diterima 30/40/30 — **tidak**
 didukung dan memang tidak diinginkan. Tim reviewer sempat mengusulkannya

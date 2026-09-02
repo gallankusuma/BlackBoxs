@@ -1791,6 +1791,22 @@ router.post('/purchase-requests/:prId/generate-pos', authMiddleware, requirePerm
     const bids = await dbAll('SELECT pb.*, v.name as reg_vendor_name, v.id as reg_vendor_id FROM pr_bids pb LEFT JOIN vendors v ON pb.vendor_id = v.id WHERE pb.pr_id = ?', [prId]) as any[];
     if (bids.length === 0) return res.status(400).json({ error: 'Belum ada vendor bid untuk PR ini.' });
 
+    // PROC-PARTIAL-01: `pr_bid_items` tidak punya kolom product_id — hanya
+    // `item_index` dan `item_name`. Akibatnya PO hasil tabulasi bid lahir dengan
+    // product_id NULL, dan barang yang sudah dipesan tidak pernah terhitung
+    // sebagai teralokasi: sisa per item tampak masih utuh padahal sudah dipesan.
+    // Identitasnya dipulihkan lewat `item_index`, yang menunjuk posisi item di
+    // dalam notes PR.
+    let prItemsUntukPo: any[] = [];
+    try { prItemsUntukPo = (JSON.parse(pr.notes || '{}').items || []) as any[]; } catch { prItemsUntukPo = []; }
+    const resolveProductId = (bidItem: any): number | null => {
+      const idx = Number(bidItem.item_index);
+      if (!Number.isFinite(idx)) return bidItem.product_id || null;
+      const asal = prItemsUntukPo[idx];
+      const pid = Number(asal?.productId ?? asal?.product_id);
+      return Number.isFinite(pid) && pid > 0 ? pid : (bidItem.product_id || null);
+    };
+
     // Collect winning items per bid/vendor
     const vendorItemsMap: Record<number, { bid: any; items: any[] }> = {};
     for (const bid of bids) {
@@ -1862,7 +1878,7 @@ router.post('/purchase-requests/:prId/generate-pos', authMiddleware, requirePerm
               await tx.run(
                 `INSERT INTO purchase_order_items (purchase_order_id, po_id, product_id, quantity, unit_price, uom, notes)
                  VALUES (?, ?, ?, ?, ?, ?, ?)`,
-                [newPoId, newPoId, item.product_id || null, Number(item.quantity), Number(item.unit_price), item.uom || '', item.item_name]
+                [newPoId, newPoId, resolveProductId(item), Number(item.quantity), Number(item.unit_price), item.uom || '', item.item_name]
               );
             }
 
@@ -1999,15 +2015,42 @@ router.get('/purchase-orders', authMiddleware, requirePermission('procurement.pu
 router.get('/purchase-orders/allocations', authMiddleware, requirePermission('procurement.purchase-orders.view'), async (req: Request, res: Response) => {
   try {
     const baris = await dbAll(
-      `SELECT po.pr_id, poi.product_id, SUM(poi.quantity) AS qty
+      `SELECT po.pr_id, poi.product_id, poi.notes AS item_name, SUM(poi.quantity) AS qty
        FROM purchase_orders po
        JOIN purchase_order_items poi
          ON (poi.purchase_order_id = po.id OR poi.po_id = po.id)
        WHERE po.is_deleted = 0
          AND po.pr_id IS NOT NULL
-         AND poi.product_id IS NOT NULL
-       GROUP BY po.pr_id, poi.product_id`
+       GROUP BY po.pr_id, poi.product_id, poi.notes`
     ) as any[];
+
+    // PROC-PARTIAL-01: item ber-product_id NULL TIDAK boleh dibuang.
+    //
+    // Versi sebelumnya menyaring `poi.product_id IS NOT NULL`. PO hasil tabulasi
+    // bid lahir tanpa product_id (`pr_bid_items` tidak punya kolom itu), jadi
+    // barang yang sudah dipesan hilang dari perhitungan dan layar menampilkan
+    // sisa yang masih utuh — "Remaining: 4" untuk item yang 1-nya sudah dipesan.
+    // Identitasnya dipulihkan di sini lewat nama item terhadap notes PR-nya.
+    const perluNama = baris.filter(r => r.product_id === null && r.item_name);
+    const namaKeProduk = new Map<string, number>();   // `${pr_id}|${nama}` -> product_id
+    if (perluNama.length > 0) {
+      // SATU query untuk semua PR yang terlibat — jangan dikembalikan menjadi
+      // pengambilan per PR, itu persis N+1 yang dibereskan PROC-N1-01.
+      const prIds = [...new Set(perluNama.map(r => Number(r.pr_id)))];
+      const prRows = await dbAll(
+        `SELECT id, notes FROM purchase_requests WHERE id IN (${prIds.map(() => '?').join(',')})`,
+        prIds
+      ) as any[];
+      for (const pr of prRows) {
+        let items: any[] = [];
+        try { items = (JSON.parse(pr.notes || '{}').items || []) as any[]; } catch { items = []; }
+        for (const it of items) {
+          const pid = Number(it.productId ?? it.product_id);
+          const nama = it.productName || it.name;
+          if (Number.isFinite(pid) && pid > 0 && nama) namaKeProduk.set(`${pr.id}|${nama}`, pid);
+        }
+      }
+    }
 
     // Bentuknya { [pr_id]: { [product_id]: qty } } — sama dengan Map bersarang
     // yang dulu dibangun di browser, supaya sisi klien tidak perlu menafsirkan
@@ -2015,8 +2058,15 @@ router.get('/purchase-orders/allocations', authMiddleware, requirePermission('pr
     const data: Record<string, Record<string, number>> = {};
     for (const r of baris) {
       const pr = String(r.pr_id);
+      let pid: number | null = r.product_id === null ? null : Number(r.product_id);
+      if (pid === null && r.item_name) {
+        pid = namaKeProduk.get(`${pr}|${r.item_name}`) ?? null;
+      }
+      // Yang tetap tidak bisa dipetakan dilewati — memaksakannya ke sebuah
+      // product_id berarti mengurangi sisa barang yang salah.
+      if (pid === null || !Number.isFinite(pid)) continue;
       if (!data[pr]) data[pr] = {};
-      data[pr][String(r.product_id)] = Number(r.qty || 0);
+      data[pr][String(pid)] = (data[pr][String(pid)] || 0) + Number(r.qty || 0);
     }
 
     res.json({ data });
@@ -2110,16 +2160,18 @@ router.post('/purchase-orders', authMiddleware, requirePermission('procurement.p
         return res.status(400).json({ error: 'Cannot create PO: PR must be fully approved (2/2) first' });
       }
 
-      // Check if PR already has POs generated
-      if (pr.status === 'PO_GENERATED') {
-        const existingPOs = await dbAll('SELECT id, po_number FROM purchase_orders WHERE pr_id = ? AND is_deleted = 0', [pr_id]) as any[];
-        if (existingPOs.length > 0) {
-          return res.status(400).json({
-            error: `PR ini sudah memiliki ${existingPOs.length} PO (${existingPOs.map((p:any) => p.po_number).join(', ')}). PR tidak bisa digunakan lagi untuk PO baru.`,
-            existing_pos: existingPOs
-          });
-        }
-      }
+      // PROC-PARTIAL-01: satu PR BOLEH melahirkan beberapa PO.
+      //
+      // Di sini dulu ada penolakan mentah begitu `pr.status === 'PO_GENERATED'`:
+      // "PR tidak bisa digunakan lagi untuk PO baru". Itu bertentangan dengan dua
+      // hal sekaligus. Pertama, layar Purchase Order memang dibangun untuk alokasi
+      // bertahap — ia menampilkan sisa per item ("Remaining: 4") dan tombol "Max".
+      // Kedua, tepat di bawah ini sudah ada pemeriksaan sisa per-item yang
+      // lengkap; penolakan itu membuatnya TIDAK PERNAH TERCAPAI.
+      //
+      // Tidak ada keputusan pemilik yang menetapkan satu PR = satu PO. Yang memang
+      // diputuskan adalah satu PO = satu GRN aktif, dan itu soal penerimaan
+      // barang, bukan penerbitan pesanan.
 
       // Validate that PR items are not already used in any PO (even draft)
       let prItems: Array<{ productId?: number; product_id?: number; qty?: number; quantity?: number }>; 
@@ -2131,14 +2183,18 @@ router.post('/purchase-orders', authMiddleware, requirePermission('procurement.p
       }
       
       // Check remaining quantity for each PR item
+      // PROC-PARTIAL-01: `i.notes` ikut diambil karena PO hasil tabulasi bid
+      // menyimpan item TANPA product_id — `pr_bid_items` tidak punya kolom itu,
+      // hanya `item_index` dan `item_name`. Tanpa nama itemnya, barang yang sudah
+      // dipesan tidak terhitung sama sekali dan sisanya tampak masih utuh.
       const existingPOItems = await dbAll(
-        `SELECT i.product_id, SUM(i.quantity) as allocated_qty
+        `SELECT i.product_id, i.notes AS item_name, SUM(i.quantity) as allocated_qty
          FROM purchase_order_items i
          JOIN purchase_orders po ON (po.id = i.purchase_order_id OR po.id = i.po_id)
          WHERE po.pr_id = ? AND po.status != 'cancelled'
-         GROUP BY i.product_id`,
+         GROUP BY i.product_id, i.notes`,
         [pr_id]
-      ) as Array<{ product_id: number, allocated_qty: number }>;
+      ) as Array<{ product_id: number | null, item_name: string | null, allocated_qty: number }>;
       
       // Build map: key -> total qty allowed from PR
       // Use product_id when available, fallback to item name for items without product catalog link
@@ -2153,11 +2209,31 @@ router.post('/purchase-orders', authMiddleware, requirePermission('procurement.p
         }
       }
       
+      // Nama item PO dipulihkan MENJADI product_id lebih dulu, baru dijadikan
+      // kunci — bukan dijadikan kunci `name:` sendiri.
+      //
+      // Percobaan pertama saya memakai kunci `name:` di sisi ini, dan tesnya
+      // langsung menangkapnya: sisi PR memakai `pid:` (item PR memang punya
+      // productId), jadi kedua sisi TIDAK PERNAH BERTEMU dan yang sudah dipesan
+      // tetap terhitung nol. Gerbangnya terbuka tanpa penjaga. Kunci `name:`
+      // hanya sah kalau item PR-nya sendiri tidak punya productId.
+      const namaKePid = new Map<string, number>();
+      for (const item of prItems) {
+        const pid = Number((item as any).product_id ?? (item as any).productId);
+        const nama = (item as any).productName || (item as any).name;
+        if (Number.isFinite(pid) && pid > 0 && nama) namaKePid.set(String(nama), pid);
+      }
+
       const allocatedQtyMap = new Map<string, number>();
       for (const item of existingPOItems) {
-         const pid = Number(item.product_id);
-         const key = (pid && Number.isFinite(pid)) ? `pid:${pid}` : `pid:${pid}`;
-         allocatedQtyMap.set(key, Number(item.allocated_qty));
+         let pid = Number(item.product_id);
+         if (!(pid && Number.isFinite(pid)) && item.item_name) {
+           pid = namaKePid.get(String(item.item_name)) ?? NaN;
+         }
+         const key = (pid && Number.isFinite(pid))
+           ? `pid:${pid}`
+           : `name:${item.item_name || 'unknown'}`;
+         allocatedQtyMap.set(key, (allocatedQtyMap.get(key) || 0) + Number(item.allocated_qty));
       }
       
       const overAllocated: Array<{ product_id: number, requested: number, remaining: number }> = [];
@@ -2168,7 +2244,8 @@ router.post('/purchase-orders', authMiddleware, requirePermission('procurement.p
         // Build lookup key matching the PR map
         const key = (pid && Number.isFinite(pid)) ? `pid:${pid}` : null;
         
-        // If we can't map this item to a PR item (no product_id), skip over-allocation check
+        // Kalau tetap tidak bisa dipetakan ke item PR mana pun, pemeriksaan
+        // dilewati — bukan ditolak: PO boleh memuat baris di luar PR.
         if (!key) continue;
         
         const maxQty = prQtyMap.get(key) || 0;

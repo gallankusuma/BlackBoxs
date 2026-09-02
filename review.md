@@ -13156,3 +13156,72 @@ dengan 401 sebelum handlernya jalan; yang sudah dicabut jatuh ke 404.
 dan itu BUKAN tanda ia masih ada. Path itu hanya satu segmen, jadi tertangkap
 route generik `GET /:id` yang memang masih terdaftar. Karena itu pembuktiannya
 memakai path empat segmen, yang tidak bisa dicocokkan route tersisa mana pun.
+
+---
+
+## [DEV] Satu PR tidak bisa melahirkan PO kedua (PROC-PARTIAL-01) — 2 September 2026
+
+Dilaporkan pemilik: dari 4 item PR, baru 1 yang diterbitkan PO, sisanya ditolak
+— *"PR ini sudah memiliki 1 PO (PO-20260828-0001). PR tidak bisa digunakan lagi
+untuk PO baru."*
+
+### Tiga lapis, bukan satu
+
+**1. Penolakan mentah yang bertentangan dengan kodenya sendiri.**
+`POST /purchase-orders` menolak begitu `pr.status = 'PO_GENERATED'` — padahal
+**tepat di bawahnya** sudah ada pemeriksaan sisa per-item yang lengkap dan
+benar, yang karenanya **tidak pernah tercapai**. Layarnya pun dibangun untuk
+alokasi bertahap: menampilkan "Remaining" per item dan tombol "Max". Tidak ada
+keputusan pemilik yang menetapkan satu PR = satu PO; yang diputuskan adalah satu
+PO = satu GRN, dan itu soal penerimaan barang.
+
+**2. Identitas produk hilang saat PO lahir dari tabulasi bid.**
+`pr_bid_items` **tidak punya kolom `product_id`** — hanya `item_index` dan
+`item_name` — sehingga `generate-pos` menyisipkan item dengan `product_id` NULL.
+Diverifikasi di produksi: item PO-20260828-0001 memang `product_id = NULL`,
+hanya bernama `KABEL POWER NYY - ETERNA - 4x4 50m` di kolom notes.
+
+**3. Perhitungan sisa membuang yang NULL.** Query alokasi mengelompokkan per
+`product_id` dan menyaring `IS NOT NULL`, jadi barang yang sudah dipesan hilang
+dari hitungan. Itulah sebabnya layar menampilkan **"Remaining: 4"** untuk item
+yang 1-nya sudah dipesan. Terverifikasi di produksi: keempat item PR 105
+melaporkan `sudah_dipesan = 0`.
+
+Membuka lapis 1 saja akan membuat pemilik bisa **memesan berlebih tanpa satu pun
+peringatan** — lapis 1 selama ini menutupi lapis 3.
+
+Ikut ditemukan: kunci fallback di sisi teralokasi tertulis
+`(pid && isFinite(pid)) ? \`pid:${pid}\` : \`pid:${pid}\`` — **kedua cabangnya
+sama persis**, salah salin, sehingga fallback nama yang dijanjikan komentar di
+atasnya tidak pernah ada.
+
+### Yang dikerjakan
+
+- Penolakan `PO_GENERATED` dibuang dari `POST /purchase-orders`.
+- `generate-pos` memulihkan `product_id` lewat `item_index` → notes PR.
+- Perhitungan sisa (penjaga PO **dan** `GET /purchase-orders/allocations`)
+  memulihkan identitas item warisan lewat nama terhadap notes PR — jadi baris
+  yang terlanjur NULL tetap terhitung **tanpa migrasi data**.
+
+Diverifikasi terhadap data produksi: nama item PO dan nama item PR **cocok
+persis** (`KABEL POWER NYY - ETERNA - 4x4 50m`), jadi sisanya menjadi **3**,
+bukan 4.
+
+### ⚠️ Tes menangkap cacat di perbaikan saya sendiri
+
+Percobaan pertama memakai kunci `name:` di sisi teralokasi sementara sisi PR
+memakai `pid:` — **kedua sisi tidak pernah bertemu**. PO ketiga yang jelas
+melebihi sisa **diterima (201)**. Artinya saya baru saja membuka gerbang tanpa
+penjaga. Diperbaiki: nama dipulihkan **menjadi `product_id`** lebih dulu, baru
+dibandingkan.
+
+### Verifikasi
+
+`tests/po-partial.ts` — **14 lulus, 0 gagal**, meniru bentuk data produksi
+(PO pertama sengaja dibuat ber-`product_id` NULL). Empat mutasi, semuanya
+tertangkap: penolakan lama dipasang balik (2), pemulihan nama dilepas (2),
+`/allocations` kembali membuang NULL (1), `generate-pos` kembali menulis NULL (2).
+
+Regresi: `procurement` 184, `proc-agregat` 12, `vendor-price` 53,
+`grn-lampiran` 31, `inbox-item` 20, `hr-inv-rbac` 25, `finance-rbac` 22.
+`tsc --noEmit` bersih, `npm run build` bersih.
