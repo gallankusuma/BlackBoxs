@@ -12409,3 +12409,30 @@ hanya berhenti memvonis mati sesuatu yang masih menyalakan diri.
 Ini pola yang sama dengan retry smoke test kemarin, di tempat berbeda: satu
 pemeriksaan tunggal terhadap layanan yang baru bangun. Dua rilis sehat sudah
 digulung balik karenanya.
+
+### Deploy PROC-N1-01 — percobaan kedua tuntas
+
+Setelah `tunggu_sehat()` dipasang: **health check 200, siap setelah 3 detik.**
+Angka itu sekaligus menutup dugaannya — boot yang gagal di detik ke-8 pada
+percobaan sebelumnya kali ini selesai dalam 3 detik. Waktunya memang
+berubah-ubah, dan `sleep 8` sekali-periksa memang tidak cukup untuk menyimpulkan
+apa pun.
+
+Smoke: **30 lulus, 1 gagal** — hanya temuan lama kredensial master; rilis tidak
+dikembalikan.
+
+**Terverifikasi live:**
+
+| Yang diperiksa | Hasil |
+|---|---|
+| `/purchase-orders/allocations`, `/purchase-requests/bid-progress-summary` | 401 tanpa token (ada & terjaga) |
+| Urutan route di `dist` produksi | allocations baris 1700 < `/purchase-orders/:id` 1727; summary 645 < `/purchase-requests/:id` 711 |
+| Bundel `PurchaseOrders.DExFjiZk.js` | 3 rujukan agregat, **0** loop `bid-progress` per-baris |
+| Bundel `PurchaseRequests.C7F2yRsm.js` | 1 rujukan agregat, **0** loop per-baris |
+| health / halaman utama | 200 / 200 |
+| `npm run smoke` | 30 lulus, 1 gagal (temuan lama) |
+
+Urutan route itu yang paling perlu dilihat langsung di produksi: kalau terbalik,
+Express membaca "allocations" sebagai id dan menjawab 404 — tanpa satu pun error
+saat build, dan tanpa tes lokal yang gagal kalau kebetulan urutannya benar di
+mesin sendiri.
