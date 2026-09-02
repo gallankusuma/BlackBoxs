@@ -12950,3 +12950,77 @@ kegagalan yang tidak ada.
 produksi** (`cogs_tracking`, `profitability_tracking`, `sales_orders`,
 `financial_summary` semuanya 0 baris). Jadi layarnya berhenti error tapi tetap
 menampilkan kosong — yang diperbaiki query-nya, bukan ketiadaan datanya.
+
+---
+
+## [DEV] Audit HR & Inventory, dan RBAC-nya (HRINV-RBAC-01) — 2 September 2026
+
+### Temuan audit
+
+**1. Asimetri gaji — temuan paling tajam.** Gaji SUDAH disamarkan saat dibaca:
+user biasa menerima `basic_rate: null` dan `salary_redacted: true`, master
+menerima `100000.00`. Kendali itu bekerja. **Tapi
+`PATCH /hr/employees/:id/rates` menjawab 200 untuk user level 1 tanpa role** —
+yang tidak boleh melihat gaji, boleh mengubahnya.
+
+**2. Cakupan gerbang.** 17 dari 31 endpoint HR, dan seluruh 32 endpoint
+inventory + warehouse, hanya `authMiddleware`. Terukur: level 1 tanpa role
+membaca slip gaji, kasbon, absensi; menghapus karyawan; dan **membuat gudang
+baru (201)**.
+
+**3. Tiga tabel yang tidak ada di mana pun:** `inventory` (dipakai 5× di
+`executeStockTransfer`), `stock_transfers`, `stock_adjustments` — tidak di
+baseline, tidak di `ensure*Schema`, tidak di database lokal maupun produksi.
+Akibatnya 5 endpoint 500. Diverifikasi lebih jauh: **pembuatan transfer dan
+adjustment pun 500 untuk master**, jadi fiturnya mati dari ujung ke ujung.
+Ketiga layarnya terdaftar di router tapi **tidak ada di menu sidebar**.
+
+**Yang diperiksa dan bersih:** tidak ada N+1 di enam layar HR/inventory; tidak
+ada `catch` kosong di ketiga berkas rute; tidak ada `CREATE TABLE` saat modul
+di-import; tidak ada unggahan berkas. `catch` di `executeStockTransfer`
+**melempar ulang**, tidak menelan — saya sempat mengira sebaliknya dan
+memeriksanya sebelum menulis.
+
+### Yang dikerjakan
+
+49 endpoint digembok. `PATCH /rates` sengaja memakai **`hr.payroll.edit`**,
+bukan `hr.employees.edit` — itu yang menutup asimetri di atas.
+
+Keempat endpoint `/mobile/*` **tidak** digembok: token mobile tidak punya
+`userId`, jadi `requirePermission` akan menjawab 401 dan mematikan absensi
+karyawan lapangan.
+
+**Verifikasi terhadap produksi:** 59 gerbang, 35 permission, nol yang tidak ada
+di katalog. Admin lolos semua. `Manager Finannce & Acc` terkunci di **4**
+endpoint — approve/reject stock transfer & adjustment — dan itu disengaja:
+keempatnya sudah tidak berfungsi bahkan untuk master.
+
+### Verifikasi
+
+`tests/hr-inv-rbac.ts` — **22 lulus, 0 gagal**. Selain penolakan dan kelolosan,
+ia menguji dua hal khas modul ini: **endpoint `/mobile/*` tidak boleh
+bergerbang**, dan **hak atas data karyawan tidak memberi hak atas angka gaji**.
+
+Empat mutasi, semuanya tertangkap: gerbang HR dilepas (2), `/mobile/` ikut
+digembok (1), tarif gaji digembok hak karyawan (1), permission salah ketik (2).
+
+### ⚠️ Pengujian mutasi saya sempat MENGUBAH DATA SUNGGUHAN
+
+Saat mutasi ketiga melonggarkan gerbang `PATCH /rates`, tes ini benar-benar
+menulis dan **mengubah `basic_rate` karyawan asli dari 100.000 menjadi 1**.
+Ketahuan karena asersi terakhir tetap gagal setelah kode dipulihkan — kegagalan
+yang tidak ikut pulih adalah tanda efek samping, bukan kode.
+
+Nilainya dipulihkan ke 100.000, dengan bukti dari probe saya sendiri di sesi
+yang sama (elemen `[0]` dari `GET /hr/employees` sebelum mutasi menunjukkan
+`basic_rate="100000.00"`, dan elemen `[0]` itu terkonfirmasi karyawan id 48).
+Nilainya tidak ditebak.
+
+Tesnya diperbaiki: kini ia membuat **karyawan fixture sendiri** dan menghapusnya
+di akhir. Tes yang menguji "tidak boleh menulis" tidak boleh menulis ke data
+sungguhan ketika penjagaannya jebol — justru di situlah ia paling berbahaya.
+Diverifikasi ulang: mutasi tetap tertangkap, data karyawan asli utuh, nol
+fixture tersisa.
+
+Regresi: `finance-rbac` 22, `finance-apar` 19, `procurement` 184,
+`inbox-item` 20, `grn-lampiran` 31, `vendor-price` 53. `tsc --noEmit` bersih.

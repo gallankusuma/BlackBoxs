@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { dbAll, dbGet, dbRun } from '../config/database';
 import { authMiddleware } from '../middleware/auth';
+import { requirePermission } from '../middleware/permission';
 
 const router = Router();
 
@@ -21,7 +22,7 @@ const generateCode = (prefix: string) => {
 // ========================================
 
 // GET /api/inventory/stock-transfers - List all stock transfers
-router.get('/stock-transfers', authMiddleware, async (req: Request, res: Response) => {
+router.get('/stock-transfers', authMiddleware, requirePermission('master-data.warehouses.view', 'reports.inventory-reports.view'), async (req: Request, res: Response) => {
   try {
     const transfers = await dbAll(`
       SELECT 
@@ -47,7 +48,7 @@ router.get('/stock-transfers', authMiddleware, async (req: Request, res: Respons
 });
 
 // POST /api/inventory/stock-transfers - Create stock transfer
-router.post('/stock-transfers', authMiddleware, async (req: Request, res: Response) => {
+router.post('/stock-transfers', authMiddleware, requirePermission('master-data.warehouses.create', 'reports.inventory-reports.create'), async (req: Request, res: Response) => {
   try {
     const { 
       product_id, 
@@ -111,7 +112,7 @@ router.post('/stock-transfers', authMiddleware, async (req: Request, res: Respon
 });
 
 // PUT /api/inventory/stock-transfers/:id - Update stock transfer (only if approval_status = 0)
-router.put('/stock-transfers/:id', authMiddleware, async (req: Request, res: Response) => {
+router.put('/stock-transfers/:id', authMiddleware, requirePermission('master-data.warehouses.edit', 'reports.inventory-reports.edit'), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { quantity, notes } = req.body;
@@ -140,7 +141,7 @@ router.put('/stock-transfers/:id', authMiddleware, async (req: Request, res: Res
 });
 
 // DELETE /api/inventory/stock-transfers/:id - Delete stock transfer (only if approval_status = 0)
-router.delete('/stock-transfers/:id', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/stock-transfers/:id', authMiddleware, requirePermission('master-data.warehouses.delete', 'reports.inventory-reports.delete'), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
 
@@ -162,7 +163,7 @@ router.delete('/stock-transfers/:id', authMiddleware, async (req: Request, res: 
 });
 
 // POST /api/inventory/stock-transfers/:id/approve - Approve stock transfer
-router.post('/stock-transfers/:id/approve', authMiddleware, async (req: Request, res: Response) => {
+router.post('/stock-transfers/:id/approve', authMiddleware, requirePermission('inventory.stock-transfer.approve_1', 'inventory.stock-transfer.approve_2'), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const userId = (req as any).user?.userId;
@@ -231,7 +232,7 @@ router.post('/stock-transfers/:id/approve', authMiddleware, async (req: Request,
 });
 
 // POST /api/inventory/stock-transfers/:id/reject - Reject/Reset stock transfer
-router.post('/stock-transfers/:id/reject', authMiddleware, async (req: Request, res: Response) => {
+router.post('/stock-transfers/:id/reject', authMiddleware, requirePermission('inventory.stock-transfer.approve_1', 'inventory.stock-transfer.approve_2'), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const userLevel = (req as any).user?.userLevel || 1;
@@ -323,7 +324,7 @@ async function executeStockTransfer(transfer: any) {
 // ========================================
 
 // GET /api/inventory/stock-adjustments - List all stock adjustments
-router.get('/stock-adjustments', authMiddleware, async (req: Request, res: Response) => {
+router.get('/stock-adjustments', authMiddleware, requirePermission('master-data.warehouses.view', 'reports.inventory-reports.view'), async (req: Request, res: Response) => {
   try {
     const adjustments = await dbAll(`
       SELECT 
@@ -347,7 +348,7 @@ router.get('/stock-adjustments', authMiddleware, async (req: Request, res: Respo
 });
 
 // POST /api/inventory/stock-adjustments - Create stock adjustment
-router.post('/stock-adjustments', authMiddleware, async (req: Request, res: Response) => {
+router.post('/stock-adjustments', authMiddleware, requirePermission('master-data.warehouses.create', 'reports.inventory-reports.create'), async (req: Request, res: Response) => {
   try {
     const { 
       product_id, 
@@ -403,7 +404,7 @@ router.post('/stock-adjustments', authMiddleware, async (req: Request, res: Resp
 });
 
 // DELETE /api/inventory/stock-adjustments/:id - Delete stock adjustment
-router.delete('/stock-adjustments/:id', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/stock-adjustments/:id', authMiddleware, requirePermission('master-data.warehouses.delete', 'reports.inventory-reports.delete'), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
 
@@ -425,7 +426,7 @@ router.delete('/stock-adjustments/:id', authMiddleware, async (req: Request, res
 });
 
 // POST /api/inventory/stock-adjustments/:id/approve - Approve stock adjustment
-router.post('/stock-adjustments/:id/approve', authMiddleware, async (req: Request, res: Response) => {
+router.post('/stock-adjustments/:id/approve', authMiddleware, requirePermission('inventory.stock-adjustment.approve_1', 'inventory.stock-adjustment.approve_2'), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const userId = (req as any).user?.userId;
@@ -486,7 +487,7 @@ router.post('/stock-adjustments/:id/approve', authMiddleware, async (req: Reques
 });
 
 // POST /api/inventory/stock-adjustments/:id/reject - Reject stock adjustment
-router.post('/stock-adjustments/:id/reject', authMiddleware, async (req: Request, res: Response) => {
+router.post('/stock-adjustments/:id/reject', authMiddleware, requirePermission('inventory.stock-adjustment.approve_1', 'inventory.stock-adjustment.approve_2'), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const userLevel = (req as any).user?.userLevel || 1;
@@ -523,7 +524,7 @@ router.post('/stock-adjustments/:id/reject', authMiddleware, async (req: Request
 // ========================================
 
 // GET /api/inventory - List all inventory
-router.get('/', authMiddleware, async (_req: Request, res: Response) => {
+router.get('/', authMiddleware, requirePermission('master-data.warehouses.view', 'reports.inventory-reports.view'), async (_req: Request, res: Response) => {
   try {
     const inventory = await dbAll(
       `SELECT i.id,
@@ -549,7 +550,7 @@ router.get('/', authMiddleware, async (_req: Request, res: Response) => {
 });
 
 // GET /api/inventory/:id - Get single inventory item
-router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:id', authMiddleware, requirePermission('master-data.warehouses.view', 'reports.inventory-reports.view'), async (req: Request, res: Response) => {
   try {
     const item = await dbGet(`
       SELECT i.*, p.name as product_name, p.sku 
@@ -570,7 +571,7 @@ router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // POST /api/inventory - Create inventory entry
-router.post('/', authMiddleware, async (req: Request, res: Response) => {
+router.post('/', authMiddleware, requirePermission('master-data.warehouses.create', 'reports.inventory-reports.create'), async (req: Request, res: Response) => {
   try {
     const { product_id, warehouse_id, quantity } = req.body;
 
@@ -603,7 +604,7 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // PUT /api/inventory/:id - Update inventory
-router.put('/:id', authMiddleware, async (req: Request, res: Response) => {
+router.put('/:id', authMiddleware, requirePermission('master-data.warehouses.edit', 'reports.inventory-reports.edit'), async (req: Request, res: Response) => {
   try {
     const { quantity } = req.body;
 
@@ -621,7 +622,7 @@ router.put('/:id', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // POST /api/inventory/:id/transaction - Record inventory transaction
-router.post('/:id/transaction', authMiddleware, async (req: Request, res: Response) => {
+router.post('/:id/transaction', authMiddleware, requirePermission('master-data.warehouses.edit', 'reports.inventory-reports.edit'), async (req: Request, res: Response) => {
   try {
     const { transaction_type, quantity, reference_type, reference_id, notes } = req.body;
 
@@ -645,7 +646,7 @@ router.post('/:id/transaction', authMiddleware, async (req: Request, res: Respon
 });
 
 // GET /api/inventory/transactions/:productId - List transactions by product
-router.get('/transactions/:productId', authMiddleware, async (req: Request, res: Response) => {
+router.get('/transactions/:productId', authMiddleware, requirePermission('master-data.warehouses.view', 'reports.inventory-reports.view'), async (req: Request, res: Response) => {
   try {
     const productId = Number(req.params.productId);
     if (!productId) {

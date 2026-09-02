@@ -86,7 +86,7 @@ router.delete('/position-rates/:id', authMiddleware, requirePermission('hr.posit
 // `basic_rate`, `tunjangan_rate`, dan `ot_rate` seluruh karyawan. Itu kebocoran
 // data kompensasi lintas departemen lewat endpoint yang dipanggil hampir semua
 // halaman.
-router.get('/employees', authMiddleware, async (req: Request, res: Response) => {
+router.get('/employees', authMiddleware, requirePermission('hr.employees.view'), async (req: Request, res: Response) => {
   try {
     // Batas permission ditegaskan di sini (jawaban atas "perlu klarifikasi"
     // reviewer): membuka angka gaji HANYA lewat `hr.payroll.view`.
@@ -211,7 +211,7 @@ router.get('/employees/pin-status', authMiddleware, requirePermission('hr.employ
   } catch (error) { res.status(500).json({ error: 'Gagal memuat status PIN' }); }
 });
 
-router.get('/employees/:id', authMiddleware, async (req: Request, res: Response) => {
+router.get('/employees/:id', authMiddleware, requirePermission('hr.employees.view'), async (req: Request, res: Response) => {
   try {
     const employee: any = await dbGet(
       `SELECT e.*, d.name as department_name FROM employees e
@@ -227,7 +227,7 @@ router.get('/employees/:id', authMiddleware, async (req: Request, res: Response)
   }
 });
 
-router.post('/employees', authMiddleware, async (req: Request, res: Response) => {
+router.post('/employees', authMiddleware, requirePermission('hr.employees.create'), async (req: Request, res: Response) => {
   try {
     const { code, employee_code, name, first_name, last_name, email, phone, department_id, position, hire_date, is_active,
             basic_rate, tunjangan_rate, ot_rate, salary_type, contract_type, basic_salary, salary } = req.body;
@@ -250,7 +250,7 @@ router.post('/employees', authMiddleware, async (req: Request, res: Response) =>
   }
 });
 
-router.put('/employees/:id', authMiddleware, async (req: Request, res: Response) => {
+router.put('/employees/:id', authMiddleware, requirePermission('hr.employees.edit'), async (req: Request, res: Response) => {
   try {
     const { name, first_name, last_name, email, phone, department_id, position, hire_date, is_active,
             basic_rate, tunjangan_rate, ot_rate, salary_type, contract_type, basic_salary, salary } = req.body;
@@ -275,7 +275,7 @@ router.put('/employees/:id', authMiddleware, async (req: Request, res: Response)
 });
 
 // Quick rate update from payslip editor (persists to employee record)
-router.patch('/employees/:id/rates', authMiddleware, async (req: Request, res: Response) => {
+router.patch('/employees/:id/rates', authMiddleware, requirePermission('hr.payroll.edit'), async (req: Request, res: Response) => {
   try {
     const { ot_rate, basic_rate, tunjangan_rate } = req.body;
     const updates: string[] = [];
@@ -293,7 +293,7 @@ router.patch('/employees/:id/rates', authMiddleware, async (req: Request, res: R
   }
 });
 
-router.delete('/employees/:id', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/employees/:id', authMiddleware, requirePermission('hr.employees.delete'), async (req: Request, res: Response) => {
   try {
     await dbRun('DELETE FROM employees WHERE id = ?', [req.params.id]);
     res.json({ message: 'Employee deleted' });
@@ -304,7 +304,7 @@ router.delete('/employees/:id', authMiddleware, async (req: Request, res: Respon
 
 // ===== ATTENDANCE =====
 
-router.get('/attendance', authMiddleware, async (req: Request, res: Response) => {
+router.get('/attendance', authMiddleware, requirePermission('hr.attendance.view'), async (req: Request, res: Response) => {
   try {
     const { project_id, month, year, employee_id } = req.query;
     let where = 'WHERE 1=1';
@@ -325,7 +325,7 @@ router.get('/attendance', authMiddleware, async (req: Request, res: Response) =>
   } catch (error) { res.status(500).json({ error: 'Failed to fetch attendance' }); }
 });
 
-router.post('/attendance', authMiddleware, async (req: Request, res: Response) => {
+router.post('/attendance', authMiddleware, requirePermission('hr.attendance.create'), async (req: Request, res: Response) => {
   try {
     const { employee_id, date, project_id, check_in, check_out, status, timesheet_value, overtime_hours, notes } = req.body;
     if (!employee_id || !date) return res.status(400).json({ error: 'employee_id and date are required' });
@@ -346,7 +346,7 @@ router.post('/attendance', authMiddleware, async (req: Request, res: Response) =
   } catch (error) { res.status(500).json({ error: 'Failed to record attendance' }); }
 });
 
-router.post('/attendance/bulk', authMiddleware, async (req: Request, res: Response) => {
+router.post('/attendance/bulk', authMiddleware, requirePermission('hr.attendance.create'), async (req: Request, res: Response) => {
   try {
     const { date, project_id, records } = req.body;
     if (!date || !records?.length) return res.status(400).json({ error: 'date and records required' });
@@ -426,7 +426,7 @@ router.post('/attendance/bulk', authMiddleware, async (req: Request, res: Respon
 });
 
 // PUT /hr/attendance/:id — edit individual attendance record
-router.put('/attendance/:id', authMiddleware, async (req: Request, res: Response) => {
+router.put('/attendance/:id', authMiddleware, requirePermission('hr.attendance.edit'), async (req: Request, res: Response) => {
   try {
     const { check_in, check_out, status, timesheet_value, overtime_hours, notes, project_id, date } = req.body;
     // Block future dates
@@ -447,7 +447,7 @@ router.put('/attendance/:id', authMiddleware, async (req: Request, res: Response
 });
 
 // DELETE /hr/attendance/:id — delete individual attendance record
-router.delete('/attendance/:id', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/attendance/:id', authMiddleware, requirePermission('hr.attendance.delete'), async (req: Request, res: Response) => {
   try {
     await dbRun('DELETE FROM attendance_logs WHERE id = ?', [req.params.id]);
     res.json({ message: 'Attendance deleted' });
@@ -457,7 +457,7 @@ router.delete('/attendance/:id', authMiddleware, async (req: Request, res: Respo
 
 // ===== SALARY ADVANCES (KASBON) =====
 
-router.get('/advances', authMiddleware, async (req: Request, res: Response) => {
+router.get('/advances', authMiddleware, requirePermission('hr.kasbon.view'), async (req: Request, res: Response) => {
   try {
     const { employee_id, status } = req.query;
     let where = 'WHERE 1=1';
@@ -474,7 +474,7 @@ router.get('/advances', authMiddleware, async (req: Request, res: Response) => {
   } catch (error) { res.status(500).json({ error: 'Failed to fetch advances' }); }
 });
 
-router.post('/advances', authMiddleware, async (req: Request, res: Response) => {
+router.post('/advances', authMiddleware, requirePermission('hr.kasbon.create'), async (req: Request, res: Response) => {
   try {
     const { employee_id, amount, description, advance_date, period_month, period_year } = req.body;
     if (!employee_id || !amount) return res.status(400).json({ error: 'employee_id and amount required' });
@@ -486,7 +486,7 @@ router.post('/advances', authMiddleware, async (req: Request, res: Response) => 
   } catch (error) { res.status(500).json({ error: 'Failed to record advance' }); }
 });
 
-router.put('/advances/:id', authMiddleware, async (req: Request, res: Response) => {
+router.put('/advances/:id', authMiddleware, requirePermission('hr.kasbon.edit'), async (req: Request, res: Response) => {
   try {
     const { amount, remaining, description, advance_date, period_month, period_year, status } = req.body;
     await dbRun(
@@ -497,7 +497,7 @@ router.put('/advances/:id', authMiddleware, async (req: Request, res: Response) 
   } catch (error) { res.status(500).json({ error: 'Failed to update advance' }); }
 });
 
-router.delete('/advances/:id', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/advances/:id', authMiddleware, requirePermission('hr.kasbon.delete'), async (req: Request, res: Response) => {
   try {
     await dbRun('DELETE FROM salary_advances WHERE id=?', [req.params.id]);
     res.json({ message: 'Advance deleted' });
@@ -787,7 +787,7 @@ const computePayslip = async (
     };
 };
 
-router.get('/payslip', authMiddleware, async (req: Request, res: Response) => {
+router.get('/payslip', authMiddleware, requirePermission('hr.payroll.view'), async (req: Request, res: Response) => {
   try {
     const { employee_id, month, year, project_id } = req.query;
     if (!employee_id || !month || !year) return res.status(400).json({ error: 'employee_id, month, year required' });
@@ -941,7 +941,7 @@ router.post('/payslip/save', authMiddleware, requirePermission('hr.payroll.creat
 });
 
 // Get saved payslips history
-router.get('/payslip/history', authMiddleware, async (req: Request, res: Response) => {
+router.get('/payslip/history', authMiddleware, requirePermission('hr.payroll.view'), async (req: Request, res: Response) => {
   try {
     const { employee_id, year } = req.query;
     let where = 'WHERE 1=1';

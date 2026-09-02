@@ -1,13 +1,14 @@
 import { Router, Request, Response } from 'express';
 import { dbAll, dbGet, dbRun } from '../config/database';
 import { authMiddleware } from '../middleware/auth';
+import { requirePermission } from '../middleware/permission';
 
 const router = Router();
 
 // ===== SPECIFIC ROUTES FIRST (before /:id) =====
 
 // Warehouses list
-router.get('/', authMiddleware, async (_req: Request, res: Response) => {
+router.get('/', authMiddleware, requirePermission('master-data.warehouses.view'), async (_req: Request, res: Response) => {
   try {
     const warehouses = await dbAll('SELECT * FROM warehouses ORDER BY name ASC', []);
     res.json({ data: warehouses });
@@ -18,7 +19,7 @@ router.get('/', authMiddleware, async (_req: Request, res: Response) => {
 });
 
 // Create warehouse
-router.post('/', authMiddleware, async (req: Request, res: Response) => {
+router.post('/', authMiddleware, requirePermission('master-data.warehouses.create'), async (req: Request, res: Response) => {
   try {
     const { code, name, address, contact_person, is_active } = req.body;
     if (!code || !name) return res.status(400).json({ error: 'code and name are required' });
@@ -36,7 +37,7 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // GET /api/warehouses/locations - Fetch all locations across warehouses
-router.get('/locations', authMiddleware, async (req: Request, res: Response) => {
+router.get('/locations', authMiddleware, requirePermission('master_data.warehouse-locations.view'), async (req: Request, res: Response) => {
   try {
     const locations = await dbAll(`
       SELECT wl.*, w.name as warehouse_name, w.code as warehouse_code
@@ -52,7 +53,7 @@ router.get('/locations', authMiddleware, async (req: Request, res: Response) => 
 });
 
 // Stock movements should be defined before catch-all "/:id" routes
-router.get('/stock-movements', authMiddleware, async (req: Request, res: Response) => {
+router.get('/stock-movements', authMiddleware, requirePermission('master-data.warehouses.view'), async (req: Request, res: Response) => {
   try {
     const movements = await dbAll(
       `SELECT sm.*, p.sku, p.name as product_name, w.name as warehouse_name, wl.code as location_code
@@ -70,7 +71,7 @@ router.get('/stock-movements', authMiddleware, async (req: Request, res: Respons
   }
 });
 
-router.post('/stock-movements', authMiddleware, async (req: Request, res: Response) => {
+router.post('/stock-movements', authMiddleware, requirePermission('master-data.warehouses.edit'), async (req: Request, res: Response) => {
   try {
     const { product_id, warehouse_id, location_id, batch_id, movement_type, quantity, uom, reference_type, reference_id, notes } = req.body;
     if (!product_id || !warehouse_id || !movement_type || quantity === undefined) {
@@ -125,7 +126,7 @@ router.post('/stock-movements', authMiddleware, async (req: Request, res: Respon
 // Express mencocokkan berurutan, jadi `/:id` menangkap string "allocate-stock"
 // sebagai id dan mengembalikan 404 "Warehouse not found". Endpoint alokasi
 // FIFO/FEFO ini tidak pernah terjangkau sama sekali sejak dibuat.
-router.get('/allocate-stock', authMiddleware, async (req: Request, res: Response) => {
+router.get('/allocate-stock', authMiddleware, requirePermission('master-data.warehouses.view'), async (req: Request, res: Response) => {
   try {
     const { product_id, quantity, method = 'FEFO', warehouse_id } = req.query;
     
@@ -247,7 +248,7 @@ router.get('/allocate-stock', authMiddleware, async (req: Request, res: Response
   }
 });
 
-router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:id', authMiddleware, requirePermission('master-data.warehouses.view'), async (req: Request, res: Response) => {
   try {
     const warehouse = await dbGet('SELECT * FROM warehouses WHERE id = ?', [req.params.id]);
     if (!warehouse) return res.status(404).json({ error: 'Warehouse not found' });
@@ -259,7 +260,7 @@ router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // Update warehouse
-router.put('/:id', authMiddleware, async (req: Request, res: Response) => {
+router.put('/:id', authMiddleware, requirePermission('master-data.warehouses.edit'), async (req: Request, res: Response) => {
   try {
     const { code, name, address, contact_person, is_active } = req.body;
     await dbRun(
@@ -274,7 +275,7 @@ router.put('/:id', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // Delete warehouse
-router.delete('/:id', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/:id', authMiddleware, requirePermission('master-data.warehouses.delete'), async (req: Request, res: Response) => {
   try {
     await dbRun('DELETE FROM warehouses WHERE id = ?', [req.params.id]);
     res.json({ message: 'Warehouse deleted' });
@@ -285,7 +286,7 @@ router.delete('/:id', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // Locations
-router.get('/:warehouseId/locations', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:warehouseId/locations', authMiddleware, requirePermission('master_data.warehouse-locations.view'), async (req: Request, res: Response) => {
   try {
     const locations = await dbAll(
       'SELECT * FROM warehouse_locations WHERE warehouse_id = ? ORDER BY code ASC',
@@ -298,7 +299,7 @@ router.get('/:warehouseId/locations', authMiddleware, async (req: Request, res: 
   }
 });
 
-router.post('/:warehouseId/locations', authMiddleware, async (req: Request, res: Response) => {
+router.post('/:warehouseId/locations', authMiddleware, requirePermission('master_data.warehouse-locations.create'), async (req: Request, res: Response) => {
   try {
     const { code, location_code, description, rack, row, bin, capacity } = req.body;
     if (!location_code && !code) return res.status(400).json({ error: 'location_code is required' });
@@ -326,7 +327,7 @@ router.post('/:warehouseId/locations', authMiddleware, async (req: Request, res:
 });
 
 // GET /api/warehouses/:warehouseId/locations/:id
-router.get('/:warehouseId/locations/:id', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:warehouseId/locations/:id', authMiddleware, requirePermission('master_data.warehouse-locations.view'), async (req: Request, res: Response) => {
   try {
     const location = await dbGet(`
       SELECT wl.* 
@@ -346,7 +347,7 @@ router.get('/:warehouseId/locations/:id', authMiddleware, async (req: Request, r
 });
 
 // PUT /api/warehouses/:warehouseId/locations/:id
-router.put('/:warehouseId/locations/:id', authMiddleware, async (req: Request, res: Response) => {
+router.put('/:warehouseId/locations/:id', authMiddleware, requirePermission('master_data.warehouse-locations.edit'), async (req: Request, res: Response) => {
   try {
     const { code, rack, row, bin, capacity, description } = req.body;
 
@@ -374,7 +375,7 @@ router.put('/:warehouseId/locations/:id', authMiddleware, async (req: Request, r
 });
 
 // DELETE /api/warehouses/:warehouseId/locations/:id
-router.delete('/:warehouseId/locations/:id', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/:warehouseId/locations/:id', authMiddleware, requirePermission('master_data.warehouse-locations.delete'), async (req: Request, res: Response) => {
   try {
     await dbRun(`
       DELETE FROM warehouse_locations 
@@ -405,7 +406,7 @@ router.delete('/:warehouseId/locations/:id', authMiddleware, async (req: Request
  * GET /api/warehouses/:warehouseId/stock-health
  * Get inventory health dashboard for a warehouse
  */
-router.get('/:warehouseId/stock-health', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:warehouseId/stock-health', authMiddleware, requirePermission('master-data.warehouses.view'), async (req: Request, res: Response) => {
   try {
 
     // Get low stock items

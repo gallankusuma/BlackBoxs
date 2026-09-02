@@ -345,6 +345,39 @@ melihat isi template literal setelah komentar JS dibuang — tanpa itu, prosa
 seperti "update AP" dan `INSERT INTO ...` di dalam komentar ikut terbaca sebagai
 tabel.
 
+### RBAC HR, Inventory, Warehouse (HRINV-RBAC-01)
+
+49 endpoint digembok: 17 di `hr.routes.ts` (10 sudah bergerbang sebelumnya),
+17 di `inventory.routes.ts`, 15 di `warehouse.routes.ts`.
+
+⚠️ **Endpoint `/mobile/*` TIDAK BOLEH digembok `requirePermission`.** Ia dipakai
+PWA karyawan dengan token mobile, yang tidak punya `userId` — memasangnya di
+sana menjawab 401 dan mematikan absensi seluruh karyawan lapangan.
+`npm run test:hr-inv-rbac` memeriksanya sebagai asersi tersendiri.
+
+⚠️ **`PATCH /hr/employees/:id/rates` digembok `hr.payroll.edit`, bukan
+`hr.employees.edit`.** Gaji sudah disamarkan saat dibaca (`salary_redacted`),
+tapi dulu siapa pun yang login bisa mengubahnya — yang tidak boleh MELIHAT gaji
+boleh MENGUBAHNYA. Yang berhak atas angka gaji adalah pemegang payroll, bukan
+pemegang hak sunting data karyawan.
+
+⚠️ **Katalog tidak punya resource untuk "stok" sama sekali.** Yang ada hanya
+`inventory.stock-adjustment` dan `inventory.stock-transfer` (hanya approve_1/2,
+dan hanya dipegang Admin) serta `reports.inventory-reports` (Admin saja).
+Karena itu endpoint inventory/warehouse digembok `master-data.warehouses.*` dan
+`master_data.warehouse-locations.*`, yang dipegang kedua role produksi, dengan
+`reports.inventory-reports.*` sebagai alternatif OR untuk Admin.
+
+**Satu-satunya pengurangan akses:** `Manager Finannce & Acc` kehilangan 4
+endpoint approve/reject stock transfer & adjustment. Itu disengaja dan tidak
+menghilangkan apa pun yang bekerja — **keempatnya, dan endpoint pembuatannya,
+sudah membalas 404/500 bahkan untuk master**, karena tabel `stock_transfers`,
+`stock_adjustments`, dan `inventory` **tidak ada di mana pun**: bukan di
+baseline, bukan di `ensure*Schema`, bukan di database lokal maupun produksi.
+Ketiga layarnya (`StockTransfer`, `StockAdjustment`, `StockCard`) terdaftar di
+router tapi tidak ada di menu sidebar. Fiturnya memang belum pernah selesai —
+menyelesaikan atau mencabutnya masih menunggu keputusan pemilik.
+
 ### RBAC finance (FIN-RBAC-01)
 
 Seluruh **64 endpoint** `finance.routes.ts` kini memakai `requirePermission` —
