@@ -26,9 +26,39 @@
 const BASE = (process.env.BASE_URL || 'https://blackboxs.io').replace(/\/$/, '');
 const TIMEOUT = Number(process.env.SMOKE_TIMEOUT || 20000);
 
+/**
+ * Percobaan ulang untuk permintaan yang TIDAK PERNAH mendapat balasan HTTP.
+ *
+ * Latar belakangnya kejadian 1 September 2026: smoke test ditembak tepat setelah
+ * `pm2 restart`, satu permintaan ke `/uploads/asset_documents/` gagal tersambung
+ * (`HTTP 0`), dan karena bukan 403 ia dilaporkan sebagai
+ * "DOKUMEN BISNIS TERBUKA TANPA TOKEN" — bunyinya jauh lebih menyeramkan
+ * daripada kejadiannya. Rilis yang sehat digulung balik. Path yang sama menjawab
+ * 403 lima kali berturut-turut beberapa menit kemudian.
+ *
+ * ⚠️ YANG DIULANG HANYA `status === 0`, yaitu ketika tidak ada balasan HTTP sama
+ * sekali (timeout, koneksi ditolak, DNS). Balasan HTTP sungguhan TIDAK PERNAH
+ * diulang — 200 di tempat yang seharusnya 403 tetap gagal seketika. Ini yang
+ * membuat retry menutup gangguan jaringan tanpa melonggarkan gerbangnya
+ * sedikit pun.
+ *
+ * Permintaan POST ikut diulang. Aman di sini karena skrip ini read-only: dua
+ * POST yang ada adalah percobaan login, dan mengulangnya tidak mengubah data —
+ * paling banter menambah hitungan rate limit, yang batasnya jauh di atas ini.
+ *
+ * Diam-diam memulihkan diri BUKAN tujuannya: setiap permintaan yang baru
+ * berhasil setelah diulang dilaporkan di ringkasan. Server yang benar-benar
+ * memburuk harus tetap terlihat, bukan diperhalus oleh retry.
+ */
+const RETRY = Math.max(0, Number(process.env.SMOKE_RETRY ?? 2));
+const RETRY_DELAY = Number(process.env.SMOKE_RETRY_DELAY || 1000);
+
 let pass = 0;
 let fail = 0;
 const failures = [];
+const retryNotes = [];
+
+const tidur = (ms) => new Promise(r => setTimeout(r, ms));
 
 function ok(label, detail = '') {
   pass++;
@@ -41,8 +71,8 @@ function bad(label, detail) {
   console.log(`  GAGAL ${label} → ${detail}`);
 }
 
-async function req(path, opts = {}) {
-  const url = path.startsWith('http') ? path : BASE + path;
+/** Satu percobaan. `status: 0` berarti tidak ada balasan HTTP sama sekali. */
+async function reqSekali(url, opts) {
   try {
     const res = await fetch(url, {
       ...opts,
@@ -58,11 +88,31 @@ async function req(path, opts = {}) {
   }
 }
 
+async function req(path, opts = {}) {
+  const url = path.startsWith('http') ? path : BASE + path;
+  let hasil = await reqSekali(url, opts);
+
+  // Ada balasan HTTP → selesai, apa pun isinya. Tidak ada retry untuk hasil
+  // yang salah; hanya untuk yang tidak sampai.
+  if (hasil.status !== 0 || RETRY === 0) return { ...hasil, attempts: 1 };
+
+  const sebabAwal = hasil.error;
+  for (let i = 1; i <= RETRY; i++) {
+    await tidur(RETRY_DELAY * i);
+    hasil = await reqSekali(url, opts);
+    if (hasil.status !== 0) {
+      retryNotes.push(`${opts.method || 'GET'} ${path} — gagal tersambung (${sebabAwal}), berhasil pada percobaan ke-${i + 1}`);
+      return { ...hasil, attempts: i + 1 };
+    }
+  }
+  return { ...hasil, attempts: RETRY + 1 };
+}
+
 /** Status yang diharapkan; `oneOf` supaya tidak rapuh terhadap detail kecil. */
 function expect(label, got, oneOf, extra = '') {
   const list = Array.isArray(oneOf) ? oneOf : [oneOf];
   if (list.includes(got.status)) ok(label, `HTTP ${got.status}${extra ? ` ${extra}` : ''}`);
-  else bad(label, `HTTP ${got.status}${got.error ? ` (${got.error})` : ''}, diharapkan ${list.join('/')}`);
+  else bad(label, `HTTP ${got.status}${got.error ? ` (${got.error})` : ''}${got.attempts > 1 ? `, setelah ${got.attempts} percobaan` : ''}, diharapkan ${list.join('/')}`);
 }
 
 (async () => {
@@ -184,14 +234,21 @@ function expect(label, got, oneOf, extra = '') {
     ['dokumen aset', '/uploads/asset_documents/probe-smoke-test.pdf'],
   ]) {
     const r = await req(path);
-    if (r.status === 403) ok(`${label} tertutup`, 'HTTP 403');
+    if (r.status === 403) ok(`${label} tertutup`, `HTTP 403${r.attempts > 1 ? ` (percobaan ke-${r.attempts})` : ''}`);
+    // "Tidak ada balasan" dan "dokumennya terbuka" adalah dua hal yang sangat
+    // berbeda, dan sebelumnya dilaporkan dengan kalimat yang sama persis. Pada
+    // 1 September 2026 satu sambungan yang gagal membuat skrip ini berteriak
+    // "DOKUMEN BISNIS TERBUKA TANPA TOKEN", dan rilis yang sehat digulung balik.
+    // Keduanya tetap GAGAL — yang diperbaiki adalah diagnosisnya.
+    else if (r.status === 0) bad(`${label} tertutup`, `tidak ada balasan setelah ${r.attempts} percobaan (${r.error}) — server tidak dapat dihubungi, ini BUKAN berarti dokumennya terbuka`);
     else bad(`${label} tertutup`, `HTTP ${r.status} — DOKUMEN BISNIS TERBUKA TANPA TOKEN`);
   }
 
   // Berkas aktif tidak boleh dilayani dari mana pun, termasuk folder publik:
   // script same-origin bisa membaca JWT desktop dari localStorage.
   const aktif = await req('/uploads/product-images/probe-smoke-test.html');
-  if (aktif.status === 403) ok('berkas HTML ditolak', 'HTTP 403');
+  if (aktif.status === 403) ok('berkas HTML ditolak', `HTTP 403${aktif.attempts > 1 ? ` (percobaan ke-${aktif.attempts})` : ''}`);
+  else if (aktif.status === 0) bad('berkas HTML ditolak', `tidak ada balasan setelah ${aktif.attempts} percobaan (${aktif.error}) — server tidak dapat dihubungi, bukan jalur XSS terbuka`);
   else bad('berkas HTML ditolak', `HTTP ${aktif.status} — jalur stored XSS terbuka`);
 
   // Katalog gambar HARUS tetap terlayani — PWA mobile merendernya sebagai <img>,
@@ -203,6 +260,13 @@ function expect(label, got, oneOf, extra = '') {
   else ok('katalog gambar tetap dilayani', `HTTP ${katalog.status}`);
 
   console.log(`\n${'='.repeat(46)}`);
+  // Dilaporkan meski semuanya lulus. Retry yang menyembunyikan server yang
+  // memburuk lebih berbahaya daripada masalah yang ia tutup.
+  if (retryNotes.length) {
+    console.log(`⚠️  ${retryNotes.length} permintaan baru berhasil setelah diulang — server kemungkinan masih memanas atau jaringannya tidak stabil:`);
+    retryNotes.forEach(n => console.log(`  · ${n}`));
+    console.log('');
+  }
   console.log(`${pass} lulus, ${fail} gagal`);
   if (fail) {
     console.log('\nYang gagal:');

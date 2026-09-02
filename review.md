@@ -12251,3 +12251,59 @@ setelah `pm2 restart`, tanpa jeda pemanasan dan tanpa retry. Satu paket yang
 nyangkut sudah cukup untuk menggulung balik rilis yang sehat. Mengulang sekali
 khusus untuk kegagalan bertipe `HTTP 0` sebelum memvonis akan menutup itu tanpa
 melemahkan gerbangnya — menunggu keputusan pemilik.
+
+---
+
+## [DEV] Retry `HTTP 0` di smoke test — 2 September 2026
+
+Menindaklanjuti usul di entri sebelumnya, atas permintaan pemilik.
+
+### Dua perbaikan, dan yang kedua lebih penting
+
+**1. Retry.** Permintaan yang tidak pernah mendapat balasan HTTP diulang sampai
+2 kali (jeda 1s lalu 2s). **Balasan HTTP sungguhan tidak pernah diulang.** Itu
+garis yang menentukan: retry yang ikut mengulang 200-di-tempat-403 bukan menutup
+gangguan jaringan, melainkan memberi server tiga kesempatan untuk kebetulan
+menjawab benar — gerbangnya justru melemah.
+
+**2. Diagnosisnya diperbaiki.** Blok `/uploads` ternyata tidak lewat `expect()`
+dan mencetak `DOKUMEN BISNIS TERBUKA TANPA TOKEN` **juga untuk `HTTP 0`**. Jadi
+"server tidak bisa dihubungi" dan "dokumen bisnis terbuka" dilaporkan dengan
+kalimat yang sama persis — itulah yang membuat rollback kemarin terbaca seperti
+kebocoran keamanan. Sekarang dibedakan. **Keduanya tetap GAGAL**; yang berubah
+hanya diagnosisnya. Retry mengurangi frekuensinya, kalimat ini memperbaiki
+pembacaannya saat tetap terjadi.
+
+Retry yang berhasil **dilaporkan di ringkasan**, tidak disembunyikan — server
+yang benar-benar memburuk harus tetap terlihat.
+
+### Verifikasi
+
+`tests/smoke-retry.ts` — **15 lulus, 0 gagal**, memakai server tiruan yang bisa
+memutus sambungan sesuka hati (menunggu jaringan produksi tidak stabil bukan
+pengujian). Empat keadaan: putus-lalu-pulih, putus terus, balasan salah, dan
+`SMOKE_RETRY=0`.
+
+Empat mutasi dijalankan, semuanya tertangkap:
+
+| Mutasi | Asersi gagal |
+|---|---|
+| retry juga untuk balasan HTTP salah (gerbang dilonggarkan) | 2 |
+| tidak pernah retry sama sekali | 7 |
+| retry berhasil tapi tidak dilaporkan | 2 |
+| gagal tersambung kembali dituduh dokumen terbuka | 3 |
+
+⚠️ Percobaan mutasi pertama **timeout 2 menit**: mutasi "retry semua status"
+membuat setiap 404 dari server tiruan diulang dengan jeda 5 detik. Jeda pada
+kasus uji ketiga dipendekkan menjadi 200ms — buktinya memang ada pada jumlah
+sambungan yang diterima server (`hits() === 1`), bukan pada lamanya menunggu.
+
+`npm run smoke` terhadap produksi tetap **30 lulus, 1 gagal** (temuan lama
+kredensial master), tanpa catatan retry — perilaku untuk server sehat tidak
+berubah.
+
+### Tidak perlu deploy
+
+`deploy-blackbox.sh` menjalankan `node "$LOCAL_ROOT/scripts/smoke-test.js"` dari
+mesin lokal, bukan dari server. Perubahan ini berlaku pada deploy berikutnya
+tanpa perlu diunggah.

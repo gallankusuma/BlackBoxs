@@ -100,6 +100,23 @@ Yang diuji adalah "jalurnya hidup dan terjaga", **bukan** "angkanya benar" —
 kebenaran angka diuji `npm run test:all` di dev, yang memang membuat data.
 Ganti target dengan `BASE_URL=http://localhost:3005`.
 
+**Retry hanya untuk `HTTP 0`.** Permintaan yang tidak pernah mendapat balasan
+HTTP (timeout, koneksi ditolak) diulang sampai 2 kali dengan jeda 1s lalu 2s
+(`SMOKE_RETRY`, `SMOKE_RETRY_DELAY`; `SMOKE_RETRY=0` mengembalikan perilaku
+lama). **Balasan HTTP sungguhan tidak pernah diulang** — 200 di tempat yang
+seharusnya 403 tetap gagal seketika. Kalau retry ikut mengulang hasil yang
+salah, ia bukan menutup gangguan jaringan melainkan memberi server kesempatan
+tambahan untuk kebetulan menjawab benar. Setiap permintaan yang baru berhasil
+setelah diulang **dilaporkan di ringkasan** — retry yang menyembunyikan server
+memburuk lebih berbahaya daripada masalah yang ia tutup.
+
+Ada sebabnya: 1 September 2026 satu sambungan yang gagal tepat setelah
+`pm2 restart` dilaporkan sebagai `DOKUMEN BISNIS TERBUKA TANPA TOKEN` — blok
+`/uploads` memakai kalimat yang sama untuk "tidak ada balasan" dan "dokumennya
+terbuka" — dan rilis yang sehat digulung balik. Kedua keadaan itu sekarang
+dibedakan kalimatnya; keduanya tetap **gagal**, yang diperbaiki diagnosisnya.
+Dijaga `npm run test:smoke-retry` lewat server tiruan.
+
 ### Skrip sekali-pakai di `scripts/`
 
 `backfill-mto-lines.js` — mengisi `mto_lines` untuk elemen MTO lama yang belum
