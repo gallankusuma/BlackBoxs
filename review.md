@@ -12509,3 +12509,24 @@ sebenarnya 5, 1, 1, dan 7. Penyetuju melihat angka yang salah saat memutuskan.
 Ada dua jalan (perbaiki bacaannya dari `notes`, atau benar-benar mengisi
 `grn_items` dan mengubah semua pembacanya) dan pilihannya menyentuh jalur tulis
 GRN, jadi **tidak dikerjakan sepihak** — di luar permintaan.
+
+### Deploy PROC-GRN-DOC-01 — 2 September 2026
+
+Tuntas tanpa rollback. **Health check 200, siap setelah 3 detik** — `tunggu_sehat()`
+bekerja seperti maksudnya, tidak ada vonis palsu seperti dua deploy sebelumnya.
+Smoke: **30 lulus, 1 gagal** (hanya temuan lama kredensial master).
+
+**Terverifikasi live:**
+
+| Yang diperiksa | Hasil |
+|---|---|
+| `/uploads/grn/apa-saja.pdf`, `/uploads/grn/foto.jpg` | **403** keduanya — folder baru otomatis masuk kelompok terlindungi, tanpa satu pun perubahan nginx |
+| Tabel `grn_documents`, `grn_item_photos` | terbuat di produksi |
+| `/goods-receipts/:id/attachments`, `.../documents/:id/download` | 401 tanpa token |
+| `backend/uploads/grn/` | terbuat saat boot (bukan menunggu unggahan pertama) |
+| Bundel `GoodReceipt.DAkJ3t9P.js` | memuat "Surat Jalan", "Simpan GRN dulu", "attachments", "sudah disetujui penuh" |
+
+Yang paling perlu dilihat langsung di produksi adalah baris pertama. Penjagaan
+`/uploads` dilakukan nginx, bukan Express — pemeriksaan di kode tidak
+membuktikan apa pun tentang perilaku produksi. Ini persis pelajaran DR-P0-05,
+ketika perbaikan lolos tes lokal (403) sementara produksi tetap 200.
