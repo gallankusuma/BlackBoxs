@@ -445,6 +445,29 @@ router.get('/inbox', authMiddleware, async (req: Request, res: Response) => {
     const requests = await dbAll(sql, params) as any[];
 
     // ── Enrich with entity details ──
+    //
+    // ⚠️ Item PR dan GRN TIDAK ada di `purchase_request_items`/`grn_items`.
+    // Kedua tabel itu ada di skema lengkap dengan foreign key, tapi tidak
+    // pernah ditulis kode mana pun — itemnya disimpan sebagai JSON di kolom
+    // `notes`, dan posting stok GRN maupun bid tabulation PR juga membacanya
+    // dari situ. Diverifikasi: produksi 54 PR / 10 GRN dengan NOL baris di
+    // kedua tabel itu; lokal 10.521 PR / 8.136 GRN, juga nol.
+    //
+    // Akibatnya layar Approval Inbox menampilkan "0 item" dan nilai PR
+    // "Rp 0" — penyetuju memutuskan di atas angka yang salah. Karena itu
+    // hitungannya diambil dari sumber yang sama dengan yang dipakai modulnya
+    // sendiri, bukan dari tabel yang tidak pernah lahir.
+    const itemsDariNotes = (notes: unknown): any[] => {
+      try {
+        const data = JSON.parse(String(notes || '{}'));
+        return Array.isArray(data?.items) ? data.items : [];
+      } catch {
+        return [];
+      }
+    };
+    const jumlah = (items: any[], ambil: (it: any) => number) =>
+      items.reduce((t, it) => t + (Number(ambil(it)) || 0), 0);
+
     for (const r of requests) {
       try {
         if (r.entity_type === 'fund_request') {
@@ -463,7 +486,12 @@ router.get('/inbox', authMiddleware, async (req: Request, res: Response) => {
 
         } else if (r.entity_type === 'purchase_order') {
           const po = await dbGet(
-            `SELECT po.id, po.po_number, po.order_date, po.total_amount, po.status,
+            // `po_date`, BUKAN `order_date` — kolom itu tidak ada. Query lama
+            // melempar, `catch` di bawah menelannya, dan `entity` diset null:
+            // Purchase Order tidak pernah muncul rinciannya di Approval Inbox
+            // sama sekali. Alias dipertahankan supaya bentuk responsnya tidak
+            // berubah bagi pembaca mana pun.
+            `SELECT po.id, po.po_number, po.po_date AS order_date, po.total_amount, po.status,
                     po.approval_status, po.notes, po.expected_date,
                     v.name AS vendor_name,
                     (SELECT COUNT(*) FROM purchase_order_items poi WHERE poi.po_id = po.id) AS item_count,
@@ -478,30 +506,42 @@ router.get('/inbox', authMiddleware, async (req: Request, res: Response) => {
 
         } else if (r.entity_type === 'purchase_request') {
           const pr = await dbGet(
+            // `requestor_id`, BUKAN `requester_id`; dan `priority` tidak ada
+            // kolomnya. Sama seperti PO di atas: query lama selalu melempar dan
+            // Purchase Request tidak pernah tampil rinciannya di inbox.
             `SELECT pr.id, pr.pr_number, pr.request_date, pr.status, pr.approval_status,
-                    pr.department, pr.notes, pr.priority,
-                    u.full_name AS requester_name,
-                    (SELECT COUNT(*) FROM purchase_request_items pri WHERE pri.purchase_request_id = pr.id) AS item_count,
-                    (SELECT COALESCE(SUM(pri.quantity * pri.estimated_price), 0) FROM purchase_request_items pri WHERE pri.purchase_request_id = pr.id) AS estimated_total
+                    pr.department, pr.notes,
+                    u.full_name AS requester_name
              FROM purchase_requests pr
-             LEFT JOIN users u ON pr.requester_id = u.id
+             LEFT JOIN users u ON pr.requestor_id = u.id
              WHERE pr.id = ?`,
             [r.entity_id]
-          );
+          ) as any;
+          if (pr) {
+            // `qty` dan `price` — nama field yang benar-benar ditulis
+            // PurchaseRequests.vue ke dalam notes. Bukan `quantity`/
+            // `estimated_price` seperti nama kolom di tabel yang tidak terpakai.
+            const items = itemsDariNotes(pr.notes);
+            pr.item_count = items.length;
+            pr.estimated_total = jumlah(items, it => Number(it.qty || 0) * Number(it.price || 0));
+          }
           r.entity = pr || null;
 
         } else if (r.entity_type === 'grn') {
           const grn = await dbGet(
             `SELECT g.id, g.grn_number, g.received_date, g.status, g.notes,
-                    po.po_number, v.name AS vendor_name,
-                    (SELECT COUNT(*) FROM grn_items gi WHERE gi.grn_id = g.id) AS item_count,
-                    (SELECT COALESCE(SUM(gi.quantity_received), 0) FROM grn_items gi WHERE gi.grn_id = g.id) AS total_qty_received
+                    po.po_number, v.name AS vendor_name
              FROM goods_receipts g
              LEFT JOIN purchase_orders po ON g.po_id = po.id
              LEFT JOIN vendors v ON po.vendor_id = v.id
              WHERE g.id = ?`,
             [r.entity_id]
-          );
+          ) as any;
+          if (grn) {
+            const items = itemsDariNotes(grn.notes);
+            grn.item_count = items.length;
+            grn.total_qty_received = jumlah(items, it => it.received_quantity);
+          }
           r.entity = grn || null;
         }
       } catch (enrichErr) {

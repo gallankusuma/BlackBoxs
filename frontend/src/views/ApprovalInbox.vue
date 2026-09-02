@@ -45,6 +45,41 @@
             </div>
           </div>
 
+          <!-- Ringkasan PR / PO / GRN.
+               Sebelumnya hanya fund_request yang punya blok seperti ini; ketiga
+               jenis lain tampil sebagai "Entity #123" saja, jadi penyetuju
+               menekan Approve tanpa melihat dokumen apa pun. Angkanya baru bisa
+               dipercaya sejak PROC-INBOX-01 — sebelum itu nol semua. -->
+          <div v-if="item.entity_type === 'purchase_request' && item.entity" class="mt-2 p-3 bg-gray-50 rounded border text-sm">
+            <div class="font-medium text-gray-800">{{ item.entity.pr_number }}<span v-if="item.entity.department"> — {{ item.entity.department }}</span></div>
+            <div class="text-gray-600 mt-1 grid grid-cols-2 gap-x-4 gap-y-1">
+              <div><span class="text-gray-500">Nilai:</span> <span class="font-mono font-semibold">{{ formatMoney(item.entity.estimated_total) }}</span></div>
+              <div><span class="text-gray-500">Tanggal:</span> {{ formatDate(item.entity.request_date) }}</div>
+              <div><span class="text-gray-500">Items:</span> {{ item.entity.item_count }}</div>
+              <div v-if="item.entity.requester_name"><span class="text-gray-500">Pemohon:</span> {{ item.entity.requester_name }}</div>
+            </div>
+          </div>
+
+          <div v-else-if="item.entity_type === 'purchase_order' && item.entity" class="mt-2 p-3 bg-gray-50 rounded border text-sm">
+            <div class="font-medium text-gray-800">{{ item.entity.po_number }}<span v-if="item.entity.vendor_name"> — {{ item.entity.vendor_name }}</span></div>
+            <div class="text-gray-600 mt-1 grid grid-cols-2 gap-x-4 gap-y-1">
+              <div><span class="text-gray-500">Nilai:</span> <span class="font-mono font-semibold">{{ formatMoney(item.entity.total_amount) }}</span></div>
+              <div><span class="text-gray-500">Tanggal:</span> {{ formatDate(item.entity.order_date) }}</div>
+              <div><span class="text-gray-500">Items:</span> {{ item.entity.item_count }}</div>
+              <div v-if="item.entity.pr_number"><span class="text-gray-500">Dari PR:</span> {{ item.entity.pr_number }}</div>
+            </div>
+          </div>
+
+          <div v-else-if="item.entity_type === 'grn' && item.entity" class="mt-2 p-3 bg-gray-50 rounded border text-sm">
+            <div class="font-medium text-gray-800">{{ item.entity.grn_number }}<span v-if="item.entity.vendor_name"> — {{ item.entity.vendor_name }}</span></div>
+            <div class="text-gray-600 mt-1 grid grid-cols-2 gap-x-4 gap-y-1">
+              <div><span class="text-gray-500">Diterima:</span> {{ formatDate(item.entity.received_date) }}</div>
+              <div><span class="text-gray-500">Dari PO:</span> {{ item.entity.po_number || '-' }}</div>
+              <div><span class="text-gray-500">Items:</span> {{ item.entity.item_count }}</div>
+              <div><span class="text-gray-500">Total qty:</span> <span class="font-mono">{{ item.entity.total_qty_received }}</span></div>
+            </div>
+          </div>
+
           <p v-if="item.notes" class="text-sm text-gray-500 mt-1">{{ item.notes }}</p>
           <p class="text-xs text-gray-400 mt-1">Submitted: {{ formatDate(item.submitted_at) }}</p>
         </div>

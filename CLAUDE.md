@@ -321,6 +321,35 @@ dan angkanya tetap benar).
 ⚠️ Menaikkan batas rate limit **bukan** perbaikan untuk gejala ini. Itu hanya
 menunda, dan menipis lagi sendiri begitu jumlah PO bertambah.
 
+### Approval Inbox: angka yang dilihat penyetuju (PROC-INBOX-01)
+
+`GET /approval/inbox` memperkaya tiap baris dengan detail dokumennya. Tiga cacat
+diperbaiki 2 September 2026, dan ketiganya **tidak menghasilkan error yang
+terlihat** — query melempar, `catch (enrichErr)` menelannya, `entity` diset
+`null`, dan layarnya sekadar kosong:
+
+| Cacat | Akibat |
+|---|---|
+| `po.order_date` (kolomnya `po_date`) | Purchase Order tidak pernah tampil rinciannya |
+| `pr.requester_id` & `pr.priority` (yang benar `requestor_id`; `priority` tidak ada) | Purchase Request tidak pernah tampil rinciannya |
+| item PR/GRN dihitung dari `purchase_request_items`/`grn_items` | selalu 0 item dan nilai PR Rp 0 |
+
+⚠️ **`purchase_request_items` dan `grn_items` tidak pernah ditulis kode mana
+pun.** Item PR dan GRN disimpan sebagai JSON di kolom `notes`, dan modulnya
+sendiri (posting stok GRN, bid tabulation PR) memang membacanya dari situ.
+Diverifikasi: produksi 54 PR / 10 GRN dengan nol baris di kedua tabel itu; lokal
+10.521 PR / 8.136 GRN, juga nol. Jangan menambahkan pembaca baru ke kedua tabel
+itu — hitung dari `notes`, memakai nama field yang benar-benar ditulis layarnya
+(`qty`/`price` untuk PR, `received_quantity` untuk GRN).
+
+`purchase_order_items` dan `fund_request_items` **benar-benar terisi**; kedua
+cabang itu sehat dan tidak diubah.
+
+Dua hal yang dijaga `npm run test:inbox-item`: **tidak ada jenis dokumen yang
+`entity`-nya null** (itu satu-satunya cara cacat di atas terlihat), dan **layar
+punya blok ringkasan untuk keempat jenis** — sebelum ini hanya `fund_request`
+yang dirender, jadi backend yang benar pun tetap tidak menolong penyetuju.
+
 ### Lampiran GRN: surat jalan & foto per item (PROC-GRN-DOC-01)
 
 Berkas disimpan di `backend/uploads/grn/`. Folder itu **tidak** ada di daftar

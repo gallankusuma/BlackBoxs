@@ -12530,3 +12530,79 @@ Yang paling perlu dilihat langsung di produksi adalah baris pertama. Penjagaan
 `/uploads` dilakukan nginx, bukan Express — pemeriksaan di kode tidak
 membuktikan apa pun tentang perilaku produksi. Ini persis pelajaran DR-P0-05,
 ketika perbaikan lolos tes lokal (403) sementara produksi tetap 200.
+
+---
+
+## [DEV] Approval Inbox — tiga cacat yang semuanya diam (PROC-INBOX-01) — 2 September 2026
+
+Ditindaklanjuti atas permintaan pemilik, dari temuan sampingan entri sebelumnya.
+
+### Yang dicari vs yang ditemukan
+
+Yang dilaporkan: jumlah item GRN selalu 0. Yang sebenarnya ada di sana **tiga**
+cacat, dan dua di antaranya lebih berat:
+
+| Cacat | Akibat |
+|---|---|
+| `po.order_date` — kolomnya bernama `po_date` | **Purchase Order tidak pernah tampil rinciannya sama sekali** |
+| `pr.requester_id` & `pr.priority` — yang benar `requestor_id`, dan `priority` tidak ada kolomnya | **Purchase Request juga tidak pernah tampil** |
+| item PR/GRN dihitung dari `purchase_request_items`/`grn_items` | 0 item, dan nilai PR **Rp 0** |
+
+Ketiganya **tidak menghasilkan error yang terlihat**: query melempar,
+`catch (enrichErr)` menelannya jadi `console.warn`, `entity` diset `null`, dan
+layar hanya kosong — tidak bisa dibedakan dari "memang belum ada datanya".
+Itulah kenapa cacat ini bertahan.
+
+### Akar yang sama dengan PROC-GRN-DOC-01
+
+`purchase_request_items` dan `grn_items` **tidak pernah ditulis kode mana pun**;
+itemnya disimpan sebagai JSON di `notes`. Produksi: 54 PR / 10 GRN, nol baris di
+kedua tabel. Lokal: 10.521 PR / 8.136 GRN, juga nol. Hitungannya sekarang
+diambil dari sumber yang sama dengan yang dipakai modulnya sendiri.
+
+`purchase_order_items` (290 baris) dan `fund_request_items` (93) benar-benar
+terisi — kedua cabang itu sehat dan **tidak diubah**, dan ada asersi yang
+memastikan perbaikan ini tidak menyeretnya.
+
+### Datanya benar tidak ada gunanya kalau tidak dirender
+
+Layar `ApprovalInbox.vue` ternyata hanya punya blok ringkasan untuk
+`fund_request`; PR, PO, dan GRN tampil sebagai "Entity #123 · Step 1" saja. Jadi
+memperbaiki backend saja akan menghasilkan angka benar yang **tidak terlihat
+siapa pun**. Ditambahkan blok ringkasan untuk ketiganya: nomor dokumen, nilai,
+tanggal, jumlah item, dan vendor/pemohon.
+
+### Verifikasi
+
+`tests/approval-inbox-item.ts` — **20 lulus, 0 gagal**. Nilai PR diuji dengan
+angka yang tidak bulat (3×1.250.000 + 2×400.500 = 4.551.000) dan `estimatedTotal`
+di notes sengaja diisi 999: kalau kode diam-diam memakai angka simpanan layar,
+asersinya gagal.
+
+Enam mutasi dijalankan, semuanya tertangkap:
+
+| Mutasi | Asersi gagal |
+|---|---|
+| PO kembali memakai kolom `order_date` yang tidak ada | 2 |
+| PR kembali join lewat `requester_id` yang tidak ada | 3 |
+| jumlah item PR kembali dari tabel kosong | 1 |
+| nilai PR memakai `estimatedTotal` simpanan layar | 1 |
+| GRN: total qty tidak dijumlahkan | 1 |
+| notes non-JSON tidak lagi ditangani | 2 |
+
+⚠️ Percobaan pertama mutasi keenam menghasilkan "0 asersi gagal" — **anchor-nya
+salah tulis**, dan tracebacknya membuktikan tidak ada yang dimutasi. Diulang
+dengan anchor yang benar; hasilnya 2. Dicatat karena "0" yang tidak diperiksa
+mudah dibaca sebagai tes yang lemah, padahal harnessnya yang gagal.
+
+Penjaga render juga dikontrol: satu blok ringkasan dilepas → langsung tertangkap.
+
+Regresi: `test:procurement` 184, `test:grn-lampiran` 31, `test:proc-agregat` 12.
+`tsc --noEmit` bersih, `npm run build` bersih.
+
+### Paparan produksi saat ini: nol
+
+`approval_requests` **kosong di produksi** (0 baris), jadi Approval Inbox belum
+menampilkan apa pun dan ketiga cacat ini belum pernah terlihat pengguna. Ini
+salah yang menunggu, bukan yang sedang berjalan — diperbaiki sekarang justru
+karena murah, sebelum ada yang memakainya.
