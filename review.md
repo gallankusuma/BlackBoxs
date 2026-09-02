@@ -12794,3 +12794,34 @@ Regresi: `test:finance-apar` 10, `test:procurement` 184. `tsc --noEmit` bersih.
 `/finance/payroll-requests` termasuk approve. Kedua role produksi lolos gerbang
 itu, jadi tidak ada yang terganggu — tapi ketergantungannya dicatat karena tidak
 terlihat dari dalam modul finance.
+
+### Deploy FIN-01 & FIN-RBAC-01 — 2 September 2026
+
+**FIN-01** (AP/AR): tuntas, health 200 **siap setelah 13 detik**. Angka itu
+sekaligus catatan sendiri: dengan `sleep 8` versi lama, deploy ini pasti
+digulung balik. Waktu boot terukur sejauh ini 3, 3, 3, 8, 13, dan 5 detik.
+Terverifikasi di dist produksi: `JOIN client_projects` 4, `JOIN projects` **0**,
+`proj.project_name` 4, `LEFT JOIN contacts ct` 1.
+
+**FIN-RBAC-01**: tuntas, health 200 (5 detik), smoke 30/1 (temuan lama), rilis
+tidak dikembalikan. Diverifikasi terhadap berkas yang BENAR-BENAR DILAYANI:
+
+| Yang diperiksa | Hasil |
+|---|---|
+| Gerbang di `dist/routes/finance.routes.js` | **64** dari 64 endpoint |
+| Permission unik yang dipakai | 45 |
+| Yang tidak ada di katalog produksi | **nol** |
+| `Admin` | **lolos seluruh 64 gerbang** |
+| `Manager Finannce & Acc` | **lolos seluruh 64 gerbang** |
+
+⚠️ Pemeriksaan pertama melaporkan **"0 gerbang di dist"** lalu tetap mencetak
+"LOLOS SEMUA" untuk kedua role — himpunan kosong memang lolos apa pun. Regex
+saya mencari `requirePermission(`, sedangkan hasil kompilasi TypeScript
+menulisnya `(0, permission_1.requirePermission)(...)`. Ditambahkan asersi
+`len(gates) == 64` supaya angka nol berhenti di situ dan tidak pernah lagi
+terbaca sebagai keberhasilan.
+
+Yang **tidak** bisa diverifikasi dari luar: bahwa beni dan takbir benar-benar
+masih bisa menyetujui di layar — itu butuh login. Kalau ada laporan 403 di
+finance, `requirePermission` mengembalikan daftar permission yang dibutuhkan di
+field `required`, jadi gerbang mana yang menolak langsung ketahuan.
