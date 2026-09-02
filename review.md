@@ -12606,3 +12606,33 @@ Regresi: `test:procurement` 184, `test:grn-lampiran` 31, `test:proc-agregat` 12.
 menampilkan apa pun dan ketiga cacat ini belum pernah terlihat pengguna. Ini
 salah yang menunggu, bukan yang sedang berjalan — diperbaiki sekarang justru
 karena murah, sebelum ada yang memakainya.
+
+### Deploy PROC-INBOX-01 — 2 September 2026
+
+Tuntas tanpa rollback. Smoke **30 lulus, 1 gagal** (hanya temuan lama kredensial
+master).
+
+**Health check: "siap setelah 8s".** Angka itu jatuh persis di ambang `sleep 8`
+yang dipakai versi lama — kalau health check belum diganti `tunggu_sehat()`
+kemarin, deploy ini kemungkinan besar digulung balik lagi tanpa sebab. Waktu
+boot yang terukur sejauh ini: 3s, 3s, 3s, dan sekarang 8s.
+
+**Terverifikasi live di `dist/routes/approval.routes.js`:**
+
+| Yang diperiksa | Hasil |
+|---|---|
+| `po_date AS order_date` | 1 |
+| `requestor_id` | 2 |
+| `po.order_date` lama | **0** |
+| `pr.requester_id` lama | **0** |
+| pembacaan `FROM grn_items` | **0** |
+| `itemsDariNotes` | 3 |
+
+Bundel `ApprovalInbox.TnkfgXSA.js` (unggah 06:37) memuat keempat jenis dokumen
+dan kelima label baru (`Pemohon`, `Dari PR`, `Dari PO`, `Total qty`, `Diterima`).
+Health 200, `/api/approval/inbox` 401 tanpa token.
+
+⚠️ Pemeriksaan pertama bundel frontend sempat melaporkan **0 untuk keempat
+jenis, termasuk `fund_request` yang jelas sudah ada sebelum perubahan ini** —
+itu pola grep saya yang salah terhadap keluaran terminifikasi, bukan berkas yang
+tidak naik. Diperiksa ulang dengan pola yang benar sebelum menyimpulkan apa pun.
