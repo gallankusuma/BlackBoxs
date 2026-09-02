@@ -13119,3 +13119,40 @@ di `hr.routes.ts`, bukan tabel. Klausanya dibuang lebih dulu sebelum pemindaian.
 Regresi: `finance-rbac` 22, `finance-apar` 19, `procurement` 184,
 `inbox-item` 20, `grn-lampiran` 31, `vendor-price` 53, `proc-agregat` 12.
 `tsc --noEmit` bersih, `npm run build` bersih.
+
+### Deploy CABUT-STOCK-01 — 2 September 2026
+
+Tuntas tanpa rollback. Health 200 (siap 6 detik), smoke **30 lulus, 1 gagal**
+(temuan lama kredensial master).
+
+**Terverifikasi di berkas yang benar-benar dilayani** —
+`dist/routes/inventory.routes.js`:
+
+| Yang diperiksa | Hasil |
+|---|---|
+| `stock-transfers` / `stock-adjustments` | **0** |
+| `executeStockTransfer` | **0** |
+| `FROM/UPDATE/INTO inventory` (tabel hantu) | **0** |
+| `inventory_stocks` (tabel yang ada) | 7 |
+| Gerbang tersisa | 6 |
+| Ukuran berkas | 156 baris (dari 704) |
+
+Chunk `StockTransfer.*.js` dan `StockAdjustment.*.js` **lenyap** dari
+`frontend/js/` (rsync `--delete`). `StockCard.*.js` masih ada — sengaja.
+
+**Cara membuktikan pencabutannya dari luar, tanpa token:**
+
+```
+POST /api/inventory/stock-transfers/1/approve    → 404
+POST /api/inventory/stock-adjustments/1/reject   → 404
+GET  /api/inventory/transactions/1               → 401   (masih ada)
+POST /api/inventory/1/transaction                → 401   (masih ada)
+```
+
+Kontras itu yang menentukan: rute yang masih terdaftar dijawab `authMiddleware`
+dengan 401 sebelum handlernya jalan; yang sudah dicabut jatuh ke 404.
+
+⚠️ `GET /api/inventory/stock-transfers` sendiri menjawab **401, bukan 404** —
+dan itu BUKAN tanda ia masih ada. Path itu hanya satu segmen, jadi tertangkap
+route generik `GET /:id` yang memang masih terdaftar. Karena itu pembuktiannya
+memakai path empat segmen, yang tidak bisa dicocokkan route tersisa mana pun.
