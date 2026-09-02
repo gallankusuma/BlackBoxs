@@ -12825,3 +12825,79 @@ Yang **tidak** bisa diverifikasi dari luar: bahwa beni dan takbir benar-benar
 masih bisa menyetujui di layar — itu butuh login. Kalau ada laporan 403 di
 finance, `requirePermission` mengembalikan daftar permission yang dibutuhkan di
 field `required`, jadi gerbang mana yang menolak langsung ketahuan.
+
+---
+
+## [DEV] Sisa audit finance — FIN-02 s/d FIN-04 — 2 September 2026
+
+Empat butir terakhir dari audit, dikerjakan atas instruksi pemilik.
+
+### 1. Lima endpoint 500 — nama kolom, dan dua yang memang tidak ada
+
+| Diminta query | Kenyataan |
+|---|---|
+| `cogs_tracking.total_cost` | kolomnya **`total_cogs`** |
+| `cogs_tracking.quantity_produced` | **tidak ada** — jumlah produksinya di `work_orders.completed_quantity`, lewat `cogs_tracking.wo_id` |
+| `cogs_tracking.cost_per_unit` | **tidak ada** — diturunkan `total_cogs / NULLIF(completed_quantity, 0)` |
+| `profitability_tracking.gross_margin_pct` | **`margin_percentage`** |
+| `pt.period`, `pt.total_revenue`, `pt.total_cogs` | **`period_date`, `revenue`, `cogs`** |
+
+Dua yang terakhir bukan sekadar salah nama: kolomnya memang tidak ada, jadi
+diturunkan dari tabel yang benar-benar menyimpannya. `NULLIF` menahan pembagian
+nol — batch tanpa unit selesai menghasilkan NULL, dan NULL memang jawaban yang
+jujur untuk "berapa per unit" ketika unitnya belum ada.
+
+**Hasil: nol dari 26 endpoint GET finance yang 5xx** (sebelumnya 9).
+
+### 2. Unggahan finance akhirnya diperiksa isinya
+
+`frDocUpload` dan `proofUpload` dulu memakai `multer.diskStorage` — berkas apa
+pun mendarat lebih dulu, dan namanya diturunkan dari `originalname` kiriman
+klien. Kini ke memori, divalidasi magic-byte lewat `validateUpload`, baru
+disimpan `storeValidatedFile` dengan nama acak. Diuji: `.pdf` berisi teks biasa
+ditolak 400, PDF sungguhan diterima 201.
+
+### 3. `payment_proofs` — dan koreksi atas perbaikan saya sendiri
+
+IIFE `CREATE TABLE` saat modul di-import dipindahkan ke
+`ensureRouteModuleSchema`. Kini **nol dari 45 berkas rute** yang membuat tabel
+sendiri.
+
+⚠️ Saya sempat menambahkan indeks `(schedule_id, source)` pada statement itu,
+lalu memverifikasinya dengan menghapus tabel dan me-restart. Tabelnya lahir
+kembali — **tapi indeksnya tidak, dan collationnya pun berbeda.** Setelah
+ditelusuri: `payment_proofs` **sudah ada di `schema-baseline.sql` baris 1721**,
+yang jalan sebelum `ensure*`, sehingga `CREATE TABLE IF NOT EXISTS` di
+`ensureRouteModuleSchema` praktis selalu no-op. Indeks itu **kode mati yang
+diam-diam tidak melakukan apa-apa**. Dibuang, dan definisinya disamakan persis
+dengan baseline supaya tidak menjanjikan sesuatu yang tidak pernah terjadi.
+
+Pelajaran yang layak diingat: `CREATE TABLE IF NOT EXISTS` **tidak bisa dipakai
+menambah indeks atau kolom** ke tabel yang sudah ada — untuk itu
+`ALTER TABLE ... IF NOT EXISTS` lewat `execSchemaEnsure`.
+
+### 4. Kegagalan tidak lagi disembunyikan
+
+`FinanceAP.vue` dan `FinanceAR.vue` menangkap kegagalan detail lalu tetap
+membuka modal dengan data baris daftar — itulah sebabnya 500 tadi bertahan lama
+tanpa ada yang melapor. Modal tetap dibuka supaya pengguna tidak terhalang, tapi
+kini ia diberi tahu bahwa yang dilihatnya data ringkas.
+
+### Verifikasi
+
+`tests/finance-ap-ar.ts` — **19 lulus, 0 gagal**, kini juga menyapu seluruh 26
+endpoint GET, menguji penolakan berkas palsu, memindai 45 berkas rute untuk
+`CREATE TABLE`, dan memeriksa kedua layar memberi tahu kegagalannya.
+
+Empat mutasi, semuanya tertangkap: kolom cogs dikembalikan (1), kolom margin
+dikembalikan (1), validasi unggahan dilepas (1), dan layar kembali menelan error
+(1).
+
+⚠️ Mutasi keempat awalnya **tidak tertangkap**. Asersi saya memindai seluruh
+berkas untuk pola `catch (e: any) { ... showToast('error'`, dan karena kedua
+layar memang punya pola itu di tempat lain, ia tetap lolos walau `openDetail`
+dikembalikan menjadi penelan senyap. Dipersempit ke badan `openDetail`; setelah
+itu tertangkap. Asersi yang selalu benar bukan penjaga.
+
+Regresi: `test:finance-rbac` 22, `test:procurement` 184, `test:inbox-item` 20.
+`tsc --noEmit` bersih, `npm run build` bersih.

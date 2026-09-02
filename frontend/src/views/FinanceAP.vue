@@ -381,7 +381,16 @@ async function openDetail(ap: any) {
   try {
     const res = await api.get(`/finance/accounts-payable/${ap.id}`);
     detailModal.value = { show: true, data: res.data.data };
-  } catch { detailModal.value = { show: true, data: ap }; }
+  } catch (e: any) {
+    // FIN-04: kegagalannya HARUS terlihat. Versi lama diam-diam jatuh ke data
+    // baris daftar, jadi modalnya tetap terbuka seolah semuanya baik-baik saja.
+    // Endpoint ini SELALU 500 sejak lama (tabel `projects` yang tidak ada) dan
+    // tidak ada seorang pun yang tahu — persis karena catch ini menutupinya.
+    // Modal tetap dibuka supaya pengguna tidak terhalang, tapi ia diberi tahu
+    // bahwa yang dilihatnya adalah data ringkas, bukan detail.
+    showToast('error', e?.response?.data?.error || 'Detail AP gagal dimuat — menampilkan data ringkas dari daftar');
+    detailModal.value = { show: true, data: ap };
+  }
 }
 
 const showToast = (type: string, message: string) => {

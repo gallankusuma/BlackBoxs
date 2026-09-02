@@ -46,7 +46,7 @@ async function call(method: string, path: string, body?: unknown, token?: string
 
 async function main() {
   const fs = await import('fs');
-  const { dbGet, dbAll } = await import('../src/config/database');
+  const { dbGet, dbAll, dbRun } = await import('../src/config/database');
 
   const master: string = (await call('POST', '/auth/login', { email: ADMIN_EMAIL, password: ADMIN_PASS })).json?.token;
   if (!master) { console.log('  FAIL login master'); process.exit(1); }
@@ -110,6 +110,75 @@ async function main() {
   ) as any[]).map(r => String(r.t).toLowerCase()));
   const hantu = [...disebut].filter(t => !ada.has(t)).sort();
   chk(`${disebut.size} tabel disebut, yang tidak ada`, hantu, []);
+
+  console.log('\n4. Tidak ada endpoint GET finance yang 5xx');
+  // Dulu 9 dari 26 membalas 500: empat karena tabel `projects` yang tidak ada,
+  // tiga karena cogs_tracking tidak punya total_cost/cost_per_unit/
+  // quantity_produced, dan dua karena profitability_tracking tidak punya
+  // gross_margin_pct/period/total_revenue. Tidak satu pun muncul saat tsc.
+  const jalurGet = [...src.matchAll(/^router\.get\('([^']+)'/gm)].map(m => m[1]);
+  const rusak: string[] = [];
+  for (const jalur of jalurGet) {
+    const nyata = jalur
+      .replace(/:id/g, jalur.includes('receivable') ? String(arId || 1) : String(apId || 1))
+      .replace(/:[a-zA-Z_]+/g, '1');
+    const r = await call('GET', `/finance${nyata}`, undefined, master);
+    if (r.status >= 500) rusak.push(`${r.status} ${nyata}`);
+  }
+  rusak.forEach(x => console.log('       ' + x));
+  chk(`${jalurGet.length} endpoint GET, yang 5xx`, rusak, []);
+
+  console.log('\n5. Unggahan finance diperiksa isinya, bukan ekstensinya');
+  const fr = await call('POST', '/finance/fund-requests', {
+    purpose: `Uji unggah ${Date.now().toString().slice(-6)}`,
+    needed_date: new Date().toISOString().slice(0, 10),
+    items: [{ amount: 1000 }],
+  }, master);
+  const frId = fr.json?.data?.id ?? fr.json?.id;
+  if (frId) {
+    const kirim = async (nama: string, tipe: string, isi: Buffer) => {
+      const fd = new FormData();
+      fd.append('file', new Blob([new Uint8Array(isi)], { type: tipe }), nama);
+      const r = await fetch(`${API}/finance/fund-requests/${frId}/documents`, {
+        method: 'POST', headers: { Authorization: `Bearer ${master}` }, body: fd,
+      });
+      return r.status;
+    };
+    chk('berkas .pdf yang isinya teks biasa ditolak',
+      await kirim('menyamar.pdf', 'application/pdf', Buffer.from('ini bukan pdf sama sekali')), 400);
+    chk('PDF sungguhan diterima',
+      await kirim('asli.pdf', 'application/pdf',
+        Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.from('uji')])), 201);
+    await dbRun('DELETE FROM fund_request_documents WHERE fund_request_id = ?', [frId]);
+    await dbRun('DELETE FROM fund_request_items WHERE fund_request_id = ?', [frId]);
+    await dbRun('DELETE FROM fund_requests WHERE id = ?', [frId]);
+  } else {
+    console.log('       (fund request uji gagal dibuat — bagian ini dilewati)');
+  }
+
+  console.log('\n6. Tabel tidak dibuat saat modul rute di-import');
+  // Dilarang eksplisit di CLAUDE.md: itu berjalan sebelum initializeDatabase(),
+  // sehingga foreign key ke tabel inti gagal di database baru.
+  const semuaRute = fs.readdirSync('src/routes').filter((f: string) => f.endsWith('.ts'));
+  const nakal = semuaRute.filter((f: string) =>
+    /CREATE TABLE/i.test(fs.readFileSync(`src/routes/${f}`, 'utf8')));
+  chk(`${semuaRute.length} berkas rute, yang membuat tabel sendiri`, nakal, []);
+  chk('payment_proofs dibuat lewat ensure*Schema',
+    /CREATE TABLE IF NOT EXISTS payment_proofs/.test(fs.readFileSync('src/config/database.ts', 'utf8')), true);
+
+  console.log('\n7. Kegagalan detail tidak disembunyikan di layar');
+  // Justru catch inilah yang membuat 500 di atas bertahan lama tanpa ketahuan.
+  // Diperiksa DI DALAM openDetail saja. Versi pertama asersi ini memindai
+  // seluruh berkas, dan karena keduanya memang punya catch ber-showToast di
+  // tempat lain, ia tetap lolos walau catch openDetail dikembalikan menjadi
+  // penelan senyap. Asersi yang selalu benar bukan penjaga.
+  for (const f of ['FinanceAP.vue', 'FinanceAR.vue']) {
+    const layar = fs.readFileSync(`../frontend/src/views/${f}`, 'utf8');
+    const i = layar.indexOf('async function openDetail');
+    chk(`  ${f} punya openDetail`, i >= 0, true);
+    const badan = i >= 0 ? layar.slice(i, layar.indexOf('\n}', i)) : '';
+    chk(`  ${f}: kegagalan detail diberitahukan`, /showToast\('error'/.test(badan), true);
+  }
 
   console.log(`\n${pass} lulus, ${fail} gagal`);
   process.exit(fail === 0 ? 0 : 1);

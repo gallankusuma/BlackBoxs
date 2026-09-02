@@ -377,12 +377,30 @@ Tiga hal yang harus dijaga:
 jadi gerbang di kedua kelompok itu ikut menentukan siapa yang bisa memakai layar
 absensi.
 
-**Masih terbuka di modul ini** (sudah diukur, belum dikerjakan): lima endpoint
-masih 500 karena `cogs_tracking` tidak punya
-`total_cost`/`cost_per_unit`/`quantity_produced` dan `profitability_tracking`
-tidak punya `gross_margin_pct`/`period`/`total_revenue`; unggahan finance tidak
-memakai `validateUpload`; dan `payment_proofs` dibuat lewat `CREATE TABLE` saat
-modul di-import, yang dilarang di atas.
+Empat cacat lain di modul ini sudah ikut ditutup (FIN-02 s/d FIN-04):
+
+- **`cogs_tracking` tidak punya `total_cost`, `cost_per_unit`, maupun
+  `quantity_produced`** — yang ada `total_cogs`. Jumlah produksinya ada di
+  `work_orders` lewat `wo_id`, dan biaya per unit **diturunkan**
+  `total_cogs / NULLIF(completed_quantity, 0)`. NULL untuk batch yang belum
+  punya unit selesai adalah jawaban yang jujur, bukan nol.
+- **`profitability_tracking` memakai `margin_percentage`, `period_date`,
+  `revenue`, `cogs`** — bukan `gross_margin_pct`, `period`, `total_revenue`,
+  `total_cogs`.
+- **Unggahan finance kini lewat `validateUpload` + `storeValidatedFile`**
+  (memori dulu, disk belakangan) — sama dengan procurement dan GRN.
+- **`payment_proofs` tidak lagi dibuat saat modul di-import.** ⚠️ Tabel itu
+  ternyata **sudah ada di `schema-baseline.sql`**, jadi statement di
+  `ensureRouteModuleSchema` praktis selalu no-op dan hanya jaring pengaman.
+  Konsekuensinya: **`CREATE TABLE IF NOT EXISTS` tidak bisa dipakai menambah
+  indeks atau kolom** ke tabel yang sudah ada — ia diam saja. Untuk itu pakai
+  `ALTER TABLE ... IF NOT EXISTS` lewat `execSchemaEnsure`.
+
+Hasilnya: **nol dari 26 endpoint GET finance yang membalas 5xx** (sebelumnya 9).
+
+⚠️ `FinanceAP.vue` dan `FinanceAR.vue` dulu menangkap kegagalan detail lalu
+tetap membuka modal dengan data baris daftar — itulah sebabnya 500 di atas
+bertahan lama tanpa ada yang melapor. Sekarang penggunanya diberi tahu.
 
 ### Approval Inbox: angka yang dilihat penyetuju (PROC-INBOX-01)
 

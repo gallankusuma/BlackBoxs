@@ -4,6 +4,7 @@ import { businessDate } from '../utils/date.utils';
 import { authMiddleware } from '../middleware/auth';
 import { requirePermission } from '../middleware/permission';
 import multer from 'multer';
+import { validateUpload, storeValidatedFile } from '../utils/file-validation';
 import path from 'path';
 import fs from 'fs';
 
@@ -12,41 +13,22 @@ const router = express.Router();
 // Multer setup for fund request document uploads
 const frDocDir = path.join(__dirname, '../../uploads/fund-requests');
 if (!fs.existsSync(frDocDir)) fs.mkdirSync(frDocDir, { recursive: true });
-const frDocStorage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, frDocDir),
-  filename: (_req, file, cb) => cb(null, `${Date.now()}-${file.originalname.replace(/\s+/g, '_')}`),
-});
-const frDocUpload = multer({ storage: frDocStorage, limits: { fileSize: 15 * 1024 * 1024 } }); // 15MB max
+// FIN-03: unggahan finance ditampung di MEMORI dulu, lalu diperiksa
+// magic-byte lewat validateUpload sebelum satu byte pun menyentuh disk — pola
+// yang sama dengan procurement, bid, dan lampiran GRN. Versi lama memakai
+// diskStorage: berkas apa pun mendarat lebih dulu, dan namanya diturunkan dari
+// `originalname` kiriman klien.
+const frDocUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } }); // 15MB max
 
 // Multer setup for payment proof uploads
 const proofDir = path.join(__dirname, '../../uploads/payment-proofs');
 if (!fs.existsSync(proofDir)) fs.mkdirSync(proofDir, { recursive: true });
-const proofStorage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, proofDir),
-  filename: (_req, file, cb) => cb(null, `${Date.now()}-${file.originalname.replace(/\s+/g, '_')}`),
-});
-const proofUpload = multer({ storage: proofStorage, limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB max
+const proofUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB max
 
-// Ensure payment_proofs table exists
-(async () => {
-  try {
-    await dbRun(`CREATE TABLE IF NOT EXISTS payment_proofs (
-      id INT AUTO_INCREMENT PRIMARY KEY,
-      schedule_id INT NOT NULL,
-      source VARCHAR(20) NOT NULL DEFAULT 'po',
-      file_name VARCHAR(255) NOT NULL,
-      original_name VARCHAR(255) NOT NULL,
-      file_path VARCHAR(500) NOT NULL,
-      file_size INT DEFAULT 0,
-      file_type VARCHAR(100),
-      notes TEXT,
-      uploaded_by INT,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`, []);
-  } catch (e: any) {
-    if (!e.message?.includes('already exists')) console.error('payment_proofs table:', e.message);
-  }
-})();
+// Tabel `payment_proofs` dibuat di `ensureRouteModuleSchema` (FIN-02),
+// bukan di sini. Membuat tabel saat modul di-import berjalan sebelum
+// initializeDatabase(), sehingga foreign key ke tabel inti gagal di
+// database baru.
 
 const generateFinanceCode = (prefix: string) => {
   const now = new Date();
@@ -448,7 +430,7 @@ router.get('/financial-summary', authMiddleware, requirePermission('finance.fina
   try {
     const summary = await dbAll(
       `SELECT fs.*, 
-              (SELECT SUM(total_cost) FROM cogs_tracking) as total_cogs,
+              (SELECT SUM(total_cogs) FROM cogs_tracking) as total_cogs,
               (SELECT SUM(total_amount) FROM sales_orders) as total_revenue
        FROM financial_summary fs
        ORDER BY fs.period_date DESC`
@@ -473,14 +455,15 @@ router.get('/cost-analysis', authMiddleware, requirePermission('finance.cost-ana
               ROUND(AVG(c.raw_material_cost), 2) as avg_material_cost,
               ROUND(AVG(c.labor_cost), 2) as avg_labor_cost,
               ROUND(AVG(c.overhead_cost), 2) as avg_overhead_cost,
-              ROUND(AVG(c.total_cost), 2) as avg_total_cost,
-              ROUND(AVG(c.cost_per_unit), 2) as avg_cost_per_unit,
-              ROUND(MIN(c.cost_per_unit), 2) as min_cost_per_unit,
-              ROUND(MAX(c.cost_per_unit), 2) as max_cost_per_unit,
-              ROUND(SUM(c.total_cost), 2) as total_cost_sum,
-              ROUND(SUM(c.quantity_produced), 0) as total_qty_produced
+              ROUND(AVG(c.total_cogs), 2) as avg_total_cost,
+              ROUND(AVG(c.total_cogs / NULLIF(wo.completed_quantity, 0)), 2) as avg_cost_per_unit,
+              ROUND(MIN(c.total_cogs / NULLIF(wo.completed_quantity, 0)), 2) as min_cost_per_unit,
+              ROUND(MAX(c.total_cogs / NULLIF(wo.completed_quantity, 0)), 2) as max_cost_per_unit,
+              ROUND(SUM(c.total_cogs), 2) as total_cost_sum,
+              ROUND(SUM(wo.completed_quantity), 0) as total_qty_produced
        FROM products p
        LEFT JOIN cogs_tracking c ON p.id = c.product_id
+       LEFT JOIN work_orders wo ON c.wo_id = wo.id
        GROUP BY p.id, p.name, p.sku
        HAVING batch_count > 0
        ORDER BY total_cost_sum DESC`
@@ -496,10 +479,11 @@ router.get('/cost-analysis/trends', authMiddleware, requirePermission('finance.c
   try {
     const trends = await dbAll(
       `SELECT DATE_FORMAT(c.created_at, '%Y-%m') as period,
-              ROUND(AVG(c.cost_per_unit), 2) as avg_cost_per_unit,
-              ROUND(SUM(c.total_cost), 2) as total_cost,
+              ROUND(AVG(c.total_cogs / NULLIF(wo.completed_quantity, 0)), 2) as avg_cost_per_unit,
+              ROUND(SUM(c.total_cogs), 2) as total_cost,
               COUNT(c.id) as batch_count
        FROM cogs_tracking c
+       LEFT JOIN work_orders wo ON c.wo_id = wo.id
        GROUP BY period
        ORDER BY period DESC
        LIMIT 12`
@@ -518,10 +502,10 @@ router.get('/margin-analysis', authMiddleware, requirePermission('finance.financ
     const margins = await dbAll(
       `SELECT pt.*, pr.name as product_name, pr.sku,
               ROUND(pt.gross_profit, 2) as gross_profit,
-              ROUND(pt.gross_margin_pct, 1) as gross_margin_pct
+              ROUND(pt.margin_percentage, 1) as gross_margin_pct
        FROM profitability_tracking pt
        LEFT JOIN products pr ON pt.product_id = pr.id
-       ORDER BY pt.gross_margin_pct DESC`
+       ORDER BY pt.margin_percentage DESC`
     );
     res.json({ success: true, data: margins });
   } catch (error) {
@@ -533,11 +517,11 @@ router.get('/margin-analysis', authMiddleware, requirePermission('finance.financ
 router.get('/margin-analysis/summary', authMiddleware, requirePermission('finance.financial-summary.view'), async (req: Request, res: Response) => {
   try {
     const summary = await dbAll(
-      `SELECT DATE_FORMAT(CONCAT(pt.period, '-01'), '%Y-%m') as period,
-              ROUND(SUM(pt.total_revenue), 2) as total_revenue,
-              ROUND(SUM(pt.total_cogs), 2) as total_cogs,
+      `SELECT DATE_FORMAT(pt.period_date, '%Y-%m') as period,
+              ROUND(SUM(pt.revenue), 2) as total_revenue,
+              ROUND(SUM(pt.cogs), 2) as total_cogs,
               ROUND(SUM(pt.gross_profit), 2) as gross_profit,
-              ROUND(AVG(pt.gross_margin_pct), 1) as avg_margin_pct
+              ROUND(AVG(pt.margin_percentage), 1) as avg_margin_pct
        FROM profitability_tracking pt
        GROUP BY period
        ORDER BY period DESC
@@ -545,9 +529,9 @@ router.get('/margin-analysis/summary', authMiddleware, requirePermission('financ
     );
     const topProducts = await dbAll(
       `SELECT pr.name as product_name, pr.sku,
-              ROUND(SUM(pt.total_revenue), 2) as total_revenue,
+              ROUND(SUM(pt.revenue), 2) as total_revenue,
               ROUND(SUM(pt.gross_profit), 2) as gross_profit,
-              ROUND(AVG(pt.gross_margin_pct), 1) as avg_margin_pct
+              ROUND(AVG(pt.margin_percentage), 1) as avg_margin_pct
        FROM profitability_tracking pt
        LEFT JOIN products pr ON pt.product_id = pr.id
        GROUP BY pt.product_id, pr.name, pr.sku
@@ -1620,16 +1604,23 @@ router.post('/fund-requests/:id/documents', authMiddleware, requirePermission('f
   try {
     const file = req.file;
     if (!file) return res.status(400).json({ error: 'No file uploaded' });
+
+    // Isi berkas yang menentukan, bukan ekstensinya: `.pdf` yang isinya HTML
+    // tetap HTML. Ditolak SEBELUM apa pun ditulis ke disk.
+    const verdict = validateUpload(file.originalname, file.mimetype, file.buffer);
+    if (!verdict.ok) return res.status(400).json({ error: `${file.originalname}: ${verdict.error}` });
+
     const userId = (req as any).userId || null;
-    const filePath = '/uploads/fund-requests/' + file.filename;
+    const namaTersimpan = storeValidatedFile(frDocDir, verdict.ext!, file.buffer);
+    const filePath = '/uploads/fund-requests/' + namaTersimpan;
     const result = await dbRun(
       `INSERT INTO fund_request_documents (fund_request_id, file_name, original_name, file_path, file_size, file_type, uploaded_by)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [req.params.id, file.filename, file.originalname, filePath, file.size, file.mimetype, userId]
+      [req.params.id, namaTersimpan, file.originalname, filePath, file.size, file.mimetype, userId]
     );
     res.status(201).json({
       message: 'Document uploaded',
-      data: { id: result.insertId, file_name: file.filename, original_name: file.originalname, file_path: filePath, file_size: file.size, file_type: file.mimetype }
+      data: { id: result.insertId, file_name: namaTersimpan, original_name: file.originalname, file_path: filePath, file_size: file.size, file_type: file.mimetype }
     });
   } catch (error) {
     console.error('Error uploading fund request document:', error);
@@ -1905,18 +1896,22 @@ router.post('/payment-schedule/:id/proof', authMiddleware, requirePermission('fi
   try {
     const file = req.file;
     if (!file) return res.status(400).json({ error: 'No file uploaded' });
+    const verdict = validateUpload(file.originalname, file.mimetype, file.buffer);
+    if (!verdict.ok) return res.status(400).json({ error: `${file.originalname}: ${verdict.error}` });
+
     const { source = 'po', notes } = req.body;
     const userId = (req as any).userId || (req as any).user?.userId || null;
-    const filePath = '/uploads/payment-proofs/' + file.filename;
+    const namaTersimpan = storeValidatedFile(proofDir, verdict.ext!, file.buffer);
+    const filePath = '/uploads/payment-proofs/' + namaTersimpan;
 
     const result = await dbRun(
       `INSERT INTO payment_proofs (schedule_id, source, file_name, original_name, file_path, file_size, file_type, notes, uploaded_by)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [req.params.id, source, file.filename, file.originalname, filePath, file.size, file.mimetype, notes || null, userId]
+      [req.params.id, source, namaTersimpan, file.originalname, filePath, file.size, file.mimetype, notes || null, userId]
     );
     res.status(201).json({
       message: 'Bukti bayar berhasil diupload',
-      data: { id: result.insertId, file_name: file.filename, original_name: file.originalname, file_path: filePath, file_size: file.size, file_type: file.mimetype }
+      data: { id: result.insertId, file_name: namaTersimpan, original_name: file.originalname, file_path: filePath, file_size: file.size, file_type: file.mimetype }
     });
   } catch (error: any) {
     console.error('Error uploading payment proof:', error);

@@ -341,7 +341,12 @@ async function openDetail(ar: any) {
   try {
     const res = await api.get(`/finance/accounts-receivable/${ar.id}`);
     detailModal.value = { show:true, data: res.data.data };
-  } catch { detailModal.value = { show:true, data: ar }; }
+  } catch (e: any) {
+    // FIN-04: sama dengan FinanceAP.vue — kegagalan detail tidak boleh
+    // disembunyikan. Endpoint ini pun selalu 500 sejak lama tanpa ada yang tahu.
+    showToast('error', e?.response?.data?.error || 'Detail AR gagal dimuat — menampilkan data ringkas dari daftar');
+    detailModal.value = { show:true, data: ar };
+  }
 }
 
 const showToast = (type: string, message: string) => {

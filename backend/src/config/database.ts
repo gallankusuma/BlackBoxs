@@ -1807,6 +1807,32 @@ const ensureAssetCapitalizationSchema = async (connection: any) => {
 
 const ensureRouteModuleSchema = async (connection: any) => {
   const statements = [
+    // FIN-02: dipindahkan dari `finance.routes.ts`, yang membuatnya lewat IIFE
+    // saat modul di-import. Itu berjalan SEBELUM initializeDatabase(), persis
+    // yang dilarang di CLAUDE.md — empat kasus sejenis sudah dipindah ke sini
+    // sebelumnya, yang ini terlewat.
+    //
+    // Definisinya sengaja SAMA PERSIS dengan `schema-baseline.sql` baris 1721,
+    // yang memang sudah membuat tabel ini lebih dulu. Jadi statement di bawah
+    // praktis selalu no-op, dan tempatnya di sini adalah jaring pengaman untuk
+    // instalasi yang baselinenya tidak lengkap — bukan sumber kebenarannya.
+    // Sempat saya tambahkan indeks (schedule_id, source) di sini: itu TIDAK
+    // pernah berlaku, karena CREATE TABLE IF NOT EXISTS tidak menyentuh tabel
+    // yang sudah ada. Dibuang lagi supaya kode ini tidak menjanjikan sesuatu
+    // yang tidak pernah terjadi.
+    `CREATE TABLE IF NOT EXISTS payment_proofs (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      schedule_id INT NOT NULL,
+      source VARCHAR(20) NOT NULL DEFAULT 'po',
+      file_name VARCHAR(255) NOT NULL,
+      original_name VARCHAR(255) NOT NULL,
+      file_path VARCHAR(500) NOT NULL,
+      file_size INT DEFAULT 0,
+      file_type VARCHAR(100),
+      notes TEXT,
+      uploaded_by INT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`,
     `CREATE TABLE IF NOT EXISTS inbox_notifications (
       id INT PRIMARY KEY AUTO_INCREMENT,
       user_id INT NOT NULL,
