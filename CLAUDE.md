@@ -321,6 +321,39 @@ dan angkanya tetap benar).
 ⚠️ Menaikkan batas rate limit **bukan** perbaikan untuk gejala ini. Itu hanya
 menunda, dan menipis lagi sendiri begitu jumlah PO bertambah.
 
+### Finance: nama tabel & kolom yang sering salah (FIN-01)
+
+Tabel proyek di basis data ini bernama **`client_projects`**, kolomnya
+**`project_name`** dan **`project_number`** — bukan `projects` dengan
+`name`/`code`. Tabel `projects` **tidak ada**. Empat query di
+`finance.routes.ts` memakai nama yang salah, sehingga **detail AP, aging AP,
+detail AR, dan aging AR selalu membalas 500** (produksi punya 148 baris AP).
+Endpoint Project P&L di berkas yang sama pernah kena persis cacat ini.
+
+`clients` juga **tidak punya kolom `email`** — alamatnya di `contacts`, lewat
+`clients.primary_contact_id`.
+
+⚠️ Kegagalan seperti ini **tidak terlihat**: `FinanceAP.vue` menangkap errornya
+lalu tetap membuka modal dengan data seadanya dari baris daftar, jadi penggunanya
+tidak pernah tahu detailnya gagal dimuat. Dan nama tabel yang salah tidak
+menghasilkan error apa pun saat `tsc` maupun `npm run build`.
+
+Karena itu `npm run test:finance-apar` memindai **setiap nama tabel yang disebut
+SQL di `finance.routes.ts` dan memastikan tabelnya benar-benar ada**. Itu penjaga
+kelasnya, bukan hanya empat yang kebetulan sudah ditemukan. Pemindaiannya hanya
+melihat isi template literal setelah komentar JS dibuang — tanpa itu, prosa
+seperti "update AP" dan `INSERT INTO ...` di dalam komentar ikut terbaca sebagai
+tabel.
+
+**Masih terbuka di modul ini** (sudah diukur, belum dikerjakan): 64 endpoint
+finance tanpa satu pun `requirePermission` — terbukti user level 1 tanpa role
+bisa mengajukan fund request lalu menyetujuinya sendiri dan mencatat pembayaran
+AP; lima endpoint lain masih 500 karena `cogs_tracking` tidak punya
+`total_cost`/`cost_per_unit`/`quantity_produced` dan `profitability_tracking`
+tidak punya `gross_margin_pct`/`period`/`total_revenue`; unggahan finance tidak
+memakai `validateUpload`; dan `payment_proofs` dibuat lewat `CREATE TABLE` saat
+modul di-import, yang dilarang di atas.
+
 ### Approval Inbox: angka yang dilihat penyetuju (PROC-INBOX-01)
 
 `GET /approval/inbox` memperkaya tiap baris dengan detail dokumennya. Tiga cacat

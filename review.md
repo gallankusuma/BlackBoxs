@@ -12636,3 +12636,82 @@ Health 200, `/api/approval/inbox` 401 tanpa token.
 jenis, termasuk `fund_request` yang jelas sudah ada sebelum perubahan ini** —
 itu pola grep saya yang salah terhadap keluaran terminifikasi, bukan berkas yang
 tidak naik. Diperiksa ulang dengan pola yang benar sebelum menyimpulkan apa pun.
+
+---
+
+## [DEV] Audit modul finance, dan perbaikan pertama (FIN-01) — 2 September 2026
+
+Pemilik meminta modul finance diperiksa. Hasil audit lengkap di bawah; yang
+dikerjakan baru butir pertama, atas instruksi pemilik.
+
+### Hasil audit
+
+**1. Otorisasi finance tidak ada sama sekali.** 64 endpoint, **nol**
+`requirePermission`; hanya satu tempat di seluruh modul yang membaca
+`user_level`, dan itu untuk mengedit. Diukur dengan user **level 1 tanpa role**:
+ia membaca AP, AR, fund request, kasbon, dan payroll request; membuat fund
+request; **menyetujui fund request-nya sendiri** (status → `approved`, dan jalur
+itu memanggil `autoPayApFromFundRequestItem`); serta mencatat pembayaran
+Rp 250.000 ke sebuah AP (`paid_amount` 0 → 250000, status → `partial`).
+CLAUDE.md sudah mencatat gap RBAC finance sebagai pekerjaan terbuka — yang belum
+pernah diukur adalah sejauh apa tembusnya.
+
+**2. Sembilan dari 26 endpoint GET membalas 500.** Dua akar:
+
+| Akar | Endpoint | Data produksi |
+|---|---|---|
+| `JOIN projects` — tabelnya `client_projects` | detail AP, aging AP, detail AR, aging AR | **148 baris AP — hidup** |
+| kolom `cogs_tracking` (`total_cost`, `cost_per_unit`, `quantity_produced` tidak ada) | financial-summary, cost-analysis, cost-analysis/trends | tabel kosong |
+| kolom `profitability_tracking` (`gross_margin_pct`, `period`, `total_revenue` tidak ada) | margin-analysis, margin-analysis/summary | tabel kosong |
+
+**3. Kegagalannya disembunyikan.** `FinanceAP.vue` `openDetail()` menangkap
+error lalu tetap membuka modal dengan data baris daftar — pengguna tidak pernah
+tahu detailnya gagal.
+
+**4. Dua hal kecil.** Unggahan finance (`frDocUpload`, `proofUpload`) tidak
+memakai `validateUpload`; berkas `.txt` diterima 201. Paparannya terbatas karena
+`/uploads/payment-proofs/` dan `/uploads/fund-requests/` sudah 403 di produksi
+(diperiksa). Dan `payment_proofs` dibuat lewat `CREATE TABLE` saat modul
+di-import — dilarang eksplisit di CLAUDE.md; empat kasus sejenis sudah dipindah
+ke `ensureRouteModuleSchema`, yang ini terlewat.
+
+**Yang diperiksa dan ternyata bersih:** tidak ada N+1 (dugaan awal saya keliru —
+semuanya fetch saat diklik); path traversal pada nama berkas unggahan **tidak
+bisa** (dicoba `../../../PROBE.txt`, multer memotongnya); seluruh 64 endpoint
+punya `authMiddleware`; kedua folder unggahan 403.
+
+### Yang dikerjakan: butir 1 (FIN-01)
+
+`projects` → `client_projects` (4 JOIN), `proj.name` → `proj.project_name`
+(4 kolom), `proj.code` → `proj.project_number` (1). Alias keluarannya
+dipertahankan supaya bentuk respons tidak berubah.
+
+Detail AR punya **cacat kedua** yang baru ketahuan setelah yang pertama
+diperbaiki: `clients.email` tidak ada. Diambil dari `contacts` lewat
+`clients.primary_contact_id`, alias `customer_email` dipertahankan.
+
+Hasil: keempatnya **200**. `ap-aging` mengembalikan **9.722 baris** lengkap
+dengan `project_name`.
+
+### Verifikasi
+
+`tests/finance-ap-ar.ts` — **10 lulus, 0 gagal**. Penjaga terpentingnya bukan
+keempat asersi status, melainkan pemindaian **setiap nama tabel yang disebut SQL
+finance harus ada** — itu menangkap kelasnya, bukan hanya empat yang kebetulan
+ketemu.
+
+Empat mutasi, semuanya tertangkap: kembali ke `projects` (7 asersi), kembali ke
+`proj.name` (6), email AR kembali dari `clients` (2), dan join proyek dihapus
+supaya "tidak error" tapi kolomnya hilang (1). Penjaga tabel juga dikontrol:
+satu `projects` dipasang balik → langsung tertangkap.
+
+⚠️ Pemindai tabel itu sempat melaporkan **sepuluh "tabel hantu" palsu** —
+`ap`, `ar`, `child`, `draft`, `selected`, `status`, dan kawan-kawan. Semuanya
+prosa Inggris di komentar dan pesan error ("update AP", "from selected
+schedule"), termasuk `INSERT INTO estimator_proposals` di dalam sebuah komentar.
+Diperbaiki dengan membuang komentar JS lalu memindai isi template literal saja.
+Dicatat karena daftar temuan palsu yang tidak diperiksa akan jadi laporan yang
+menyesatkan.
+
+Regresi: `test:procurement` 184, `test:inbox-item` 20, `test:grn-lampiran` 31.
+`tsc --noEmit` bersih. Frontend tidak disentuh.

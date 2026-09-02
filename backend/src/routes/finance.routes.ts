@@ -1159,12 +1159,18 @@ router.get('/accounts-payable/:id', authMiddleware, async (req: Request, res: Re
     const ap = await dbGet(
       `SELECT ap.*, po.po_number, po.total_amount as po_total, v.name as vendor_name,
               ps.schedule_no, ps.label as schedule_label, ps.trigger_type,
-              proj.name as project_name
+              proj.project_name AS project_name
+       -- FIN-01: tabel proyek di basis data ini bernama client_projects, dan
+       -- kolomnya project_name / project_number -- bukan projects dengan
+       -- name / code. Empat query di berkas ini memakai nama yang salah,
+       -- sehingga detail AP, aging AP, detail AR, dan aging AR SELALU
+       -- membalas 500. Alias keluarannya dipertahankan supaya bentuk
+       -- responsnya tidak berubah bagi pembacanya.
        FROM accounts_payable ap
        LEFT JOIN purchase_orders po ON ap.po_id = po.id
        LEFT JOIN purchase_order_payment_schedules ps ON ap.po_schedule_id = ps.id
        LEFT JOIN vendors v ON ap.vendor_id = v.id
-       LEFT JOIN projects proj ON ap.project_id = proj.id
+       LEFT JOIN client_projects proj ON ap.project_id = proj.id
        WHERE ap.id = ?`, [req.params.id]
     ) as any;
     if (!ap) return res.status(404).json({ error: 'AP not found' });
@@ -1297,11 +1303,11 @@ router.get('/ap-aging', authMiddleware, async (req: Request, res: Response) => {
               ap.amount, ap.paid_amount, (ap.amount - ap.paid_amount) as outstanding,
               ap.due_date, ap.status,
               DATEDIFF(CURDATE(), ap.due_date) as days_overdue,
-              po.po_number, proj.name as project_name
+              po.po_number, proj.project_name AS project_name
        FROM accounts_payable ap
        LEFT JOIN vendors v ON ap.vendor_id = v.id
        LEFT JOIN purchase_orders po ON ap.po_id = po.id
-       LEFT JOIN projects proj ON ap.project_id = proj.id
+       LEFT JOIN client_projects proj ON ap.project_id = proj.id
        WHERE ap.status != 'paid'
        ORDER BY ap.due_date ASC`
     ) as any[];
@@ -1336,11 +1342,15 @@ router.post('/accounts-receivable/create', authMiddleware, async (req: Request, 
 router.get('/accounts-receivable/:id', authMiddleware, async (req: Request, res: Response) => {
   try {
     const ar = await dbGet(
-      `SELECT ar.*, c.name as customer_name, c.email as customer_email,
-              proj.name as project_name, proj.code as project_code
+      // FIN-01: tabel clients tidak punya kolom email; alamatnya ada di
+      // contacts, lewat clients.primary_contact_id. Alias customer_email
+      // dipertahankan supaya bentuk responsnya tidak berubah.
+      `SELECT ar.*, c.name as customer_name, ct.email as customer_email,
+              proj.project_name AS project_name, proj.project_number AS project_code
        FROM accounts_receivable ar
        LEFT JOIN clients c ON ar.customer_id = c.id
-       LEFT JOIN projects proj ON ar.project_id = proj.id
+       LEFT JOIN contacts ct ON c.primary_contact_id = ct.id
+       LEFT JOIN client_projects proj ON ar.project_id = proj.id
        WHERE ar.id=?`, [req.params.id]
     ) as any;
     if (!ar) return res.status(404).json({ error: 'AR not found' });
@@ -1419,10 +1429,10 @@ router.get('/ar-aging', authMiddleware, async (req: Request, res: Response) => {
               ar.amount, ar.paid_amount, (ar.amount - ar.paid_amount) as outstanding,
               ar.due_date, ar.status, ar.tax_percent, ar.tax_amount,
               DATEDIFF(CURDATE(), ar.due_date) as days_overdue,
-              proj.name as project_name
+              proj.project_name AS project_name
        FROM accounts_receivable ar
        LEFT JOIN clients c ON ar.customer_id = c.id
-       LEFT JOIN projects proj ON ar.project_id = proj.id
+       LEFT JOIN client_projects proj ON ar.project_id = proj.id
        WHERE ar.status != 'paid'
        ORDER BY ar.due_date ASC`
     ) as any[];
