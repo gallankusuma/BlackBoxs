@@ -161,7 +161,40 @@ async function main() {
   chk('TIDAK boleh mengubah tarif gaji',
     (await call('PATCH', `/hr/employees/${emp?.id || 999999}/rates`, { basic_rate: 1 }, polos)).status, 403);
 
-  console.log('\n7. Bersih-bersih fixture');
+  // ── 7. Fitur yang dicabut tidak boleh kembali diam-diam ─────────────────
+  //
+  // Stock Transfer dan Stock Adjustment dicabut (CABUT-STOCK-01) karena tabel
+  // yang mereka baca dan tulis tidak ada di mana pun. Kalau seseorang
+  // menghidupkannya lagi tanpa membuat tabelnya, endpointnya akan 500 dan
+  // `executeStockTransfer` akan menulis ke tabel `inventory` yang tidak ada —
+  // persis bentuk cacat yang dulu membuat stok bertambah sementara dokumennya
+  // lenyap.
+  console.log('\n7. Fitur yang dicabut tidak kembali membawa tabel hantu');
+  const hantu = ['stock_transfers', 'stock_adjustments'];
+  const adaTabel = new Set((await dbAll(
+    `SELECT TABLE_NAME AS t FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE()`
+  ) as any[]).map(r => String(r.t)));
+  const pelanggar: string[] = [];
+  for (const f of BERKAS) {
+    // `FOR UPDATE OF a` adalah klausa penguncian SQL, bukan tabel bernama
+    // "of" — dibuang lebih dulu supaya tidak terbaca sebagai tabel hantu.
+    const bersih = sumber[f].replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/^\s*\/\/[^\n]*$/gm, ' ')
+      .replace(/FOR\s+UPDATE(\s+OF\s+\w+)?/gi, ' ');
+    for (const lit of bersih.match(/`[^`]*`/g) || []) {
+      for (const m of lit.matchAll(/\b(?:FROM|JOIN|INTO|UPDATE)\s+([a-z_][a-z0-9_]*)/gi)) {
+        const t = m[1].toLowerCase();
+        if (['select', 'dual', 'set', 'values', 'json_table'].includes(t)) continue;
+        if (!adaTabel.has(t)) pelanggar.push(`${f}: ${t}`);
+      }
+    }
+  }
+  chk('tidak ada tabel yang disebut tapi tidak ada', [...new Set(pelanggar)].sort(), []);
+  chk('tabel stock_transfers/stock_adjustments memang tidak dibuat',
+    hantu.filter(t => adaTabel.has(t)), []);
+  chk('endpoint stock-transfer/adjustment sudah tidak terdaftar',
+    BERKAS.some(f => /router\.[a-z]+\('\/(stock-transfers|stock-adjustments)/.test(sumber[f])), false);
+
+  console.log('\n8. Bersih-bersih fixture');
   await dbRun('DELETE FROM users WHERE id = ?', [uid]);
   if (emp?.id) await dbRun('DELETE FROM employees WHERE id = ?', [emp.id]);
   await dbRun('DELETE FROM role_permissions WHERE role_id IN (?, ?)', [roleId, roleHR]);

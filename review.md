@@ -13064,3 +13064,58 @@ kelalaian saya.
 masih jalan — itu butuh token karyawan sungguhan. Kalau ada laporan karyawan
 tidak bisa absen, endpoint `/mobile/*` adalah tersangka pertamanya, meski
 sumbernya sudah diperiksa tidak bergerbang.
+
+---
+
+## [DEV] Stock Transfer & Stock Adjustment dicabut (CABUT-STOCK-01) — 2 September 2026
+
+Keputusan pemilik setelah audit: cabut, jangan diselesaikan.
+
+### Yang dicabut
+
+11 endpoint di `inventory.routes.ts` — **548 baris**, dari 714 menjadi 166 —
+termasuk `executeStockTransfer()` (yang membaca dan menulis tabel `inventory`
+yang tidak ada) dan `generateCode()` yang hanya dipakai kedua fitur itu. Plus
+`StockTransfer.vue`, `StockAdjustment.vue`, dan kedua entri routernya.
+
+Enam endpoint inventory yang tersisa memang bekerja dan membaca
+`inventory_stocks`. Diverifikasi setelah pencabutan: `GET /api/inventory` → 200,
+`/stock-transfers` dan `/stock-adjustments` → 404.
+
+### ⚠️ `StockCard.vue` sengaja dibiarkan — dan alasannya perlu diketahui
+
+Satu-satunya sumber data layar itu adalah kedua endpoint yang dicabut, jadi
+sekilas ia "menjadi rusak" karena pencabutan ini. **Tidak.** Ia sudah rusak
+sejak lama oleh sebab yang sama sekali lain: seluruh panggilannya memakai
+`api.get('/api/...')` sementara `baseURL` axios sudah berakhiran `/api`,
+sehingga URL-nya menjadi `/api/api/...` dan **selalu 404**. Cacat prefix ganda
+yang sama ada di `WarehouseLocations.vue` dan `Dashboard.vue`.
+
+Jadi mencabut kedua endpoint tidak mengubah apa pun bagi layar itu. Membangunnya
+kembali di atas `stock_movements` (tabel yang **ada**) adalah pekerjaan
+tersendiri, dan belum diputuskan — karena itu tidak saya kerjakan sepihak.
+
+### Verifikasi
+
+`tests/hr-inv-rbac.ts` — **25 lulus, 0 gagal**, dengan bagian baru yang menahan
+fitur ini kembali diam-diam: tidak ada endpoint `stock-transfers`/
+`stock-adjustments` terdaftar, dan tidak ada nama tabel yang disebut SQL tapi
+tidak ada di database.
+
+Penjaganya dikontrol: endpoint `stock-transfers` dipasang balik lengkap dengan
+`SELECT * FROM stock_transfers` → **3 asersi gagal** seketika.
+
+⚠️ Percobaan kontrol pertama melaporkan **0 asersi gagal**. Itu bukan penjaga
+yang lemah — tesnya **crash** dengan `ECONNRESET` karena backend sedang restart
+saat tes ditembakkan, jadi tidak satu pun asersinya sempat berjalan. Diulang
+dengan menunggu PID proses benar-benar berganti. Kesalahan yang sama pernah
+terjadi pada pengujian mutasi 1 September; "0" yang tidak diperiksa selalu layak
+dicurigai.
+
+Ikut diperbaiki: pemindai tabel di `hr-inv-rbac.ts` dan `finance-ap-ar.ts`
+melaporkan tabel hantu bernama **`of`** — itu klausa penguncian `FOR UPDATE OF a`
+di `hr.routes.ts`, bukan tabel. Klausanya dibuang lebih dulu sebelum pemindaian.
+
+Regresi: `finance-rbac` 22, `finance-apar` 19, `procurement` 184,
+`inbox-item` 20, `grn-lampiran` 31, `vendor-price` 53, `proc-agregat` 12.
+`tsc --noEmit` bersih, `npm run build` bersih.

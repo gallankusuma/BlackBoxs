@@ -345,6 +345,36 @@ melihat isi template literal setelah komentar JS dibuang — tanpa itu, prosa
 seperti "update AP" dan `INSERT INTO ...` di dalam komentar ikut terbaca sebagai
 tabel.
 
+### Stock Transfer & Stock Adjustment: dicabut (CABUT-STOCK-01)
+
+Kedua fitur dicabut 2 September 2026 atas keputusan pemilik. **Keduanya tidak
+pernah bisa bekerja**: tabel `stock_transfers`, `stock_adjustments`, dan
+`inventory` tidak ada di mana pun — bukan di `schema-baseline.sql`, bukan di
+`ensure*Schema`, bukan di database lokal maupun produksi. Diverifikasi sebelum
+dicabut: membuat transfer maupun adjustment membalas **500 bahkan untuk master**,
+dan menyetujuinya 404/500.
+
+Yang dicabut: 11 endpoint di `inventory.routes.ts` (548 baris, termasuk
+`executeStockTransfer` yang menulis ke tabel `inventory` yang tidak ada, dan
+`generateCode` yang hanya dipakai keduanya), plus layar `StockTransfer.vue` dan
+`StockAdjustment.vue` beserta entri routernya.
+
+Enam endpoint inventory yang **tersisa memang bekerja** dan membaca
+`inventory_stocks` — tabel yang ada.
+
+⚠️ **`StockCard.vue` sengaja DIBIARKAN** meski satu-satunya sumber datanya
+adalah kedua endpoint yang dicabut. Alasannya: layar itu **sudah rusak sejak
+lama** oleh sebab lain — seluruh panggilannya memakai `api.get('/api/...')`
+sementara `baseURL` axios sudah berakhiran `/api`, sehingga URL-nya menjadi
+`/api/api/...` dan selalu 404. Cacat prefix ganda yang sama ada di
+`WarehouseLocations.vue` dan `Dashboard.vue`. Membangunnya kembali di atas tabel
+`stock_movements` (yang **ada**) adalah pekerjaan tersendiri yang belum
+diputuskan.
+
+`npm run test:hr-inv-rbac` menahan fitur ini kembali diam-diam: ia memeriksa
+tidak ada endpoint `stock-transfers`/`stock-adjustments` yang terdaftar dan
+tidak ada nama tabel yang disebut SQL tapi tidak ada di database.
+
 ### RBAC HR, Inventory, Warehouse (HRINV-RBAC-01)
 
 49 endpoint digembok: 17 di `hr.routes.ts` (10 sudah bergerbang sebelumnya),
@@ -368,15 +398,8 @@ Karena itu endpoint inventory/warehouse digembok `master-data.warehouses.*` dan
 `master_data.warehouse-locations.*`, yang dipegang kedua role produksi, dengan
 `reports.inventory-reports.*` sebagai alternatif OR untuk Admin.
 
-**Satu-satunya pengurangan akses:** `Manager Finannce & Acc` kehilangan 4
-endpoint approve/reject stock transfer & adjustment. Itu disengaja dan tidak
-menghilangkan apa pun yang bekerja — **keempatnya, dan endpoint pembuatannya,
-sudah membalas 404/500 bahkan untuk master**, karena tabel `stock_transfers`,
-`stock_adjustments`, dan `inventory` **tidak ada di mana pun**: bukan di
-baseline, bukan di `ensure*Schema`, bukan di database lokal maupun produksi.
-Ketiga layarnya (`StockTransfer`, `StockAdjustment`, `StockCard`) terdaftar di
-router tapi tidak ada di menu sidebar. Fiturnya memang belum pernah selesai —
-menyelesaikan atau mencabutnya masih menunggu keputusan pemilik.
+**Stock Transfer & Stock Adjustment sudah DICABUT** (CABUT-STOCK-01,
+keputusan pemilik 2 September 2026) — lihat bagian di bawah.
 
 ### RBAC finance (FIN-RBAC-01)
 

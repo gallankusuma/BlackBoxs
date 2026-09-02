@@ -97,7 +97,8 @@ async function main() {
   // di dalam literal juga dibuang, karena isinya kalimat manusia juga.
   const disebut = new Set<string>();
   for (const lit of src.match(/`[^`]*`/g) || []) {
-    const sql = lit.replace(/--[^\n]*/g, ' ');
+    // `FOR UPDATE OF x` klausa penguncian, bukan tabel bernama "of".
+    const sql = lit.replace(/--[^\n]*/g, ' ').replace(/FOR\s+UPDATE(\s+OF\s+\w+)?/gi, ' ');
     if (!/\b(FROM|JOIN|INTO|UPDATE)\b/i.test(sql)) continue;
     for (const m of sql.matchAll(/\b(?:FROM|JOIN|INTO|UPDATE)\s+([a-z_][a-z0-9_]*)/gi)) {
       const t = m[1].toLowerCase();

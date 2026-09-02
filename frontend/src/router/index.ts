@@ -173,18 +173,6 @@ const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true, breadcrumb: [{ label: 'Inventory', route: '/inventory' }, { label: 'Stock Card' }] },
   },
   {
-    path: '/inventory/transfer',
-    name: 'InventoryTransferReal',
-    component: () => import('../views/StockTransfer.vue'),
-    meta: { requiresAuth: true, breadcrumb: [{ label: 'Inventory', route: '/inventory' }, { label: 'Stock Transfer' }] },
-  },
-  {
-    path: '/inventory/adjustment',
-    name: 'InventoryAdjustmentReal',
-    component: () => import('../views/StockAdjustment.vue'),
-    meta: { requiresAuth: true, breadcrumb: [{ label: 'Inventory', route: '/inventory' }, { label: 'Stock Adjustment' }] },
-  },
-  {
     path: '/inventory/opname',
     name: 'InventoryOpnameReal',
     component: () => import('../views/StockOpname.vue'),
