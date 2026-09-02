@@ -1606,11 +1606,21 @@ async function fetchData() {
   loading.value = true;
   error.value = '';
   try {
-    const [posRes, prsRes, vendorsRes, projRes] = await Promise.all([
+    // PROC-N1-01: enam permintaan, bukan seratus lima puluh lima.
+    //
+    // Dulu layar ini memanggil `/purchase-requests/:id/bid-progress` sekali per
+    // PR yang disetujui (54 di produksi) dan `/purchase-orders/:id` sekali per
+    // PO (97) — semuanya paralel, di atas 4 permintaan dasar. Batas rate limit
+    // 300 permintaan/menit habis hanya dengan membuka layar ini dua kali, dan
+    // yang terlihat pengguna adalah 429 pada tombol Approve, seolah approval-nya
+    // yang rusak. Angkanya sekarang dihitung di database.
+    const [posRes, prsRes, vendorsRes, projRes, progressRes, allocRes] = await Promise.all([
       api.get('/procurement/purchase-orders'),
       api.get('/procurement/purchase-requests'),
       api.get('/procurement/vendors'),
       api.get('/projects'),
+      api.get('/procurement/purchase-requests/bid-progress-summary', { params: { approval_status: 2 } }),
+      api.get('/procurement/purchase-orders/allocations'),
     ]);
     purchaseOrders.value = posRes.data.data || [];
     projects.value = (projRes.data || []).filter((p: any) => p.status !== 'completed' && p.status !== 'canceled');
@@ -1619,14 +1629,9 @@ async function fetchData() {
     const allPRs = prsRes.data.data || [];
     const allApproved = allPRs.filter((pr: any) => pr.approval_status === 2);
     
-    // Load bid progress for each approved PR, only show PRs with a selected winner
-    const prBidProgressMap = new Map<number, any>();
-    await Promise.all(allApproved.map(async (pr: any) => {
-      try {
-        const progressRes = await api.get(`/procurement/purchase-requests/${pr.id}/bid-progress`);
-        prBidProgressMap.set(pr.id, progressRes.data);
-      } catch { /* ignore */ }
-    }));
+    const prBidProgressMap = new Map<number, any>(
+      Object.entries(progressRes.data?.data || {}).map(([id, v]) => [Number(id), v])
+    );
     
     // Show PRs that have at least some bidding data (1+ items with price)
     approvedPRs.value = allApproved.filter((pr: any) => {
@@ -1634,32 +1639,17 @@ async function fetchData() {
       return progress && progress.percentage > 0;
     });
     
-    // Build PR allocation map from existing POs (sum quantity per product_id by pr_id)
-    prAllocationMap.value = new Map();
-    const poDetailPromises = (purchaseOrders.value || [])
-      .filter((po: any) => po && po.id)
-      .map(async (po: any) => {
-        try {
-          const detailRes = await api.get(`/procurement/purchase-orders/${po.id}`);
-          const poData = detailRes.data?.data || {};
-          const prId = Number(poData.pr_id);
-          const items = poData.items || [];
-          if (prId && items.length > 0) {
-            const map = prAllocationMap.value.get(prId) || new Map<number, number>();
-            for (const it of items) {
-              const pid = Number(it.product_id);
-              const qty = Number(it.quantity || 0);
-              if (Number.isFinite(pid)) {
-                map.set(pid, (map.get(pid) || 0) + qty);
-              }
-            }
-            prAllocationMap.value.set(prId, map);
-          }
-        } catch (e) {
-          console.warn('[PO Detail] failed to load', po?.id, e);
-        }
-      });
-    await Promise.all(poDetailPromises);
+    // Sisa alokasi per (PR, produk). Bentuk Map bersarangnya sengaja
+    // dipertahankan persis seperti dulu supaya seluruh pembacanya di berkas ini
+    // tidak perlu ikut diubah.
+    prAllocationMap.value = new Map(
+      Object.entries(allocRes.data?.data || {}).map(([prId, produk]) => [
+        Number(prId),
+        new Map<number, number>(
+          Object.entries(produk as Record<string, any>).map(([pid, qty]) => [Number(pid), Number(qty || 0)])
+        ),
+      ])
+    );
 
     vendors.value = vendorsRes.data.data || [];
     console.log('Vendors loaded:', vendors.value);
@@ -1695,23 +1685,19 @@ async function loadPRItems() {
     // Parse notes to get items (same format as PR)
     const notesData = JSON.parse(pr.notes || '{}');
     const items = notesData.items || [];
-    // Get all POs for this PR to check which items are already allocated
-    const poList = (await api.get('/procurement/purchase-orders')).data.data || [];
-    const thisPrPOs = poList.filter((po: any) => po.pr_id === form.value.pr_id);
+    // PROC-N1-01: sisa alokasi dihitung di database, bukan dengan mengambil
+    // daftar PO lengkap lalu detail satu per satu. Angkanya berasal dari query
+    // yang sama dengan yang dipakai daftar PO, jadi kedua layar tidak bisa
+    // berselisih soal "berapa yang sudah dipesan".
     const allocatedQtyMap = new Map<number, number>();
-    
-    for (const po of thisPrPOs) {
-      try {
-        const detail = await api.get(`/procurement/purchase-orders/${po.id}`);
-        const detailItems = detail.data.data?.items || [];
-        for (const di of detailItems) {
-          const pid = Number(di.product_id);
-          const qty = Number(di.quantity || 0);
-          allocatedQtyMap.set(pid, (allocatedQtyMap.get(pid) || 0) + qty);
-        }
-      } catch (e) {
-        console.warn('Failed to load PO detail for allocation calc', e);
+    try {
+      const allocRes = await api.get('/procurement/purchase-orders/allocations');
+      const perProduk = (allocRes.data?.data || {})[String(form.value.pr_id)] || {};
+      for (const [pid, qty] of Object.entries(perProduk as Record<string, any>)) {
+        allocatedQtyMap.set(Number(pid), Number(qty || 0));
       }
+    } catch (e) {
+      console.warn('Failed to load PO allocations', e);
     }
 
     // Prepare verification items for manual selection

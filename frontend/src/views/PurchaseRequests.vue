@@ -764,15 +764,20 @@ const getBidProgress = (prId: number) => {
   return bidProgressMap.value[prId] || { percentage: 0, has_winner: false, total_bids: 0, total_items: 0, items_with_bids: 0, items_with_winner: 0 };
 };
 
+// PROC-N1-01: satu permintaan, bukan satu per PR.
+//
+// Versi lama menembak `/purchase-requests/:id/bid-progress` berurutan untuk
+// setiap PR yang disetujui — 54 permintaan di produksi, dari jatah rate limit
+// yang sama dengan layar Purchase Orders. Dua layar procurement yang dibuka
+// berdekatan cukup untuk menghabiskannya, dan gejalanya muncul sebagai 429 di
+// tombol Approve.
 const loadBidProgress = async () => {
-  const prs = store.purchaseRequests || [];
-  const approvedPRs = prs.filter((pr: any) => (pr.approval_status || 0) === 2);
-  for (const pr of approvedPRs) {
-    try {
-      const res = await api.get(`/procurement/purchase-requests/${pr.id}/bid-progress`);
-      bidProgressMap.value[pr.id] = res.data;
-    } catch { /* ignore */ }
-  }
+  try {
+    const res = await api.get('/procurement/purchase-requests/bid-progress-summary', {
+      params: { approval_status: 2 },
+    });
+    bidProgressMap.value = (res.data?.data || {}) as any;
+  } catch { /* biarkan peta kosong — getBidProgress sudah punya nilai default */ }
 };
 
 

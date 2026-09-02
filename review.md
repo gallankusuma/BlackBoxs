@@ -12307,3 +12307,78 @@ berubah.
 `deploy-blackbox.sh` menjalankan `node "$LOCAL_ROOT/scripts/smoke-test.js"` dari
 mesin lokal, bukan dari server. Perubahan ini berlaku pada deploy berikutnya
 tanpa perlu diunggah.
+
+---
+
+## [DEV] Layar PO gagal karena 429, bukan karena approval — PROC-N1-01 — 2 September 2026
+
+Laporan pemilik: modul procurement, layar PO bermasalah. Konsol menunjukkan
+`POST /purchase-orders/244/approve` gagal, dan sekilas terbaca sebagai approval
+yang rusak.
+
+**Bukan approval-nya.** Lima endpoint kena `HTTP 429 Too Many Requests`
+sekaligus: `purchase-orders`, `purchase-requests`, `vendors`, `projects`, dan
+POST approve. Yang gagal adalah izin permintaannya, bukan logikanya.
+
+### Sebabnya: N+1 di layar itu sendiri
+
+`fetchData()` memanggil `/purchase-requests/:id/bid-progress` sekali per PR
+disetujui dan `/purchase-orders/:id` sekali per PO. Di produksi: **54 + 97 + 4 =
+155 permintaan paralel setiap layar dibuka**, sementara batasnya 300/menit.
+Membuka layar itu dua kali sudah cukup. Layar PR punya cacat yang sama
+(54 permintaan berurutan) dan `loadBidProgress()` dipanggil lagi setiap approve
+— tiga approval berturut-turut = 162 permintaan dari jatah yang sama.
+
+Konfigurasi rate limiter-nya sendiri **benar** dan tidak disentuh:
+`trust proxy: 'loopback'` sudah dipasang, jadi 300/menit memang dihitung per IP,
+bukan satu jatah untuk semua orang.
+
+⚠️ Menaikkan batasnya akan menyamarkan ini dan menipis lagi sendiri begitu PO
+bertambah. Yang diperbaiki penyebabnya.
+
+### Yang dibangun
+
+Dua endpoint agregat, keduanya didaftarkan **sebelum** route `/:id` yang
+seawalan:
+
+| Endpoint | Hasil |
+|---|---|
+| `GET /purchase-requests/bid-progress-summary` | progres bid seluruh PR dalam satu query |
+| `GET /purchase-orders/allocations` | qty terpesan per (PR, produk) dalam satu query |
+
+| Alur | Sebelum | Sesudah |
+|---|---|---|
+| Buka layar Purchase Orders | 155 | **6** |
+| Muat ulang layar Purchase Requests | 54 | **1** |
+| Pilih PR di form buat PO | 1 + N detail | **1** |
+
+### Verifikasi — yang diuji "angkanya identik", bukan "endpointnya 200"
+
+Dibandingkan langsung ke **data produksi** (read-only): alokasi agregat vs
+penjumlahan cara lama → **29 baris di kedua cara, 0 selisih qty, 0 baris yang
+hanya ada di salah satu**.
+
+`tests/procurement-agregat.ts` — **12 lulus, 0 gagal**: 25 PR dibandingkan
+agregat-vs-per-PR (0 beda), 6 PR dibandingkan alokasi-vs-detail (0 beda),
+urutan route diuji, otorisasi 401, dan pemindaian sumber untuk menahan loop
+per-baris kembali.
+
+**Catatan jujur soal pengujian mutasi.** Empat mutasi pertama saya semuanya
+menghasilkan **0 asersi gagal** — dan setelah diperiksa, keempatnya memang
+**setara secara semantik pada data yang ada**, bukan tesnya yang lemah:
+
+| Mutasi | Kenapa tidak bisa tertangkap |
+|---|---|
+| abaikan kolom warisan `po_id` | setiap baris `purchase_order_items` punya `purchase_order_id` DAN `po_id` bernilai sama — 0 baris hanya `po_id`, 0 yang berbeda, di lokal maupun produksi |
+| ikut menghitung PO terhapus | 0 PO terhapus yang punya `pr_id` + item |
+| pemenang dihitung per baris | 0 PR punya `item_index` pemenang ganda |
+| hapus jalan keluar "tidak ada bid" | cabangnya menghasilkan objek yang identik dengan jalur bawahnya |
+
+Karena "0" tidak bisa dibedakan dari harness yang rusak, saya jalankan **mutasi
+kontrol yang wajib tertangkap** — dan tertangkap semua: persentase lupa dikali
+100 (1 asersi), alokasi menghitung baris alih-alih menjumlahkan qty (1), dan
+`allocations` didaftarkan sesudah `/:id` (4). Penjaga anti-N+1 juga dikontrol:
+loop yang dipasang balik langsung tertangkap.
+
+Regresi: `test:procurement` 184 lulus, `test:vendor-price` 53 lulus,
+`tsc --noEmit` bersih, `npm run build` bersih.

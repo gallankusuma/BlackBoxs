@@ -716,6 +716,98 @@ router.get('/purchase-requests', authMiddleware, requirePermission('procurement.
   }
 });
 
+/**
+ * PROC-N1-01: bid progress untuk BANYAK PR sekaligus.
+ *
+ * Layar Purchase Orders sebelumnya memanggil `/purchase-requests/:id/bid-progress`
+ * satu kali per PR yang disetujui, dan `/purchase-orders/:id` satu kali per PO —
+ * di produksi itu 54 + 97 permintaan paralel setiap layar dibuka, di atas 4
+ * permintaan dasar. Batas rate limit 300/menit habis hanya dengan membuka layar
+ * itu dua kali, dan yang muncul di layar adalah 429 pada tombol Approve —
+ * seolah approval-nya yang rusak.
+ *
+ * ⚠️ HARUS didaftarkan SEBELUM `/purchase-requests/:id`, kalau tidak Express
+ * mencocokkannya sebagai id bernama "bid-progress-summary".
+ *
+ * Angkanya WAJIB identik dengan endpoint per-PR: perhitungan di bawah menyalin
+ * urutan dan pembulatannya persis, termasuk dua jalan keluar awalnya (tidak ada
+ * item, dan tidak ada bid). Dua jalur yang menjawab beda untuk pertanyaan yang
+ * sama lebih buruk daripada satu jalur yang lambat.
+ */
+router.get('/purchase-requests/bid-progress-summary', authMiddleware, requirePermission('procurement.purchase-requests.view'), async (req: Request, res: Response) => {
+  try {
+    const { approval_status } = req.query;
+    const params: any[] = [];
+    let filter = '';
+    if (approval_status !== undefined && approval_status !== '') {
+      filter = ' AND approval_status = ?';
+      params.push(Number(approval_status));
+    }
+
+    const prs = await dbAll(
+      `SELECT id, notes FROM purchase_requests WHERE is_deleted = 0${filter}`,
+      params
+    ) as any[];
+
+    if (prs.length === 0) return res.json({ data: {} });
+
+    const ids = prs.map((r: any) => r.id);
+    const tanda = ids.map(() => '?').join(',');
+
+    const jumlahBid = await dbAll(
+      `SELECT pr_id, COUNT(*) AS total_bids FROM pr_bids WHERE pr_id IN (${tanda}) GROUP BY pr_id`,
+      ids
+    ) as any[];
+    const bidPerPr = new Map<number, number>(jumlahBid.map((r: any) => [Number(r.pr_id), Number(r.total_bids)]));
+
+    // DISTINCT item_index — sama seperti endpoint per-PR. Satu item bisa punya
+    // pemenang dari beberapa bid; yang dihitung itemnya, bukan barisnya.
+    const pemenang = await dbAll(
+      `SELECT b.pr_id, COUNT(DISTINCT i.item_index) AS items_with_winner
+       FROM pr_bids b
+       JOIN pr_bid_items i ON i.bid_id = b.id
+       WHERE b.pr_id IN (${tanda}) AND i.is_winner = 1
+       GROUP BY b.pr_id`,
+      ids
+    ) as any[];
+    const menangPerPr = new Map<number, number>(pemenang.map((r: any) => [Number(r.pr_id), Number(r.items_with_winner)]));
+
+    const data: Record<string, any> = {};
+    for (const pr of prs) {
+      let totalItems = 0;
+      try {
+        const notesData = JSON.parse(pr.notes || '{}');
+        totalItems = (notesData.items || []).length;
+      } catch { totalItems = 0; }
+
+      if (totalItems === 0) {
+        data[pr.id] = { total_items: 0, items_with_winner: 0, percentage: 0, has_winner: false };
+        continue;
+      }
+
+      const totalBids = bidPerPr.get(Number(pr.id)) || 0;
+      if (totalBids === 0) {
+        data[pr.id] = { total_items: totalItems, items_with_winner: 0, percentage: 0, has_winner: false, total_bids: 0 };
+        continue;
+      }
+
+      const itemsWithWinner = menangPerPr.get(Number(pr.id)) || 0;
+      data[pr.id] = {
+        total_items: totalItems,
+        items_with_winner: itemsWithWinner,
+        percentage: Math.round((itemsWithWinner / totalItems) * 100),
+        has_winner: itemsWithWinner > 0,
+        total_bids: totalBids,
+      };
+    }
+
+    res.json({ data });
+  } catch (error) {
+    console.error('Error building bid progress summary:', error);
+    res.status(500).json({ error: 'Failed to build bid progress summary' });
+  }
+});
+
 router.get('/purchase-requests/:id', authMiddleware, requirePermission('procurement.purchase-requests.view'), async (req: Request, res: Response) => {
   try {
     const pr = await dbGet(
@@ -1874,6 +1966,50 @@ router.get('/purchase-orders', authMiddleware, requirePermission('procurement.pu
   } catch (error) {
     console.error('Error fetching purchase orders:', error);
     res.status(500).json({ error: 'Failed to fetch purchase orders' });
+  }
+});
+
+/**
+ * PROC-N1-01: berapa qty tiap produk yang SUDAH dipesan dari sebuah PR.
+ *
+ * Menggantikan pengambilan detail PO satu per satu di layar Purchase Orders
+ * (97 permintaan di produksi) dengan satu query agregat.
+ *
+ * ⚠️ HARUS didaftarkan SEBELUM `/purchase-orders/:id`.
+ *
+ * Himpunan yang dijumlahkan HARUS sama dengan yang dulu: PO `is_deleted = 0`
+ * (persis filter `GET /purchase-orders`), dan item dicocokkan lewat
+ * `purchase_order_id` ATAU `po_id` — dua kolom warisan yang keduanya masih
+ * dipakai, sama seperti di `GET /purchase-orders/:id`. Menjumlahkan himpunan
+ * yang berbeda berarti sisa alokasi bergeser tanpa ada yang mengubah data.
+ */
+router.get('/purchase-orders/allocations', authMiddleware, requirePermission('procurement.purchase-orders.view'), async (req: Request, res: Response) => {
+  try {
+    const baris = await dbAll(
+      `SELECT po.pr_id, poi.product_id, SUM(poi.quantity) AS qty
+       FROM purchase_orders po
+       JOIN purchase_order_items poi
+         ON (poi.purchase_order_id = po.id OR poi.po_id = po.id)
+       WHERE po.is_deleted = 0
+         AND po.pr_id IS NOT NULL
+         AND poi.product_id IS NOT NULL
+       GROUP BY po.pr_id, poi.product_id`
+    ) as any[];
+
+    // Bentuknya { [pr_id]: { [product_id]: qty } } — sama dengan Map bersarang
+    // yang dulu dibangun di browser, supaya sisi klien tidak perlu menafsirkan
+    // ulang apa pun.
+    const data: Record<string, Record<string, number>> = {};
+    for (const r of baris) {
+      const pr = String(r.pr_id);
+      if (!data[pr]) data[pr] = {};
+      data[pr][String(r.product_id)] = Number(r.qty || 0);
+    }
+
+    res.json({ data });
+  } catch (error) {
+    console.error('Error building PO allocations:', error);
+    res.status(500).json({ error: 'Failed to build PO allocations' });
   }
 });
 

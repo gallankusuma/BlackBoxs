@@ -293,6 +293,34 @@ Konsekuensi yang harus dijaga:
   semacam itu hanya masuk akal untuk model partial delivery, dan menambahkannya
   setengah jalan akan membuat dua sumber kebenaran untuk jumlah yang diterima.
 
+### Layar procurement: jangan menembak per baris (PROC-N1-01)
+
+Seluruh `/api` dibatasi **300 permintaan per menit per IP**. Layar Purchase
+Orders dulu memanggil `/purchase-requests/:id/bid-progress` sekali per PR
+disetujui (54 di produksi) dan `/purchase-orders/:id` sekali per PO (97) —
+**155 permintaan sekali buka**. Membuka layar itu dua kali sudah memicu 429, dan
+gejalanya muncul sebagai tombol Approve yang gagal, seolah approval-nya rusak.
+
+Sekarang ada dua endpoint agregat, dan **keduanya wajib didaftarkan SEBELUM
+route `/:id` yang seawalan** — kalau tidak, Express membacanya sebagai id dan
+menjawab 404 tanpa error apa pun saat build:
+
+| Endpoint | Menggantikan |
+|---|---|
+| `GET /procurement/purchase-requests/bid-progress-summary` | N panggilan `/purchase-requests/:id/bid-progress` |
+| `GET /procurement/purchase-orders/allocations` | N panggilan `/purchase-orders/:id` untuk menjumlahkan qty |
+
+Aturan yang harus dijaga: **angka agregat wajib identik dengan jalur per-item.**
+Endpoint cepat yang menjawab beda untuk pertanyaan yang sama lebih berbahaya
+daripada yang lambat — sisa alokasi bergeser tanpa ada yang mengubah data.
+`tests/procurement-agregat.ts` membandingkan keduanya baris per baris, dan
+memindai `PurchaseOrders.vue`/`PurchaseRequests.vue` untuk menahan loop per-baris
+kembali muncul (perbandingan angka tidak akan menangkap itu — loopnya bisa balik
+dan angkanya tetap benar).
+
+⚠️ Menaikkan batas rate limit **bukan** perbaikan untuk gejala ini. Itu hanya
+menunda, dan menipis lagi sendiri begitu jumlah PO bertambah.
+
 ### Approval harga vendor (PROC-VPL-01)
 
 `vendor_prices` dulu ditulis tanpa gerbang apa pun, dan angkanya **saat itu juga**
