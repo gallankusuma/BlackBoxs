@@ -13024,3 +13024,43 @@ fixture tersisa.
 
 Regresi: `finance-rbac` 22, `finance-apar` 19, `procurement` 184,
 `inbox-item` 20, `grn-lampiran` 31, `vendor-price` 53. `tsc --noEmit` bersih.
+
+### Deploy HRINV-RBAC-01 — 2 September 2026
+
+⚠️ **Percobaan pertama tidak pernah berjalan.** Keluar dengan kode 127 —
+`./deploy-blackbox.sh: no such file or directory` — karena direktori kerja sesi
+masih di `backend/src/routes` dari perintah sebelumnya. Diperiksa lebih dulu
+sebelum mengulang: produksi **tidak tersentuh sama sekali** (`inventory.routes.js`
+di sana masih nol `requirePermission`), jadi tidak ada rilis setengah jalan.
+Diulang dengan path absolut.
+
+Percobaan kedua tuntas: health 200 (siap 7 detik), smoke **30 lulus, 1 gagal**
+(temuan lama), rilis tidak dikembalikan.
+
+**Terverifikasi pada berkas yang benar-benar dilayani:**
+
+| Yang diperiksa | Hasil |
+|---|---|
+| Keempat endpoint `/mobile/*` | `mobileAuthMiddleware`, **tanpa** `requirePermission` |
+| Gerbang di dist | hr **27**, inventory **17**, warehouse **15** = **59** |
+| `PATCH /employees/:id/rates` | `requirePermission('hr.payroll.edit')` |
+| Permission yang tidak ada di katalog | **nol** |
+| `Admin` | **lolos seluruh 59** |
+| `Manager Finannce & Acc` | terkunci di 4 (approve/reject stock transfer & adjustment — disengaja) |
+
+⚠️ `/api/inventory` sempat menjawab `000` pada pemeriksaan pertama. Diulang lima
+kali: **401 semua**. Gangguan sambungan sesaat, kelas yang sama dengan yang
+ditangani retry smoke test — bukan endpoint yang mati.
+
+**Catatan diff:** `inventory.routes.ts` tampil berubah 1427 baris untuk 17
+gerbang. Berkas itu aslinya CRLF dan skrip saya menulisnya balik sebagai LF,
+sehingga seluruh berkas ikut terkonversi. Perubahan nyatanya, dengan
+`git diff -w`: **18 tambah / 17 hapus** — persis 17 gerbang + 1 impor. Repo ini
+memang campur (17 berkas CRLF, 28 LF, tanpa `.gitattributes`), jadi ini tidak
+melanggar konvensi apa pun — tapi diffnya jadi berisik untuk direview, dan itu
+kelalaian saya.
+
+**Yang tidak bisa diverifikasi dari luar:** bahwa PWA absensi karyawan benar-benar
+masih jalan — itu butuh token karyawan sungguhan. Kalau ada laporan karyawan
+tidak bisa absen, endpoint `/mobile/*` adalah tersangka pertamanya, meski
+sumbernya sudah diperiksa tidak bergerbang.
