@@ -2,6 +2,7 @@ import express, { Request, Response } from 'express';
 import { dbAll, dbGet, dbRun, withTransaction } from '../config/database';
 import { businessDate } from '../utils/date.utils';
 import { authMiddleware } from '../middleware/auth';
+import { requirePermission } from '../middleware/permission';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
@@ -154,7 +155,7 @@ const autoPayApFromFundRequestItem = async (itemId: number) => {
 
 // ===== COGS TRACKING =====
 
-router.get('/cogs', authMiddleware, async (req: Request, res: Response) => {
+router.get('/cogs', authMiddleware, requirePermission('finance.cost-analysis.view'), async (req: Request, res: Response) => {
   try {
     const cogs = await dbAll(
       `SELECT c.*, b.batch_number, p.sku, p.name as product_name
@@ -170,7 +171,7 @@ router.get('/cogs', authMiddleware, async (req: Request, res: Response) => {
   }
 });
 
-router.get('/cogs/:id', authMiddleware, async (req: Request, res: Response) => {
+router.get('/cogs/:id', authMiddleware, requirePermission('finance.cost-analysis.view'), async (req: Request, res: Response) => {
   try {
     const cogs = await dbGet(
       `SELECT c.*, b.batch_number, p.sku, p.name as product_name
@@ -188,7 +189,7 @@ router.get('/cogs/:id', authMiddleware, async (req: Request, res: Response) => {
   }
 });
 
-router.post('/cogs', authMiddleware, async (req: Request, res: Response) => {
+router.post('/cogs', authMiddleware, requirePermission('finance.cost-analysis.create'), async (req: Request, res: Response) => {
   try {
     const {
       batch_id,
@@ -239,7 +240,7 @@ router.post('/cogs', authMiddleware, async (req: Request, res: Response) => {
 
 // ===== PROFITABILITY =====
 
-router.get('/profitability', authMiddleware, async (req: Request, res: Response) => {
+router.get('/profitability', authMiddleware, requirePermission('finance.financial-summary.view'), async (req: Request, res: Response) => {
   try {
     const profitability = await dbAll(
       `SELECT p.*, pr.sku, pr.name as product_name
@@ -254,7 +255,7 @@ router.get('/profitability', authMiddleware, async (req: Request, res: Response)
   }
 });
 
-router.post('/profitability', authMiddleware, async (req: Request, res: Response) => {
+router.post('/profitability', authMiddleware, requirePermission('finance.financial-summary.create'), async (req: Request, res: Response) => {
   try {
     const {
       product_id,
@@ -305,7 +306,7 @@ router.post('/profitability', authMiddleware, async (req: Request, res: Response
 
 // ===== ACCOUNTS PAYABLE (AP) =====
 
-router.get('/accounts-payable', authMiddleware, async (req: Request, res: Response) => {
+router.get('/accounts-payable', authMiddleware, requirePermission('finance.accounts-payable.view', 'finance.ap.view'), async (req: Request, res: Response) => {
   try {
     const ap = await dbAll(
       `SELECT ap.*, po.po_number, v.name as vendor_name, po.total_amount,
@@ -323,7 +324,7 @@ router.get('/accounts-payable', authMiddleware, async (req: Request, res: Respon
   }
 });
 
-router.post('/accounts-payable', authMiddleware, async (req: Request, res: Response) => {
+router.post('/accounts-payable', authMiddleware, requirePermission('finance.accounts-payable.create', 'finance.ap.create'), async (req: Request, res: Response) => {
   try {
     const {
       po_id,
@@ -384,7 +385,7 @@ router.post('/accounts-payable', authMiddleware, async (req: Request, res: Respo
 
 // ===== ACCOUNTS RECEIVABLE (AR) =====
 
-router.get('/accounts-receivable', authMiddleware, async (req: Request, res: Response) => {
+router.get('/accounts-receivable', authMiddleware, requirePermission('finance.accounts-receivable.view', 'finance.ar.view'), async (req: Request, res: Response) => {
   try {
     const ar = await dbAll(
       `SELECT ar.*, inv.invoice_number, inv.total_amount as amount
@@ -399,7 +400,7 @@ router.get('/accounts-receivable', authMiddleware, async (req: Request, res: Res
   }
 });
 
-router.post('/accounts-receivable', authMiddleware, async (req: Request, res: Response) => {
+router.post('/accounts-receivable', authMiddleware, requirePermission('finance.accounts-receivable.create', 'finance.ar.create'), async (req: Request, res: Response) => {
   try {
     const {
       invoice_id,
@@ -443,7 +444,7 @@ router.post('/accounts-receivable', authMiddleware, async (req: Request, res: Re
 
 // ===== FINANCIAL SUMMARY =====
 
-router.get('/financial-summary', authMiddleware, async (req: Request, res: Response) => {
+router.get('/financial-summary', authMiddleware, requirePermission('finance.financial-summary.view'), async (req: Request, res: Response) => {
   try {
     const summary = await dbAll(
       `SELECT fs.*, 
@@ -463,7 +464,7 @@ router.get('/financial-summary', authMiddleware, async (req: Request, res: Respo
 
 // ===== COST ANALYSIS =====
 
-router.get('/cost-analysis', authMiddleware, async (req: Request, res: Response) => {
+router.get('/cost-analysis', authMiddleware, requirePermission('finance.cost-analysis.view'), async (req: Request, res: Response) => {
   try {
     // Per-product cost breakdown with standard vs actual comparison
     const analysis = await dbAll(
@@ -491,7 +492,7 @@ router.get('/cost-analysis', authMiddleware, async (req: Request, res: Response)
   }
 });
 
-router.get('/cost-analysis/trends', authMiddleware, async (req: Request, res: Response) => {
+router.get('/cost-analysis/trends', authMiddleware, requirePermission('finance.cost-analysis.view'), async (req: Request, res: Response) => {
   try {
     const trends = await dbAll(
       `SELECT DATE_FORMAT(c.created_at, '%Y-%m') as period,
@@ -512,7 +513,7 @@ router.get('/cost-analysis/trends', authMiddleware, async (req: Request, res: Re
 
 // ===== MARGIN ANALYSIS =====
 
-router.get('/margin-analysis', authMiddleware, async (req: Request, res: Response) => {
+router.get('/margin-analysis', authMiddleware, requirePermission('finance.financial-summary.view'), async (req: Request, res: Response) => {
   try {
     const margins = await dbAll(
       `SELECT pt.*, pr.name as product_name, pr.sku,
@@ -529,7 +530,7 @@ router.get('/margin-analysis', authMiddleware, async (req: Request, res: Respons
   }
 });
 
-router.get('/margin-analysis/summary', authMiddleware, async (req: Request, res: Response) => {
+router.get('/margin-analysis/summary', authMiddleware, requirePermission('finance.financial-summary.view'), async (req: Request, res: Response) => {
   try {
     const summary = await dbAll(
       `SELECT DATE_FORMAT(CONCAT(pt.period, '-01'), '%Y-%m') as period,
@@ -765,7 +766,7 @@ const balikkanPembayaran = async (opts: {
   });
 };
 
-router.post('/accounts-payable/:id/payments/:paymentId/reverse', authMiddleware,
+router.post('/accounts-payable/:id/payments/:paymentId/reverse', authMiddleware, requirePermission('finance.accounts-payable.approve', 'finance.ap.approve_2'),
   async (req: Request, res: Response) => {
     try {
       const hasil = await balikkanPembayaran({
@@ -780,7 +781,7 @@ router.post('/accounts-payable/:id/payments/:paymentId/reverse', authMiddleware,
     }
   });
 
-router.post('/accounts-receivable/:id/payments/:paymentId/reverse', authMiddleware,
+router.post('/accounts-receivable/:id/payments/:paymentId/reverse', authMiddleware, requirePermission('finance.accounts-receivable.approve', 'finance.ar.approve'),
   async (req: Request, res: Response) => {
     try {
       const hasil = await balikkanPembayaran({
@@ -795,7 +796,7 @@ router.post('/accounts-receivable/:id/payments/:paymentId/reverse', authMiddlewa
     }
   });
 
-router.put('/accounts-payable/:id/pay', authMiddleware, async (req: Request, res: Response) => {
+router.put('/accounts-payable/:id/pay', authMiddleware, requirePermission('finance.accounts-payable.approve', 'finance.ap.approve_2'), async (req: Request, res: Response) => {
   try {
     const { amount } = req.body;
     const payload = { payment_method: undefined, reference_number: undefined, notes: undefined, payment_date: undefined } as any;
@@ -819,7 +820,7 @@ router.put('/accounts-payable/:id/pay', authMiddleware, async (req: Request, res
 
 // ===== AR PAYMENT =====
 
-router.put('/accounts-receivable/:id/pay', authMiddleware, async (req: Request, res: Response) => {
+router.put('/accounts-receivable/:id/pay', authMiddleware, requirePermission('finance.accounts-receivable.approve', 'finance.ar.approve'), async (req: Request, res: Response) => {
   try {
     const { amount } = req.body;
     const payload = { payment_method: undefined, reference_number: undefined, notes: undefined, payment_date: undefined } as any;
@@ -844,7 +845,7 @@ router.put('/accounts-receivable/:id/pay', authMiddleware, async (req: Request, 
 // ===== FUND REQUESTS =====
 
 // GET /fund-requests â€” list all fund requests with item counts
-router.get('/fund-requests', authMiddleware, async (req: Request, res: Response) => {
+router.get('/fund-requests', authMiddleware, requirePermission('finance.fund-requests.view'), async (req: Request, res: Response) => {
   try {
     const { status } = req.query;
     let sql = `
@@ -874,7 +875,7 @@ router.get('/fund-requests', authMiddleware, async (req: Request, res: Response)
 });
 
 // GET /fund-requests/:id â€” detail with items
-router.get('/fund-requests/:id', authMiddleware, async (req: Request, res: Response) => {
+router.get('/fund-requests/:id', authMiddleware, requirePermission('finance.fund-requests.view'), async (req: Request, res: Response) => {
   try {
     const fr = await dbGet(
       `SELECT fr.*, u.full_name as submitter_name,
@@ -910,7 +911,7 @@ router.get('/fund-requests/:id', authMiddleware, async (req: Request, res: Respo
 });
 
 // POST /fund-requests â€” create new fund request with items
-router.post('/fund-requests', authMiddleware, async (req: Request, res: Response) => {
+router.post('/fund-requests', authMiddleware, requirePermission('finance.fund-requests.create'), async (req: Request, res: Response) => {
   try {
     const { purpose, needed_date, notes, cash_account, cash_account_note, items } = req.body;
     if (!purpose || !needed_date) {
@@ -954,7 +955,7 @@ router.post('/fund-requests', authMiddleware, async (req: Request, res: Response
 });
 
 // PUT /fund-requests/:id â€” update draft fund request
-router.put('/fund-requests/:id', authMiddleware, async (req: Request, res: Response) => {
+router.put('/fund-requests/:id', authMiddleware, requirePermission('finance.fund-requests.edit'), async (req: Request, res: Response) => {
   try {
     const fr = await dbGet('SELECT * FROM fund_requests WHERE id = ?', [req.params.id]) as any;
     if (!fr) return res.status(404).json({ error: 'Fund request not found' });
@@ -992,7 +993,7 @@ router.put('/fund-requests/:id', authMiddleware, async (req: Request, res: Respo
 });
 
 // PUT /fund-requests/:id/submit â€” submit for approval
-router.put('/fund-requests/:id/submit', authMiddleware, async (req: Request, res: Response) => {
+router.put('/fund-requests/:id/submit', authMiddleware, requirePermission('finance.fund-requests.edit'), async (req: Request, res: Response) => {
   try {
     const fr = await dbGet('SELECT * FROM fund_requests WHERE id = ?', [req.params.id]) as any;
     if (!fr) return res.status(404).json({ error: 'Fund request not found' });
@@ -1022,7 +1023,7 @@ router.put('/fund-requests/:id/submit', authMiddleware, async (req: Request, res
 });
 
 // PUT /fund-requests/:id/approve â€” approve all pending items
-router.put('/fund-requests/:id/approve', authMiddleware, async (req: Request, res: Response) => {
+router.put('/fund-requests/:id/approve', authMiddleware, requirePermission('finance.fund-requests.approve', 'finance.fund-requests.approve_1', 'finance.fund-requests.approve_2'), async (req: Request, res: Response) => {
   try {
     const fr = await dbGet('SELECT * FROM fund_requests WHERE id = ?', [req.params.id]) as any;
     if (!fr) return res.status(404).json({ error: 'Fund request not found' });
@@ -1055,7 +1056,7 @@ router.put('/fund-requests/:id/approve', authMiddleware, async (req: Request, re
 });
 
 // PUT /fund-requests/:id/reject â€” reject all pending items
-router.put('/fund-requests/:id/reject', authMiddleware, async (req: Request, res: Response) => {
+router.put('/fund-requests/:id/reject', authMiddleware, requirePermission('finance.fund-requests.approve', 'finance.fund-requests.approve_1', 'finance.fund-requests.approve_2'), async (req: Request, res: Response) => {
   try {
     const fr = await dbGet('SELECT * FROM fund_requests WHERE id = ?', [req.params.id]) as any;
     if (!fr) return res.status(404).json({ error: 'Fund request not found' });
@@ -1081,7 +1082,7 @@ router.put('/fund-requests/:id/reject', authMiddleware, async (req: Request, res
 });
 
 // PUT /fund-requests/:id/items/:itemId/approve â€” approve single item
-router.put('/fund-requests/:id/items/:itemId/approve', authMiddleware, async (req: Request, res: Response) => {
+router.put('/fund-requests/:id/items/:itemId/approve', authMiddleware, requirePermission('finance.fund-requests.approve', 'finance.fund-requests.approve_1', 'finance.fund-requests.approve_2'), async (req: Request, res: Response) => {
   try {
     const item = await dbGet(
       'SELECT * FROM fund_request_items WHERE id = ? AND fund_request_id = ?',
@@ -1106,7 +1107,7 @@ router.put('/fund-requests/:id/items/:itemId/approve', authMiddleware, async (re
 });
 
 // PUT /fund-requests/:id/items/:itemId/reject â€” reject single item
-router.put('/fund-requests/:id/items/:itemId/reject', authMiddleware, async (req: Request, res: Response) => {
+router.put('/fund-requests/:id/items/:itemId/reject', authMiddleware, requirePermission('finance.fund-requests.approve', 'finance.fund-requests.approve_1', 'finance.fund-requests.approve_2'), async (req: Request, res: Response) => {
   try {
     const item = await dbGet(
       'SELECT * FROM fund_request_items WHERE id = ? AND fund_request_id = ?',
@@ -1131,7 +1132,7 @@ router.put('/fund-requests/:id/items/:itemId/reject', authMiddleware, async (req
 });
 
 // DELETE /fund-requests/:id â€” delete fund request (admin: any status, user: draft/rejected only)
-router.delete('/fund-requests/:id', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/fund-requests/:id', authMiddleware, requirePermission('finance.fund-requests.delete'), async (req: Request, res: Response) => {
   try {
     const userLevel = (req as any).user?.userLevel || 1;
     const fr = await dbGet('SELECT * FROM fund_requests WHERE id = ?', [req.params.id]) as any;
@@ -1154,7 +1155,7 @@ router.delete('/fund-requests/:id', authMiddleware, async (req: Request, res: Re
 // ===== ENHANCED AP ENDPOINTS =====
 
 // GET /accounts-payable/:id — detail with payment history
-router.get('/accounts-payable/:id', authMiddleware, async (req: Request, res: Response) => {
+router.get('/accounts-payable/:id', authMiddleware, requirePermission('finance.accounts-payable.view', 'finance.ap.view'), async (req: Request, res: Response) => {
   try {
     const ap = await dbGet(
       `SELECT ap.*, po.po_number, po.total_amount as po_total, v.name as vendor_name,
@@ -1249,7 +1250,7 @@ const periksaKunciPosting = async (
   return null;
 };
 
-router.put('/accounts-payable/:id', authMiddleware, async (req: Request, res: Response) => {
+router.put('/accounts-payable/:id', authMiddleware, requirePermission('finance.accounts-payable.edit', 'finance.ap.edit'), async (req: Request, res: Response) => {
   try {
     const { vendor_invoice_number, invoice_date, due_date, amount, description, project_id, notes } = req.body;
     const hasil = await withTransaction(async tx => {
@@ -1273,7 +1274,7 @@ router.put('/accounts-payable/:id', authMiddleware, async (req: Request, res: Re
 });
 
 // POST /accounts-payable/:id/payments — record payment
-router.post('/accounts-payable/:id/payments', authMiddleware, async (req: Request, res: Response) => {
+router.post('/accounts-payable/:id/payments', authMiddleware, requirePermission('finance.accounts-payable.approve', 'finance.ap.approve_2'), async (req: Request, res: Response) => {
   try {
     const { amount, payment_date, payment_method, reference_number, notes } = req.body;
     const payload = { payment_date, payment_method, reference_number, notes } as any;
@@ -1296,7 +1297,7 @@ router.post('/accounts-payable/:id/payments', authMiddleware, async (req: Reques
 });
 
 // GET /accounts-payable/aging — AP aging buckets
-router.get('/ap-aging', authMiddleware, async (req: Request, res: Response) => {
+router.get('/ap-aging', authMiddleware, requirePermission('finance.accounts-payable.view', 'finance.ap.view'), async (req: Request, res: Response) => {
   try {
     const rows = await dbAll(
       `SELECT ap.id, v.name as vendor_name, ap.invoice_number, ap.vendor_invoice_number,
@@ -1320,7 +1321,7 @@ router.get('/ap-aging', authMiddleware, async (req: Request, res: Response) => {
 // ===== ENHANCED AR ENDPOINTS =====
 
 // POST /accounts-receivable — create AR manually
-router.post('/accounts-receivable/create', authMiddleware, async (req: Request, res: Response) => {
+router.post('/accounts-receivable/create', authMiddleware, requirePermission('finance.accounts-receivable.create', 'finance.ar.create'), async (req: Request, res: Response) => {
   try {
     const { customer_id, project_id, invoice_number, invoice_date, due_date, amount, tax_percent, description, notes } = req.body;
     if (!customer_id || !amount) return res.status(400).json({ error: 'customer_id and amount required' });
@@ -1339,7 +1340,7 @@ router.post('/accounts-receivable/create', authMiddleware, async (req: Request, 
 });
 
 // GET /accounts-receivable/:id — AR detail with payment history
-router.get('/accounts-receivable/:id', authMiddleware, async (req: Request, res: Response) => {
+router.get('/accounts-receivable/:id', authMiddleware, requirePermission('finance.accounts-receivable.view', 'finance.ar.view'), async (req: Request, res: Response) => {
   try {
     const ar = await dbGet(
       // FIN-01: tabel clients tidak punya kolom email; alamatnya ada di
@@ -1360,7 +1361,7 @@ router.get('/accounts-receivable/:id', authMiddleware, async (req: Request, res:
 });
 
 // PUT /accounts-receivable/:id — update AR record
-router.put('/accounts-receivable/:id', authMiddleware, async (req: Request, res: Response) => {
+router.put('/accounts-receivable/:id', authMiddleware, requirePermission('finance.accounts-receivable.edit', 'finance.ar.edit'), async (req: Request, res: Response) => {
   try {
     const { invoice_number, invoice_date, due_date, amount, tax_percent, description, notes, status } = req.body;
     const taxPct = Number(tax_percent||11);
@@ -1399,7 +1400,7 @@ router.put('/accounts-receivable/:id', authMiddleware, async (req: Request, res:
 });
 
 // POST /accounts-receivable/:id/payments — record collection
-router.post('/accounts-receivable/:id/payments', authMiddleware, async (req: Request, res: Response) => {
+router.post('/accounts-receivable/:id/payments', authMiddleware, requirePermission('finance.accounts-receivable.approve', 'finance.ar.approve'), async (req: Request, res: Response) => {
   try {
     const { amount, payment_date, payment_method, reference_number, notes } = req.body;
     const payload = { payment_date, payment_method, reference_number, notes } as any;
@@ -1422,7 +1423,7 @@ router.post('/accounts-receivable/:id/payments', authMiddleware, async (req: Req
 });
 
 // GET /ar-aging — AR aging buckets
-router.get('/ar-aging', authMiddleware, async (req: Request, res: Response) => {
+router.get('/ar-aging', authMiddleware, requirePermission('finance.accounts-receivable.view', 'finance.ar.view'), async (req: Request, res: Response) => {
   try {
     const rows = await dbAll(
       `SELECT ar.id, c.name as customer_name, ar.invoice_number,
@@ -1444,7 +1445,7 @@ router.get('/ar-aging', authMiddleware, async (req: Request, res: Response) => {
 
 // ===== FINANCE DASHBOARD =====
 
-router.get('/dashboard', authMiddleware, async (req: Request, res: Response) => {
+router.get('/dashboard', authMiddleware, requirePermission('finance.financial-summary.view'), async (req: Request, res: Response) => {
   try {
     const [apSummary, arSummary, recentAP, recentAR] = await Promise.all([
       dbGet(`SELECT
@@ -1500,7 +1501,7 @@ router.get('/dashboard', authMiddleware, async (req: Request, res: Response) => 
  * sebagai biaya yang sudah terjadi — barangnya belum tentu datang dan
  * invoicenya belum tentu ada.
  */
-router.get('/project-pl', authMiddleware, async (req: Request, res: Response) => {
+router.get('/project-pl', authMiddleware, requirePermission('finance.project-pl.view'), async (req: Request, res: Response) => {
   try {
     // `LIMIT ?` ditolak MySQL sebagai prepared statement — divalidasi lalu
     // disisipkan.
@@ -1597,7 +1598,7 @@ router.get('/project-pl', authMiddleware, async (req: Request, res: Response) =>
 // ===== FUND REQUEST DOCUMENTS =====
 
 // GET /fund-requests/:id/documents
-router.get('/fund-requests/:id/documents', authMiddleware, async (req: Request, res: Response) => {
+router.get('/fund-requests/:id/documents', authMiddleware, requirePermission('finance.fund-requests.view'), async (req: Request, res: Response) => {
   try {
     const docs = await dbAll(
       `SELECT d.*, u.full_name as uploaded_by_name
@@ -1615,7 +1616,7 @@ router.get('/fund-requests/:id/documents', authMiddleware, async (req: Request, 
 });
 
 // POST /fund-requests/:id/documents - upload file
-router.post('/fund-requests/:id/documents', authMiddleware, frDocUpload.single('file'), async (req: Request, res: Response) => {
+router.post('/fund-requests/:id/documents', authMiddleware, requirePermission('finance.fund-requests.edit'), frDocUpload.single('file'), async (req: Request, res: Response) => {
   try {
     const file = req.file;
     if (!file) return res.status(400).json({ error: 'No file uploaded' });
@@ -1644,7 +1645,7 @@ router.post('/fund-requests/:id/documents', authMiddleware, frDocUpload.single('
 // Layar menaut langsung ke `/uploads/fund-requests/<berkas>`, jadi begitu
 // penjagaan itu aktif, SELURUH dokumen fund request tidak bisa dibuka lagi —
 // 27 berkas di produksi. Dilaporkan pengguna 27 Agustus 2026.
-router.get('/fund-requests/:frId/documents/:docId/download', authMiddleware, async (req: Request, res: Response) => {
+router.get('/fund-requests/:frId/documents/:docId/download', authMiddleware, requirePermission('finance.fund-requests.view'), async (req: Request, res: Response) => {
   try {
     const doc = await dbGet(
       'SELECT file_path, file_name, original_name, file_type FROM fund_request_documents WHERE id = ? AND fund_request_id = ?',
@@ -1678,7 +1679,7 @@ router.get('/fund-requests/:frId/documents/:docId/download', authMiddleware, asy
 });
 
 // DELETE /fund-requests/:frId/documents/:docId
-router.delete('/fund-requests/:frId/documents/:docId', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/fund-requests/:frId/documents/:docId', authMiddleware, requirePermission('finance.fund-requests.edit'), async (req: Request, res: Response) => {
   try {
     const doc = await dbGet('SELECT * FROM fund_request_documents WHERE id = ? AND fund_request_id = ?', [req.params.docId, req.params.frId]) as any;
     if (!doc) return res.status(404).json({ error: 'Document not found' });
@@ -1695,7 +1696,7 @@ router.delete('/fund-requests/:frId/documents/:docId', authMiddleware, async (re
 // ===== PAYMENT SCHEDULE =====
 
 // GET /payment-schedule — aggregate PO schedules + expenses + AP invoices
-router.get('/payment-schedule', authMiddleware, async (req: Request, res: Response) => {
+router.get('/payment-schedule', authMiddleware, requirePermission('finance.payment-schedule.view'), async (req: Request, res: Response) => {
   try {
     const { year, month, period, project_id, status, source } = req.query;
     const yr  = parseInt(String(year  || new Date().getFullYear()));
@@ -1882,7 +1883,7 @@ router.get('/payment-schedule', authMiddleware, async (req: Request, res: Respon
 });
 
 // PATCH /payment-schedule/:id/paid — mark schedule item as paid
-router.patch('/payment-schedule/:id/paid', authMiddleware, async (req: Request, res: Response) => {
+router.patch('/payment-schedule/:id/paid', authMiddleware, requirePermission('finance.payment-schedule.edit'), async (req: Request, res: Response) => {
   try {
     const { source } = req.body;
     const id = req.params.id;
@@ -1900,7 +1901,7 @@ router.patch('/payment-schedule/:id/paid', authMiddleware, async (req: Request, 
 });
 
 // POST /payment-schedule/:id/proof — upload payment proof file
-router.post('/payment-schedule/:id/proof', authMiddleware, proofUpload.single('file'), async (req: Request, res: Response) => {
+router.post('/payment-schedule/:id/proof', authMiddleware, requirePermission('finance.payment-schedule.edit'), proofUpload.single('file'), async (req: Request, res: Response) => {
   try {
     const file = req.file;
     if (!file) return res.status(400).json({ error: 'No file uploaded' });
@@ -1930,7 +1931,7 @@ router.post('/payment-schedule/:id/proof', authMiddleware, proofUpload.single('f
 // memakai `<img :src="/uploads/...">` untuk thumbnail — `<img>` tidak bisa
 // membawa header Authorization sama sekali, jadi tidak ada cara memperbaikinya
 // dari sisi tautan. Berkasnya sekarang diambil lewat sini lalu dijadikan blob.
-router.get('/payment-schedule/proofs/:proofId/download', authMiddleware, async (req: Request, res: Response) => {
+router.get('/payment-schedule/proofs/:proofId/download', authMiddleware, requirePermission('finance.payment-schedule.view'), async (req: Request, res: Response) => {
   try {
     const doc = await dbGet(
       'SELECT file_path, file_name, original_name FROM payment_proofs WHERE id = ?',
@@ -1958,7 +1959,7 @@ router.get('/payment-schedule/proofs/:proofId/download', authMiddleware, async (
 });
 
 // GET /payment-schedule/:id/proofs?source=po — list proof files for a schedule item
-router.get('/payment-schedule/:id/proofs', authMiddleware, async (req: Request, res: Response) => {
+router.get('/payment-schedule/:id/proofs', authMiddleware, requirePermission('finance.payment-schedule.view'), async (req: Request, res: Response) => {
   try {
     const source = req.query.source || 'po';
     const docs = await dbAll(
@@ -1976,7 +1977,7 @@ router.get('/payment-schedule/:id/proofs', authMiddleware, async (req: Request, 
 });
 
 // DELETE /payment-schedule/proof/:proofId — delete a proof file
-router.delete('/payment-schedule/proof/:proofId', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/payment-schedule/proof/:proofId', authMiddleware, requirePermission('finance.payment-schedule.edit'), async (req: Request, res: Response) => {
   try {
     const doc = await dbGet('SELECT * FROM payment_proofs WHERE id = ?', [req.params.proofId]) as any;
     if (!doc) return res.status(404).json({ error: 'Proof not found' });
@@ -1990,7 +1991,7 @@ router.delete('/payment-schedule/proof/:proofId', authMiddleware, async (req: Re
 });
 
 // PATCH /payment-schedule/:id/reschedule — Finance team reschedules due_date (and optionally amount/notes)
-router.patch('/payment-schedule/:id/reschedule', authMiddleware, async (req: Request, res: Response) => {
+router.patch('/payment-schedule/:id/reschedule', authMiddleware, requirePermission('finance.payment-schedule.edit'), async (req: Request, res: Response) => {
   try {
     const { source, due_date, amount, notes } = req.body;
     const id = req.params.id;
@@ -2031,7 +2032,7 @@ router.patch('/payment-schedule/:id/reschedule', authMiddleware, async (req: Req
 });
 
 // POST /payment-schedule/generate-fund-request — create FR from selected schedule items (idempotent)
-router.post('/payment-schedule/generate-fund-request', authMiddleware, async (req: Request, res: Response) => {
+router.post('/payment-schedule/generate-fund-request', authMiddleware, requirePermission('finance.fund-requests.create'), async (req: Request, res: Response) => {
   try {
     const { ids } = req.body as { ids: { id: number; source: string }[] | number[] };
     if (!ids || !Array.isArray(ids) || ids.length === 0) {
@@ -2154,7 +2155,7 @@ router.post('/payment-schedule/generate-fund-request', authMiddleware, async (re
 // ===== KASBON REQUESTS =====
 
 // GET /kasbon-requests — list all
-router.get('/kasbon-requests', authMiddleware, async (req: Request, res: Response) => {
+router.get('/kasbon-requests', authMiddleware, requirePermission('finance.kasbon.view', 'hr.kasbon.view'), async (req: Request, res: Response) => {
   try {
     const rows = await dbAll(`
       SELECT kr.*,
@@ -2173,7 +2174,7 @@ router.get('/kasbon-requests', authMiddleware, async (req: Request, res: Respons
 });
 
 // GET /kasbon-requests/:id — detail with items
-router.get('/kasbon-requests/:id', authMiddleware, async (req: Request, res: Response) => {
+router.get('/kasbon-requests/:id', authMiddleware, requirePermission('finance.kasbon.view', 'hr.kasbon.view'), async (req: Request, res: Response) => {
   try {
     const kr = await dbGet(`
       SELECT kr.*, u.full_name as requester_name
@@ -2196,7 +2197,7 @@ router.get('/kasbon-requests/:id', authMiddleware, async (req: Request, res: Res
 });
 
 // POST /kasbon-requests — create from selected salary_advances
-router.post('/kasbon-requests', authMiddleware, async (req: Request, res: Response) => {
+router.post('/kasbon-requests', authMiddleware, requirePermission('finance.kasbon.create', 'hr.kasbon.create'), async (req: Request, res: Response) => {
   try {
     const { salary_advance_ids, purpose, notes, project_id } = req.body;
     if (!salary_advance_ids || !Array.isArray(salary_advance_ids) || salary_advance_ids.length === 0) {
@@ -2247,7 +2248,7 @@ router.post('/kasbon-requests', authMiddleware, async (req: Request, res: Respon
 });
 
 // PUT /kasbon-requests/:id/submit
-router.put('/kasbon-requests/:id/submit', authMiddleware, async (req: Request, res: Response) => {
+router.put('/kasbon-requests/:id/submit', authMiddleware, requirePermission('finance.kasbon.edit', 'hr.kasbon.edit'), async (req: Request, res: Response) => {
   try {
     const kr = await dbGet('SELECT * FROM kasbon_requests WHERE id = ?', [req.params.id]) as any;
     if (!kr) return res.status(404).json({ error: 'Not found' });
@@ -2258,7 +2259,7 @@ router.put('/kasbon-requests/:id/submit', authMiddleware, async (req: Request, r
 });
 
 // PUT /kasbon-requests/:id/approve
-router.put('/kasbon-requests/:id/approve', authMiddleware, async (req: Request, res: Response) => {
+router.put('/kasbon-requests/:id/approve', authMiddleware, requirePermission('finance.kasbon.approve', 'hr.kasbon.approve'), async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user?.userId || null;
     const kr = await dbGet('SELECT * FROM kasbon_requests WHERE id = ?', [req.params.id]) as any;
@@ -2274,7 +2275,7 @@ router.put('/kasbon-requests/:id/approve', authMiddleware, async (req: Request, 
 });
 
 // PUT /kasbon-requests/:id/reject
-router.put('/kasbon-requests/:id/reject', authMiddleware, async (req: Request, res: Response) => {
+router.put('/kasbon-requests/:id/reject', authMiddleware, requirePermission('finance.kasbon.approve', 'hr.kasbon.approve'), async (req: Request, res: Response) => {
   try {
     const { reason } = req.body;
     await dbRun(
@@ -2288,7 +2289,7 @@ router.put('/kasbon-requests/:id/reject', authMiddleware, async (req: Request, r
 });
 
 // DELETE /kasbon-requests/:id — only draft
-router.delete('/kasbon-requests/:id', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/kasbon-requests/:id', authMiddleware, requirePermission('finance.kasbon.delete', 'hr.kasbon.delete'), async (req: Request, res: Response) => {
   try {
     const kr = await dbGet('SELECT * FROM kasbon_requests WHERE id = ?', [req.params.id]) as any;
     if (!kr) return res.status(404).json({ error: 'Not found' });
@@ -2303,7 +2304,7 @@ router.delete('/kasbon-requests/:id', authMiddleware, async (req: Request, res: 
 // ===== PAYROLL REQUESTS =====
 
 // GET /payroll-requests — list all grouped by period
-router.get('/payroll-requests', authMiddleware, async (req: Request, res: Response) => {
+router.get('/payroll-requests', authMiddleware, requirePermission('hr.payroll.view'), async (req: Request, res: Response) => {
   try {
     const rows = await dbAll(`
       SELECT pr.*,
@@ -2321,7 +2322,7 @@ router.get('/payroll-requests', authMiddleware, async (req: Request, res: Respon
 });
 
 // POST /payroll-requests — create batch from payslip_records for a period
-router.post('/payroll-requests', authMiddleware, async (req: Request, res: Response) => {
+router.post('/payroll-requests', authMiddleware, requirePermission('hr.payroll.create'), async (req: Request, res: Response) => {
   try {
     const { period_month, period_year, payslip_ids, purpose, notes, project_id, due_date } = req.body;
     if (!period_month || !period_year) {
@@ -2398,7 +2399,7 @@ router.post('/payroll-requests', authMiddleware, async (req: Request, res: Respo
 });
 
 // PUT /payroll-requests/:id/submit
-router.put('/payroll-requests/:id/submit', authMiddleware, async (req: Request, res: Response) => {
+router.put('/payroll-requests/:id/submit', authMiddleware, requirePermission('hr.payroll.edit'), async (req: Request, res: Response) => {
   try {
     const pr = await dbGet('SELECT * FROM payroll_requests WHERE id = ?', [req.params.id]) as any;
     if (!pr) return res.status(404).json({ error: 'Not found' });
@@ -2409,7 +2410,7 @@ router.put('/payroll-requests/:id/submit', authMiddleware, async (req: Request, 
 });
 
 // PUT /payroll-requests/:id/approve → auto shows in Payment Schedule
-router.put('/payroll-requests/:id/approve', authMiddleware, async (req: Request, res: Response) => {
+router.put('/payroll-requests/:id/approve', authMiddleware, requirePermission('hr.payroll.approve'), async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user?.userId || null;
     const pr = await dbGet('SELECT * FROM payroll_requests WHERE id = ?', [req.params.id]) as any;
@@ -2426,7 +2427,7 @@ router.put('/payroll-requests/:id/approve', authMiddleware, async (req: Request,
 });
 
 // PUT /payroll-requests/:id/reject
-router.put('/payroll-requests/:id/reject', authMiddleware, async (req: Request, res: Response) => {
+router.put('/payroll-requests/:id/reject', authMiddleware, requirePermission('hr.payroll.approve'), async (req: Request, res: Response) => {
   try {
     const { reason } = req.body;
     await dbRun(
@@ -2438,7 +2439,7 @@ router.put('/payroll-requests/:id/reject', authMiddleware, async (req: Request, 
 });
 
 // DELETE /payroll-requests/:id — only draft
-router.delete('/payroll-requests/:id', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/payroll-requests/:id', authMiddleware, requirePermission('hr.payroll.delete'), async (req: Request, res: Response) => {
   try {
     const pr = await dbGet('SELECT * FROM payroll_requests WHERE id = ?', [req.params.id]) as any;
     if (!pr) return res.status(404).json({ error: 'Not found' });

@@ -345,10 +345,40 @@ melihat isi template literal setelah komentar JS dibuang — tanpa itu, prosa
 seperti "update AP" dan `INSERT INTO ...` di dalam komentar ikut terbaca sebagai
 tabel.
 
-**Masih terbuka di modul ini** (sudah diukur, belum dikerjakan): 64 endpoint
-finance tanpa satu pun `requirePermission` — terbukti user level 1 tanpa role
-bisa mengajukan fund request lalu menyetujuinya sendiri dan mencatat pembayaran
-AP; lima endpoint lain masih 500 karena `cogs_tracking` tidak punya
+### RBAC finance (FIN-RBAC-01)
+
+Seluruh **64 endpoint** `finance.routes.ts` kini memakai `requirePermission` —
+sebelumnya nol, dan terbukti user level 1 tanpa role bisa mengajukan fund
+request lalu menyetujuinya sendiri serta mencatat pembayaran AP.
+
+⚠️ Berbeda dengan procurement, di sini permission **boleh** dipakai: kedua role
+produksi (`Admin` 62/62 dan `Manager Finannce & Acc` 55/62 permission
+`finance.*`) diverifikasi lolos seluruh 64 gerbang sebelum perubahan ditulis.
+
+Tiga hal yang harus dijaga:
+
+1. **Katalog memuat DUA penamaan untuk resource yang sama** — `finance.ap` dan
+   `finance.accounts-payable`, `finance.ar` dan `finance.accounts-receivable` —
+   dan role produksi memegang campuran keduanya. Karena `requirePermission`
+   bersifat OR, kedua nama ditulis berdampingan. Itu bukan pelonggaran, itu
+   satu hak yang punya dua nama.
+2. **Approve yang tidak dipegang role finance dijembatani permission HR, bukan
+   `edit`.** `Manager Finannce & Acc` tidak punya `finance.kasbon.approve` tapi
+   punya `hr.kasbon.approve`; untuk payroll ia punya `hr.payroll.approve`.
+   Jangan menggantinya dengan `.edit` — itu membuat gerbangnya tidak lagi
+   berarti "berhak menyetujui".
+3. **Permission yang salah ketik mengunci SEMUA ORANG kecuali master** — Admin
+   sekalipun, karena `ensureAdminRoleHasAllPermissions` hanya memetakan yang ada
+   di katalog. Tidak ada error apa pun yang muncul. `npm run test:finance-rbac`
+   memeriksa setiap string yang dipakai benar-benar ada di tabel `permissions`.
+
+⚠️ `AttendanceView.vue` (layar HR, di luar modul finance) memanggil
+`/finance/kasbon-requests` dan `/finance/payroll-requests` termasuk approve —
+jadi gerbang di kedua kelompok itu ikut menentukan siapa yang bisa memakai layar
+absensi.
+
+**Masih terbuka di modul ini** (sudah diukur, belum dikerjakan): lima endpoint
+masih 500 karena `cogs_tracking` tidak punya
 `total_cost`/`cost_per_unit`/`quantity_produced` dan `profitability_tracking`
 tidak punya `gross_margin_pct`/`period`/`total_revenue`; unggahan finance tidak
 memakai `validateUpload`; dan `payment_proofs` dibuat lewat `CREATE TABLE` saat

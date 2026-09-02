@@ -12715,3 +12715,82 @@ menyesatkan.
 
 Regresi: `test:procurement` 184, `test:inbox-item` 20, `test:grn-lampiran` 31.
 `tsc --noEmit` bersih. Frontend tidak disentuh.
+
+---
+
+## [DEV] RBAC modul finance (FIN-RBAC-01) — 2 September 2026
+
+Butir paling serius dari audit finance, dikerjakan atas instruksi pemilik.
+
+### Urutan yang ditempuh — memetakan dulu, baru menggembok
+
+CLAUDE.md mensyaratkan: sebelum menggembok modul yang sudah live, periksa dulu
+role produksi memang memegang permissionnya. Hasil pemeriksaan:
+
+| Role | `finance.*` dipegang | approve |
+|---|---|---|
+| Admin (master, admin, anshor) | **62 dari 62** | 15 |
+| Manager Finannce & Acc (beni, takbir) | **55 dari 62** | 8 |
+
+**Kebalikan dari procurement:** di sana role penyetuju tidak punya satu pun
+permission `procurement.*.approve*`, jadi approval sengaja tetap memakai
+`approverLevel()`. Di finance kedua role sudah memegangnya, jadi permission
+boleh dipakai.
+
+⚠️ Pemeriksaan pertama saya melaporkan **0 permission finance untuk semua role**
+— query saya memfilter `p.module='finance'`, padahal kolom `module` berisi label
+manusia ("Finance - Accounts Payable"). Kelas kesalahan yang sama dengan
+peringatan CLAUDE.md soal kolom `name`. Diulang lewat `resource`.
+
+### Tiga celah pemetaan, dan bagaimana ditutup tanpa kompromi
+
+1. `Manager Finannce & Acc` tidak punya `finance.fund-requests.approve`, tapi
+   punya `approve_1` dan `approve_2` → ketiganya ditulis berdampingan.
+2. Ia tidak punya `finance.kasbon.approve`, tapi punya **`hr.kasbon.approve`**.
+3. Tidak ada resource `finance.payroll` sama sekali; ia punya
+   **`hr.payroll.approve`**.
+
+Tidak ada satu pun gerbang yang memakai `.edit` sebagai pengganti approve.
+
+### Bukti tidak ada yang terkunci
+
+Seluruh 64 gerbang diadu langsung dengan himpunan permission kedua role
+produksi (737 baris `role_permissions` diunduh dari produksi):
+
+```
+Admin                      LOLOS SEMUA
+Manager Finannce & Acc     LOLOS SEMUA
+→ aman di-deploy
+```
+
+### Verifikasi
+
+`tests/finance-rbac.ts` — **22 lulus, 0 gagal**. Yang diuji:
+
+- 64 endpoint, **nol** tanpa `requirePermission`
+- 45 permission dipakai, **nol** yang tidak ada di katalog — string salah ketik
+  mengunci semua orang kecuali master, tanpa error apa pun
+- User level 1 tanpa role: kedelapan tindakan yang tadi terbukti tembus kini
+  **403** (termasuk baca payroll, setujui fund request, catat pembayaran AP)
+- Role dengan permission yang tepat: tetap 200
+- **Role "boleh lihat, tidak boleh setujui": approve ditolak 403**
+
+Tiga mutasi dijalankan, semuanya tertangkap: satu endpoint dilepas gerbangnya
+(2 asersi), permission salah ketik (2), gerbang approve dilonggarkan jadi
+`view` (1).
+
+⚠️ Mutasi ketiga awalnya **tidak tertangkap**, dan itu lubang nyata di tes saya:
+bagian "yang tidak berhak" memakai user tanpa permission apa pun (gerbang
+selonggar apa pun tetap menolaknya) dan bagian "yang berhak" memberi seluruh
+permission (gerbang selonggar apa pun tetap lolos). Keduanya buta terhadap
+approve yang diturunkan menjadi view. Ditambahkan role "hanya boleh melihat";
+setelah itu mutasinya tertangkap.
+
+Regresi: `test:finance-apar` 10, `test:procurement` 184. `tsc --noEmit` bersih.
+
+### Catatan lintas modul
+
+`AttendanceView.vue` (layar HR) memanggil `/finance/kasbon-requests` dan
+`/finance/payroll-requests` termasuk approve. Kedua role produksi lolos gerbang
+itu, jadi tidak ada yang terganggu — tapi ketergantungannya dicatat karena tidak
+terlihat dari dalam modul finance.
