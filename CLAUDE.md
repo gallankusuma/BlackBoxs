@@ -276,6 +276,44 @@ ia memutus literalnya dan errornya menunjuk baris lain.
 Fase 3 (progress certificate, retensi, invoice/AR) **belum ada** dan menunggu
 keputusan terms komersial.
 
+### Tools & equipment: lokasi berjalan + kondisi (AST-CUSTODY-01)
+
+Inventory di EPC lebih banyak alat daripada barang habis pakai: satu mesin las
+pindah workshop → Project A → Project B, dan masuk bengkel begitu kondisinya
+turun. Modul Asset dulu plant-oriented (`production_line_id`, `pnid_tag`) dan
+lokasinya cuma teks bebas `assets.location` — tidak bisa menjawab "alat ini
+sekarang di mana" maupun "bulan lalu di mana".
+
+Sekarang ada `asset_movements` (satu baris per perpindahan) plus kolom kondisi
+di `assets`. Empat aturan yang harus dijaga:
+
+1. **Lokasi berjalan dihitung, tidak disimpan.** Tidak ada kolom
+   `current_project_id` di `assets` — lokasi = tujuan perpindahan terakhir,
+   di-join lewat `SQL_LOKASI_TERAKHIR` di `asset.routes.ts`. Kolom
+   denormalisasi akan melenceng dari riwayatnya persis seperti yang dihindari
+   ledger kontrak. Tes menghitungnya (harus nol).
+2. **Asal perpindahan diturunkan server, tidak pernah dari body.** `from_type`/
+   `from_project_id` diambil dari `lokasiSekarang()`. Kalau klien boleh
+   mengarang asal, riwayatnya berhenti bisa dipakai menelusuri alat.
+3. **Kondisi yang menentukan, `status` ikut.** `PATCH /:id/condition` menurunkan
+   `status` ke `under_maintenance` saat kondisi bukan `baik`, dan
+   mengembalikannya ke `active` saat sudah `baik` — dalam satu transaction, dan
+   jejaknya masuk `asset_status_history` yang sudah ada (AST-012), bukan tabel
+   kedua. Tanpa ini daftar aset bilang "Aktif" sementara pengirimannya ditolak.
+   `disposed`/`disposal_requested` **tidak pernah disentuh** — alat yang sudah
+   dilepas tidak boleh ditarik kembali cuma karena kondisinya dicatat.
+4. **Alat berkondisi tidak baik tidak bisa dikirim ke proyek**
+   (`KONDISI_BELUM_LAYAK`), **tapi tetap boleh dipindah ke workshop/vendor.**
+   Mengunci jalur perbaikan sekalian akan membuat alat rusak mangkrak di
+   lokasi terakhirnya.
+
+Penegakannya ada di satu tempat: `POST /assets/:id/movements`. Tidak ada modul
+lain yang mengalokasikan aset ke proyek — `budget.routes.ts` hanya membuat aset
+dari kapitalisasi CAPEX. Kalau nanti ada jalur alokasi kedua, gerbang kondisinya
+ikut dipindah ke sana, jangan diduplikasi.
+
+Dijaga `npm run test:asset-custody` (30 asersi, 5 mutasi terbukti tertangkap).
+
 ### Aturan bisnis procurement
 
 ### Satu PR boleh melahirkan beberapa PO (PROC-PARTIAL-01)

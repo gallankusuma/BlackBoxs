@@ -2911,6 +2911,65 @@ const PERMISSION_CATALOG: { actions: string[]; resources: string[] }[] = [
 // memang keadaan sekarang — diperiksa di produksi dan lokal, nol PO yang memuat
 // product_id yang sama dua kali. Kalau suatu saat `grn_items` benar-benar diisi,
 // inilah yang harus ditinjau ulang lebih dulu.
+// ============ KUSTODI & KONDISI ALAT (AST-CUSTODY-01) ============
+//
+// Di EPC, isi "inventory" sebagian besar adalah tools & equipment yang
+// BERPINDAH: mesin las dari workshop ke Project A, bulan depan ke Project B,
+// dan kalau kondisinya tidak baik masuk perbaikan dulu.
+//
+// Modul aset yang ada sebelumnya dibangun untuk pabrik yang diam — ada
+// `production_line_id` dan `pnid_tag` — dan lokasinya cuma kolom `location`
+// bertipe teks bebas. Begitu ditimpa "Project B", jejak "pernah di Project A"
+// HILANG. Pertanyaan "bulan lalu di mana" dan "berapa lama di proyek A" tidak
+// pernah bisa dijawab.
+//
+// Keputusan pemilik (2 September 2026):
+//   1. Riwayat penuh — tiap perpindahan satu baris. Lokasi berjalan DIHITUNG
+//      dari baris terakhir, tidak disimpan sebagai kolom. Kolom denormalisasi
+//      akan melenceng dan selisihnya tidak bisa dijelaskan (alasan yang sama
+//      dengan nilai kontrak di ledger).
+//   2. Kondisi tidak baik MENGUNCI perpindahan ke proyek.
+//   3. Semua tools dilacak per unit, termasuk yang kecil.
+const ensureAssetCustodySchema = async (connection: any) => {
+  const statements = [
+    // Kondisi DIPISAH dari `status`. `status` menjawab "aset ini masih tercatat
+    // atau sudah dilepas" (active/disposed); `condition` menjawab "alatnya layak
+    // dipakai atau tidak". Menggabungkan keduanya membuat aset yang sedang
+    // diperbaiki tidak bisa dibedakan dari aset yang sudah dilepas.
+    `ALTER TABLE assets ADD COLUMN IF NOT EXISTS \`condition\` VARCHAR(20) NOT NULL DEFAULT 'baik'`,
+    `ALTER TABLE assets ADD COLUMN IF NOT EXISTS condition_note TEXT NULL`,
+    `ALTER TABLE assets ADD COLUMN IF NOT EXISTS condition_changed_at TIMESTAMP NULL`,
+    `ALTER TABLE assets ADD COLUMN IF NOT EXISTS condition_changed_by INT NULL`,
+
+    `CREATE TABLE IF NOT EXISTS asset_movements (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      asset_id INT NOT NULL,
+      -- Asal DISIMPAN, bukan cuma diturunkan dari baris sebelumnya: satu baris
+      -- harus bisa dibaca sendiri saat audit, tanpa merangkai ulang rantainya.
+      from_type VARCHAR(20) NULL,
+      from_project_id INT NULL,
+      from_label VARCHAR(200) NULL,
+      to_type VARCHAR(20) NOT NULL,
+      to_project_id INT NULL,
+      to_label VARCHAR(200) NULL,
+      condition_at_move VARCHAR(20) NULL,
+      moved_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      moved_by INT NULL,
+      received_by VARCHAR(150) NULL,
+      notes TEXT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_asset_movements_asset (asset_id, moved_at),
+      KEY idx_asset_movements_project (to_project_id),
+      CONSTRAINT fk_asset_movements_asset FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  ];
+
+  for (const statement of statements) {
+    await execSchemaEnsure(connection, statement);
+  }
+  console.log('✅ Skema kustodi & kondisi alat ensured');
+};
+
 const ensureGrnAttachmentSchema = async (connection: any) => {
   const statements = [
     `CREATE TABLE IF NOT EXISTS grn_documents (
@@ -3294,6 +3353,7 @@ export async function initializeDatabase() {
     await ensureProposalItemOrderUnique(connection);
     await ensureDisposalSchema(connection);
     await ensureAssetStatusHistorySchema(connection);
+    await ensureAssetCustodySchema(connection);
     await ensureGrnAttachmentSchema(connection);
     await ensureVendorPriceApprovalSchema(connection);
     await ensurePermissionCatalog(connection);

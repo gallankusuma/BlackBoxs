@@ -176,6 +176,82 @@
       </table>
     </div>
 
+    <!-- Lokasi & Kondisi (AST-CUSTODY-01) -->
+    <div v-if="activeTab === 'custody'" class="bg-white border rounded-xl p-6 space-y-6">
+      <div class="flex items-start justify-between gap-6">
+        <div>
+          <div class="text-[11px] text-gray-500 uppercase">Sekarang berada di</div>
+          <div class="text-lg font-semibold text-gray-800">{{ lokasiSekarang }}</div>
+          <div v-if="asset?.current_since" class="text-xs text-gray-500">sejak {{ formatDate(asset.current_since) }}</div>
+        </div>
+        <div class="text-right">
+          <div class="text-[11px] text-gray-500 uppercase mb-1">Kondisi</div>
+          <span class="px-2.5 py-1 rounded text-xs font-semibold" :class="kelasKondisi">{{ labelKondisi }}</span>
+          <div class="mt-2 flex items-center gap-1 justify-end">
+            <select v-model="kondisiBaru" class="border rounded px-2 py-1 text-xs">
+              <option value="baik">Baik</option>
+              <option value="perlu_perbaikan">Perlu perbaikan</option>
+              <option value="rusak">Rusak</option>
+            </select>
+            <input v-model="kondisiCatatan" type="text" placeholder="catatan" class="border rounded px-2 py-1 text-xs w-36" />
+            <button @click="simpanKondisi" class="px-2.5 py-1 bg-gray-700 text-white rounded text-xs hover:bg-gray-800">Simpan</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Alat berkondisi tidak baik memang tidak boleh dikirim ke proyek;
+           dikatakan di layar supaya tombolnya tidak sekadar menolak diam-diam. -->
+      <p v-if="asset?.condition && asset.condition !== 'baik'"
+         class="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-3 py-2">
+        Alat ini berkondisi <strong>{{ labelKondisi }}</strong>, jadi belum bisa dikirim ke proyek.
+        Pemindahan ke workshop atau vendor perbaikan tetap bisa dilakukan.
+      </p>
+
+      <div class="bg-gray-50 border rounded-lg p-3">
+        <div class="text-[11px] text-gray-500 uppercase mb-2">Catat perpindahan</div>
+        <div class="grid grid-cols-6 gap-2 items-end">
+          <div><label class="block text-[10px] text-gray-500 mb-1">Tujuan</label>
+            <select v-model="pindahForm.to_type" class="w-full border rounded px-2 py-1.5 text-xs">
+              <option value="project">Proyek</option>
+              <option value="workshop">Workshop</option>
+              <option value="vendor">Vendor / bengkel</option>
+            </select></div>
+          <div class="col-span-2" v-if="pindahForm.to_type === 'project'">
+            <label class="block text-[10px] text-gray-500 mb-1">Proyek</label>
+            <select v-model.number="pindahForm.to_project_id" class="w-full border rounded px-2 py-1.5 text-xs">
+              <option :value="null">— pilih proyek —</option>
+              <option v-for="p in daftarProyek" :key="p.id" :value="p.id">{{ p.title || p.project_name }}</option>
+            </select></div>
+          <div class="col-span-2" v-else>
+            <label class="block text-[10px] text-gray-500 mb-1">Nama tempat</label>
+            <input v-model="pindahForm.to_label" type="text" class="w-full border rounded px-2 py-1.5 text-xs" placeholder="mis. Workshop Pusat" /></div>
+          <div><label class="block text-[10px] text-gray-500 mb-1">Diterima oleh</label>
+            <input v-model="pindahForm.received_by" type="text" class="w-full border rounded px-2 py-1.5 text-xs" /></div>
+          <div><label class="block text-[10px] text-gray-500 mb-1">Catatan</label>
+            <input v-model="pindahForm.notes" type="text" class="w-full border rounded px-2 py-1.5 text-xs" /></div>
+          <button @click="catatPerpindahan" class="px-3 py-1.5 bg-blue-600 text-white rounded text-xs font-semibold hover:bg-blue-700">+ Pindahkan</button>
+        </div>
+      </div>
+
+      <table class="w-full text-sm">
+        <thead class="bg-gray-50 border-b"><tr class="text-left text-gray-600">
+          <th class="px-3 py-2">Tanggal</th><th class="px-3 py-2">Dari</th><th class="px-3 py-2">Ke</th>
+          <th class="px-3 py-2">Kondisi saat pindah</th><th class="px-3 py-2">Diterima</th><th class="px-3 py-2">Oleh</th>
+        </tr></thead>
+        <tbody>
+          <tr v-if="!perpindahan.length"><td colspan="6" class="text-center py-6 text-gray-400">Belum ada perpindahan tercatat.</td></tr>
+          <tr v-for="m in perpindahan" :key="m.id" class="border-b">
+            <td class="px-3 py-2">{{ formatDate(m.moved_at) }}</td>
+            <td class="px-3 py-2 text-gray-500">{{ namaTempat(m.from_type, m.from_project_name, m.from_label) }}</td>
+            <td class="px-3 py-2 font-medium">{{ namaTempat(m.to_type, m.to_project_name, m.to_label) }}</td>
+            <td class="px-3 py-2"><span class="px-2 py-0.5 bg-gray-100 rounded text-xs">{{ m.condition_at_move || '-' }}</span></td>
+            <td class="px-3 py-2 text-gray-500">{{ m.received_by || '-' }}</td>
+            <td class="px-3 py-2 text-gray-500">{{ m.moved_by_name || '-' }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
     <!-- Riwayat Pembelian -->
     <div v-if="activeTab === 'purchases'" class="bg-white border rounded-xl p-6">
       <h3 class="font-semibold text-gray-700 mb-4">🧾 Riwayat Pembelian / Penambahan Nilai</h3>
@@ -224,7 +300,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue';
+import { ref, computed, onMounted, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import { api } from '@/lib/api';
 import { formatCurrency } from '@/utils/format';
@@ -242,6 +318,7 @@ const saving = ref(false);
 
 const tabs = [
   { id: 'spec', label: '📋 Ringkasan & Spec' },
+  { id: 'custody', label: '📍 Lokasi & Kondisi' },
   { id: 'documents', label: '📄 Dokumen' },
   { id: 'maintenance', label: '🔧 Riwayat Perbaikan' },
   { id: 'purchases', label: '🧾 Riwayat Pembelian' },
@@ -398,7 +475,64 @@ onMounted(async () => {
   productionLines.value = data.data || [];
 });
 
+// ── Lokasi & kondisi (AST-CUSTODY-01) ───────────────────────────────────
+const perpindahan = ref<any[]>([]);
+const daftarProyek = ref<any[]>([]);
+const kondisiBaru = ref('baik');
+const kondisiCatatan = ref('');
+const pindahForm = ref<any>({ to_type: 'project', to_project_id: null, to_label: '', received_by: '', notes: '' });
+
+const namaTempat = (tipe: string | null, namaProyek: string | null, label: string | null) => {
+  if (!tipe) return '—';
+  if (tipe === 'project') return namaProyek || 'Proyek';
+  return label || (tipe === 'workshop' ? 'Workshop' : 'Vendor');
+};
+const lokasiSekarang = computed(() =>
+  namaTempat(asset.value?.current_location_type, asset.value?.current_project_name, asset.value?.current_location_label));
+const labelKondisi = computed(() => ({
+  baik: 'Baik', perlu_perbaikan: 'Perlu perbaikan', rusak: 'Rusak',
+} as Record<string, string>)[asset.value?.condition || 'baik'] || asset.value?.condition);
+const kelasKondisi = computed(() => ({
+  baik: 'bg-green-100 text-green-700',
+  perlu_perbaikan: 'bg-amber-100 text-amber-800',
+  rusak: 'bg-red-100 text-red-700',
+} as Record<string, string>)[asset.value?.condition || 'baik'] || 'bg-gray-100 text-gray-600');
+
+const loadCustody = async () => {
+  try {
+    const [mv, pj] = await Promise.all([
+      api.get(`/assets/${assetId}/movements`),
+      api.get('/projects'),
+    ]);
+    perpindahan.value = mv.data?.data || [];
+    daftarProyek.value = (pj.data?.data || pj.data || []).filter((p: any) => p?.id);
+    kondisiBaru.value = asset.value?.condition || 'baik';
+  } catch (e) { console.error('Gagal memuat lokasi & kondisi', e); }
+};
+
+const catatPerpindahan = async () => {
+  try {
+    await api.post(`/assets/${assetId}/movements`, pindahForm.value);
+    pindahForm.value = { to_type: 'project', to_project_id: null, to_label: '', received_by: '', notes: '' };
+    await loadAsset();
+    await loadCustody();
+  } catch (e: any) {
+    alert(e?.response?.data?.error || 'Gagal mencatat perpindahan');
+  }
+};
+
+const simpanKondisi = async () => {
+  try {
+    await api.patch(`/assets/${assetId}/condition`, { condition: kondisiBaru.value, note: kondisiCatatan.value || null });
+    kondisiCatatan.value = '';
+    await loadAsset();
+  } catch (e: any) {
+    alert(e?.response?.data?.error || 'Gagal memperbarui kondisi');
+  }
+};
+
 watch(activeTab, (tab) => {
+  if (tab === 'custody' && !perpindahan.value.length) loadCustody();
   if (tab === 'documents' && !documents.value.length) loadDocuments();
   if (tab === 'maintenance' && !maintenanceLogs.value.length) loadMaintenance();
   if (tab === 'purchases' && !purchaseHistory.value.length) loadPurchaseHistory();

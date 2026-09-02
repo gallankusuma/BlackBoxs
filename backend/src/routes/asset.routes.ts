@@ -319,12 +319,22 @@ router.get('/', authMiddleware, requirePermission('assets.view', 'assets.manage'
     const whereSql = `WHERE ${where.join(' AND ')}`;
 
     const rows = await dbAll(
+      // AST-CUSTODY-01: lokasi berjalan ikut dalam SATU query lewat join
+      // perpindahan-terakhir. Mengambilnya per baris aset akan mengulang cacat
+      // N+1 yang dibereskan PROC-N1-01 di layar PO.
       `SELECT a.*, c.name as category_name, c.code as category_code, c.is_depreciable,
-              p.name as production_line_name, q.code as pnid_code
+              p.name as production_line_name, q.code as pnid_code,
+              loc.to_type AS current_location_type,
+              loc.to_project_id AS current_project_id,
+              cp.project_name AS current_project_name,
+              loc.to_label AS current_location_label,
+              loc.moved_at AS current_since
        FROM assets a
        JOIN asset_categories c ON a.category_id = c.id
        LEFT JOIN production_lines p ON a.production_line_id = p.id
        LEFT JOIN pnids q ON a.pnid_id = q.id
+       ${SQL_LOKASI_TERAKHIR}
+       LEFT JOIN client_projects cp ON loc.to_project_id = cp.id
        ${whereSql}
        ORDER BY a.id DESC`,
       params
@@ -346,11 +356,18 @@ router.get('/:id', authMiddleware, requirePermission('assets.view', 'assets.mana
   try {
     const row: any = await dbGet(
       `SELECT a.*, c.name as category_name, c.code as category_code, c.is_depreciable,
-              p.name as production_line_name, q.code as pnid_code, q.title as pnid_title
+              p.name as production_line_name, q.code as pnid_code, q.title as pnid_title,
+              loc.to_type AS current_location_type,
+              loc.to_project_id AS current_project_id,
+              cp.project_name AS current_project_name,
+              loc.to_label AS current_location_label,
+              loc.moved_at AS current_since
        FROM assets a
        JOIN asset_categories c ON a.category_id = c.id
        LEFT JOIN production_lines p ON a.production_line_id = p.id
        LEFT JOIN pnids q ON a.pnid_id = q.id
+       ${SQL_LOKASI_TERAKHIR}
+       LEFT JOIN client_projects cp ON loc.to_project_id = cp.id
        WHERE a.id = ? AND a.is_deleted = 0`,
       [req.params.id]
     );
@@ -892,6 +909,167 @@ router.get('/:id/status-history', authMiddleware, requirePermission('assets.view
     res.json({ data: rows });
   } catch (error: any) {
     serverError(res, 'status-history', error);
+  }
+});
+
+// ── Kustodi & kondisi alat (AST-CUSTODY-01) ─────────────────────────────
+//
+// Lokasi berjalan sebuah alat adalah TUJUAN dari perpindahan terakhirnya —
+// dihitung saat dibaca, tidak disimpan sebagai kolom. Kolom denormalisasi akan
+// melenceng dari riwayatnya dan selisihnya tidak bisa dijelaskan.
+const KONDISI_SAH = ['baik', 'perlu_perbaikan', 'rusak'] as const;
+
+/** Perpindahan terakhir per aset. MAX(id) dipakai sebagai pemutus kalau dua
+ *  perpindahan tercatat pada detik yang sama. */
+const SQL_LOKASI_TERAKHIR = `
+  LEFT JOIN (
+    SELECT m.* FROM asset_movements m
+    JOIN (SELECT asset_id, MAX(id) AS mid FROM asset_movements GROUP BY asset_id) t
+      ON t.mid = m.id
+  ) loc ON loc.asset_id = a.id`;
+
+const lokasiSekarang = async (assetId: any) =>
+  await dbGet(
+    `SELECT m.* FROM asset_movements m WHERE m.asset_id = ? ORDER BY m.id DESC LIMIT 1`,
+    [assetId]
+  ) as any;
+
+router.get('/:id/movements', authMiddleware, requirePermission('assets.view', 'assets.manage'),
+  async (req: Request, res: Response) => {
+  try {
+    const rows = await dbAll(
+      `SELECT m.*, u.full_name AS moved_by_name,
+              pa.project_name AS from_project_name, pb.project_name AS to_project_name
+       FROM asset_movements m
+       LEFT JOIN users u ON m.moved_by = u.id
+       LEFT JOIN client_projects pa ON m.from_project_id = pa.id
+       LEFT JOIN client_projects pb ON m.to_project_id = pb.id
+       WHERE m.asset_id = ? ORDER BY m.id DESC`,
+      [req.params.id]
+    );
+    res.json({ data: rows, current: await lokasiSekarang(req.params.id) });
+  } catch (error: any) {
+    serverError(res, 'asset-movements', error);
+  }
+});
+
+/**
+ * Mencatat perpindahan alat.
+ *
+ * Dua aturan yang harus dijaga:
+ *
+ * 1. **Asal TIDAK diambil dari klien.** Ia diturunkan dari perpindahan terakhir
+ *    yang tercatat. Kalau asal boleh dikirim klien, rantainya bisa dikarang dan
+ *    riwayatnya berhenti bisa dipercaya.
+ * 2. **Alat yang kondisinya tidak baik tidak boleh dikirim ke proyek**
+ *    (keputusan pemilik). Perpindahan ke workshop atau ke vendor perbaikan
+ *    justru TETAP BOLEH — itu jalan untuk memperbaikinya.
+ */
+router.post('/:id/movements', authMiddleware, requirePermission('assets.manage'),
+  async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId ?? (req as any).user?.userId ?? null;
+    const aset = await dbGet('SELECT id, asset_code, name, status, `condition`, is_deleted FROM assets WHERE id = ?', [req.params.id]) as any;
+    if (!aset || aset.is_deleted) return res.status(404).json({ error: 'Aset tidak ditemukan' });
+    if (aset.status === 'disposed') {
+      return res.status(409).json({ error: 'Aset ini sudah dilepas (disposed), jadi tidak bisa dipindahkan lagi.', code: 'ASET_SUDAH_DILEPAS' });
+    }
+
+    const { to_type, to_project_id, to_label, received_by, notes, moved_at } = req.body || {};
+    const tipe = String(to_type || '').trim();
+    if (!['project', 'workshop', 'vendor'].includes(tipe)) {
+      return res.status(400).json({ error: 'to_type harus salah satu dari: project, workshop, vendor', code: 'TUJUAN_TIDAK_SAH' });
+    }
+
+    let projectId: number | null = null;
+    if (tipe === 'project') {
+      projectId = Number(to_project_id);
+      if (!Number.isFinite(projectId) || projectId <= 0) {
+        return res.status(400).json({ error: 'to_project_id wajib diisi untuk perpindahan ke proyek', code: 'PROJECT_WAJIB' });
+      }
+      const proyek = await dbGet('SELECT id, project_name FROM client_projects WHERE id = ?', [projectId]) as any;
+      if (!proyek) return res.status(400).json({ error: 'Proyek tujuan tidak ditemukan', code: 'PROJECT_TIDAK_ADA' });
+
+      // Penguncian kondisi — hanya untuk tujuan proyek.
+      if (aset.condition && aset.condition !== 'baik') {
+        return res.status(409).json({
+          error: `${aset.asset_code || aset.name} berkondisi "${aset.condition}", jadi belum boleh dikirim ke proyek. Selesaikan perbaikannya dulu, atau pindahkan ke workshop/vendor.`,
+          code: 'KONDISI_BELUM_LAYAK',
+          condition: aset.condition,
+        });
+      }
+    }
+
+    const terakhir = await lokasiSekarang(aset.id);
+    const hasil = await dbRun(
+      `INSERT INTO asset_movements
+        (asset_id, from_type, from_project_id, from_label, to_type, to_project_id, to_label,
+         condition_at_move, moved_at, moved_by, received_by, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?, ?)`,
+      [
+        aset.id,
+        terakhir?.to_type ?? null,
+        terakhir?.to_project_id ?? null,
+        terakhir?.to_label ?? null,
+        tipe, projectId, tipe === 'project' ? null : (to_label || null),
+        aset.condition || 'baik',
+        moved_at || null, userId, received_by || null, notes || null,
+      ]
+    );
+
+    res.status(201).json({ message: 'Perpindahan alat dicatat', data: { id: hasil.insertId }, current: await lokasiSekarang(aset.id) });
+  } catch (error: any) {
+    serverError(res, 'asset-movement-create', error);
+  }
+});
+
+/** Menetapkan kondisi alat. Inilah yang mengunci/melepas perpindahan ke proyek. */
+router.patch('/:id/condition', authMiddleware, requirePermission('assets.manage'),
+  async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId ?? (req as any).user?.userId ?? null;
+    const kondisi = String(req.body?.condition || '').trim();
+    if (!(KONDISI_SAH as readonly string[]).includes(kondisi)) {
+      return res.status(400).json({ error: `condition harus salah satu dari: ${KONDISI_SAH.join(', ')}`, code: 'KONDISI_TIDAK_SAH' });
+    }
+    const aset = await dbGet('SELECT id, is_deleted, status FROM assets WHERE id = ?', [req.params.id]) as any;
+    if (!aset || aset.is_deleted) return res.status(404).json({ error: 'Aset tidak ditemukan' });
+
+    // Kondisi yang menentukan, status ikut. Alat rusak yang tetap berstatus
+    // 'active' adalah setengah jalan yang paling membingungkan: daftar aset
+    // bilang siap dipakai sementara pengiriman ke proyek ditolak.
+    //
+    // Yang TIDAK pernah disentuh: 'disposed' dan 'disposal_requested'. Alat
+    // yang sudah dilepas tidak bisa ditarik kembali jadi 'perbaikan' hanya
+    // karena kondisinya dicatat.
+    let statusBaru: string | null = null;
+    if (kondisi === 'baik') {
+      if (aset.status === 'under_maintenance') statusBaru = 'active';
+    } else if (aset.status === 'active' || aset.status === 'idle') {
+      statusBaru = 'under_maintenance';
+    }
+
+    await withTransaction(async tx => {
+      await tx.run(
+        'UPDATE assets SET `condition` = ?, condition_note = ?, condition_changed_at = CURRENT_TIMESTAMP, condition_changed_by = ? WHERE id = ?',
+        [kondisi, req.body?.note || null, userId, aset.id]
+      );
+      if (statusBaru) {
+        await tx.run('UPDATE assets SET status = ? WHERE id = ?', [statusBaru, aset.id]);
+        // Jejaknya masuk ke tabel riwayat status yang sudah ada (AST-012),
+        // bukan tabel kedua — supaya layar riwayat tidak perlu menggabungkan
+        // dua sumber untuk menjawab 'kapan alat ini masuk bengkel'.
+        await tx.run(
+          `INSERT INTO asset_status_history (asset_id, from_status, to_status, note, changed_by)
+           VALUES (?, ?, ?, ?, ?)`,
+          [aset.id, aset.status, statusBaru,
+            `Kondisi diubah menjadi ${kondisi}${req.body?.note ? ': ' + req.body.note : ''}`, userId]
+        );
+      }
+    });
+    res.json({ message: 'Kondisi alat diperbarui', condition: kondisi, status: statusBaru || aset.status });
+  } catch (error: any) {
+    serverError(res, 'asset-condition', error);
   }
 });
 

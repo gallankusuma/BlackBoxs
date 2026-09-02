@@ -60,7 +60,8 @@
             <th class="px-4 py-2.5">Kode Aset</th>
             <th class="px-4 py-2.5">Nama</th>
             <th class="px-4 py-2.5">Kategori</th>
-            <th class="px-4 py-2.5">Lokasi / Line</th>
+            <th class="px-4 py-2.5">Lokasi Sekarang</th>
+            <th class="px-4 py-2.5">Kondisi</th>
             <th class="px-4 py-2.5 text-right">Harga Beli</th>
             <th class="px-4 py-2.5 text-right">Nilai Buku</th>
             <th class="px-4 py-2.5 text-right">Depresiasi</th>
@@ -69,8 +70,8 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-if="loading"><td colspan="9" class="text-center py-8 text-gray-400">Memuat...</td></tr>
-          <tr v-else-if="!filteredAssets.length"><td colspan="9" class="text-center py-8 text-gray-400">Belum ada aset di kategori ini.</td></tr>
+          <tr v-if="loading"><td colspan="10" class="text-center py-8 text-gray-400">Memuat...</td></tr>
+          <tr v-else-if="!filteredAssets.length"><td colspan="10" class="text-center py-8 text-gray-400">Belum ada aset di kategori ini.</td></tr>
           <tr v-for="a in filteredAssets" :key="a.id" @click="$router.push(`/assets/${a.id}`)"
             class="border-b hover:bg-blue-50/50 cursor-pointer">
             <td class="px-4 py-2.5 font-medium text-gray-700">{{ a.asset_code }}</td>
@@ -78,7 +79,13 @@
             <td class="px-4 py-2.5">
               <span class="px-2 py-0.5 bg-gray-100 rounded text-xs">{{ a.category_name }}</span>
             </td>
-            <td class="px-4 py-2.5 text-gray-500">{{ a.production_line_name || a.location || '-' }}</td>
+            <td class="px-4 py-2.5">
+              <span class="text-gray-700">{{ lokasiBerjalan(a) }}</span>
+              <span v-if="a.current_since" class="block text-[10px] text-gray-400">sejak {{ formatDate(a.current_since) }}</span>
+            </td>
+            <td class="px-4 py-2.5">
+              <span :class="kondisiBadge(a.condition)" class="px-2 py-0.5 rounded text-xs font-medium">{{ kondisiLabel(a.condition) }}</span>
+            </td>
             <td class="px-4 py-2.5 text-right">{{ formatCurrency(a.purchase_price) }}</td>
             <td class="px-4 py-2.5 text-right font-semibold text-green-700">{{ formatCurrency(a.book_value) }}</td>
             <td class="px-4 py-2.5 text-right text-red-600">{{ a.percent_depreciated }}%</td>
@@ -232,6 +239,22 @@ const statusBadge = (s: string) => ({
   under_maintenance: 'bg-amber-100 text-amber-700',
   idle: 'bg-blue-100 text-blue-700',
 }[s] || 'bg-gray-100 text-gray-600');
+
+// Lokasi berjalan diturunkan dari perpindahan terakhir (AST-CUSTODY-01).
+// Aset yang belum pernah dipindahkan jatuh ke kolom lama supaya tidak
+// mendadak kosong untuk data warisan.
+const lokasiBerjalan = (a: any) => {
+  if (a.current_location_type === 'project') return a.current_project_name || 'Proyek';
+  if (a.current_location_type) return a.current_location_label || (a.current_location_type === 'workshop' ? 'Workshop' : 'Vendor');
+  return a.production_line_name || a.location || '-';
+};
+const kondisiLabel = (k: string) => ({ baik: 'Baik', perlu_perbaikan: 'Perlu perbaikan', rusak: 'Rusak' }[k] || k || 'Baik');
+const kondisiBadge = (k: string) => ({
+  baik: 'bg-green-100 text-green-700',
+  perlu_perbaikan: 'bg-amber-100 text-amber-800',
+  rusak: 'bg-red-100 text-red-700',
+}[k] || 'bg-green-100 text-green-700');
+const formatDate = (d: string) => d ? new Date(d).toLocaleDateString('id-ID', { month: 'short', day: 'numeric', year: 'numeric' }) : '-';
 
 async function loadAll() {
   loading.value = true;

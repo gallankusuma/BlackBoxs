@@ -13228,7 +13228,42 @@ Regresi: `procurement` 184, `proc-agregat` 12, `vendor-price` 53,
 
 ---
 
-## Temuan susulan: HRINV-RBAC-01 sempat mematahkan DR-P0-03
+## AST-CUSTODY-01 — Tools & equipment: lokasi berjalan + kondisi
+
+**Permintaan pemilik (2 September 2026):** inventory EPC lebih banyak tools &
+equipment. Mesin las jenis X spec Y pindah workshop → Project A → Project B,
+dan kalau kondisinya tidak baik segera masuk perbaikan. Tiga keputusan yang
+diambil: riwayat penuh + lokasi berjalan, alat rusak masuk status perbaikan dan
+tidak bisa dialokasikan, berlaku untuk semua tools termasuk yang kecil.
+
+**Keadaan sebelumnya.** Modul Asset plant-oriented: `production_line_id`,
+`pnid_tag`, dan lokasi cuma teks bebas `assets.location`. Tidak ada `project_id`
+sama sekali. Di produksi: 3 aset, semuanya `active`, satu `location` berisi
+"pengoreng", 0 baris maintenance log, 0 baris `asset_status_history` — jadi
+tidak ada data warisan yang perlu dimigrasi.
+
+**Diterapkan.**
+
+- `ensureAssetCustodySchema` (`config/database.ts`): tabel `asset_movements` +
+  4 kolom kondisi di `assets` (`condition`, `condition_note`,
+  `condition_changed_at`, `condition_changed_by`).
+- `asset.routes.ts`: `GET /:id/movements`, `POST /:id/movements`,
+  `PATCH /:id/condition`; `SQL_LOKASI_TERAKHIR` ikut di `GET /` dan `GET /:id`.
+- `AssetDetail.vue`: tab "Lokasi & Kondisi" — lokasi berjalan, pengubah kondisi,
+  formulir pindah, tabel riwayat. `AssetList.vue`: kolom Lokasi Sekarang +
+  Kondisi.
+
+Empat aturan yang dijaga (alasannya di `CLAUDE.md`): lokasi **dihitung** dari
+perpindahan terakhir dan tidak pernah disimpan sebagai kolom; asal perpindahan
+diturunkan server, bukan dari body; kondisi menggerakkan `status` dalam satu
+transaction dengan jejak ke `asset_status_history` yang sudah ada, tapi
+`disposed` tidak pernah disentuh; alat rusak ditolak ke proyek
+(`KONDISI_BELUM_LAYAK`) tapi tetap boleh dikirim ke workshop/vendor.
+
+`npm run test:asset-custody` — 30 asersi. Lima mutasi diuji, semuanya
+tertangkap (3, 1, 2, 2, 1 asersi gagal).
+
+### Temuan susulan: HRINV-RBAC-01 sempat mematahkan DR-P0-03
 
 Regresi penuh menangkap `test:rbac` gagal di `daftar employee tetap terbaca →
 403`. Sapuan RBAC HR/inventory memasang `requirePermission('hr.employees.view')`
