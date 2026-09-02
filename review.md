@@ -12901,3 +12901,52 @@ itu tertangkap. Asersi yang selalu benar bukan penjaga.
 
 Regresi: `test:finance-rbac` 22, `test:procurement` 184, `test:inbox-item` 20.
 `tsc --noEmit` bersih, `npm run build` bersih.
+
+### Deploy FIN-02 s/d FIN-04 — 2 September 2026
+
+Tuntas tanpa rollback. Health 200 (siap 4 detik), smoke **30 lulus, 1 gagal**
+(temuan lama kredensial master).
+
+**Retry `HTTP 0` yang dipasang kemarin bekerja untuk pertama kalinya:**
+
+```
+⚠️  1 permintaan baru berhasil setelah diulang:
+    · GET /api/estimator/proposals/1/rab — gagal tersambung (timeout),
+      berhasil pada percobaan ke-2
+```
+
+Tanpa itu, satu timeout tepat setelah `pm2 restart` akan dihitung sebagai
+kegagalan di luar temuan lama, dan rilis yang sehat ini digulung balik — persis
+kejadian 1 September. Dan retry-nya **dilaporkan**, tidak disembunyikan.
+
+**Terverifikasi di `dist` produksi:**
+
+| Rujukan kolom yang tidak ada | |
+|---|---|
+| `c.total_cost`, `c.cost_per_unit`, `c.quantity_produced` | **0** |
+| `pt.gross_margin_pct`, `pt.total_revenue`, `pt.total_cogs` | **0** |
+| `SUM(total_cost)` | **0** |
+
+| Yang benar | |
+|---|---|
+| `c.total_cogs` / `pt.margin_percentage` / `wo.completed_quantity` | 7 / 4 / 5 |
+| `memoryStorage` / `validateUpload` | 2 / 3 |
+| `diskStorage` aktif | **0** |
+| `CREATE TABLE` di seluruh `dist/routes/*.js` | **0 berkas** |
+
+Bundel `FinanceAP.D49bknB8.js` dan `FinanceAR.BFPrq8xP.js` memuat pesan
+"gagal dimuat". Health 200; ketiga endpoint analitik menjawab 401 tanpa token.
+
+⚠️ Pemeriksaan pertama saya melaporkan `total_cost: 9`, `gross_margin_pct: 5`,
+`cost_per_unit: 7`, `diskStorage: 1` di dist — terlihat seperti perbaikan yang
+tidak naik. Itu keliru: yang terhitung adalah **alias keluaran** yang memang
+sengaja dipertahankan (`as total_cost_sum`, `as avg_cost_per_unit`,
+`as gross_margin_pct`) dan satu komentar yang menyebut `diskStorage`. Diperiksa
+ulang sebagai rujukan kolom (`c.total_cost`, `pt.gross_margin_pct`, dst.):
+semuanya nol. Dicatat karena hitungan kata mentah nyaris membuat saya melaporkan
+kegagalan yang tidak ada.
+
+**Catatan:** kelima endpoint analitik ini menembak tabel yang **kosong di
+produksi** (`cogs_tracking`, `profitability_tracking`, `sales_orders`,
+`financial_summary` semuanya 0 baris). Jadi layarnya berhenti error tapi tetap
+menampilkan kosong — yang diperbaiki query-nya, bukan ketiadaan datanya.
