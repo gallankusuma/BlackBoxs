@@ -12382,3 +12382,30 @@ loop yang dipasang balik langsung tertangkap.
 
 Regresi: `test:procurement` 184 lulus, `test:vendor-price` 53 lulus,
 `tsc --noEmit` bersih, `npm run build` bersih.
+
+### Deploy PROC-N1-01 — percobaan pertama dikembalikan, sebabnya health check sekali-jalan
+
+Deploy pertama digulung balik pada `❌ Backend TIDAK sehat setelah restart
+(health: 000)`. **Bukan kodenya:** pm2 melaporkan proses `online`, dan log yang
+dicetak skrip saat itu hanya berisi peringatan `ensure*Schema` — bukti backend
+sedang **di tengah boot**, bukan crash. Tidak ada satu pun exception.
+
+Skripnya memeriksa health **satu kali setelah `sleep 8`**. Boot backend
+menjalankan baseline schema + puluhan `ensure*` terhadap MySQL, dan lamanya
+berubah-ubah — di mesin itu ada sepuluh proses pm2. Petunjuk paling terang ada
+di percobaan yang sama: rollback justru sehat setelah **6** detik, sementara
+jalur utama gagal di detik ke-**8**. Ambangnya memang di sekitar situ.
+
+Diganti `tunggu_sehat()`: menunggu sampai 90 detik, memeriksa tiap 2 detik, dan
+melaporkan berapa lama backend benar-benar siap. Dipakai juga pada verifikasi
+rollback, yang punya cacat sama (`sleep 6` + sekali periksa) — dan alarm palsu
+"ROLLBACK TIDAK PULIH" lebih berbahaya lagi.
+
+**Gerbangnya tidak dilonggarkan.** Diuji terisolasi dengan `ssh` tiruan,
+8 asersi: sehat pada percobaan ke-3 → berhasil dan berhenti tepat di situ;
+tidak pernah sehat → tetap GAGAL; menjawab 500 → tetap GAGAL. Yang berubah
+hanya berhenti memvonis mati sesuatu yang masih menyalakan diri.
+
+Ini pola yang sama dengan retry smoke test kemarin, di tempat berbeda: satu
+pemeriksaan tunggal terhadap layanan yang baru bangun. Dua rilis sehat sudah
+digulung balik karenanya.

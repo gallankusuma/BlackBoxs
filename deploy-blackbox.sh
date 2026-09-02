@@ -170,6 +170,33 @@ echo "✅ Backend restarted"
 # ── Verifikasi setelah restart ───────────────────────────────────────────────
 # Proses "online" menurut pm2 tidak berarti aplikasinya melayani. Yang diuji di
 # sini permintaan HTTP sungguhan.
+# Menunggu backend BENAR-BENAR melayani, bukan menebaknya dengan satu `sleep`.
+#
+# Boot backend menjalankan baseline schema + puluhan fungsi ensure* terhadap
+# MySQL, dan lamanya berubah-ubah tergantung beban VPS (ada sepuluh proses pm2
+# di mesin ini). 2 September 2026 sebuah rilis yang sehat digulung balik karena
+# health diperiksa SEKALI pada detik ke-8 dan backend masih di tengah
+# `ensure*Schema` — pm2 melaporkan "online", dan log saat itu memang hanya
+# berisi peringatan skema, bukan satu pun error. Pada percobaan yang sama,
+# rollback justru sehat setelah 6 detik: ambangnya memang di sekitar situ.
+#
+# Ini TIDAK melonggarkan gerbang. Kalau sampai batas waktu tidak pernah 200,
+# hasilnya tetap gagal dan rilis tetap dikembalikan — yang berubah hanya
+# berhenti memvonis mati sesuatu yang masih menyalakan diri.
+HEALTH_KODE=""
+HEALTH_DETIK=0
+tunggu_sehat() {
+  local batas="${1:-90}"
+  local mulai=$SECONDS
+  while true; do
+    HEALTH_KODE=$(ssh "$VPS" "curl -s -o /dev/null -w '%{http_code}' -m 10 http://localhost:3005/api/health || true")
+    HEALTH_DETIK=$((SECONDS - mulai))
+    [ "$HEALTH_KODE" = "200" ] && return 0
+    [ "$HEALTH_DETIK" -ge "$batas" ] && return 1
+    sleep 2
+  done
+}
+
 # Kembalikan frontend DAN backend ke versi sebelumnya, lalu restart.
 kembalikan_versi_lama() {
   echo ""
@@ -197,29 +224,25 @@ kembalikan_versi_lama() {
       (cd $REMOTE_BACKEND && npm install --omit=dev >/dev/null 2>&1) || echo '   ⚠️ npm install saat rollback gagal'
     fi
     pm2 restart $PM2_NAME >/dev/null 2>&1 || true"
-  sleep 6
-  local kode
-  kode=$(ssh "$VPS" "curl -s -o /dev/null -w '%{http_code}' -m 15 http://localhost:3005/api/health || true")
-  if [ "$kode" = "200" ]; then
-    echo "✅ Versi lama kembali melayani (health 200)"
+  if tunggu_sehat 90; then
+    echo "✅ Versi lama kembali melayani (health 200, siap setelah ${HEALTH_DETIK}s)"
   else
-    echo "🚨 ROLLBACK TIDAK PULIH (health: $kode) — perlu ditangani manual SEKARANG"
+    echo "🚨 ROLLBACK TIDAK PULIH (health: $HEALTH_KODE setelah ${HEALTH_DETIK}s) — perlu ditangani manual SEKARANG"
   fi
 }
 
 echo "🔎 Verifikasi setelah restart..."
-sleep 8
 
-# Health check dasar dulu — cepat, dan kalau ini saja gagal tidak perlu lanjut.
-HEALTH=$(ssh "$VPS" "curl -s -o /dev/null -w '%{http_code}' -m 15 http://localhost:3005/api/health || true")
-if [ "$HEALTH" != "200" ]; then
-  echo "❌ Backend TIDAK sehat setelah restart (health: $HEALTH)"
+# Health check dasar dulu — kalau ini saja gagal tidak perlu lanjut. Ditunggu
+# sampai 90 detik, bukan diperiksa sekali setelah `sleep 8`; lihat tunggu_sehat.
+if ! tunggu_sehat 90; then
+  echo "❌ Backend TIDAK sehat setelah restart (health: $HEALTH_KODE, ditunggu ${HEALTH_DETIK}s)"
   echo "   Log terakhir:"
   ssh "$VPS" "pm2 logs $PM2_NAME --lines 15 --nostream --err 2>/dev/null | tail -15"
   kembalikan_versi_lama
   exit 1
 fi
-echo "✅ Health check 200"
+echo "✅ Health check 200 (siap setelah ${HEALTH_DETIK}s)"
 
 # Smoke test: health 200 saja TIDAK membuktikan aplikasi bekerja. Pada 12 Agustus
 # 2026 proses terlihat online dan health menjawab, sementara backend sama sekali
