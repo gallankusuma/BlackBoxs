@@ -2871,6 +2871,55 @@ const PERMISSION_CATALOG: { actions: string[]; resources: string[] }[] = [
 // melayani PR/PO sampai revisi itu disetujui — baru kemudian ditandai
 // `superseded_at`. Tanpa itu setiap koreksi harga membuat produknya kehilangan
 // harga selama menunggu persetujuan.
+// ==================== LAMPIRAN GRN (PROC-GRN-DOC-01) ====================
+// Surat jalan per GRN dan foto per item barang yang diterima.
+//
+// ⚠️ Fotonya ditambatkan ke (grn_id, product_id), BUKAN ke `grn_items.id`.
+// Alasannya bukan selera: tabel `grn_items` ada di skema lengkap dengan foreign
+// key, tapi TIDAK PERNAH DITULIS — `POST /goods-receipts` hanya menyisipkan
+// baris `goods_receipts`, dan itemnya disimpan sebagai JSON di kolom `notes`.
+// Diverifikasi di produksi: 4 GRN, 0 baris `grn_items`. Menambatkan foto ke id
+// yang tidak pernah lahir berarti foto tidak akan pernah bisa dipasang.
+//
+// Konsekuensinya: satu produk hanya boleh muncul sekali dalam satu GRN. Itu
+// memang keadaan sekarang — diperiksa di produksi dan lokal, nol PO yang memuat
+// product_id yang sama dua kali. Kalau suatu saat `grn_items` benar-benar diisi,
+// inilah yang harus ditinjau ulang lebih dulu.
+const ensureGrnAttachmentSchema = async (connection: any) => {
+  const statements = [
+    `CREATE TABLE IF NOT EXISTS grn_documents (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      grn_id INT NOT NULL,
+      doc_type VARCHAR(30) NOT NULL DEFAULT 'surat_jalan',
+      file_path VARCHAR(500) NOT NULL,
+      file_name VARCHAR(255) NOT NULL,
+      file_size INT NULL,
+      uploaded_by INT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_grn_documents_grn (grn_id),
+      CONSTRAINT fk_grn_documents_grn FOREIGN KEY (grn_id) REFERENCES goods_receipts(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+    `CREATE TABLE IF NOT EXISTS grn_item_photos (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      grn_id INT NOT NULL,
+      product_id INT NOT NULL,
+      file_path VARCHAR(500) NOT NULL,
+      file_name VARCHAR(255) NOT NULL,
+      file_size INT NULL,
+      uploaded_by INT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_grn_item_photos_grn (grn_id, product_id),
+      CONSTRAINT fk_grn_item_photos_grn FOREIGN KEY (grn_id) REFERENCES goods_receipts(id) ON DELETE CASCADE,
+      CONSTRAINT fk_grn_item_photos_product FOREIGN KEY (product_id) REFERENCES products(id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  ];
+
+  for (const statement of statements) {
+    await execSchemaEnsure(connection, statement);
+  }
+  console.log('✅ Skema lampiran GRN ensured');
+};
+
 const ensureVendorPriceApprovalSchema = async (connection: any) => {
   // Diperiksa SEBELUM kolomnya dibuat. Baris yang sudah ada saat migrasi ini
   // pertama kali jalan adalah harga yang memang sudah dipakai produksi selama
@@ -3219,6 +3268,7 @@ export async function initializeDatabase() {
     await ensureProposalItemOrderUnique(connection);
     await ensureDisposalSchema(connection);
     await ensureAssetStatusHistorySchema(connection);
+    await ensureGrnAttachmentSchema(connection);
     await ensureVendorPriceApprovalSchema(connection);
     await ensurePermissionCatalog(connection);
     await ensureMasterUserRow(connection);

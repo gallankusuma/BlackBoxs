@@ -31,6 +31,19 @@ if (!fs.existsSync(prAttachDir)) {
 }
 const prAttachUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB max
 
+// PROC-GRN-DOC-01: surat jalan & foto barang diterima.
+//
+// Foldernya `uploads/grn/`, yang TIDAK ada di daftar folder publik nginx
+// (`product-images`, `mr-photos`) — jadi permintaan ke `/uploads/grn/...`
+// diteruskan ke Node dan ditolak 403. Terverifikasi di produksi. Kalau nanti ada
+// yang memindahkannya ke folder publik, seluruh bukti penerimaan barang bisa
+// diunduh siapa pun yang punya URL-nya.
+const grnUploadDir = path.join(__dirname, '../../uploads/grn');
+if (!fs.existsSync(grnUploadDir)) {
+  fs.mkdirSync(grnUploadDir, { recursive: true });
+}
+const grnUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB max
+
 // PROC-R22: multer melempar errornya sendiri (mis. LIMIT_FILE_SIZE). Tanpa
 // handler ini error tersebut jatuh ke error handler global dan dibalas 500,
 // padahal berkas kebesaran adalah kesalahan permintaan — 413, bukan 500.
@@ -3081,10 +3094,26 @@ router.delete('/goods-receipts/:id', authMiddleware, requirePermission('procurem
     // Sisanya GRN yang belum pernah memposting stok — aman dihapus, tapi dalam
     // satu transaction dan tanpa menelan error, supaya tidak ada penghapusan
     // separuh jalan.
+    // Nama berkas lampiran dibaca SEBELUM barisnya hilang. Foreign key
+    // menghapus baris `grn_documents`/`grn_item_photos` secara cascade, tapi
+    // tidak menyentuh disk — tanpa langkah ini `uploads/grn/` terisi berkas
+    // yatim yang tidak ditunjuk baris mana pun dan tidak akan pernah dibersihkan.
+    const berkasLampiran = (await dbAll(
+      `SELECT file_path FROM grn_documents WHERE grn_id = ?
+       UNION ALL
+       SELECT file_path FROM grn_item_photos WHERE grn_id = ?`,
+      [id, id]
+    ) as any[]).map(r => path.basename(String(r.file_path || ''))).filter(Boolean);
+
     await withTransaction(async tx => {
       await tx.run('DELETE FROM grn_items WHERE grn_id = ?', [id]);
       await tx.run('DELETE FROM goods_receipts WHERE id = ?', [id]);
     });
+
+    // Baru sesudah baris database benar-benar hilang. Kalau berkasnya dihapus
+    // lebih dulu dan transaction gagal, GRN-nya tetap ada tapi lampirannya
+    // tinggal baris yang menunjuk berkas yang sudah tidak ada.
+    for (const nama of berkasLampiran) removeStoredFile(grnUploadDir, nama);
 
     res.json({ message: 'Goods receipt deleted successfully' });
   } catch (error: any) {
@@ -3471,6 +3500,246 @@ async function applyGrnToInventory(grn: any, items: any[], tx: TxRunner): Promis
 }
 
 // ── Manual Price Search ─────────────────────────────────────────────────────
+/**
+ * ========== LAMPIRAN GRN (PROC-GRN-DOC-01) ==========
+ *
+ * Surat jalan per GRN, dan foto per item barang yang diterima.
+ *
+ * Keputusan pemilik (2 September 2026): setelah GRN disetujui penuh, berkas
+ * masih BOLEH DITAMBAH tapi TIDAK BOLEH DIHAPUS. Foto susulan dari lapangan
+ * tetap bisa masuk, sementara bukti yang sudah ada tidak bisa dihilangkan
+ * setelah stoknya terlanjur bertambah. Tidak ada berkas yang diwajibkan
+ * sebelum approve — approval berjalan seperti sebelumnya.
+ */
+
+const getGrnOrNull = async (id: any) =>
+  await dbGet('SELECT id, grn_number, approval_status, notes FROM goods_receipts WHERE id = ?', [id]) as any;
+
+/** Produk yang benar-benar ada di GRN ini, dibaca dari `notes` (lihat catatan skema). */
+const produkDalamGrn = (grn: any): Set<number> => {
+  try {
+    const data = JSON.parse(grn?.notes || '{}');
+    return new Set((data.items || []).map((it: any) => Number(it.product_id)).filter((n: any) => Number.isFinite(n)));
+  } catch {
+    return new Set();
+  }
+};
+
+/**
+ * Menyimpan berkas ke disk + baris database dalam satu transaction.
+ *
+ * Seluruh berkas divalidasi LEBIH DULU: kalau satu ditolak, tidak ada berkas
+ * separuh yang terlanjur mendarat di disk. Kalau transaction-nya gagal, berkas
+ * yang sudah tertulis dihapus lagi — kalau tidak, tersisa file yatim yang tidak
+ * ditunjuk baris mana pun.
+ */
+const simpanLampiran = async (
+  files: Express.Multer.File[],
+  tipeDiizinkan: string[],
+  insert: (tx: TxRunner, filePath: string, file: { originalname: string; size: number }) => Promise<any>,
+) => {
+  const checked: { ext: string; buffer: Buffer; originalname: string; size: number }[] = [];
+  for (const file of files) {
+    const verdict = validateUpload(file.originalname, file.mimetype, file.buffer);
+    if (!verdict.ok) return { error: `${file.originalname}: ${verdict.error}` };
+    if (!tipeDiizinkan.includes(verdict.type as string)) {
+      return { error: `${file.originalname}: hanya ${tipeDiizinkan.join('/')} yang diterima di sini` };
+    }
+    checked.push({ ext: verdict.ext!, buffer: file.buffer, originalname: file.originalname, size: file.size });
+  }
+
+  const written: string[] = [];
+  try {
+    const rows = await withTransaction(async tx => {
+      const hasil: any[] = [];
+      for (const file of checked) {
+        const filename = storeValidatedFile(grnUploadDir, file.ext, file.buffer);
+        written.push(filename);
+        const filePath = '/uploads/grn/' + filename;
+        hasil.push(await insert(tx, filePath, file));
+      }
+      return hasil;
+    });
+    return { rows };
+  } catch (err) {
+    for (const filename of written) removeStoredFile(grnUploadDir, filename);
+    throw err;
+  }
+};
+
+/** Unduhan bersama untuk dokumen & foto: nama berkas saja, supaya `../` pada data lama tidak bisa keluar folder. */
+const kirimBerkasGrn = (res: Response, filePath: string, fileName: string) => {
+  const namaBerkas = path.basename(String(filePath || ''));
+  if (!namaBerkas) return res.status(404).json({ error: 'Berkas tidak ditemukan' });
+  const berkas = path.join(grnUploadDir, namaBerkas);
+  if (!fs.existsSync(berkas)) return res.status(404).json({ error: 'Berkas sudah tidak ada di server' });
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  return res.download(berkas, fileName || namaBerkas);
+};
+
+// Dokumen DAN foto dikembalikan dalam SATU permintaan. Mengambil foto per baris
+// item akan mengulang persis cacat yang baru dibereskan di layar PO
+// (PROC-N1-01): satu layar, ratusan permintaan.
+router.get('/goods-receipts/:id/attachments', authMiddleware, requirePermission('procurement.grn.view'), async (req: Request, res: Response) => {
+  try {
+    const grn = await getGrnOrNull(req.params.id);
+    if (!grn) return res.status(404).json({ error: 'GRN tidak ditemukan' });
+
+    const [documents, photos] = await Promise.all([
+      dbAll(`SELECT d.id, d.doc_type, d.file_name, d.file_size, d.created_at, u.full_name AS uploaded_by_name
+             FROM grn_documents d LEFT JOIN users u ON u.id = d.uploaded_by
+             WHERE d.grn_id = ? ORDER BY d.created_at ASC`, [req.params.id]),
+      dbAll(`SELECT p.id, p.product_id, p.file_name, p.file_size, p.created_at, u.full_name AS uploaded_by_name
+             FROM grn_item_photos p LEFT JOIN users u ON u.id = p.uploaded_by
+             WHERE p.grn_id = ? ORDER BY p.created_at ASC`, [req.params.id]),
+    ]);
+
+    res.json({ data: { documents, photos, locked: Number(grn.approval_status || 0) >= 2 } });
+  } catch (error) {
+    console.error('Error fetching GRN attachments:', error);
+    res.status(500).json({ error: 'Gagal mengambil lampiran GRN' });
+  }
+});
+
+router.post('/goods-receipts/:id/documents', authMiddleware, requirePermission('procurement.grn.edit'), grnUpload.array('file', 10), handleUploadErrors, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.userId ?? null;
+    const grn = await getGrnOrNull(req.params.id);
+    if (!grn) return res.status(404).json({ error: 'GRN tidak ditemukan' });
+
+    const files = (req as any).files as Express.Multer.File[];
+    if (!files || files.length === 0) return res.status(400).json({ error: 'Tidak ada berkas yang diunggah' });
+
+    const docType = String(req.body?.doc_type || 'surat_jalan').slice(0, 30);
+
+    const hasil = await simpanLampiran(files, ['pdf', 'jpg', 'png'], async (tx, filePath, file) => {
+      const r = await tx.run(
+        'INSERT INTO grn_documents (grn_id, doc_type, file_path, file_name, file_size, uploaded_by) VALUES (?, ?, ?, ?, ?, ?)',
+        [grn.id, docType, filePath, file.originalname, file.size, userId]
+      );
+      return { id: r.insertId, doc_type: docType, file_name: file.originalname, file_size: file.size };
+    });
+    if ((hasil as any).error) return res.status(400).json({ error: (hasil as any).error });
+
+    res.status(201).json({ message: `${(hasil as any).rows.length} berkas diunggah`, data: (hasil as any).rows });
+  } catch (error) {
+    console.error('Error uploading GRN document:', error);
+    res.status(500).json({ error: 'Gagal mengunggah dokumen GRN' });
+  }
+});
+
+router.post('/goods-receipts/:id/photos', authMiddleware, requirePermission('procurement.grn.edit'), grnUpload.array('file', 10), handleUploadErrors, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.userId ?? null;
+    const grn = await getGrnOrNull(req.params.id);
+    if (!grn) return res.status(404).json({ error: 'GRN tidak ditemukan' });
+
+    const productId = Number(req.body?.product_id);
+    if (!Number.isFinite(productId)) return res.status(400).json({ error: 'product_id wajib diisi', code: 'PRODUCT_ID_WAJIB' });
+
+    // Foto ditolak kalau produknya bukan bagian dari GRN ini. Tanpa ini, foto
+    // bisa ditempelkan ke barang yang tidak pernah diterima pada GRN tersebut —
+    // dan yang tersimpan bukan bukti, melainkan lampiran yang menyesatkan.
+    if (!produkDalamGrn(grn).has(productId)) {
+      return res.status(400).json({ error: 'Produk itu tidak ada di GRN ini', code: 'PRODUK_BUKAN_MILIK_GRN' });
+    }
+
+    const files = (req as any).files as Express.Multer.File[];
+    if (!files || files.length === 0) return res.status(400).json({ error: 'Tidak ada berkas yang diunggah' });
+
+    // Foto barang: hanya gambar. PDF/DOCX di sini hampir pasti salah kolom, dan
+    // layarnya merendernya sebagai gambar.
+    const hasil = await simpanLampiran(files, ['jpg', 'png'], async (tx, filePath, file) => {
+      const r = await tx.run(
+        'INSERT INTO grn_item_photos (grn_id, product_id, file_path, file_name, file_size, uploaded_by) VALUES (?, ?, ?, ?, ?, ?)',
+        [grn.id, productId, filePath, file.originalname, file.size, userId]
+      );
+      return { id: r.insertId, product_id: productId, file_name: file.originalname, file_size: file.size };
+    });
+    if ((hasil as any).error) return res.status(400).json({ error: (hasil as any).error });
+
+    res.status(201).json({ message: `${(hasil as any).rows.length} foto diunggah`, data: (hasil as any).rows });
+  } catch (error) {
+    console.error('Error uploading GRN photo:', error);
+    res.status(500).json({ error: 'Gagal mengunggah foto GRN' });
+  }
+});
+
+router.get('/goods-receipts/:id/documents/:docId/download', authMiddleware, requirePermission('procurement.grn.view'), async (req: Request, res: Response) => {
+  try {
+    const doc = await dbGet('SELECT file_path, file_name FROM grn_documents WHERE id = ? AND grn_id = ?',
+      [req.params.docId, req.params.id]) as any;
+    if (!doc) return res.status(404).json({ error: 'Dokumen tidak ditemukan' });
+    return kirimBerkasGrn(res, doc.file_path, doc.file_name);
+  } catch (error) {
+    console.error('Error downloading GRN document:', error);
+    res.status(500).json({ error: 'Gagal mengunduh dokumen' });
+  }
+});
+
+router.get('/goods-receipts/:id/photos/:photoId/download', authMiddleware, requirePermission('procurement.grn.view'), async (req: Request, res: Response) => {
+  try {
+    const foto = await dbGet('SELECT file_path, file_name FROM grn_item_photos WHERE id = ? AND grn_id = ?',
+      [req.params.photoId, req.params.id]) as any;
+    if (!foto) return res.status(404).json({ error: 'Foto tidak ditemukan' });
+    return kirimBerkasGrn(res, foto.file_path, foto.file_name);
+  } catch (error) {
+    console.error('Error downloading GRN photo:', error);
+    res.status(500).json({ error: 'Gagal mengunduh foto' });
+  }
+});
+
+/**
+ * Penghapusan lampiran — DITUTUP setelah GRN disetujui penuh.
+ *
+ * Ini keputusan pemilik, dan alasannya: begitu approval selesai, stok sudah
+ * bertambah. Bukti penerimaan yang bisa dihapus setelah barangnya masuk
+ * membuat GRN kehilangan gunanya sebagai bukti. Menambah berkas tetap boleh.
+ */
+const hapusLampiran = async (
+  req: Request, res: Response,
+  tabel: 'grn_documents' | 'grn_item_photos',
+  fileId: string,
+) => {
+  const grn = await getGrnOrNull(req.params.id);
+  if (!grn) return res.status(404).json({ error: 'GRN tidak ditemukan' });
+
+  if (Number(grn.approval_status || 0) >= 2) {
+    return res.status(409).json({
+      error: `GRN ${grn.grn_number || ''} sudah disetujui penuh, jadi lampirannya tidak bisa dihapus. Menambah berkas baru masih boleh.`,
+      code: 'GRN_SUDAH_DISETUJUI',
+    });
+  }
+
+  const baris = await dbGet(`SELECT id, file_path FROM ${tabel} WHERE id = ? AND grn_id = ?`, [fileId, grn.id]) as any;
+  if (!baris) return res.status(404).json({ error: 'Lampiran tidak ditemukan' });
+
+  // Baris dihapus DULU, berkasnya belakangan. Kalau urutannya dibalik dan
+  // DELETE-nya gagal, tersisa baris yang menunjuk berkas yang sudah lenyap —
+  // layarnya menampilkan lampiran yang tidak bisa diunduh.
+  await dbRun(`DELETE FROM ${tabel} WHERE id = ?`, [baris.id]);
+  removeStoredFile(grnUploadDir, path.basename(String(baris.file_path || '')));
+  return res.json({ message: 'Lampiran dihapus' });
+};
+
+router.delete('/goods-receipts/:id/documents/:docId', authMiddleware, requirePermission('procurement.grn.delete'), async (req: Request, res: Response) => {
+  try {
+    return await hapusLampiran(req, res, 'grn_documents', String(req.params.docId));
+  } catch (error) {
+    console.error('Error deleting GRN document:', error);
+    res.status(500).json({ error: 'Gagal menghapus dokumen' });
+  }
+});
+
+router.delete('/goods-receipts/:id/photos/:photoId', authMiddleware, requirePermission('procurement.grn.delete'), async (req: Request, res: Response) => {
+  try {
+    return await hapusLampiran(req, res, 'grn_item_photos', String(req.params.photoId));
+  } catch (error) {
+    console.error('Error deleting GRN photo:', error);
+    res.status(500).json({ error: 'Gagal menghapus foto' });
+  }
+});
+
 // Search prices by product name/SKU — returns vendor_prices + PO history + standard cost
 router.get('/price-search', authMiddleware, requirePermission('procurement.vendor-price-list.view'), async (req: Request, res: Response) => {
   try {

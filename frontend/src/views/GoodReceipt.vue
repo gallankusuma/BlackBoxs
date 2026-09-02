@@ -197,6 +197,7 @@
                     <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">UoM</th>
                     <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Spec Check</th>
                     <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Remarks</th>
+                    <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Foto</th>
                   </tr>
                 </thead>
                 <tbody class="bg-white divide-y divide-gray-200">
@@ -245,12 +246,86 @@
                         :disabled="isEditing"
                       />
                     </td>
+                    <td class="px-4 py-2">
+                      <!-- Foto ditambatkan ke GRN yang sudah tersimpan, jadi pada
+                           GRN baru belum ada tempat menempelkannya. Dikatakan apa
+                           adanya, bukan dibiarkan tombolnya mati tanpa penjelasan. -->
+                      <div v-if="!selectedGRN" class="text-[11px] text-gray-400 w-32">
+                        Simpan GRN dulu
+                      </div>
+                      <div v-else class="flex items-center gap-1 flex-wrap w-40">
+                        <div v-for="f in fotoItem(item.product_id)" :key="f.id" class="relative group">
+                          <img
+                            :src="fotoUrl(f.id)"
+                            :alt="f.file_name"
+                            :title="f.file_name"
+                            class="w-9 h-9 object-cover rounded border border-gray-200 cursor-pointer"
+                            @click="bukaFoto(f)"
+                          />
+                          <button
+                            v-if="!lampiran.locked"
+                            @click="hapusFoto(f)"
+                            title="Hapus foto"
+                            aria-label="Hapus foto"
+                            class="absolute -top-1 -right-1 hidden group-hover:flex items-center justify-center w-4 h-4 rounded-full bg-red-600 text-white text-[10px] leading-none"
+                          >&times;</button>
+                        </div>
+                        <label
+                          class="w-9 h-9 flex items-center justify-center rounded border border-dashed border-gray-300 text-gray-400 cursor-pointer hover:border-blue-400 hover:text-blue-500"
+                          :title="`Tambah foto untuk ${item.product_name}`"
+                        >
+                          <input type="file" accept="image/jpeg,image/png" multiple class="hidden"
+                            @change="unggahFoto(item.product_id, $event)" />
+                          +
+                        </label>
+                      </div>
+                    </td>
                   </tr>
                   <tr v-if="formItems.length === 0">
-                    <td colspan="6" class="px-4 py-4 text-center text-gray-500 text-sm">Pilih PO untuk load items.</td>
+                    <td colspan="7" class="px-4 py-4 text-center text-gray-500 text-sm">Pilih PO untuk load items.</td>
                   </tr>
                 </tbody>
               </table>
+            </div>
+          </div>
+
+          <!-- Surat jalan & dokumen -->
+          <div>
+            <div class="flex items-center justify-between mb-1">
+              <label class="block text-sm font-medium text-gray-700">Surat Jalan &amp; Dokumen</label>
+              <label v-if="selectedGRN"
+                class="text-xs px-3 py-1 rounded-lg bg-blue-600 text-white cursor-pointer hover:bg-blue-700">
+                <input type="file" accept="application/pdf,image/jpeg,image/png" multiple class="hidden"
+                  @change="unggahDokumen($event)" />
+                + Unggah
+              </label>
+            </div>
+
+            <p v-if="!selectedGRN" class="text-xs text-gray-400 border border-dashed border-gray-300 rounded-lg px-3 py-3">
+              Simpan GRN ini dulu, lalu buka kembali untuk melampirkan surat jalan dan foto barang.
+            </p>
+
+            <div v-else>
+              <p v-if="lampiran.locked" class="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 mb-2">
+                GRN sudah disetujui penuh — berkas masih boleh ditambah, tapi tidak bisa dihapus lagi.
+              </p>
+              <p v-if="lampiran.documents.length === 0" class="text-xs text-gray-400 border border-dashed border-gray-300 rounded-lg px-3 py-3">
+                Belum ada surat jalan atau dokumen.
+              </p>
+              <ul v-else class="border border-gray-200 rounded-lg divide-y">
+                <li v-for="d in lampiran.documents" :key="d.id" class="flex items-center justify-between px-3 py-2 text-sm">
+                  <div class="min-w-0">
+                    <div class="truncate">{{ d.file_name }}</div>
+                    <div class="text-[11px] text-gray-500">
+                      {{ ukuranBerkas(d.file_size) }}<span v-if="d.uploaded_by_name"> · {{ d.uploaded_by_name }}</span>
+                    </div>
+                  </div>
+                  <div class="flex items-center gap-2 shrink-0">
+                    <button @click="unduhDokumen(d)" class="text-blue-600 hover:text-blue-800 text-xs">Unduh</button>
+                    <button v-if="!lampiran.locked" @click="hapusDokumen(d)" class="text-red-600 hover:text-red-800 text-xs">Hapus</button>
+                  </div>
+                </li>
+              </ul>
             </div>
           </div>
 
@@ -354,6 +429,126 @@ const isEditing = ref(false);
 const submitting = ref(false);
 const successMsg = ref('');
 const selectedGRN = ref<any>(null);
+
+// ── Lampiran GRN (PROC-GRN-DOC-01) ──────────────────────────────────────────
+// `locked` datang dari backend (GRN sudah disetujui penuh): berkas masih boleh
+// ditambah, tapi tidak boleh dihapus lagi. Layar tidak menghitungnya sendiri —
+// satu sumber kebenaran, supaya tombol Hapus tidak muncul untuk sesuatu yang
+// pasti ditolak server.
+const lampiran = ref<{ documents: any[]; photos: any[]; locked: boolean }>({
+  documents: [], photos: [], locked: false,
+});
+
+// Foto diambil lewat permintaan ber-Authorization lalu dijadikan blob URL.
+// TIDAK memakai `?token=` di `src` — token di URL ikut tercatat di log akses,
+// riwayat browser, dan header Referer, dan jalur itu memang sudah dihapus dari
+// kode ini.
+const fotoBlob = ref<Record<number, string>>({});
+
+const bebaskanBlob = () => {
+  for (const url of Object.values(fotoBlob.value)) URL.revokeObjectURL(url);
+  fotoBlob.value = {};
+};
+
+const muatLampiran = async (grnId: number) => {
+  bebaskanBlob();
+  try {
+    const res = await api.get(`/procurement/goods-receipts/${grnId}/attachments`);
+    lampiran.value = {
+      documents: res.data?.data?.documents || [],
+      photos: res.data?.data?.photos || [],
+      locked: !!res.data?.data?.locked,
+    };
+  } catch (error) {
+    console.error('Gagal memuat lampiran GRN:', error);
+    lampiran.value = { documents: [], photos: [], locked: false };
+    return;
+  }
+
+  // Byte gambar memang harus diambil satu per satu — tidak ada agregat untuk
+  // itu. Jumlahnya terbatas oleh banyaknya item dalam satu GRN, jadi tetap jauh
+  // di bawah batas rate limit; yang tidak boleh adalah menariknya berulang tiap
+  // render, karena itu hasilnya disimpan di `fotoBlob`.
+  await Promise.all((lampiran.value.photos || []).map(async (f: any) => {
+    try {
+      const r = await api.get(`/procurement/goods-receipts/${grnId}/photos/${f.id}/download`, { responseType: 'blob' });
+      fotoBlob.value = { ...fotoBlob.value, [f.id]: URL.createObjectURL(r.data) };
+    } catch { /* foto gagal dimuat — kotaknya kosong, sisanya tetap tampil */ }
+  }));
+};
+
+const fotoItem = (productId: number) =>
+  (lampiran.value.photos || []).filter((f: any) => Number(f.product_id) === Number(productId));
+
+const fotoUrl = (photoId: number) => fotoBlob.value[photoId] || '';
+
+const bukaFoto = (f: any) => {
+  const url = fotoBlob.value[f.id];
+  if (url) window.open(url, '_blank');
+};
+
+const ukuranBerkas = (bytes: number | null | undefined) => {
+  const n = Number(bytes || 0);
+  if (!n) return '-';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+};
+
+const ambilBerkas = (event: Event): File[] => {
+  const input = event.target as HTMLInputElement;
+  const files = Array.from(input.files || []);
+  input.value = '';  // supaya memilih berkas yang sama lagi tetap memicu change
+  return files;
+};
+
+const unggahKe = async (url: string, files: File[], extra?: Record<string, string>) => {
+  if (!selectedGRN.value || files.length === 0) return;
+  const fd = new FormData();
+  for (const f of files) fd.append('file', f);
+  for (const [k, v] of Object.entries(extra || {})) fd.append(k, v);
+  try {
+    await api.post(url, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+    await muatLampiran(selectedGRN.value.id);
+  } catch (error: any) {
+    alert(error?.response?.data?.error || 'Gagal mengunggah berkas');
+  }
+};
+
+const unggahDokumen = (event: Event) =>
+  unggahKe(`/procurement/goods-receipts/${selectedGRN.value.id}/documents`, ambilBerkas(event), { doc_type: 'surat_jalan' });
+
+const unggahFoto = (productId: number, event: Event) =>
+  unggahKe(`/procurement/goods-receipts/${selectedGRN.value.id}/photos`, ambilBerkas(event), { product_id: String(productId) });
+
+const unduhDokumen = async (d: any) => {
+  try {
+    const r = await api.get(`/procurement/goods-receipts/${selectedGRN.value.id}/documents/${d.id}/download`, { responseType: 'blob' });
+    const url = URL.createObjectURL(r.data);
+    const a = document.createElement('a');
+    a.href = url; a.download = d.file_name || 'dokumen';
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (error: any) {
+    alert(error?.response?.data?.error || 'Gagal mengunduh dokumen');
+  }
+};
+
+const hapusLampiranDi = async (jalur: string, konfirmasi: string) => {
+  if (!confirm(konfirmasi)) return;
+  try {
+    await api.delete(jalur);
+    await muatLampiran(selectedGRN.value.id);
+  } catch (error: any) {
+    alert(error?.response?.data?.error || 'Gagal menghapus lampiran');
+  }
+};
+
+const hapusDokumen = (d: any) =>
+  hapusLampiranDi(`/procurement/goods-receipts/${selectedGRN.value.id}/documents/${d.id}`, `Hapus dokumen "${d.file_name}"?`);
+
+const hapusFoto = (f: any) =>
+  hapusLampiranDi(`/procurement/goods-receipts/${selectedGRN.value.id}/photos/${f.id}`, `Hapus foto "${f.file_name}"?`);
 
 const form = ref({
   po_id: null as number | null,
@@ -630,6 +825,8 @@ const viewGRN = async (gr: any) => {
     console.error('Failed to load GRN details:', error);
   }
 
+  await muatLampiran(gr.id);
+
   showModal.value = true;
 };
 
@@ -716,6 +913,10 @@ const loadPOData = async (poId: number) => {
 };
 
 const openCreateModal = () => {
+  // GRN baru belum punya id, jadi belum ada tempat menempelkan lampiran.
+  selectedGRN.value = null;
+  bebaskanBlob();
+  lampiran.value = { documents: [], photos: [], locked: false };
   isEditing.value = false;
   form.value = {
     po_id: null,
@@ -732,6 +933,9 @@ const openCreateModal = () => {
 const closeModal = () => {
   showModal.value = false;
   successMsg.value = '';
+  // Blob URL tidak dibebaskan sendiri oleh browser; tanpa ini tiap kali modal
+  // dibuka-tutup memori foto menumpuk sampai tab-nya di-reload.
+  bebaskanBlob();
 };
 
 const toDateOnly = (value: string | null | undefined) => {

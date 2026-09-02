@@ -12436,3 +12436,76 @@ Urutan route itu yang paling perlu dilihat langsung di produksi: kalau terbalik,
 Express membaca "allocations" sebagai id dan menjawab 404 — tanpa satu pun error
 saat build, dan tanpa tes lokal yang gagal kalau kebetulan urutannya benar di
 mesin sendiri.
+
+---
+
+## [DEV] Lampiran GRN — surat jalan & foto per item (PROC-GRN-DOC-01) — 2 September 2026
+
+Permintaan pemilik: modul GRN dilengkapi unggahan surat jalan dan foto per item.
+
+### Keputusan pemilik (ditanyakan lebih dulu)
+
+| Pertanyaan | Keputusan |
+|---|---|
+| Setelah GRN disetujui penuh | **Boleh tambah, tidak boleh hapus** |
+| Kelengkapan wajib sebelum approve | **Tidak ada yang wajib** |
+
+### Temuan yang mengubah rancangan
+
+`grn_items` — tabel yang seharusnya menampung item GRN — **tidak pernah ditulis
+kode mana pun.** `POST /goods-receipts` hanya menyisipkan baris
+`goods_receipts`; itemnya disimpan sebagai JSON di kolom `notes`, dan posting
+stok saat approve juga membaca dari situ. Produksi: **4 GRN, 0 baris
+`grn_items`.**
+
+Karena itu foto ditambatkan ke **`(grn_id, product_id)`**, bukan `grn_items.id`
+yang tidak akan pernah lahir. Konsekuensinya satu produk hanya boleh muncul
+sekali per GRN — diperiksa: nol PO memuat `product_id` yang sama dua kali, di
+produksi maupun lokal.
+
+### Yang dibangun
+
+`ensureGrnAttachmentSchema` (`grn_documents`, `grn_item_photos`), tujuh endpoint,
+dan bagian baru di `GoodReceipt.vue`: kolom Foto per baris item dengan thumbnail,
+serta panel Surat Jalan & Dokumen.
+
+Berkas disimpan di `backend/uploads/grn/` — **tidak** terdaftar sebagai folder
+publik nginx, jadi otomatis diteruskan ke Node dan ditolak 403 tanpa perlu
+mengubah konfigurasi nginx sama sekali.
+
+Foto ditampilkan lewat permintaan ber-`Authorization` yang dijadikan blob URL,
+bukan `?token=` di `src`. Dokumen dan foto diambil dalam **satu** permintaan
+(`/attachments`) — mengambil foto per baris item akan mengulang cacat N+1 yang
+baru dibereskan di layar PO.
+
+Batasan yang ditampilkan apa adanya di layar: GRN baru belum punya id, jadi
+lampiran baru bisa dipasang setelah GRN disimpan. Layarnya mengatakan itu, bukan
+membiarkan tombolnya mati tanpa penjelasan.
+
+### Verifikasi
+
+`tests/grn-lampiran.ts` — **31 lulus, 0 gagal**. Enam mutasi dijalankan,
+semuanya tertangkap:
+
+| Mutasi | Asersi gagal |
+|---|---|
+| folder GRN dibuka ke publik (kebocoran bukti) | 1 |
+| lampiran boleh dihapus setelah GRN disetujui | 2 |
+| foto boleh ditempel ke produk di luar GRN | 2 |
+| PDF diterima di kolom foto | 2 |
+| hapus lampiran tidak menghapus berkasnya | 1 |
+| hapus GRN meninggalkan berkas yatim | 1 |
+
+Regresi: `test:procurement` 184, `test:proc-agregat` 12, `test:vendor-price` 53.
+`tsc --noEmit` bersih, `npm run build` bersih.
+
+### BUG LAIN yang ikut ketahuan — belum dikerjakan
+
+`approval.routes.ts` (~baris 497-498) menghitung `item_count` dan
+`total_qty_received` GRN dari `grn_items` — tabel yang tidak pernah diisi itu.
+Akibatnya **Approval Inbox menampilkan 0 item untuk semua GRN**, padahal isi
+sebenarnya 5, 1, 1, dan 7. Penyetuju melihat angka yang salah saat memutuskan.
+
+Ada dua jalan (perbaiki bacaannya dari `notes`, atau benar-benar mengisi
+`grn_items` dan mengubah semua pembacanya) dan pilihannya menyentuh jalur tulis
+GRN, jadi **tidak dikerjakan sepihak** — di luar permintaan.

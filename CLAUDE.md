@@ -321,6 +321,42 @@ dan angkanya tetap benar).
 ⚠️ Menaikkan batas rate limit **bukan** perbaikan untuk gejala ini. Itu hanya
 menunda, dan menipis lagi sendiri begitu jumlah PO bertambah.
 
+### Lampiran GRN: surat jalan & foto per item (PROC-GRN-DOC-01)
+
+Berkas disimpan di `backend/uploads/grn/`. Folder itu **tidak** ada di daftar
+publik nginx (`product-images`, `mr-photos`), jadi `/uploads/grn/...` diteruskan
+ke Node dan ditolak 403 — otomatis, tanpa perlu mengubah nginx. Kalau ada yang
+memindahkannya ke kelompok publik, seluruh bukti penerimaan barang bisa diunduh
+siapa pun yang punya URL-nya. Dijaga `npm run test:grn-lampiran`.
+
+⚠️ **Foto ditambatkan ke `(grn_id, product_id)`, bukan `grn_items.id`.** Tabel
+`grn_items` ada di skema lengkap dengan foreign key tapi **tidak pernah ditulis
+kode mana pun** — `POST /goods-receipts` hanya menyisipkan baris
+`goods_receipts`, dan itemnya disimpan sebagai JSON di kolom `notes`; posting
+stok saat approve juga membaca dari situ. Konsekuensinya: satu produk hanya
+boleh muncul sekali dalam satu GRN (keadaan sekarang: nol PO memuat product_id
+yang sama dua kali, di produksi maupun lokal). Kalau `grn_items` suatu saat
+benar-benar diisi, penambat foto ini yang harus ditinjau lebih dulu.
+
+Aturan yang harus dijaga:
+
+1. **Setelah GRN disetujui penuh, berkas boleh DITAMBAH tapi tidak boleh
+   DIHAPUS** (`GRN_SUDAH_DISETUJUI`). Keputusan pemilik: stoknya sudah
+   bertambah, jadi bukti yang bisa dihapus setelah barangnya masuk tidak lagi
+   berguna sebagai bukti — sementara foto susulan dari lapangan tetap perlu
+   bisa masuk.
+2. **Tidak ada berkas yang diwajibkan sebelum approve.** Approval GRN berjalan
+   seperti sebelumnya; jangan menambahkan syarat kelengkapan tanpa keputusan
+   pemilik.
+3. **Isi berkas diperiksa, bukan ekstensinya** (`validateUpload` magic-byte).
+   Kolom foto hanya menerima jpg/png; dokumen menerima pdf/jpg/png.
+4. **Layar mengambil dokumen dan foto dalam SATU permintaan**
+   (`GET /goods-receipts/:id/attachments`). Mengambil foto per baris item akan
+   mengulang persis cacat N+1 di PROC-N1-01.
+5. Foto ditampilkan lewat permintaan ber-`Authorization` yang dijadikan blob
+   URL — **bukan** `?token=` di `src`. Jalur token-di-URL sudah tidak ada lagi
+   di kode ini, dan token di URL ikut tercatat di log akses serta Referer.
+
 ### Approval harga vendor (PROC-VPL-01)
 
 `vendor_prices` dulu ditulis tanpa gerbang apa pun, dan angkanya **saat itu juga**
