@@ -409,8 +409,19 @@ tidak ada nama tabel yang disebut SQL tapi tidak ada di database.
 
 ### RBAC HR, Inventory, Warehouse (HRINV-RBAC-01)
 
-49 endpoint digembok: 17 di `hr.routes.ts` (10 sudah bergerbang sebelumnya),
+48 endpoint digembok: 16 di `hr.routes.ts` (10 sudah bergerbang sebelumnya),
 17 di `inventory.routes.ts`, 15 di `warehouse.routes.ts`.
+
+⚠️ **`GET /hr/employees` sengaja TIDAK bergerbang** — ini satu-satunya
+pengecualian, dan pernah salah dipasang. Sapuan ini sempat menggemboknya
+`hr.employees.view`, tepat di bawah komentar DR-P0-03 yang menyatakan ia
+sengaja terbuka. `ProjectTimesheets.vue` dan `ManpowerPlan.vue` memakai daftar
+itu sekadar untuk dropdown nama; role proyek tanpa permission HR akan menerima
+403 dan dropdown kosong tanpa pesan apa pun. Yang menjaga data kompensasi di
+sana adalah **redaksi** (`salary_redacted`, dibuka `hr.payroll.view`), bukan
+gerbang akses. Pemindai gerbang di `tests/hr-inv-rbac.ts` menyebut pengecualian
+ini di allowlist `DIKECUALIKAN` — pengecualian yang tidak dituliskan akan
+berkembang diam-diam.
 
 ⚠️ **Endpoint `/mobile/*` TIDAK BOLEH digembok `requirePermission`.** Ia dipakai
 PWA karyawan dengan token mobile, yang tidak punya `userId` — memasangnya di

@@ -13225,3 +13225,29 @@ tertangkap: penolakan lama dipasang balik (2), pemulihan nama dilepas (2),
 Regresi: `procurement` 184, `proc-agregat` 12, `vendor-price` 53,
 `grn-lampiran` 31, `inbox-item` 20, `hr-inv-rbac` 25, `finance-rbac` 22.
 `tsc --noEmit` bersih, `npm run build` bersih.
+
+---
+
+## Temuan susulan: HRINV-RBAC-01 sempat mematahkan DR-P0-03
+
+Regresi penuh menangkap `test:rbac` gagal di `daftar employee tetap terbaca →
+403`. Sapuan RBAC HR/inventory memasang `requirePermission('hr.employees.view')`
+di `GET /hr/employees` — **tepat di bawah komentar yang menyatakan endpoint itu
+sengaja TIDAK digembok** (DR-P0-03). Komentarnya dibiarkan, jadi kode dan
+alasannya saling bertentangan tanpa ada yang menyadarinya.
+
+Dampaknya nyata meski belum terjadi: `ProjectTimesheets.vue` dan
+`ManpowerPlan.vue` memakai daftar itu sekadar untuk dropdown nama. Role proyek
+tanpa permission HR akan mendapat 403 dan dropdown kosong tanpa pesan apa pun.
+
+Diperiksa di produksi sebelum memutuskan: kelima user aktif memegang
+`hr.employees.view`, jadi **tidak ada yang terdampak sekarang** — gerbangnya
+akan menggigit begitu role proyek pertama dibuat.
+
+**Diterapkan:** gerbang dicabut, kembali ke perilaku DR-P0-03 (terbuka, angka
+gaji diredaksi lewat `hr.payroll.view`). Komentarnya menyebut kekeliruan ini
+supaya tidak dipasang ulang. Di `tests/hr-inv-rbac.ts` pemindai gerbang sekarang
+punya allowlist `DIKECUALIKAN` berisi **satu** baris yang disebut namanya —
+pengecualian yang tidak dituliskan akan berkembang diam-diam.
+
+`test:rbac` 181, `test:hr-inv-rbac` 25, keduanya 0 gagal.

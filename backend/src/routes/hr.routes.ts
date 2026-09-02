@@ -86,7 +86,14 @@ router.delete('/position-rates/:id', authMiddleware, requirePermission('hr.posit
 // `basic_rate`, `tunjangan_rate`, dan `ot_rate` seluruh karyawan. Itu kebocoran
 // data kompensasi lintas departemen lewat endpoint yang dipanggil hampir semua
 // halaman.
-router.get('/employees', authMiddleware, requirePermission('hr.employees.view'), async (req: Request, res: Response) => {
+//
+// Sempat digembok `hr.employees.view` saat sapuan RBAC HRINV-RBAC-01 dan itu
+// KELIRU: `ProjectTimesheets.vue` dan `ManpowerPlan.vue` memakai daftar ini
+// sekadar untuk dropdown nama. Role proyek yang tidak memegang permission HR
+// akan menerima 403 dan dropdown-nya kosong tanpa pesan apa pun — layarnya
+// tidak rusak, cuma tidak bisa dipakai. Gerbangnya dicabut lagi; yang menjaga
+// data kompensasi adalah redaksi di bawah, bukan gerbang di sini.
+router.get('/employees', authMiddleware, async (req: Request, res: Response) => {
   try {
     // Batas permission ditegaskan di sini (jawaban atas "perlu klarifikasi"
     // reviewer): membuka angka gaji HANYA lewat `hr.payroll.view`.

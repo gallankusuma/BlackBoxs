@@ -63,6 +63,11 @@ async function main() {
 
   // ── 1. Cakupan gerbang ──────────────────────────────────────────────────
   console.log('\n1. Setiap endpoint desktop bergerbang; endpoint mobile TIDAK');
+  // Satu-satunya pengecualian, dan disebut namanya supaya tidak berkembang
+  // diam-diam: daftar employee memang TIDAK bergerbang (DR-P0-03) karena
+  // ProjectTimesheets & ManpowerPlan memakainya sekadar untuk dropdown nama.
+  // Yang menjaga data kompensasi di sana adalah redaksi, diuji di test:rbac.
+  const DIKECUALIKAN = ['hr.routes.ts: GET /employees'];
   const tanpaGerbang: string[] = [];
   const mobileBergerbang: string[] = [];
   for (const f of BERKAS) {
@@ -70,7 +75,8 @@ async function main() {
       const [, method, jalur, sisa] = m;
       const mobile = jalur.startsWith('/mobile');
       if (mobile && sisa.includes('requirePermission')) mobileBergerbang.push(`${method.toUpperCase()} ${jalur}`);
-      if (!mobile && !sisa.includes('requirePermission')) tanpaGerbang.push(`${f}: ${method.toUpperCase()} ${jalur}`);
+      const tanda = `${f}: ${method.toUpperCase()} ${jalur}`;
+      if (!mobile && !sisa.includes('requirePermission') && !DIKECUALIKAN.includes(tanda)) tanpaGerbang.push(tanda);
     }
   }
   chk('endpoint desktop tanpa gerbang', tanpaGerbang, []);
@@ -107,8 +113,13 @@ async function main() {
   );
   const emp = { id: empIns.insertId };
 
+  // Daftar karyawan sengaja TIDAK ikut ditolak — ia dikecualikan di atas.
+  // Yang dijaga di sana angkanya, bukan aksesnya.
+  const polosLihatEmp = await call('GET', '/hr/employees', undefined, polos);
+  chk('  baca karyawan tetap terbuka, tapi gaji diredaksi',
+    [polosLihatEmp.status, (polosLihatEmp.json?.data || [])[0]?.salary_redacted], [200, true]);
+
   for (const [label, m, p, b] of [
-    ['baca karyawan', 'GET', '/hr/employees', undefined],
     ['baca riwayat slip gaji', 'GET', '/hr/payslip/history', undefined],
     ['baca kasbon', 'GET', '/hr/advances', undefined],
     ['baca absensi', 'GET', '/hr/attendance', undefined],
