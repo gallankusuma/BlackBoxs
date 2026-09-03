@@ -13330,3 +13330,81 @@ mengarahkan ke layar Purchase Order. Sebelumnya item itu hilang tanpa suara.
 **Catatan proses:** ini lolos dari kerjaan sebelumnya karena tesnya menembak
 endpoint yang gue perbaiki, bukan tombol yang dipencet pelapor. Pemindai frasa
 di bagian 5 sekarang memeriksa **kedua** kalimat penolakan.
+
+---
+
+## GL-01 — General Ledger: skema diambil, jalur tulis ditulis ulang
+
+**Permintaan pemilik (3 September 2026):** ambil modul finance general ledger
+dari `app.rheologi.id`. Kredensial yang diberikan **tidak dipakai** — aplikasi
+itu berjalan di VPS yang sama, jadi sumbernya dibaca langsung dari
+`/var/www/erp-rheologi/backend/src`, tanpa login ke aplikasi mana pun.
+
+**Modulnya nyata**, bukan kerangka: ter-mount di `/api/gl`, 632 baris,
+16 endpoint, dan datanya hidup — 101 akun COA, 41 jurnal, 94 baris jurnal,
+36 periode fiskal. Skemanya bagus: control account dengan tautan subledger,
+`idempotency_key` unik, rantai reversal dua arah, optimistic lock periode,
+dimensi per baris jurnal.
+
+**Kodenya tidak diambil**, dan setiap alasannya diverifikasi di sumbernya:
+
+| Temuan | Bukti |
+|---|---|
+| Nol transaction di seluruh 632 baris | `grep -c 'withTransaction\|beginTransaction\|START TRANSACTION\|getConnection'` → 0 |
+| Jurnal bisa lahir tidak seimbang | Header di-INSERT lalu baris di-loop; keseimbangan diperiksa atas **body request** |
+| Posting bisa berhenti di tengah | Update saldo N akun dalam loop, baru menandai `posted` — crash → saldo berubah sebagian, entry masih draft, posting ulang menghitung dua kali |
+| `current_balance` disimpan | Trial balance punya dua jalur: `journal_lines` dan kolom itu |
+| Periode tidak ditegakkan | `period?.id \|\| null` saat buat; posting tidak melihat periode |
+| Jurnal bisa mendarat di akun header | `is_header` hanya dipakai di CRUD dan filter laporan |
+| `is_postable`, `is_control_account`, `allow_manual_posting` | Ada di skema, nol kali disebut kode |
+| Tanpa otorisasi | 16 endpoint, nol `requirePermission` |
+
+**Diterapkan (2 langkah, keduanya sudah di-commit).**
+
+Langkah 1 — skema: enam tabel plus bagan akun EPC 68 akun (56 postable,
+12 header, 6 kontrol) dan 47 peran pemetaan untuk 24 peristiwa. Tidak ada kolom
+`current_balance` maupun `opening_balance`.
+
+Langkah 2 — `gl.routes.ts` (26 endpoint): COA, periode fiskal, jurnal
+(draft → posted → reversed), trial balance, buku besar, laba rugi, neraca,
+pemetaan, setelan. Semua bergerbang `requirePermission`.
+
+**Dua cacat di kode saya sendiri ditemukan oleh tesnya, bukan setelah deploy:**
+
+1. **`withTransaction` commit kalau callback `return`, bukan `throw`.** Versi
+   pertama me-return objek kegagalan — jurnal yang ditolak karena tidak
+   seimbang **tetap tersimpan**, persis cacat yang modul ini dibuat untuk
+   menghindarinya. Diperbaiki dengan `class GlGagal extends Error`.
+2. **`/ledger` menulis filter statusnya sendiri** (`je.status = 'posted'`)
+   alih-alih memakai konstanta bersama. Akibatnya jurnal yang sudah dibalik
+   hilang dari mutasi sementara pembaliknya tetap ada, dan saldo akhirnya
+   **berbalik tanda**: -250000 untuk yang seharusnya 0. Itu cacat "dua jalur"
+   yang sama yang saya tuduhkan ke GL asal. Sekarang ada `STATUS_DIHITUNG`, dan
+   tesnya memindai setiap template literal yang membaca `jl.debit`/`jl.credit`.
+
+**Satu lubang tes ditemukan lewat mutasi.** Mutasi "keseimbangan diperiksa dari
+body, bukan dari baris tersimpan" awalnya **0 asersi gagal** — padahal itu klaim
+terpenting modul ini. Sebabnya: dalam keadaan normal body dan baris tersimpan
+identik. Ditambahkan kasus yang membuat keduanya berbeda: sepuluh baris
+`10.00004` dibulatkan DECIMAL(20,4) jadi `10.0000` masing-masing (tersimpan
+100.0000) melawan satu baris `100.0004`. Menurut body seimbang, menurut yang
+tersimpan tidak. Setelah itu mutasinya menangkap 6 asersi.
+
+`npm run test:gl-core` — 50 asersi. Delapan mutasi diuji, semuanya tertangkap
+(6, 4, 5, 1, 1, 6, 5, 2 asersi gagal).
+
+**Keputusan pemilik yang tertanam di kode:**
+
+- **Percentage-of-completion.** Pendapatan diakui saat progress disetujui, bukan
+  saat tagihan terbit. Biaya diakui saat terjadi ke beban pokok, bukan ditumpuk
+  di WIP — pelepasan proporsional butuh EAC yang dipercaya, dan EAC itu angka
+  turunan yang kalau meleset memindahkan laba antar periode tanpa ada yang salah
+  mencatat apa pun.
+- **Tidak ada jurnal mundur.** `gl_settings.auto_posting_start_date` lahir NULL
+  dan selama NULL auto-posting mati total. Penegakannya setelan, bukan janji.
+
+**Masih terbuka, dan tidak menghalangi:** PPh final atau tarif umum, dan angka
+saldo awal (harus dari neraca terakhir, bukan dari data aplikasi ini).
+
+**Belum dikerjakan:** auto-posting lima modul (AP, AR, GRN, depresiasi, payroll)
+dan layarnya.

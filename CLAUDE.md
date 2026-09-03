@@ -502,6 +502,83 @@ Karena itu endpoint inventory/warehouse digembok `master-data.warehouses.*` dan
 **Stock Transfer & Stock Adjustment sudah DICABUT** (CABUT-STOCK-01,
 keputusan pemilik 2 September 2026) — lihat bagian di bawah.
 
+### General Ledger (GL-01)
+
+Skema diadaptasi dari GL di instance `erp-rheologi` (VPS yang sama,
+`/var/www/erp-rheologi/backend/src/routes/gl.routes.ts`). Modul di sana nyata
+dan datanya hidup — 101 akun, 41 jurnal. **Yang diambil hanya skemanya**;
+seluruh jalur tulis ditulis ulang, karena yang di sana punya lima cacat yang
+semuanya diverifikasi di sumbernya:
+
+| Cacat di GL asal | Akibatnya |
+|---|---|
+| **Nol transaction** di seluruh 632 baris | Gagal di baris ke-3 dari 4 meninggalkan jurnal yang `total_debit`/`total_credit`-nya bilang seimbang sementara barisnya tidak |
+| Keseimbangan diperiksa atas **body request** | Yang tersimpan tidak pernah diperiksa |
+| Posting me-loop update saldo lalu baru menandai `posted` | Crash di tengah → sebagian saldo berubah, entry masih draft, posting ulang menghitung dua kali |
+| `current_balance` disimpan sebagai kolom | Trial balance punya dua jalur: `journal_lines` dan kolom itu |
+| Periode dicari `period?.id \|\| null`, posting tidak melihat periode | Periode tertutup tidak mengunci apa pun |
+| Jurnal bisa mendarat di akun header | Laporan memfilter `is_header = 0`, jadi uangnya masuk lalu tidak muncul di mana pun |
+
+Aturan yang harus dijaga di `gl.routes.ts`:
+
+1. **Penolakan di dalam transaction WAJIB dilempar (`throw new GlGagal`), tidak
+   boleh di-`return`.** `withTransaction` menganggap callback yang selesai tanpa
+   melempar sebagai sukses dan **commit**. Versi pertama berkas ini me-return
+   objek kegagalan, dan jurnal tidak seimbang tetap tersimpan — persis cacat
+   yang modul ini dibuat untuk menghindarinya. Tertangkap tes.
+2. **Saldo tidak pernah disimpan.** Tidak ada kolom `current_balance` maupun
+   `opening_balance`; saldo awal masuk sebagai jurnal bertipe `OPENING`. Tes
+   memeriksa kolom itu tidak ada dan tidak ada `UPDATE ... balance` ke COA.
+3. **Setiap query yang membaca angka jurnal memakai `STATUS_DIHITUNG`**, bukan
+   filter status yang ditulis ulang. `/ledger` sempat menulis
+   `je.status = 'posted'` sendiri — akibatnya jurnal yang sudah dibalik hilang
+   dari mutasi sementara pembaliknya tetap ada, dan saldonya **berbalik tanda**
+   (-250000 untuk yang seharusnya 0). Tes memindai setiap template literal yang
+   membaca `jl.debit`/`jl.credit`.
+4. **Jurnal `reversed` TETAP dihitung dalam saldo.** Pembalikan menambah jurnal
+   berlawanan, bukan menghapus yang asli. Mengeluarkan yang asli membatalkannya
+   dua kali. Ini juga yang benar secara akuntansi — buku besar tidak menulis
+   ulang sejarah.
+5. **Akun header menolak semua jurnal; akun kontrol menolak jurnal MANUAL tapi
+   menerima jurnal sistem.** Yang berhak menggerakkan saldo subledger memang
+   sistemnya. Pembalikan juga memakai jalur non-manual — kalau tidak, jurnal
+   sistem yang salah tidak akan pernah bisa dikoreksi.
+6. **Periode tidak bisa ditutup selama masih ada jurnal draft di dalamnya.**
+   Draft yang tertinggal akan menggantung selamanya: tidak bisa di-post karena
+   periodenya tertutup, tidak terlihat di laporan karena belum posted.
+7. **Jurnal `posted` tidak pernah diubah atau dihapus** — koreksinya lewat
+   pembalikan, sama seperti change order pada ledger kontrak. Hanya draft yang
+   boleh dihapus.
+8. **Nomor jurnal dialokasikan DI DALAM transaction dokumennya**, berbeda dengan
+   `withNumberedDocument` di procurement yang sengaja memisahkannya. Di sana
+   pemisahan dipilih untuk menghindari lock contention pada 20 PO serentak, dan
+   nomor berlubang diterima. Di GL sebaliknya: volumenya kecil, dan **nomor
+   jurnal yang berlubang adalah pertanyaan pertama auditor**.
+
+`gl_account_mappings` memetakan `(peristiwa, peran) → kode akun`. **Bentuk
+jurnal tetap di kode** — itu logika akuntansi, dan salah bentuk harus ketahuan
+saat tes, bukan saat tutup buku. Yang ada di tabel cuma akun mana yang mengisi
+tiap peran, jadi memindahkan beban subkontraktor dari 5300 ke akun lain adalah
+satu `UPDATE`. Seed-nya `INSERT IGNORE`: pemetaan yang sudah diubah penggunanya
+tidak dikembalikan ke bawaan setiap restart.
+
+**Pengakuan pendapatan: percentage-of-completion** (keputusan pemilik,
+3 September 2026). Pendapatan diakui saat progress **disetujui**, bukan saat
+tagihan terbit — nilainya selisih `earned_pct` × nilai kontrak berjalan
+(`original_value` + CO approved), dan hanya periode berstatus `approved` yang
+dihitung. Karena itu `1114 Pendapatan Belum Ditagih` dan `2150 Penagihan
+Melebihi Progress` benar-benar terpakai. Biaya proyek diakui **saat terjadi**
+langsung ke beban pokok, bukan ditumpuk di WIP lalu dilepas proporsional:
+pelepasan proporsional butuh *estimate at completion* yang dipercaya, dan EAC
+itu angka turunan — kalau meleset, laba berpindah antar periode tanpa ada yang
+salah mencatat apa pun.
+
+**Tidak ada jurnal mundur** (keputusan pemilik). `gl_settings.auto_posting_start_date`
+lahir `NULL`, dan selama NULL auto-posting **mati total**. Penegakannya berupa
+setelan, bukan janji di dokumen.
+
+Dijaga `npm run test:gl-core`.
+
 ### RBAC finance (FIN-RBAC-01)
 
 Seluruh **64 endpoint** `finance.routes.ts` kini memakai `requirePermission` —
