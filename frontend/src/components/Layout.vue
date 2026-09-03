@@ -436,6 +436,10 @@ const mainMenus: MenuItem[] = [
       { id: 'finance-kasbon', label: '💵 Pengajuan Kasbon', route: '/finance/kasbon-requests', name: 'FinanceKasbonRequests', permKey: 'finance.kasbon' },
       { id: 'finance-fund', label: 'Fund Requests', route: '/finance/fund-requests', name: 'FinanceFundRequestsPage', permKey: 'finance.fund-requests' },
       { id: 'finance-summary', label: 'Financial Summary', route: '/finance', name: 'Finance', permKey: 'finance.financial-summary' },
+      { id: 'gl-journal', label: '📓 Jurnal Umum', route: '/finance/gl', name: 'GeneralLedger', permKey: 'finance.general-ledger' },
+      { id: 'gl-coa', label: '📒 Bagan Akun', route: '/finance/gl/coa', name: 'ChartOfAccounts', permKey: 'finance.chart-of-accounts' },
+      { id: 'gl-reports', label: '📊 Laporan Keuangan', route: '/finance/gl/reports', name: 'GlReports', permKey: 'finance.general-ledger' },
+      { id: 'gl-settings', label: '⚙️ Pengaturan GL', route: '/finance/gl/settings', name: 'GlSettings', permKey: 'finance.general-ledger' },
     ]
   },
   {

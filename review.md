@@ -13495,3 +13495,45 @@ menjalankan gl-core → gl-auto → gl-core: ketiganya 0 gagal.
 
 **Auto-posting tetap MATI** sampai `auto_posting_start_date` diisi. Tidak ada
 yang berubah di produksi sampai pemilik menyalakannya.
+
+---
+
+## GL-01 langkah 4 — layar
+
+Empat layar di bawah menu Finance: Jurnal Umum (`/finance/gl`), Bagan Akun
+(`/finance/gl/coa`), Laporan Keuangan (`/finance/gl/reports`), dan Pengaturan GL
+(`/finance/gl/settings`).
+
+**Keputusan yang diambil di layar, bukan cuma di backend:**
+
+1. **Sebab penolakan ditampilkan apa adanya.** Server menyebut akun mana yang
+   header, periode mana yang tertutup, berapa selisihnya. Menggantinya dengan
+   "gagal menyimpan" membuang satu-satunya petunjuk yang berguna — itu persis
+   yang membuat 500 di `FinanceAP.vue` bertahan lama tanpa ada yang melapor.
+2. **Ketidakseimbangan ditampilkan menonjol**, bukan disembunyikan. Kalau neraca
+   saldo tidak nol, yang salah jalur postingnya.
+3. **Pemetaan bermasalah disebut di Pengaturan** — pemetaan yang menunjuk akun
+   tak ada / header / nonaktif akan meledak di tengah transaksi bisnis orang
+   lain, jam berapa pun itu.
+4. **Selisih jurnal ditampilkan sebelum Simpan ditekan.** Server tetap yang
+   menegakkan, tapi tidak ada gunanya menyuruh orang menekan Simpan untuk
+   diberi tahu jurnalnya timpang.
+
+**Kelas cacat yang tidak terlihat build.** `vue-tsc` dan `npm run build` tidak
+memeriksa string jalur API maupun nama field. Layar bisa memanggil endpoint yang
+tidak ada, atau membaca field yang tidak dikembalikan server, dan hasilnya cuma
+layar kosong tanpa satu pun error. Dua contoh nyata di repo ini: dropdown proyek
+di layar aset memakai `p.project_name` sementara `GET /projects` mengembalikan
+`title`, dan `StockCard.vue` memakai `api.get('/api/...')` sehingga URL-nya jadi
+`/api/api/...` dan selalu 404.
+
+`npm run test:gl-layar` memeriksa kontraknya: setiap jalur `/gl/` yang dipanggil
+keempat layar benar-benar terdaftar, setiap field yang dibaca template ada di
+responsnya, tiap layar punya route dan entri menu, dan tidak ada yang memakai
+prefix `/api` ganda. **21 asersi, enam mutasi semuanya tertangkap** — termasuk
+menghapus field dari respons backend (1, 2, dan 1 asersi gagal).
+
+**Catatan proses:** probe endpoint versi pertama memotong jalur di `${`, jadi ia
+menguji potongan yang memang bukan rute dan melaporkan empat hantu. Probe yang
+melaporkan hantu sama tidak bergunanya dengan probe yang diam; sekarang jalurnya
+diambil utuh dengan interpolasi diganti `1`.

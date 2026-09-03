@@ -620,6 +620,30 @@ const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true, title: 'COGS Calculation' },
   },
   {
+    path: '/finance/gl',
+    name: 'GeneralLedger',
+    component: () => import('../views/GeneralLedger.vue'),
+    meta: { requiresAuth: true, title: 'Jurnal Umum' },
+  },
+  {
+    path: '/finance/gl/coa',
+    name: 'ChartOfAccounts',
+    component: () => import('../views/ChartOfAccounts.vue'),
+    meta: { requiresAuth: true, title: 'Bagan Akun' },
+  },
+  {
+    path: '/finance/gl/reports',
+    name: 'GlReports',
+    component: () => import('../views/GlReports.vue'),
+    meta: { requiresAuth: true, title: 'Laporan Keuangan' },
+  },
+  {
+    path: '/finance/gl/settings',
+    name: 'GlSettings',
+    component: () => import('../views/GlSettings.vue'),
+    meta: { requiresAuth: true, title: 'Pengaturan GL' },
+  },
+  {
     path: '/finance/ap',
     name: 'FinanceAPPage',
     component: () => import('../views/FinanceAP.vue'),

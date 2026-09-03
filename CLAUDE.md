@@ -637,6 +637,47 @@ yang disebut jalur auto-posting.
 
 Dijaga `npm run test:gl-auto`.
 
+#### Layar (GL-01 langkah 4)
+
+Empat layar di bawah menu Finance:
+
+| Layar | Route | Isi |
+|---|---|---|
+| Jurnal Umum | `/finance/gl` | Daftar & filter jurnal, buat jurnal manual, post, balikkan, hapus draft |
+| Bagan Akun | `/finance/gl/coa` | COA berjenjang, opsional dengan saldo, tambah/ubah akun |
+| Laporan Keuangan | `/finance/gl/reports` | Neraca saldo, neraca, laba rugi, buku besar per akun |
+| Pengaturan GL | `/finance/gl/settings` | Periode fiskal, pemetaan akun, tanggal mulai auto-posting |
+
+Aturan yang harus dijaga:
+
+1. **Sebab penolakan dari server ditampilkan apa adanya.** Server menyebut akun
+   mana yang header, periode mana yang tertutup, atau berapa selisihnya.
+   Menggantinya dengan "gagal menyimpan" membuang satu-satunya petunjuk yang
+   berguna — itu persis yang membuat 500 di `FinanceAP.vue` bertahan lama tanpa
+   ada yang melapor.
+2. **Ketidakseimbangan neraca saldo & neraca ditampilkan MENONJOL**, bukan
+   disembunyikan. Kalau itu tidak nol, yang salah jalur postingnya, bukan
+   laporannya.
+3. **Pemetaan bermasalah disebut di layar Pengaturan.** Pemetaan yang menunjuk
+   akun tak ada / header / nonaktif akan meledak saat jurnalnya dibentuk — di
+   tengah transaksi bisnis orang lain, jam berapa pun itu.
+4. **Kode, jenis, dan saldo normal akun dikunci setelah akun ada.** Mengubahnya
+   pada akun yang sudah punya jurnal membalik arti seluruh saldo historisnya
+   tanpa satu pun baris jurnal berubah.
+
+⚠️ **`vue-tsc` dan `npm run build` tidak memeriksa string jalur API maupun nama
+field.** Layar bisa memanggil endpoint yang tidak ada, atau membaca field yang
+tidak dikembalikan server, dan hasilnya cuma layar kosong tanpa error —
+persis cacat `p.project_name` vs `title` di dropdown proyek layar aset, dan
+cacat prefix `/api/api/...` di `StockCard.vue`.
+
+Karena itu `npm run test:gl-layar` memeriksa **kontraknya**: setiap jalur `/gl/`
+yang dipanggil keempat layar benar-benar terdaftar, setiap field yang dibaca
+template ada di responsnya, tiap layar punya route dan entri menu, dan tidak ada
+yang memakai prefix `/api` ganda. Empat mutasi terbukti tertangkap.
+
+Dijaga `npm run test:gl-layar`.
+
 ### RBAC finance (FIN-RBAC-01)
 
 Seluruh **64 endpoint** `finance.routes.ts` kini memakai `requirePermission` —
