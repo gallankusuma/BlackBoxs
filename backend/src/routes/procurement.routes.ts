@@ -1776,16 +1776,19 @@ router.post('/purchase-requests/:prId/generate-pos', authMiddleware, requirePerm
       return res.status(400).json({ error: 'PR belum diapprove. Approve PR terlebih dahulu sebelum generate PO.' });
     }
 
-    // Check if PR already has POs (prevent duplicate generation)
-    if (pr.status === 'PO_GENERATED') {
-      const existingPOs = await dbAll('SELECT id, po_number FROM purchase_orders WHERE pr_id = ? AND is_deleted = 0', [prId]) as any[];
-      if (existingPOs.length > 0) {
-        return res.status(400).json({
-          error: `PR ini sudah memiliki ${existingPOs.length} PO (${existingPOs.map((p:any) => p.po_number).join(', ')}). Hapus PO yang ada terlebih dahulu jika ingin generate ulang.`,
-          existing_pos: existingPOs
-        });
-      }
-    }
+    // PROC-PARTIAL-02: di sini dulu ada penolakan mentah begitu PR punya PO —
+    // "PR ini sudah memiliki N PO. Hapus PO yang ada terlebih dahulu."
+    //
+    // Itu keliru dua kali. Pertama, ia bertentangan dengan PROC-PARTIAL-01:
+    // satu PR memang boleh melahirkan beberapa PO, dan pemenang per item
+    // ditentukan bertahap — vendor B baru dipilih setelah PO vendor A terbit.
+    // Kedua, penjaga duplikatnya sudah ada dan lebih tepat: UNIQUE
+    // (pr_id, source_bid_id) membuat bid yang sudah punya PO ditolak database,
+    // lalu dilaporkan sebagai `skipped` (PROC-R19). Penolakan di atas berjalan
+    // LEBIH DULU, jadi penjaga yang benar itu tidak pernah tercapai.
+    //
+    // Akibatnya di produksi: PR dengan beberapa item, satu PO sudah terbit,
+    // sisanya tidak bisa dirilis sama sekali lewat tombol Generate PO.
 
     // Get all bids for this PR
     const bids = await dbAll('SELECT pb.*, v.name as reg_vendor_name, v.id as reg_vendor_id FROM pr_bids pb LEFT JOIN vendors v ON pb.vendor_id = v.id WHERE pb.pr_id = ?', [prId]) as any[];
@@ -1893,7 +1896,22 @@ router.post('/purchase-requests/:prId/generate-pos', authMiddleware, requirePerm
             'SELECT id, po_number FROM purchase_orders WHERE pr_id = ? AND source_bid_id = ?',
             [prId, bid.id]
           ) as any;
-          skipped.push({ vendor_name: vendorName, po_number: already?.po_number, po_id: already?.id });
+          // Satu bid = satu PO. Kalau vendor ini memenangkan item TAMBAHAN
+          // setelah PO-nya terbit, item itu tidak bisa ikut lewat jalur ini —
+          // dan diam-diam menghilangkannya adalah cara paling halus untuk
+          // membuat orang mengira barangnya sudah dipesan. Jumlahnya dihitung
+          // dan dilaporkan supaya bisa dirilis lewat layar Purchase Order.
+          let belumMasuk = 0;
+          if (already?.id) {
+            const sudah = await dbAll(
+              'SELECT notes FROM purchase_order_items WHERE po_id = ?', [already.id]) as any[];
+            const namaSudah = new Set(sudah.map((r: any) => String(r.notes || '')));
+            belumMasuk = items.filter((i: any) => !namaSudah.has(String(i.item_name || ''))).length;
+          }
+          skipped.push({
+            vendor_name: vendorName, po_number: already?.po_number, po_id: already?.id,
+            item_belum_masuk: belumMasuk,
+          });
           continue;
         }
         throw err;
@@ -1912,13 +1930,15 @@ router.post('/purchase-requests/:prId/generate-pos', authMiddleware, requirePerm
     // Update PR status to PO_GENERATED
     await dbRun("UPDATE purchase_requests SET status = 'PO_GENERATED' WHERE id = ?", [prId]);
 
-    res.status(201).json({
-      message: skipped.length > 0
-        ? `${createdPOs.length} draft PO dibuat, ${skipped.length} vendor sudah punya PO sebelumnya`
-        : `${createdPOs.length} draft PO berhasil dibuat`,
-      data: createdPOs,
-      skipped,
-    });
+    const tertinggal = skipped.reduce((n: number, s: any) => n + Number(s.item_belum_masuk || 0), 0);
+    let pesan = `${createdPOs.length} draft PO berhasil dibuat`;
+    if (skipped.length > 0) {
+      pesan = `${createdPOs.length} draft PO dibuat, ${skipped.length} vendor sudah punya PO sebelumnya`;
+      if (tertinggal > 0) {
+        pesan += `. ${tertinggal} item pemenang belum masuk PO mana pun — rilis lewat layar Purchase Order`;
+      }
+    }
+    res.status(201).json({ message: pesan, data: createdPOs, skipped, item_belum_masuk: tertinggal });
   } catch (error: any) {
     console.error('Error generating POs from bid:', error);
     res.status(500).json({ error: 'Failed to generate POs: ' + (error.message || 'Unknown error') });

@@ -13286,3 +13286,47 @@ punya allowlist `DIKECUALIKAN` berisi **satu** baris yang disebut namanya —
 pengecualian yang tidak dituliskan akan berkembang diam-diam.
 
 `test:rbac` 181, `test:hr-inv-rbac` 25, keduanya 0 gagal.
+
+---
+
+## PROC-PARTIAL-02 — Generate PO masih menolak, dan itu tombol yang dipencet pelapor
+
+**Ditemukan saat verifikasi pasca-deploy 3 September 2026.** PROC-PARTIAL-01
+dinyatakan selesai, tapi verifikasi kode terpasang di server menunjukkan kalimat
+penolakan di screenshot pelapor — "PR ini sudah memiliki 1 PO
+(PO-20260828-0001)" — berasal dari endpoint **lain** dari yang diperbaiki.
+
+Ada dua jalur PR → PO:
+
+| Jalur | Endpoint | Layar |
+|---|---|---|
+| Manual | `POST /purchase-orders` | Purchase Orders → + Buat PO |
+| Tabulasi bid | `POST /purchase-requests/:prId/generate-pos` | Purchase Requests → Generate PO |
+
+PROC-PARTIAL-01 hanya membuka jalur pertama. Jalur kedua punya penolakannya
+sendiri dan masih berdiri. Verifikasi: `PurchaseRequests.vue:1449` memanggil
+`generate-pos`, dan `catch` di sana menampilkan `err.response.data.error` —
+persis kalimat di screenshot.
+
+**Diterapkan.** Penolakan mentah dibuang. Dua hal diverifikasi lebih dulu
+supaya pencabutan itu tidak membuka pintu duplikat:
+
+1. `select-item/:itemIndex` me-reset `is_winner` di SELURUH bid untuk
+   `item_index` itu sebelum menyetel pemenang baru — jadi satu item hanya bisa
+   punya satu pemenang, dan dua vendor tidak bisa memesan item yang sama.
+2. `UNIQUE (pr_id, source_bid_id)` (`uniq_po_pr_bid`) **ada di produksi**
+   (dicek langsung ke `SHOW INDEX`). Inilah penjaga duplikat yang sebenarnya;
+   bid yang sudah punya PO ditolak database lalu dilaporkan `skipped`.
+
+Batas yang tetap ada dan sekarang **dikatakan**: satu bid = satu PO, jadi item
+yang dimenangkan vendor setelah PO-nya terbit tidak ikut lewat jalur ini.
+Jumlahnya dihitung (`item_belum_masuk`) dan layar menyebutkannya sambil
+mengarahkan ke layar Purchase Order. Sebelumnya item itu hilang tanpa suara.
+
+`npm run test:po-partial` naik 14 → 25 asersi, dengan bagian 7 yang menembak
+`generate-pos` dua kali berturut-turut. Empat mutasi diuji, semuanya tertangkap
+(7, 5, 1, 3 asersi gagal) — termasuk memasang kembali penolakan yang dibuang.
+
+**Catatan proses:** ini lolos dari kerjaan sebelumnya karena tesnya menembak
+endpoint yang gue perbaiki, bukan tombol yang dipencet pelapor. Pemindai frasa
+di bagian 5 sekarang memeriksa **kedua** kalimat penolakan.

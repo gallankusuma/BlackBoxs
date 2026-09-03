@@ -328,6 +328,26 @@ Sampai 2 September 2026 ada penolakan mentah begitu `pr.status = 'PO_GENERATED'`
 per-item di bawahnya **tidak pernah tercapai**. Sudah dibuang. Yang menjaga
 sekarang hanya satu: PO ditolak kalau kuantitasnya **melebihi sisa** PR.
 
+⚠️ **Ada DUA jalur PR → PO, dan penolakan itu kembar.** Perbaikan pertama hanya
+menyentuh `POST /purchase-orders` (layar Purchase Order manual). Tombol
+**Generate PO** di layar Purchase Requests memakai
+`POST /purchase-requests/:prId/generate-pos`, yang punya penolakan sendiri —
+"PR ini sudah memiliki N PO. Hapus PO yang ada terlebih dahulu" — dan **itulah
+kalimat yang benar-benar dilihat pelapor**. Dibuang 3 September 2026
+(PROC-PARTIAL-02).
+
+Penolakan itu mubazir sekaligus merusak: penjaga duplikat yang sebenarnya sudah
+ada di bawahnya, yaitu `UNIQUE (pr_id, source_bid_id)` (PROC-R19), yang membuat
+bid yang sudah punya PO ditolak database lalu dilaporkan sebagai `skipped`.
+Penolakan mentah berjalan lebih dulu, jadi penjaga yang benar tidak pernah
+tercapai — dan vendor B tidak bisa mendapat PO setelah PO vendor A terbit.
+
+⚠️ **Satu bid = satu PO tetap berlaku.** Item yang dimenangkan vendor SETELAH
+PO-nya terbit tidak bisa ikut lewat `generate-pos`. Yang penting: jumlahnya
+dihitung dan dilaporkan (`item_belum_masuk`), tidak hilang diam-diam — layar
+menyebutkannya dan mengarahkan ke layar Purchase Order. Menghilangkannya tanpa
+suara adalah cara paling halus membuat orang mengira barangnya sudah dipesan.
+
 ⚠️ **`pr_bid_items` tidak punya kolom `product_id`** — hanya `item_index` dan
 `item_name`. PO hasil tabulasi bid karena itu dulu lahir dengan `product_id`
 NULL, dan barang yang sudah dipesan **tidak terhitung sebagai teralokasi**:

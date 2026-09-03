@@ -1448,8 +1448,23 @@ const convertToPO = async (pr: any) => {
   try {
     const res = await api.post(`/procurement/purchase-requests/${pr.id}/generate-pos`);
     const pos = res.data.data || [];
+    const dilewati = res.data.skipped || [];
     const poList = pos.map((p: any) => `• ${p.po_number} — ${p.vendor_name} (${p.items_count} item, Rp ${p.total_amount.toLocaleString('id-ID')})`).join('\n');
-    alert(`✅ ${res.data.message}:\n\n${poList}\n\nDraft PO sudah bisa dilihat di halaman Purchase Orders.`);
+
+    // Vendor yang dilewati harus disebut. Satu bid = satu PO, jadi item yang
+    // dimenangkan vendor SETELAH PO-nya terbit tidak ikut lewat jalur ini —
+    // menampilkan daftar PO saja akan membuat orang mengira semuanya sudah
+    // dipesan. Sisanya dirilis lewat layar Purchase Order.
+    const bagianDilewati = dilewati.length
+      ? '\n\nDilewati (sudah punya PO):\n' + dilewati.map((s: any) =>
+          `• ${s.vendor_name} — ${s.po_number || 'PO sebelumnya'}` +
+          (s.item_belum_masuk ? ` (${s.item_belum_masuk} item pemenang belum masuk PO mana pun)` : '')
+        ).join('\n')
+      : '';
+    const saran = res.data.item_belum_masuk
+      ? '\n\nRilis item yang tersisa lewat halaman Purchase Orders → + Buat PO dari PR ini.'
+      : '\n\nDraft PO sudah bisa dilihat di halaman Purchase Orders.';
+    alert(`${pos.length ? '✅' : 'ℹ️'} ${res.data.message}` + (poList ? `:\n\n${poList}` : '') + bagianDilewati + saran);
     await store.fetchPurchaseRequests();
     await loadBidProgress();
     // Navigate to PO page
