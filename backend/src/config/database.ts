@@ -2830,7 +2830,9 @@ const PERMISSION_CATALOG: { actions: string[]; resources: string[] }[] = [
       'dashboard.dashboard-overview', 'estimator.estimator-ahsp', 'estimator.estimator-masters',
       'estimator.estimator-proposals', 'estimator.hsp', 'estimator.rab',
       'finance.accounts-payable', 'finance.accounts-receivable', 'finance.cost-analysis',
-      'finance.financial-summary', 'finance.kasbon', 'finance.payment-schedule', 'hr.attendance',
+      'finance.financial-summary', 'finance.kasbon', 'finance.payment-schedule',
+      'finance.general-ledger', 'finance.chart-of-accounts', 'finance.fiscal-periods',
+      'hr.attendance',
       'hr.kasbon', 'hr.office-locations', 'hr.payroll', 'hr.position-rates',
       'master_data.item-types', 'master_data.suppliers', 'master_data.warehouse-locations',
       'master-data.categories', 'master-data.customers', 'master-data.departments',
@@ -3071,6 +3073,395 @@ const ensureVendorPriceApprovalSchema = async (connection: any) => {
   }
 
   console.log('✅ Skema approval harga vendor ensured');
+};
+
+/**
+ * Bagan akun EPC (GL-01).
+ *
+ * Disusun dari peristiwa ekonomi yang benar-benar ada di aplikasi ini, bukan
+ * COA generik: WIP proyek, piutang retensi, uang muka proyek dari pelanggan,
+ * penagihan melebihi progress, GRN clearing, piutang karyawan untuk kasbon,
+ * dan akumulasi penyusutan dipisah per kategori aset karena modul Asset di
+ * sini memang berkategori.
+ *
+ * Kolom saldo TIDAK ADA di tabelnya — saldo awal masuk sebagai jurnal OPENING.
+ * Lihat alasannya di ensureGeneralLedgerSchema.
+ *
+ * Ditanam SEKALI, hanya kalau tabelnya masih kosong. Kalau ini lepas ke jalur
+ * boot biasa, setiap restart akan mengembalikan akun yang sengaja dinonaktifkan
+ * atau diganti namanya oleh penggunanya.
+ */
+type AkunSeed = [string, string, string, string, string | null, number, number, string | null, string | null];
+const COA_EPC: AkunSeed[] = [
+  // kode, nama, jenis, saldo normal, induk, is_header, is_postable, control_subledger, seksi laporan
+  ['1000', 'ASET', 'asset', 'debit', null, 1, 0, null, null],
+  ['1100', 'Aset Lancar', 'asset', 'debit', '1000', 1, 0, null, null],
+  ['1101', 'Kas Kecil', 'asset', 'debit', '1100', 0, 1, null, 'BS_CURRENT_ASSET'],
+  ['1102', 'Bank', 'asset', 'debit', '1100', 0, 1, 'BANK', 'BS_CURRENT_ASSET'],
+  ['1110', 'Piutang Usaha', 'asset', 'debit', '1100', 0, 1, 'AR', 'BS_CURRENT_ASSET'],
+  ['1112', 'Piutang Retensi', 'asset', 'debit', '1100', 0, 1, null, 'BS_CURRENT_ASSET'],
+  ['1114', 'Pendapatan Belum Ditagih', 'asset', 'debit', '1100', 0, 1, null, 'BS_CURRENT_ASSET'],
+  ['1120', 'Piutang Karyawan (Kasbon)', 'asset', 'debit', '1100', 0, 1, null, 'BS_CURRENT_ASSET'],
+  ['1130', 'Uang Muka ke Vendor', 'asset', 'debit', '1100', 0, 1, null, 'BS_CURRENT_ASSET'],
+  ['1140', 'Persediaan Material', 'asset', 'debit', '1100', 0, 1, 'INVENTORY', 'BS_CURRENT_ASSET'],
+  ['1150', 'WIP Proyek', 'asset', 'debit', '1100', 0, 1, 'WIP', 'BS_CURRENT_ASSET'],
+  ['1160', 'PPN Masukan', 'asset', 'debit', '1100', 0, 1, null, 'BS_CURRENT_ASSET'],
+  ['1165', 'PPh Dibayar di Muka', 'asset', 'debit', '1100', 0, 1, null, 'BS_CURRENT_ASSET'],
+  ['1170', 'Biaya Dibayar di Muka', 'asset', 'debit', '1100', 0, 1, null, 'BS_CURRENT_ASSET'],
+  ['1200', 'Aset Tetap', 'asset', 'debit', '1000', 1, 0, null, null],
+  ['1210', 'Tanah', 'asset', 'debit', '1200', 0, 1, null, 'BS_FIXED_ASSET'],
+  ['1220', 'Bangunan', 'asset', 'debit', '1200', 0, 1, null, 'BS_FIXED_ASSET'],
+  ['1230', 'Peralatan & Alat Berat', 'asset', 'debit', '1200', 0, 1, null, 'BS_FIXED_ASSET'],
+  ['1240', 'Kendaraan', 'asset', 'debit', '1200', 0, 1, null, 'BS_FIXED_ASSET'],
+  ['1250', 'Peralatan Kantor', 'asset', 'debit', '1200', 0, 1, null, 'BS_FIXED_ASSET'],
+  ['1280', 'Akumulasi Penyusutan - Bangunan', 'asset', 'credit', '1200', 0, 1, null, 'BS_FIXED_ASSET'],
+  ['1281', 'Akumulasi Penyusutan - Peralatan & Alat Berat', 'asset', 'credit', '1200', 0, 1, null, 'BS_FIXED_ASSET'],
+  ['1282', 'Akumulasi Penyusutan - Kendaraan', 'asset', 'credit', '1200', 0, 1, null, 'BS_FIXED_ASSET'],
+  ['1283', 'Akumulasi Penyusutan - Peralatan Kantor', 'asset', 'credit', '1200', 0, 1, null, 'BS_FIXED_ASSET'],
+
+  ['2000', 'LIABILITAS', 'liability', 'credit', null, 1, 0, null, null],
+  ['2100', 'Liabilitas Jangka Pendek', 'liability', 'credit', '2000', 1, 0, null, null],
+  ['2101', 'Utang Usaha', 'liability', 'credit', '2100', 0, 1, 'AP', 'BS_CURRENT_LIABILITY'],
+  ['2105', 'Utang Penerimaan Barang (GRN Clearing)', 'liability', 'credit', '2100', 0, 1, 'GRN', 'BS_CURRENT_LIABILITY'],
+  ['2110', 'Utang Retensi Subkontraktor', 'liability', 'credit', '2100', 0, 1, null, 'BS_CURRENT_LIABILITY'],
+  ['2120', 'Utang Gaji & Upah', 'liability', 'credit', '2100', 0, 1, null, 'BS_CURRENT_LIABILITY'],
+  ['2125', 'Utang PPh 21', 'liability', 'credit', '2100', 0, 1, null, 'BS_CURRENT_LIABILITY'],
+  ['2130', 'PPN Keluaran', 'liability', 'credit', '2100', 0, 1, null, 'BS_CURRENT_LIABILITY'],
+  ['2135', 'Utang PPh Final Konstruksi', 'liability', 'credit', '2100', 0, 1, null, 'BS_CURRENT_LIABILITY'],
+  ['2140', 'Uang Muka Proyek dari Pelanggan', 'liability', 'credit', '2100', 0, 1, null, 'BS_CURRENT_LIABILITY'],
+  ['2150', 'Penagihan Melebihi Progress', 'liability', 'credit', '2100', 0, 1, null, 'BS_CURRENT_LIABILITY'],
+  ['2190', 'Utang Lain-lain', 'liability', 'credit', '2100', 0, 1, null, 'BS_CURRENT_LIABILITY'],
+  ['2200', 'Liabilitas Jangka Panjang', 'liability', 'credit', '2000', 1, 0, null, null],
+  ['2210', 'Utang Bank Jangka Panjang', 'liability', 'credit', '2200', 0, 1, null, 'BS_LONG_LIABILITY'],
+
+  ['3000', 'EKUITAS', 'equity', 'credit', null, 1, 0, null, null],
+  ['3100', 'Modal Disetor', 'equity', 'credit', '3000', 0, 1, null, 'BS_EQUITY'],
+  ['3200', 'Laba Ditahan', 'equity', 'credit', '3000', 0, 1, null, 'BS_EQUITY'],
+  ['3300', 'Laba (Rugi) Tahun Berjalan', 'equity', 'credit', '3000', 0, 1, null, 'BS_EQUITY'],
+
+  ['4000', 'PENDAPATAN', 'revenue', 'credit', null, 1, 0, null, null],
+  ['4100', 'Pendapatan Kontrak Konstruksi', 'revenue', 'credit', '4000', 0, 1, null, 'PL_REVENUE'],
+  ['4200', 'Pendapatan Jasa Engineering', 'revenue', 'credit', '4000', 0, 1, null, 'PL_REVENUE'],
+  ['4900', 'Potongan Pendapatan', 'revenue', 'debit', '4000', 0, 1, null, 'PL_REVENUE'],
+
+  ['5000', 'BEBAN POKOK PROYEK', 'cogs', 'debit', null, 1, 0, null, null],
+  ['5100', 'Beban Material', 'cogs', 'debit', '5000', 0, 1, null, 'PL_COGS'],
+  ['5200', 'Beban Upah Langsung', 'cogs', 'debit', '5000', 0, 1, null, 'PL_COGS'],
+  ['5300', 'Beban Subkontraktor', 'cogs', 'debit', '5000', 0, 1, null, 'PL_COGS'],
+  ['5400', 'Beban Sewa & Operasional Alat', 'cogs', 'debit', '5000', 0, 1, null, 'PL_COGS'],
+  ['5500', 'Beban Overhead Proyek', 'cogs', 'debit', '5000', 0, 1, null, 'PL_COGS'],
+  ['5600', 'Penyusutan Alat Proyek', 'cogs', 'debit', '5000', 0, 1, null, 'PL_COGS'],
+
+  ['6000', 'BEBAN OPERASIONAL', 'expense', 'debit', null, 1, 0, null, null],
+  ['6100', 'Gaji & Tunjangan Kantor', 'expense', 'debit', '6000', 0, 1, null, 'PL_OPEX'],
+  ['6200', 'Beban Kantor & Umum', 'expense', 'debit', '6000', 0, 1, null, 'PL_OPEX'],
+  ['6300', 'Beban Perjalanan Dinas', 'expense', 'debit', '6000', 0, 1, null, 'PL_OPEX'],
+  ['6400', 'Penyusutan Non-Proyek', 'expense', 'debit', '6000', 0, 1, null, 'PL_OPEX'],
+  ['6500', 'Beban Pemasaran', 'expense', 'debit', '6000', 0, 1, null, 'PL_OPEX'],
+  ['6600', 'Beban Jasa Profesional', 'expense', 'debit', '6000', 0, 1, null, 'PL_OPEX'],
+  ['6900', 'Beban Operasional Lain', 'expense', 'debit', '6000', 0, 1, null, 'PL_OPEX'],
+
+  ['7000', 'PENDAPATAN & BEBAN LAIN', 'other_income', 'credit', null, 1, 0, null, null],
+  ['7100', 'Pendapatan Bunga', 'other_income', 'credit', '7000', 0, 1, null, 'PL_OTHER'],
+  ['7200', 'Laba (Rugi) Pelepasan Aset', 'other_income', 'credit', '7000', 0, 1, null, 'PL_OTHER'],
+  ['7300', 'Beban Bunga', 'expense', 'debit', '7000', 0, 1, null, 'PL_OTHER'],
+  ['7400', 'Selisih Kurs', 'other_income', 'credit', '7000', 0, 1, null, 'PL_OTHER'],
+
+  ['8000', 'PAJAK', 'tax', 'debit', null, 1, 0, null, null],
+  ['8100', 'Beban Pajak Penghasilan', 'tax', 'debit', '8000', 0, 1, null, 'PL_TAX'],
+];
+
+const seedChartOfAccounts = async (connection: any) => {
+  try {
+    const [ada]: any = await connection.execute('SELECT COUNT(*) AS c FROM chart_of_accounts');
+    if (Array.isArray(ada) && ada[0] && Number(ada[0].c) > 0) return;
+
+    const idOf = new Map<string, number>();
+    let urutan = 0;
+    for (const [kode, nama, jenis, saldo, induk, header, postable, kontrol, seksi] of COA_EPC) {
+      urutan += 10;
+      const parentId = induk ? (idOf.get(induk) ?? null) : null;
+      const level = induk ? (induk.endsWith('000') ? 2 : 3) : 1;
+      // Akun kontrol saldonya datang dari subledger. Jurnal manual ke sana
+      // ditolak, supaya buku besar dan daftar AP/AR tidak pernah berselisih
+      // tanpa bisa dijelaskan.
+      const manual = kontrol ? 0 : 1;
+      const [r]: any = await connection.execute(
+        `INSERT INTO chart_of_accounts
+          (account_code, account_name, account_type, normal_balance, parent_id, level,
+           is_header, is_postable, is_control_account, control_subledger,
+           allow_manual_posting, statement_section, display_order)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [kode, nama, jenis, saldo, parentId, level, header, postable,
+         kontrol ? 1 : 0, kontrol, manual, seksi, urutan]
+      );
+      idOf.set(kode, r.insertId);
+    }
+    console.log(`✅ Bagan akun EPC ditanam: ${COA_EPC.length} akun`);
+  } catch (err: any) {
+    console.warn('seedChartOfAccounts warning:', err.message.substring(0, 160));
+  }
+};
+
+/**
+ * Peran akun untuk tiap peristiwa yang menjurnal otomatis.
+ *
+ * Pengakuan pendapatan memakai percentage-of-completion (keputusan pemilik,
+ * 3 September 2026): pendapatan diakui saat progress DISETUJUI, bukan saat
+ * tagihan terbit. Karena itu 1114 dan 2150 benar-benar terpakai.
+ *
+ * Biaya proyek diakui saat terjadi langsung ke beban pokok, bukan ditumpuk di
+ * WIP lalu dilepas proporsional — pelepasan proporsional butuh estimate at
+ * completion yang dipercaya, dan EAC itu angka turunan: kalau meleset, laba
+ * berpindah antar periode tanpa ada yang salah mencatat apa pun. Akun 1150
+ * tetap ada kalau perlakuan itu suatu saat dipilih.
+ */
+const GL_MAPPINGS: [string, string, string, string][] = [
+  // peristiwa, peran, kode akun, catatan
+  ['GRN_APPROVED', 'inventory', '1140', 'Barang diterima menambah persediaan'],
+  ['GRN_APPROVED', 'clearing', '2105', 'Utang penerimaan sampai invoice vendor datang'],
+
+  ['MATERIAL_ISSUED', 'expense', '5100', 'Material keluar gudang jadi beban proyek'],
+  ['MATERIAL_ISSUED', 'inventory', '1140', null],
+
+  ['AP_INVOICE_GOODS', 'clearing', '2105', 'Menutup GRN clearing'],
+  ['AP_INVOICE_GOODS', 'payable', '2101', null],
+  ['AP_INVOICE_SERVICE', 'expense', '5300', 'Invoice jasa/subkontraktor tanpa GRN'],
+  ['AP_INVOICE_SERVICE', 'payable', '2101', null],
+  ['AP_INVOICE_TAX', 'input_tax', '1160', 'PPN masukan'],
+  ['AP_INVOICE_TAX', 'payable', '2101', null],
+  ['AP_RETENTION', 'payable', '2101', null],
+  ['AP_RETENTION', 'retention', '2110', 'Retensi ditahan atas invoice subkontraktor'],
+  ['AP_PAYMENT', 'payable', '2101', null],
+  ['AP_PAYMENT', 'bank', '1102', null],
+
+  ['REVENUE_PROGRESS', 'unbilled', '1114', 'Pendapatan diakui mengikuti progress disetujui'],
+  ['REVENUE_PROGRESS', 'revenue', '4100', null],
+  ['AR_BILLING', 'receivable', '1110', null],
+  ['AR_BILLING', 'unbilled', '1114', 'Tagihan mengurangi pendapatan belum ditagih'],
+  ['AR_BILLING', 'overbilling', '2150', 'Kelebihan tagihan di atas progress'],
+  ['AR_BILLING_TAX', 'receivable', '1110', null],
+  ['AR_BILLING_TAX', 'output_tax', '2130', 'PPN keluaran'],
+  ['AR_RETENTION', 'retention', '1112', 'Retensi ditahan pelanggan'],
+  ['AR_RETENTION', 'receivable', '1110', null],
+  ['AR_RECEIPT', 'bank', '1102', null],
+  ['AR_RECEIPT', 'receivable', '1110', null],
+  ['AR_ADVANCE', 'bank', '1102', null],
+  ['AR_ADVANCE', 'advance', '2140', 'Uang muka proyek dari pelanggan'],
+
+  ['DEPRECIATION_PROJECT', 'expense', '5600', 'Penyusutan alat proyek'],
+  ['DEPRECIATION_OFFICE', 'expense', '6400', 'Penyusutan non-proyek'],
+  ['DEPRECIATION', 'accum_building', '1280', null],
+  ['DEPRECIATION', 'accum_equipment', '1281', null],
+  ['DEPRECIATION', 'accum_vehicle', '1282', null],
+  ['DEPRECIATION', 'accum_office', '1283', null],
+  ['ASSET_CAPITALIZATION', 'asset', '1230', 'Aset dari kapitalisasi CAPEX'],
+  ['ASSET_CAPITALIZATION', 'payable', '2101', null],
+  ['ASSET_DISPOSAL', 'bank', '1102', 'Hasil pelepasan'],
+  ['ASSET_DISPOSAL', 'gain_loss', '7200', null],
+
+  ['PAYROLL_DIRECT', 'expense', '5200', 'Upah langsung proyek'],
+  ['PAYROLL_OFFICE', 'expense', '6100', 'Gaji kantor'],
+  ['PAYROLL', 'payable', '2120', null],
+  ['PAYROLL_DEDUCTION', 'payable', '2120', null],
+  ['PAYROLL_DEDUCTION', 'income_tax', '2125', 'Potongan PPh 21'],
+  ['PAYROLL_DEDUCTION', 'advance', '1120', 'Potongan kasbon'],
+  ['PAYROLL_PAYMENT', 'payable', '2120', null],
+  ['PAYROLL_PAYMENT', 'bank', '1102', null],
+  ['KASBON_DISBURSED', 'advance', '1120', null],
+  ['KASBON_DISBURSED', 'bank', '1102', null],
+];
+
+const seedGlAccountMappings = async (connection: any) => {
+  try {
+    for (const [event, role, kode, catatan] of GL_MAPPINGS) {
+      // INSERT IGNORE, bukan REPLACE: pemetaan yang sudah diubah penggunanya
+      // tidak boleh dikembalikan ke bawaan setiap kali proses restart.
+      await connection.execute(
+        `INSERT IGNORE INTO gl_account_mappings (event_code, role, account_code, note)
+         VALUES (?, ?, ?, ?)`,
+        [event, role, kode, catatan]
+      );
+    }
+    console.log(`✅ Pemetaan akun jurnal otomatis ensured: ${GL_MAPPINGS.length} peran`);
+  } catch (err: any) {
+    console.warn('seedGlAccountMappings warning:', err.message.substring(0, 160));
+  }
+};
+
+/**
+ * General Ledger (GL-01).
+ *
+ * Skemanya diadaptasi dari GL di instance rheologi (VPS yang sama): control
+ * account, periode fiskal, rantai reversal, idempotency key. Tapi DUA kolomnya
+ * sengaja TIDAK ikut, dan ini pembeda terpentingnya:
+ * chart_of_accounts.current_balance dan chart_of_accounts.opening_balance.
+ *
+ * Di sana saldo akun disimpan sebagai kolom lalu di-UPDATE satu per satu saat
+ * posting, dan trial balance punya DUA jalur — satu menjumlah journal_lines,
+ * satu membaca current_balance. Dua sumber kebenaran untuk angka yang sama.
+ * Lebih buruk lagi, seluruh berkas rute di sana nol transaction: crash di
+ * tengah loop update saldo meninggalkan sebagian akun sudah berubah sementara
+ * jurnalnya masih draft, dan posting ulang menghitungnya dua kali. Tidak ada
+ * error yang muncul; saldonya cuma melenceng selamanya.
+ *
+ * Di sini saldo SELALU dihitung dari journal_lines, dan saldo awal masuk
+ * sebagai jurnal bertipe OPENING. Sama seperti nilai kontrak berjalan dan
+ * lokasi berjalan aset: dihitung saat dibaca, tidak pernah disimpan.
+ */
+const ensureGeneralLedgerSchema = async (connection: any) => {
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS chart_of_accounts (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      account_code VARCHAR(20) NOT NULL,
+      account_name VARCHAR(200) NOT NULL,
+      account_type ENUM('asset','liability','equity','revenue','cogs','expense','other_income','tax') NOT NULL,
+      normal_balance ENUM('debit','credit') NOT NULL,
+      parent_id INT NULL,
+      level INT DEFAULT 1,
+      is_header TINYINT(1) DEFAULT 0,
+      is_postable TINYINT(1) DEFAULT 1,
+      is_control_account TINYINT(1) DEFAULT 0,
+      control_subledger VARCHAR(20) NULL,
+      allow_manual_posting TINYINT(1) DEFAULT 1,
+      is_active TINYINT(1) DEFAULT 1,
+      statement_section VARCHAR(40) NULL,
+      display_order INT DEFAULT 0,
+      description TEXT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_coa_code (account_code),
+      KEY idx_coa_type (account_type),
+      KEY idx_coa_parent (parent_id),
+      CONSTRAINT fk_coa_parent FOREIGN KEY (parent_id) REFERENCES chart_of_accounts(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS fiscal_periods (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      period_name VARCHAR(50) NOT NULL,
+      fiscal_year INT NOT NULL,
+      period_number INT NOT NULL,
+      start_date DATE NOT NULL,
+      end_date DATE NOT NULL,
+      status ENUM('open','soft_closed','closed') DEFAULT 'open',
+      closed_by INT NULL,
+      closed_at TIMESTAMP NULL,
+      reopened_by INT NULL,
+      reopened_at TIMESTAMP NULL,
+      reopen_reason TEXT NULL,
+      version INT DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_fiscal_period (fiscal_year, period_number),
+      KEY idx_fp_range (start_date, end_date)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS journal_entries (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      entry_number VARCHAR(30) NOT NULL,
+      entry_date DATE NOT NULL,
+      fiscal_period_id INT NULL,
+      journal_type ENUM('MANUAL','SYSTEM','OPENING','CLOSING','REVERSAL','ADJUSTMENT') DEFAULT 'MANUAL',
+      description TEXT NOT NULL,
+      source_module VARCHAR(30) NULL,
+      source_event VARCHAR(50) NULL,
+      reference_type VARCHAR(50) NULL,
+      reference_id INT NULL,
+      reference_number VARCHAR(50) NULL,
+      total_debit DECIMAL(20,4) DEFAULT 0,
+      total_credit DECIMAL(20,4) DEFAULT 0,
+      status ENUM('draft','posted','reversed') DEFAULT 'draft',
+      posted_by INT NULL,
+      posted_at TIMESTAMP NULL,
+      original_journal_id INT NULL,
+      reversal_journal_id INT NULL,
+      reversal_reason TEXT NULL,
+      idempotency_key VARCHAR(128) NULL,
+      created_by INT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_je_number (entry_number),
+      UNIQUE KEY uq_je_idempotency (idempotency_key),
+      KEY idx_je_date (entry_date),
+      KEY idx_je_status (status),
+      KEY idx_je_ref (reference_type, reference_id),
+      KEY idx_je_source (source_module, source_event),
+      CONSTRAINT fk_je_period FOREIGN KEY (fiscal_period_id) REFERENCES fiscal_periods(id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS journal_lines (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      journal_entry_id INT NOT NULL,
+      line_number INT DEFAULT 1,
+      account_id INT NOT NULL,
+      description VARCHAR(500) NULL,
+      debit DECIMAL(20,4) DEFAULT 0,
+      credit DECIMAL(20,4) DEFAULT 0,
+      project_id INT NULL,
+      vendor_id INT NULL,
+      client_id INT NULL,
+      employee_id INT NULL,
+      product_id INT NULL,
+      asset_id INT NULL,
+      source_line_ref VARCHAR(100) NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_jl_entry (journal_entry_id),
+      KEY idx_jl_account (account_id),
+      KEY idx_jl_project (project_id),
+      CONSTRAINT fk_jl_entry FOREIGN KEY (journal_entry_id) REFERENCES journal_entries(id) ON DELETE CASCADE,
+      CONSTRAINT fk_jl_account FOREIGN KEY (account_id) REFERENCES chart_of_accounts(id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  /**
+   * Pemetaan akun untuk jurnal otomatis.
+   *
+   * BENTUK jurnal ada di kode (itu logika akuntansi, dan salah bentuk harus
+   * ketahuan saat tes). Yang ada di sini cuma AKUN MANA yang mengisi tiap
+   * peran. Jadi memindahkan beban subkontraktor dari 5300 ke akun lain adalah
+   * satu baris UPDATE, bukan deploy ulang.
+   */
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS gl_account_mappings (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      event_code VARCHAR(50) NOT NULL,
+      role VARCHAR(40) NOT NULL,
+      account_code VARCHAR(20) NOT NULL,
+      note VARCHAR(200) NULL,
+      is_active TINYINT(1) DEFAULT 1,
+      updated_by INT NULL,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_glmap (event_code, role)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS gl_settings (
+      setting_key VARCHAR(50) PRIMARY KEY,
+      setting_value VARCHAR(200) NULL,
+      updated_by INT NULL,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  // Auto-posting MATI sampai tanggal mulai diisi manusia. Keputusan pemilik
+  // (3 September 2026): tidak ada jurnal mundur — menjurnal transaksi lama
+  // yang aturannya belum ada saat itu menghasilkan buku besar yang tidak bisa
+  // direkonsiliasi dengan apa pun. Baris NULL ini yang menahannya.
+  await execSchemaEnsure(connection, `
+    INSERT IGNORE INTO gl_settings (setting_key, setting_value)
+    VALUES ('auto_posting_start_date', NULL)
+  `);
+
+  await seedChartOfAccounts(connection);
+  await seedGlAccountMappings(connection);
+
+  console.log('✅ Skema general ledger ensured');
 };
 
 const ensurePermissionCatalog = async (connection: any) => {
@@ -3356,6 +3747,7 @@ export async function initializeDatabase() {
     await ensureAssetCustodySchema(connection);
     await ensureGrnAttachmentSchema(connection);
     await ensureVendorPriceApprovalSchema(connection);
+    await ensureGeneralLedgerSchema(connection);
     await ensurePermissionCatalog(connection);
     await ensureMasterUserRow(connection);
     // Harus paling akhir: semua permission dari ensure* di atas sudah ada
