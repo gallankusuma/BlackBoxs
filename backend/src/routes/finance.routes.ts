@@ -1,5 +1,7 @@
 import express, { Request, Response } from 'express';
 import { dbAll, dbGet, dbRun, withTransaction } from '../config/database';
+import { postingOtomatis, SQL_SALDO, saldoNormal, balasGlGagal } from '../utils/gl-posting';
+import { nextSequentialCode } from './procurement.routes';
 import { businessDate } from '../utils/date.utils';
 import { authMiddleware } from '../middleware/auth';
 import { requirePermission } from '../middleware/permission';
@@ -333,27 +335,31 @@ router.post('/accounts-payable', authMiddleware, requirePermission('finance.acco
       effectiveVendorId = poRow?.vendor_id || null;
     }
 
-    const result = await dbRun(
-      `INSERT INTO accounts_payable (po_id, vendor_id, po_schedule_id, invoice_number, invoice_date, due_date, 
-       amount, paid_amount, status, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        po_id,
-        effectiveVendorId,
-        po_schedule_id || null,
-        invoice_number || null,
-        invoice_date || new Date().toISOString(),
-        due_date || null,
-        amount,
-        paid_amount || 0,
-        status || 'open',
-        notes || null,
-      ]
-    );
+    const tglInvoice = String(invoice_date || businessDate()).slice(0, 10);
+    // Baris AP dan jurnalnya SATU transaction. Utang yang tercatat tanpa jurnal
+    // pasangannya adalah selisih yang baru ketahuan saat rekonsiliasi, dan saat
+    // itu tidak ada lagi yang ingat invoice mana yang terlewat.
+    const result = await withTransaction(async tx => {
+      const r = await tx.run(
+        `INSERT INTO accounts_payable (po_id, vendor_id, po_schedule_id, invoice_number, invoice_date, due_date,
+         amount, paid_amount, status, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [po_id, effectiveVendorId, po_schedule_id || null, invoice_number || null,
+         tglInvoice, due_date || null, amount, paid_amount || 0, status || 'open', notes || null]
+      );
 
-    if (po_schedule_id) {
-      await dbRun('UPDATE purchase_order_payment_schedules SET ap_id = ?, status = ? WHERE id = ?', [result.insertId, status || 'open', po_schedule_id]);
-    }
+      if (po_schedule_id) {
+        await tx.run('UPDATE purchase_order_payment_schedules SET ap_id = ?, status = ? WHERE id = ?',
+          [r.insertId, status || 'open', po_schedule_id]);
+      }
+
+      await jurnalInvoiceAp(tx, {
+        apId: r.insertId, poId: po_id, vendorId: effectiveVendorId,
+        jumlah: Number(amount), tanggal: tglInvoice,
+        nomor: invoice_number || null, userId: (req as any).userId ?? null,
+      });
+      return r;
+    });
 
     res.status(201).json({
       message: 'AP record created',
@@ -565,6 +571,96 @@ router.get('/margin-analysis/summary', authMiddleware, requirePermission('financ
  * Sekarang keduanya memakai jalur ini: lock baris, validasi sisa tagihan, tulis
  * event, perbarui aggregate dan jadwal — satu transaction.
  */
+/**
+ * Jurnal invoice vendor.
+ *
+ * Barang atau jasa DITENTUKAN DARI DATA, bukan ditebak: kalau PO ini punya GRN
+ * yang sudah disetujui penuh dan belum direversal, invoice-nya menutup GRN
+ * clearing (Dr 2105). Kalau tidak ada penerimaan barang sama sekali, ia invoice
+ * jasa/subkontraktor dan langsung jadi beban (Dr 5300).
+ *
+ * Menebaknya dari kategori PO akan salah persis di kasus yang paling mahal —
+ * PO campuran barang dan jasa — sementara keberadaan GRN adalah fakta.
+ */
+const jurnalInvoiceAp = async (tx: any, o: {
+  apId: number; poId: any; vendorId: any; jumlah: number;
+  tanggal: string; nomor: string | null; userId: number | null;
+}) => {
+  const grn = await tx.get(
+    `SELECT COUNT(*) AS c FROM goods_receipts
+     WHERE po_id = ? AND approval_status = 2 AND (is_reversed IS NULL OR is_reversed = 0)`,
+    [o.poId]) as any;
+  const adaBarang = Number(grn?.c || 0) > 0;
+
+  const po = await tx.get('SELECT po_number, project_id FROM purchase_orders WHERE id = ?', [o.poId]) as any;
+  return postingOtomatis(tx, {
+    event: adaBarang ? 'AP_INVOICE_GOODS' : 'AP_INVOICE_SERVICE',
+    date: o.tanggal,
+    description: `Invoice vendor ${o.nomor || '#' + o.apId}${po?.po_number ? ' atas ' + po.po_number : ''}`,
+    refType: 'accounts_payable', refId: Number(o.apId), refNumber: o.nomor,
+    sourceModule: 'finance', userId: o.userId,
+    lines: [
+      { role: adaBarang ? 'clearing' : 'expense', debit: o.jumlah,
+        vendor_id: o.vendorId ?? null, project_id: po?.project_id ?? null },
+      { role: 'payable', credit: o.jumlah,
+        vendor_id: o.vendorId ?? null, project_id: po?.project_id ?? null },
+    ],
+    nomorJurnal: (t: any) => nextSequentialCode('JE', 'journal_entries', 'entry_number', t),
+  });
+};
+
+/**
+ * Jurnal tagihan ke pelanggan, dengan perlakuan percentage-of-completion.
+ *
+ * Tagihan TIDAK mengakui pendapatan — pendapatannya sudah diakui saat progress
+ * disetujui (lihat jurnalPengakuanPendapatan). Tagihan hanya memindahkannya
+ * dari "belum ditagih" menjadi piutang.
+ *
+ * Kalau tagihannya MELEBIHI pendapatan yang sudah diakui, kelebihannya bukan
+ * pendapatan: ia kewajiban sampai pekerjaannya dikerjakan (2150). Ini titik
+ * yang paling mudah dilewatkan, dan melewatkannya berarti mengakui pendapatan
+ * atas pekerjaan yang belum terjadi.
+ *
+ * Sisa "belum ditagih" dihitung dari saldo akun 1114 untuk proyek ini —
+ * dihitung dari jurnal, bukan dari kolom yang bisa melenceng.
+ */
+const jurnalTagihanAr = async (tx: any, o: {
+  arId: number; projectId: any; customerId: any; jumlah: number; pajak: number;
+  tanggal: string; nomor: string | null; userId: number | null;
+}) => {
+  let belumDitagih = 0;
+  if (o.projectId) {
+    const akun = await tx.get(
+      `SELECT id, normal_balance FROM chart_of_accounts WHERE account_code =
+        (SELECT account_code FROM gl_account_mappings WHERE event_code = 'AR_BILLING' AND role = 'unbilled')`) as any;
+    if (akun?.id) {
+      const sal = await tx.get(
+        `${SQL_SALDO} AND jl.account_id = ? AND jl.project_id = ? GROUP BY jl.account_id`,
+        [akun.id, o.projectId]) as any;
+      belumDitagih = Math.max(0, saldoNormal(akun.normal_balance,
+        Number(sal?.total_debit || 0), Number(sal?.total_credit || 0)));
+    }
+  }
+
+  const dariProgress = Math.min(o.jumlah, belumDitagih);
+  const kelebihan = Math.max(0, o.jumlah - belumDitagih);
+
+  return postingOtomatis(tx, {
+    event: 'AR_BILLING',
+    date: o.tanggal,
+    description: `Tagihan ${o.nomor || '#' + o.arId}`,
+    refType: 'accounts_receivable', refId: Number(o.arId), refNumber: o.nomor,
+    sourceModule: 'finance', userId: o.userId,
+    lines: [
+      { role: 'receivable', debit: o.jumlah + o.pajak, client_id: o.customerId ?? null, project_id: o.projectId ?? null },
+      { role: 'unbilled', credit: dariProgress, client_id: o.customerId ?? null, project_id: o.projectId ?? null },
+      { role: 'overbilling', credit: kelebihan, client_id: o.customerId ?? null, project_id: o.projectId ?? null },
+      { role: 'output_tax', credit: o.pajak, client_id: o.customerId ?? null, project_id: o.projectId ?? null },
+    ],
+    nomorJurnal: (t: any) => nextSequentialCode('JE', 'journal_entries', 'entry_number', t),
+  });
+};
+
 const catatPembayaran = async (opts: {
   jenis: 'AP' | 'AR';
   id: any;
@@ -651,6 +747,34 @@ const catatPembayaran = async (opts: {
         [totalBaru, statusBaru, opts.id, row.po_schedule_id]
       );
     }
+
+    // Jurnal pembayaran ikut di transaction yang sama. Dikaitkan ke id EVENT
+    // pembayaran, bukan ke id tagihan — satu tagihan bisa dibayar beberapa
+    // kali, dan kunci idempotensi per tagihan akan membuat cicilan kedua diam
+    // saja karena dianggap sudah pernah dijurnal.
+    const tglBayar = String(opts.payment_date || businessDate()).slice(0, 10);
+    await postingOtomatis(tx, {
+      event: opts.jenis === 'AP' ? 'AP_PAYMENT' : 'AR_RECEIPT',
+      date: tglBayar,
+      description: opts.jenis === 'AP'
+        ? `Pembayaran utang ${row.invoice_number || row.vendor_invoice_number || '#' + opts.id}`
+        : `Penerimaan piutang ${row.invoice_number || '#' + opts.id}`,
+      refType: opts.jenis === 'AP' ? 'ap_payment' : 'ar_payment',
+      refId: Number(eventResult.insertId),
+      refNumber: opts.reference_number || row.invoice_number || null,
+      sourceModule: 'finance',
+      userId: opts.userId ?? null,
+      lines: opts.jenis === 'AP'
+        ? [
+            { role: 'payable', debit: opts.jumlah, vendor_id: row.vendor_id ?? null, project_id: row.project_id ?? null },
+            { role: 'bank', credit: opts.jumlah, vendor_id: row.vendor_id ?? null },
+          ]
+        : [
+            { role: 'bank', debit: opts.jumlah, client_id: row.customer_id ?? null },
+            { role: 'receivable', credit: opts.jumlah, client_id: row.customer_id ?? null, project_id: row.project_id ?? null },
+          ],
+      nomorJurnal: (t) => nextSequentialCode('JE', 'journal_entries', 'entry_number', t),
+    });
 
     return {
       ok: true as const,
@@ -1312,15 +1436,27 @@ router.post('/accounts-receivable/create', authMiddleware, requirePermission('fi
     const taxPct = Number(tax_percent||11);
     const taxAmt = Number(amount) * taxPct / 100;
     const autoInvNum = invoice_number || `INV-${new Date().getFullYear()}-${String(Date.now()).slice(-5)}`;
-    const result = await dbRun(
-      `INSERT INTO accounts_receivable (customer_id, project_id, invoice_number, invoice_date, due_date,
-       amount, paid_amount, tax_percent, tax_amount, status, description, notes)
-       VALUES (?,?,?,?,?,?,0,?,?,?,?,?)`,
-      [customer_id, project_id||null, autoInvNum, invoice_date||new Date().toISOString().slice(0,10),
-       due_date||null, Number(amount), taxPct, taxAmt, 'open', description||null, notes||null]
-    );
+    const tglInv = String(invoice_date || businessDate()).slice(0, 10);
+    const result = await withTransaction(async tx => {
+      const r = await tx.run(
+        `INSERT INTO accounts_receivable (customer_id, project_id, invoice_number, invoice_date, due_date,
+         amount, paid_amount, tax_percent, tax_amount, status, description, notes)
+         VALUES (?,?,?,?,?,?,0,?,?,?,?,?)`,
+        [customer_id, project_id||null, autoInvNum, tglInv,
+         due_date||null, Number(amount), taxPct, taxAmt, 'open', description||null, notes||null]
+      );
+      await jurnalTagihanAr(tx, {
+        arId: r.insertId, projectId: project_id || null, customerId: customer_id,
+        jumlah: Number(amount), pajak: Number(taxAmt || 0), tanggal: tglInv,
+        nomor: autoInvNum, userId: (req as any).userId ?? null,
+      });
+      return r;
+    });
     res.status(201).json({ success: true, data: { id: result.insertId, invoice_number: autoInvNum } });
-  } catch (e) { res.status(500).json({ error: 'Failed to create AR' }); }
+  } catch (e) {
+    if (balasGlGagal(res, e)) return;
+    res.status(500).json({ error: 'Failed to create AR' });
+  }
 });
 
 // GET /accounts-receivable/:id — AR detail with payment history

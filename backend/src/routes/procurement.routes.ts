@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { dbAll, dbGet, dbRun, withTransaction, TxRunner } from '../config/database';
+import { postingOtomatis, GlGagal } from '../utils/gl-posting';
 import { authMiddleware } from '../middleware/auth';
 import { requirePermission } from '../middleware/permission';
 import { validateUpload, storeValidatedFile, removeStoredFile } from '../utils/file-validation';
@@ -3325,7 +3326,13 @@ router.post('/goods-receipts/:id/approve', authMiddleware, async (req: Request, 
         const updated = await tx.get('SELECT * FROM goods_receipts WHERE id = ?', [id]);
         if (Number(updated.approval_status) !== 2) return null;
 
-        return applyGrnToInventory(updated, items, tx);
+        const hasilStok = await applyGrnToInventory(updated, items, tx);
+        // Jurnal ikut di transaction yang sama dengan posting stok. GRN yang
+        // menambah stok tanpa jurnal pasangannya adalah selisih yang baru
+        // ketahuan saat tutup buku — dan saat itu tidak ada lagi yang ingat
+        // kejadiannya.
+        await jurnalGrn(updated, items, tx, userId);
+        return hasilStok;
       });
     } catch (err: any) {
       console.error('[GRN Approve] Posting stok gagal, persetujuan dibatalkan:', err?.message || err);
@@ -3556,6 +3563,57 @@ router.post('/goods-receipts/:id/reverse', authMiddleware, requirePermission('pr
  * `stock_movements`, berjalan dalam transaction, dan errornya DILEMPAR
  * sehingga pemanggil tahu kalau posting gagal.
  */
+/**
+ * Jurnal penerimaan barang: Dr Persediaan / Cr Utang Penerimaan (GRN Clearing).
+ *
+ * Nilainya diambil dari harga PO, bukan dari notes GRN — notes GRN hanya
+ * menyimpan `received_quantity`, tidak ada harganya.
+ *
+ * Kalau ada item yang diterima tapi harganya tidak ketemu di PO, penerimaan
+ * DITOLAK, bukan dijurnal seadanya. Saldo GRN Clearing yang salah adalah
+ * selisih yang tidak bisa dijelaskan siapa pun saat rekonsiliasi, dan
+ * memperbaikinya berbulan-bulan kemudian jauh lebih mahal daripada menolak
+ * sekarang dengan menyebut barangnya.
+ */
+async function jurnalGrn(grn: any, items: any[], tx: TxRunner, userId: any) {
+  const barisPo = await tx.all(
+    'SELECT product_id, unit_price FROM purchase_order_items WHERE po_id = ? OR purchase_order_id = ?',
+    [grn.po_id, grn.po_id]) as any[];
+  const harga = new Map<number, number>();
+  for (const b of barisPo) {
+    if (b.product_id != null) harga.set(Number(b.product_id), Number(b.unit_price || 0));
+  }
+
+  let nilai = 0;
+  for (const item of items) {
+    const qty = Number(item.received_quantity || 0);
+    if (!item.product_id || qty <= 0) continue;
+    const h = harga.get(Number(item.product_id));
+    if (h === undefined) {
+      throw new GlGagal('HARGA_GRN_TIDAK_DITEMUKAN',
+        `Barang "${item.product_name || item.name || item.product_id}" diterima tapi harganya tidak ada di PO, jadi nilai jurnalnya tidak bisa ditentukan.`,
+        409);
+    }
+    nilai += qty * h;
+  }
+  if (nilai <= 0) return null;
+
+  const po = await tx.get('SELECT po_number, vendor_id FROM purchase_orders WHERE id = ?', [grn.po_id]) as any;
+  const label = grn.grn_number || `GRN-${grn.id}`;
+  return postingOtomatis(tx, {
+    event: 'GRN_APPROVED',
+    date: String(grn.received_date || '').slice(0, 10) || new Date().toISOString().slice(0, 10),
+    description: `Penerimaan barang ${label}${po?.po_number ? ' atas ' + po.po_number : ''}`,
+    refType: 'goods_receipt', refId: Number(grn.id), refNumber: label,
+    sourceModule: 'procurement', userId,
+    lines: [
+      { role: 'inventory', debit: nilai, vendor_id: po?.vendor_id ?? null },
+      { role: 'clearing', credit: nilai, vendor_id: po?.vendor_id ?? null },
+    ],
+    nomorJurnal: (t) => nextSequentialCode('JE', 'journal_entries', 'entry_number', t),
+  });
+}
+
 async function applyGrnToInventory(grn: any, items: any[], tx: TxRunner): Promise<{ posted: number; skipped: boolean }> {
   const already: any = await tx.get(
     'SELECT COUNT(*) AS cnt FROM stock_movements WHERE reference_type = ? AND reference_id = ?',

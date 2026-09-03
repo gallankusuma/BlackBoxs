@@ -1,8 +1,11 @@
 import express, { Request, Response } from 'express';
-import { dbAll, dbGet, dbRun, withTransaction, TxRunner } from '../config/database';
+import { dbAll, dbGet, dbRun, withTransaction } from '../config/database';
 import { authMiddleware } from '../middleware/auth';
 import { requirePermission } from '../middleware/permission';
 import { nextSequentialCode } from './procurement.routes';
+import {
+  uang, GlGagal, STATUS_DIHITUNG, SQL_SALDO, saldoNormal, periodeUntuk, buatJurnal,
+} from '../utils/gl-posting';
 
 const router = express.Router();
 
@@ -30,22 +33,6 @@ const router = express.Router();
  *    perhitungan di `SQL_SALDO`.
  */
 
-const uang = (v: any) => Math.round(Number(v || 0) * 10000) / 10000;
-
-/**
- * Penolakan di dalam transaction WAJIB dilempar, tidak boleh di-return.
- *
- * `withTransaction` menganggap callback yang selesai tanpa melempar sebagai
- * sukses dan COMMIT. Versi pertama berkas ini me-return objek kegagalan — dan
- * jurnal yang ditolak karena tidak seimbang tetap tersimpan, persis cacat yang
- * dihindari dari GL asal. Tertangkap tes: "tidak ada jurnal yang tertinggal".
- */
-class GlGagal extends Error {
-  constructor(public code: string, message: string, public httpStatus = 400, public extra: any = {}) {
-    super(message);
-    this.name = 'GlGagal';
-  }
-}
 const glError = (res: Response, konteks: string, error: any) => {
   console.error(`GL ${konteks}:`, error?.message || error);
   return res.status(500).json({ error: `Gagal memproses ${konteks}`, code: 'GL_ERROR' });
@@ -56,38 +43,6 @@ const tangkapGagal = (res: Response, konteks: string, e: any) => {
   }
   return glError(res, konteks, e);
 };
-
-/**
- * Satu-satunya rumus saldo di modul ini.
- *
- * Semua laporan memakainya. Endpoint cepat yang menjawab beda untuk pertanyaan
- * yang sama lebih berbahaya daripada yang lambat — trial balance yang tidak
- * cocok dengan buku besar membuat orang berhenti percaya keduanya.
- *
- * Draft tidak dihitung — ia belum terjadi.
- *
- * Jurnal `reversed` TETAP dihitung, dan ini titik yang paling mudah salah.
- * Pembalikan bekerja dengan menambah jurnal berlawanan, bukan dengan menghapus
- * yang asli. Kalau yang asli ikut dikeluarkan dari perhitungan, pembatalannya
- * terjadi DUA KALI: sekali karena aslinya hilang, sekali lagi karena jurnal
- * pembaliknya ada — dan saldonya berbalik tanda. Tertangkap tes: "saldo beban
- * kembali nol" sempat menjawab -250000.
- *
- * Ini juga yang benar secara akuntansi: jurnal yang sudah di-post memang
- * pernah terjadi, dan buku besar tidak menulis ulang sejarah.
- */
-const STATUS_DIHITUNG = `('posted', 'reversed')`;
-const SQL_SALDO = `
-  SELECT jl.account_id,
-         COALESCE(SUM(jl.debit), 0)  AS total_debit,
-         COALESCE(SUM(jl.credit), 0) AS total_credit
-  FROM journal_lines jl
-  JOIN journal_entries je ON je.id = jl.journal_entry_id
-  WHERE je.status IN ${STATUS_DIHITUNG}`;
-
-/** Saldo bertanda sesuai sifat akun: positif berarti searah saldo normalnya. */
-const saldoNormal = (normal: string, debit: number, credit: number) =>
-  normal === 'debit' ? uang(debit - credit) : uang(credit - debit);
 
 // ═══════════════════════════════════════════════════════════════════════
 // CHART OF ACCOUNTS
@@ -339,129 +294,6 @@ router.put('/fiscal-periods/:id/reopen', authMiddleware,
 // ═══════════════════════════════════════════════════════════════════════
 
 const jeView = [authMiddleware, requirePermission('finance.general-ledger.view')];
-
-/** Periode yang memuat tanggal ini, apa pun statusnya. */
-const periodeUntuk = async (tanggal: string, tx?: TxRunner) => {
-  const q = 'SELECT * FROM fiscal_periods WHERE ? BETWEEN start_date AND end_date LIMIT 1';
-  return (tx ? await tx.get(q, [tanggal]) : await dbGet(q, [tanggal])) as any;
-};
-
-/**
- * Memvalidasi akun tujuan tiap baris.
- *
- * `manual` membedakan jurnal yang diketik orang dari jurnal yang lahir dari
- * peristiwa: akun kontrol menolak yang pertama dan menerima yang kedua, karena
- * justru sistemlah yang berhak menggerakkan saldo subledger.
- */
-const validasiAkun = async (tx: TxRunner, lines: any[], manual: boolean) => {
-  const ids = [...new Set(lines.map(l => Number(l.account_id)).filter(Boolean))];
-  if (!ids.length) throw new GlGagal('AKUN_WAJIB', 'Tidak ada akun yang sah di baris jurnal');
-  const akun = await tx.all(
-    `SELECT id, account_code, account_name, is_header, is_postable, is_active,
-            is_control_account, allow_manual_posting
-     FROM chart_of_accounts WHERE id IN (${ids.map(() => '?').join(',')})`, ids) as any[];
-  const peta = new Map<number, any>(akun.map(a => [Number(a.id), a]));
-
-  for (const l of lines) {
-    const a = peta.get(Number(l.account_id));
-    if (!a) throw new GlGagal('AKUN_TIDAK_ADA', `Akun id ${l.account_id} tidak ditemukan`);
-    if (!a.is_active) throw new GlGagal('AKUN_NONAKTIF', `${a.account_code} ${a.account_name} sudah nonaktif`);
-    if (a.is_header || !a.is_postable) {
-      throw new GlGagal('AKUN_HEADER',
-        `${a.account_code} ${a.account_name} adalah akun header — ia hanya mengelompokkan dan tidak bisa menerima jurnal. Pilih akun turunannya.`);
-    }
-    if (manual && a.is_control_account && !a.allow_manual_posting) {
-      throw new GlGagal('AKUN_KONTROL',
-        `${a.account_code} ${a.account_name} adalah akun kontrol — saldonya datang dari subledger, jadi tidak boleh dijurnal manual. Kalau tidak, buku besar dan daftar subledger bisa berselisih tanpa bisa dijelaskan.`,
-        409);
-    }
-  }
-};
-
-/**
- * Membuat jurnal di dalam SATU transaction, lalu memeriksa keseimbangannya dari
- * baris yang BENAR-BENAR TERSIMPAN.
- *
- * Memeriksa body request saja tidak cukup: kalau penyisipan baris ke-3 gagal,
- * body-nya tetap seimbang sementara jurnalnya tidak. Karena pemeriksaan ini
- * berada di dalam transaction, jurnal tak seimbang tidak pernah sempat ada.
- */
-const buatJurnal = async (opts: {
-  tx: TxRunner; entryNumber: string; entryDate: string; description: string;
-  journalType?: string; lines: any[]; userId: number | null; manual: boolean;
-  sourceModule?: string | null; sourceEvent?: string | null;
-  referenceType?: string | null; referenceId?: number | null; referenceNumber?: string | null;
-  idempotencyKey?: string | null; originalJournalId?: number | null;
-}) => {
-  const { tx, lines } = opts;
-
-  await validasiAkun(tx, lines, opts.manual);
-
-  const periode = await periodeUntuk(opts.entryDate, tx);
-  if (!periode) {
-    throw new GlGagal('PERIODE_TIDAK_ADA',
-      `Belum ada periode fiskal yang memuat ${opts.entryDate}. Buat periode tahunnya dulu.`);
-  }
-  if (periode.status === 'closed') {
-    throw new GlGagal('PERIODE_TERTUTUP',
-      `Periode ${periode.period_name} sudah ditutup, jadi tidak bisa menerima jurnal bertanggal ${opts.entryDate}.`,
-      409);
-  }
-
-  const head = await tx.run(
-    `INSERT INTO journal_entries
-      (entry_number, entry_date, fiscal_period_id, journal_type, description,
-       source_module, source_event, reference_type, reference_id, reference_number,
-       total_debit, total_credit, status, original_journal_id, idempotency_key, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 'draft', ?, ?, ?)`,
-    [opts.entryNumber, opts.entryDate, periode.id, opts.journalType || 'MANUAL', opts.description,
-     opts.sourceModule ?? null, opts.sourceEvent ?? null, opts.referenceType ?? null,
-     opts.referenceId ?? null, opts.referenceNumber ?? null,
-     opts.originalJournalId ?? null, opts.idempotencyKey ?? null, opts.userId]
-  );
-  const jeId = head.insertId;
-
-  let no = 0;
-  for (const l of lines) {
-    no++;
-    await tx.run(
-      `INSERT INTO journal_lines
-        (journal_entry_id, line_number, account_id, description, debit, credit,
-         project_id, vendor_id, client_id, employee_id, product_id, asset_id, source_line_ref)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [jeId, no, Number(l.account_id), l.description || null,
-       uang(l.debit), uang(l.credit),
-       l.project_id ?? null, l.vendor_id ?? null, l.client_id ?? null,
-       l.employee_id ?? null, l.product_id ?? null, l.asset_id ?? null,
-       l.source_line_ref ?? null]
-    );
-  }
-
-  // Keseimbangan dihitung dari baris yang tersimpan, bukan dari body request.
-  const jml = await tx.get(
-    `SELECT COALESCE(SUM(debit), 0) AS d, COALESCE(SUM(credit), 0) AS k, COUNT(*) AS n
-     FROM journal_lines WHERE journal_entry_id = ?`, [jeId]) as any;
-  const d = uang(jml?.d), k = uang(jml?.k);
-
-  if (Number(jml?.n) < 2) {
-    throw new GlGagal('BARIS_KURANG', 'Jurnal harus punya minimal 2 baris');
-  }
-  if (Math.abs(d - k) > 0.0001) {
-    throw new GlGagal('TIDAK_SEIMBANG', `Jurnal tidak seimbang: debit ${d} vs kredit ${k}`,
-      400, { total_debit: d, total_credit: k });
-  }
-  // Baris yang debit dan kredit dua-duanya nol tidak menambah informasi apa pun
-  // tapi ikut terhitung sebagai baris — ia menutupi jurnal satu-sisi.
-  const kosong = await tx.get(
-    `SELECT COUNT(*) AS c FROM journal_lines WHERE journal_entry_id = ? AND debit = 0 AND credit = 0`,
-    [jeId]) as any;
-  if (Number(kosong?.c) > 0) {
-    throw new GlGagal('BARIS_KOSONG', 'Ada baris jurnal tanpa nilai debit maupun kredit');
-  }
-
-  await tx.run('UPDATE journal_entries SET total_debit = ?, total_credit = ? WHERE id = ?', [d, k, jeId]);
-  return { jeId, entryNumber: opts.entryNumber, total: d, periode };
-};
 
 router.get('/journal-entries', ...jeView, async (req: Request, res: Response) => {
   try {

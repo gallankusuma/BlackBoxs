@@ -579,6 +579,64 @@ setelan, bukan janji di dokumen.
 
 Dijaga `npm run test:gl-core`.
 
+#### Auto-posting (GL-01 langkah 3)
+
+Enam modul menjurnal sendiri lewat `postingOtomatis()` di
+[utils/gl-posting.ts](backend/src/utils/gl-posting.ts):
+
+| Peristiwa | Titik kait | Jurnal |
+|---|---|---|
+| GRN disetujui | `procurement.routes.ts` — di dalam transaction posting stok | Dr 1140 / Cr 2105 |
+| Invoice vendor | `POST /finance/accounts-payable` | Dr 2105 atau 5300 / Cr 2101 |
+| Pembayaran AP & penerimaan AR | `catatPembayaran()` — satu titik untuk keduanya | Dr 2101 / Cr 1102, dan sebaliknya |
+| Tagihan pelanggan | `POST /accounts-receivable/create` | Dr 1110 / Cr 1114 + 2150 + 2130 |
+| Progress disetujui | `project.routes.ts` — di dalam transaction persetujuan | Dr 1114 / Cr 4100 |
+| Tutup periode penyusutan | `asset.routes.ts` | Dr 5600/6400 / Cr 128x |
+| Payroll | `hr.routes.ts` generate-expense | Dr 5200 gross / Cr 2120 net + 1120 kasbon |
+| Kasbon | `POST /hr/advances` | Dr 1120 / Cr 1102 |
+
+Aturan yang harus dijaga:
+
+1. **Dipanggil DI DALAM transaction pemanggilnya.** Kalau jurnalnya gagal,
+   transaksi bisnisnya ikut batal. Itu disengaja: GRN yang menambah stok tanpa
+   jurnal pasangannya adalah selisih yang baru ketahuan saat tutup buku, dan
+   saat itu tidak ada lagi yang ingat kejadiannya. Tes membuktikan barisnya
+   ikut batal, bukan hanya endpointnya membalas 500.
+2. **Idempoten lewat `idempotency_key`** (`event:refType:refId[:suffix]`), dijamin
+   UNIQUE di database — bukan pemeriksaan yang bisa kalah balapan. Pembayaran
+   dikaitkan ke id **event pembayaran**, bukan id tagihan: satu tagihan bisa
+   dicicil, dan kunci per-tagihan akan membuat cicilan kedua diam saja.
+3. **Peran → akun lewat `gl_account_mappings`; bentuk jurnalnya di kode.**
+   Setiap `event_code` memuat SELURUH peran jurnalnya — satu jurnal lahir dari
+   satu event, jadi peran yang tercecer di event lain tidak akan pernah ketemu.
+4. **Barang atau jasa ditentukan dari DATA.** Invoice vendor menutup GRN
+   clearing kalau PO-nya punya GRN disetujui yang belum direversal; kalau tidak
+   ada penerimaan sama sekali, ia invoice jasa. Menebaknya dari kategori PO akan
+   salah persis di kasus yang paling mahal — PO campuran.
+5. **GRN yang tidak bisa dinilai DITOLAK**, bukan dijurnal seadanya
+   (`HARGA_GRN_TIDAK_DITEMUKAN`). Saldo GRN Clearing yang salah adalah selisih
+   yang tidak bisa dijelaskan siapa pun saat rekonsiliasi.
+6. **Payroll menjurnal GROSS sebagai beban**, bukan net. Potongan kasbon
+   mengurangi piutang karyawan (1120), bukan mengurangi beban — mencatat net
+   membuat biaya proyek terlihat lebih kecil sebesar kasbon yang kebetulan
+   dipotong bulan itu.
+7. **Kasbon dijurnal saat uangnya diberikan** (`POST /hr/advances`), bukan saat
+   kasbon request disetujui. Persetujuan hanya mengelompokkan kasbon yang sudah
+   terjadi untuk penagihan ke proyek; uangnya sudah keluar lebih dulu.
+8. **Penyusutan satu jurnal ringkas per periode**, bukan satu per aset.
+   Rinciannya sudah ada di `asset_depreciation_ledger`. Pembagian proyek vs
+   non-proyek memakai KATEGORI aset (BLDG → 6400, sisanya → 5600), sengaja
+   bukan lokasi berjalan alat: lokasi berpindah di tengah bulan sementara
+   penyusutan adalah beban satu periode penuh.
+
+⚠️ **Nama kolom yang salah di jalur ini tidak menghasilkan error saat `tsc`
+maupun `build`** — ia baru meledak saat jurnalnya dibentuk, di tengah transaksi
+bisnis orang lain. `change_orders.value_change` sempat ditulis begitu; yang
+benar `value_delta`. `npm run test:gl-auto` memeriksa keberadaan setiap kolom
+yang disebut jalur auto-posting.
+
+Dijaga `npm run test:gl-auto`.
+
 ### RBAC finance (FIN-RBAC-01)
 
 Seluruh **64 endpoint** `finance.routes.ts` kini memakai `requirePermission` —

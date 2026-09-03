@@ -2,7 +2,9 @@ import { Router, Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
 import multer from 'multer';
-import { dbAll, dbGet, dbRun, withTransaction } from '../config/database';
+import { dbAll, dbGet, dbRun, withTransaction, TxRunner } from '../config/database';
+import { postingOtomatis } from '../utils/gl-posting';
+import { nextSequentialCode } from './procurement.routes';
 import { authMiddleware } from '../middleware/auth';
 import { requirePermission } from '../middleware/permission';
 import { validateUpload, storeValidatedFile, removeStoredFile } from '../utils/file-validation';
@@ -1302,6 +1304,56 @@ router.get('/:id/depreciation-ledger', authMiddleware, requirePermission('assets
 });
 
 // POST /assets/depreciation/periods/close — hitung & posting satu bulan, lalu kunci
+/**
+ * Jurnal penyusutan satu periode: Dr beban penyusutan / Cr akumulasi penyusutan.
+ *
+ * SATU jurnal ringkas per kelompok, bukan satu per aset — buku besar yang
+ * memuat 300 baris jurnal identik tiap bulan tidak bisa dibaca siapa pun, dan
+ * rinciannya memang sudah ada di asset_depreciation_ledger.
+ *
+ * Pembagian project vs non-project memakai KATEGORI aset: bangunan masuk beban
+ * operasional (6400), sisanya alat yang dipakai mengerjakan proyek (5600).
+ * Sengaja bukan lokasi berjalan alat — lokasi berpindah di tengah bulan,
+ * sementara penyusutan adalah beban satu periode penuh, jadi memakainya akan
+ * membuat akun beban berpindah-pindah tanpa alasan akuntansi.
+ */
+async function jurnalPenyusutan(
+  tx: TxRunner, rows: any[], year: number, month: number, periodEnd: string, userId: any
+) {
+  const kelompok: Record<string, { peran: string; jumlah: number }> = {};
+  for (const r of rows) {
+    const nilai = Number(r.depreciation_amount || 0);
+    if (nilai <= 0) continue;
+    const bangunan = String(r.category_code || '').toUpperCase() === 'BLDG';
+    const event = bangunan ? 'DEPRECIATION_OFFICE' : 'DEPRECIATION_PROJECT';
+    const peranAkum = bangunan ? 'accum_building' : 'accum_equipment';
+    const k = `${event}|${peranAkum}`;
+    (kelompok[k] ||= { peran: peranAkum, jumlah: 0 }).jumlah += nilai;
+  }
+
+  const label = `${String(month).padStart(2, '0')}/${year}`;
+  for (const event of ['DEPRECIATION_PROJECT', 'DEPRECIATION_OFFICE']) {
+    const bagian = Object.entries(kelompok).filter(([k]) => k.startsWith(event + '|'));
+    if (!bagian.length) continue;
+    const total = bagian.reduce((t, [, v]) => t + v.jumlah, 0);
+    if (total <= 0) continue;
+
+    await postingOtomatis(tx, {
+      event,
+      date: periodEnd,
+      description: `Penyusutan periode ${label}${event === 'DEPRECIATION_OFFICE' ? ' (non-proyek)' : ' (alat proyek)'}`,
+      refType: 'depreciation_period', refId: year * 100 + month, refNumber: `DEP-${label}`,
+      idemSuffix: event,
+      sourceModule: 'assets', userId,
+      lines: [
+        { role: 'expense', debit: total },
+        ...bagian.map(([, v]) => ({ role: v.peran, credit: v.jumlah })),
+      ],
+      nomorJurnal: (t) => nextSequentialCode('JE', 'journal_entries', 'entry_number', t),
+    });
+  }
+}
+
 router.post('/depreciation/periods/close', authMiddleware, requirePermission('assets.period.manage', 'assets.manage'),
   async (req: Request, res: Response) => {
   try {
@@ -1340,7 +1392,8 @@ router.post('/depreciation/periods/close', authMiddleware, requirePermission('as
     }
 
     const assets = await dbAll(
-      `SELECT a.*, c.is_depreciable FROM assets a JOIN asset_categories c ON a.category_id = c.id
+      `SELECT a.*, c.is_depreciable, c.code AS category_code
+       FROM assets a JOIN asset_categories c ON a.category_id = c.id
        WHERE a.is_deleted = 0`
     ) as any[];
     const additions = await capitalAdditionsByAsset(assets.map(a => a.id));
@@ -1368,8 +1421,14 @@ router.post('/depreciation/periods/close', authMiddleware, requirePermission('as
            VALUES (?, ?, ?, ?, ?, ?, ?)`,
           [asset.id, year, month, charge, accumulatedAfter, atEnd.book_value, userId]
         );
-        rows.push({ asset_id: asset.id, asset_code: asset.asset_code, depreciation_amount: charge });
+        rows.push({ asset_id: asset.id, asset_code: asset.asset_code,
+                    category_code: asset.category_code, depreciation_amount: charge });
       }
+
+      // Jurnal penyusutan ikut di transaction penutupan periode. Periode yang
+      // tertutup tanpa jurnalnya berarti bebannya tidak pernah masuk laba rugi,
+      // dan itu baru ketahuan saat laba bulan itu terlihat terlalu bagus.
+      await jurnalPenyusutan(tx, rows, year, month, periodEnd, userId);
 
       await tx.run(
         `INSERT INTO asset_depreciation_periods (period_year, period_month, status, closed_at, closed_by, notes)

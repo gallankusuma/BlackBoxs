@@ -3,6 +3,7 @@ import { businessDate, businessTime, businessDatePart } from '../utils/date.util
 import bcrypt from 'bcrypt';
 import { randomInt } from 'crypto';
 import { dbAll, dbGet, dbRun, withTransaction } from '../config/database';
+import { postingOtomatis, balasGlGagal } from '../utils/gl-posting';
 import { nextSequentialCode } from './procurement.routes';
 import { authMiddleware, generateMobileToken, mobileAuthMiddleware, assertSelf, MobileAuthRequest } from '../middleware/auth';
 import { requirePermission, loadUserAccess } from '../middleware/permission';
@@ -485,12 +486,36 @@ router.post('/advances', authMiddleware, requirePermission('hr.kasbon.create'), 
   try {
     const { employee_id, amount, description, advance_date, period_month, period_year } = req.body;
     if (!employee_id || !amount) return res.status(400).json({ error: 'employee_id and amount required' });
-    const result = await dbRun(
-      'INSERT INTO salary_advances (employee_id, amount, remaining, description, advance_date, period_month, period_year, status) VALUES (?,?,?,?,?,?,?,?)',
-      [employee_id, amount, amount, description||null, advance_date||null, period_month||null, period_year||null, 'pending']
-    );
+    const tglKasbon = String(advance_date || new Date().toISOString().slice(0, 10)).slice(0, 10);
+    // Kasbon dijurnal DI SINI, saat uangnya diberikan ke karyawan — bukan saat
+    // kasbon request disetujui. Persetujuan hanya mengelompokkan kasbon yang
+    // sudah terjadi untuk keperluan penagihan ke proyek; uangnya sudah keluar
+    // lebih dulu. Menjurnalnya di titik persetujuan akan mencatat pengeluaran
+    // kas yang tanggalnya salah, dan rekonsiliasi bank tidak akan cocok.
+    const result = await withTransaction(async tx => {
+      const r = await tx.run(
+        'INSERT INTO salary_advances (employee_id, amount, remaining, description, advance_date, period_month, period_year, status) VALUES (?,?,?,?,?,?,?,?)',
+        [employee_id, amount, amount, description||null, advance_date||null, period_month||null, period_year||null, 'pending']
+      );
+      await postingOtomatis(tx, {
+        event: 'KASBON_DISBURSED',
+        date: tglKasbon,
+        description: `Kasbon karyawan${description ? ' — ' + description : ''}`,
+        refType: 'salary_advance', refId: Number(r.insertId), refNumber: null,
+        sourceModule: 'hr', userId: (req as any).userId ?? null,
+        lines: [
+          { role: 'advance', debit: Number(amount), employee_id: Number(employee_id) },
+          { role: 'bank', credit: Number(amount), employee_id: Number(employee_id) },
+        ],
+        nomorJurnal: (t) => nextSequentialCode('JE', 'journal_entries', 'entry_number', t),
+      });
+      return r;
+    });
     res.status(201).json({ message: 'Advance recorded', data: { id: result.insertId } });
-  } catch (error) { res.status(500).json({ error: 'Failed to record advance' }); }
+  } catch (error) {
+    if (balasGlGagal(res, error)) return;
+    res.status(500).json({ error: 'Failed to record advance' });
+  }
 });
 
 router.put('/advances/:id', authMiddleware, requirePermission('hr.kasbon.edit'), async (req: Request, res: Response) => {
@@ -1248,6 +1273,38 @@ router.post('/payslip/generate-expense', authMiddleware, requirePermission('hr.p
         createdExpenses.push({ id: kasbonResult.insertId, type: 'kasbon', amount: totalKasbon });
       }
 
+      // Jurnal payroll (GL-01), di transaction yang sama dengan expense-nya.
+      //
+      // Dr beban upah sebesar GROSS — itu biaya yang benar-benar ditanggung
+      // perusahaan. Kreditnya dipecah: utang gaji sebesar yang akan dibayar,
+      // dan potongan kasbon mengurangi PIUTANG karyawan, bukan menambah beban.
+      // Mencatat net sebagai beban akan membuat biaya proyek terlihat lebih
+      // kecil dari yang sebenarnya, sebesar kasbon yang kebetulan dipotong
+      // bulan itu.
+      //
+      // PAYROLL_DIRECT karena payroll di sini selalu bersandar pada project_id;
+      // gaji kantor tidak lewat jalur ini.
+      await postingOtomatis(tx, {
+        event: 'PAYROLL_DIRECT',
+        date: expenseDate,
+        description: `Payroll ${periodLabel} — ${payslips.length} karyawan`,
+        // Ditambatkan ke baris expense gaji, bukan ke kode gabungan
+        // project+periode: gabungan itu melampaui jangkauan INT begitu id
+        // proyeknya empat digit (4510 * 1e6 sudah 4,5 miliar), dan
+        // journal_entries.reference_id bertipe INT. Baris expense juga sudah
+        // dijaga unik per proyek per periode oleh pemeriksaan duplikat di atas.
+        refType: 'project_expense',
+        refId: Number(salaryResult.insertId),
+        refNumber: salaryExpNum,
+        sourceModule: 'hr', userId,
+        lines: [
+          { role: 'expense', debit: totalGross, project_id: Number(project_id) },
+          { role: 'payable', credit: totalNet, project_id: Number(project_id) },
+          { role: 'advance', credit: totalKasbon, project_id: Number(project_id) },
+        ],
+        nomorJurnal: (t) => nextSequentialCode('JE', 'journal_entries', 'entry_number', t),
+      });
+
       return {
         ok: true as const,
         project, periodLabel, payslips, totalGross, totalKasbon, totalNet, createdExpenses,
@@ -1269,6 +1326,7 @@ router.post('/payslip/generate-expense', authMiddleware, requirePermission('hr.p
       },
     });
   } catch (error) {
+    if (balasGlGagal(res, error)) return;
     console.error('Generate expense error:', error);
     res.status(500).json({ error: 'Failed to generate expense' });
   }

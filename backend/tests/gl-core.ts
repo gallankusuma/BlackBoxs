@@ -261,12 +261,26 @@ async function main() {
 
   // ── 7. Auto-posting mati sampai tanggalnya diisi ────────────────────────
   console.log('\n7. Auto-posting mati sampai tanggal mulainya diisi');
+  // Keadaan setelan dikondisikan dan dikembalikan, bukan diasumsikan. Versi
+  // pertama mengandaikan tanggalnya masih kosong — dan begitu test:gl-auto
+  // menyalakannya lebih dulu di rangkaian yang sama, bagian ini gagal karena
+  // tes lain, bukan karena kodenya.
+  const setelanSemula = ((await dbGet(
+    "SELECT setting_value v FROM gl_settings WHERE setting_key = 'auto_posting_start_date'")) as any)?.v ?? null;
+  await dbRun("UPDATE gl_settings SET setting_value = NULL WHERE setting_key = 'auto_posting_start_date'");
+
   const setelan = (await call('GET', '/gl/settings', undefined, master)).json;
-  chk('auto-posting belum aktif', setelan?.auto_posting_aktif, false);
-  chk('tanggal mulai masih kosong', setelan?.auto_posting_start_date, null);
+  chk('auto-posting mati saat tanggalnya kosong', setelan?.auto_posting_aktif, false);
+  chk('tanggal mulai terbaca kosong', setelan?.auto_posting_start_date, null);
   chk('tanggal di luar periode fiskal ditolak',
     (await call('PUT', '/gl/settings/auto-posting-start', { start_date: '1999-01-01' }, master)).json?.code,
     'PERIODE_TIDAK_ADA');
+
+  await dbRun("UPDATE gl_settings SET setting_value = ? WHERE setting_key = 'auto_posting_start_date'",
+    [setelanSemula]);
+  chk('  setelan dikembalikan seperti semula',
+    ((await dbGet("SELECT setting_value v FROM gl_settings WHERE setting_key = 'auto_posting_start_date'")) as any)?.v ?? null,
+    setelanSemula);
 
   // ── 8. Pemetaan tidak boleh menunjuk akun yang tidak bisa dijurnal ──────
   console.log('\n8. Pemetaan jurnal otomatis');
@@ -287,11 +301,23 @@ async function main() {
   chk('tidak ada kolom saldo di chart_of_accounts', kolomSaldo.length, 0);
 
   const fs = await import('fs');
-  const src = fs.readFileSync('src/routes/gl.routes.ts', 'utf8');
+  // Dipindai KEDUANYA: sejak auto-posting, pembuatan jurnal ada di util
+  // bersama sementara laporannya di rute. Memindai satu berkas saja akan
+  // membuat penjaga struktural ini diam persis saat kodenya dipecah.
+  const srcRute = fs.readFileSync('src/routes/gl.routes.ts', 'utf8');
+  const srcUtil = fs.readFileSync('src/utils/gl-posting.ts', 'utf8');
+  const src = srcRute + '\n' + srcUtil;
   // Kalau nanti ada yang menambah UPDATE saldo ke COA, ia harus tertangkap di
   // sini — bukan berbulan-bulan kemudian saat neraca mulai tidak cocok.
   chk('tidak ada UPDATE saldo ke chart_of_accounts',
     /UPDATE chart_of_accounts SET[^`]*balance/i.test(src), false);
+  // Satu jalur pembuatan jurnal. Jurnal otomatis yang punya jalurnya sendiri
+  // akan ketinggalan aturan yang dipasang di jalur manual, cepat atau lambat.
+  chk('hanya ada SATU fungsi pembuat jurnal',
+    (src.match(/INSERT INTO journal_entries/g) || []).length, 1);
+  chk('rute memakai buatJurnal dari util, bukan salinannya',
+    /from '\.\.\/utils\/gl-posting'/.test(srcRute) && !/INSERT INTO journal_entries/.test(srcRute),
+    true);
   // Setiap laporan harus lewat SQL_SALDO. Jalur kedua = dua sumber kebenaran.
   const pakaiSaldo = (src.match(/SQL_SALDO/g) || []).length;
   chk('SQL_SALDO dipakai semua jalur laporan', pakaiSaldo >= 4, true);

@@ -2,6 +2,8 @@ import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { enrichMtoElement, groupStoredLines } from '../modules/estimator/mto/enrich';
 import { dbQuery, dbGet, dbAll, dbRun, withTransaction, TxRunner } from '../config/database';
+import { postingOtomatis } from '../utils/gl-posting';
+import { nextSequentialCode } from './procurement.routes';
 import { isProposalEditable } from '../modules/estimator/mto/units';
 import { authMiddleware } from '../middleware/auth';
 import multer from 'multer';
@@ -3043,6 +3045,22 @@ router.post('/:id/progress/periods/:periodId/approve', authMiddleware,
             [projectId, userId, `Menyetujui periode #${periode.period_no} (earned ${pct(terbobot)}%)`]);
         }
 
+        // Pengakuan pendapatan percentage-of-completion (GL-01).
+        //
+        // Yang diakui adalah SELISIH earned_pct terhadap periode sebelumnya,
+        // dikali nilai kontrak BERJALAN — bukan earned_pct penuh, kalau tidak
+        // pendapatan periode lalu diakui ulang setiap kali ada periode baru.
+        //
+        // Nilai kontrak berjalan dihitung saat dibaca (original + CO approved),
+        // sama seperti di ledger kontrak. Selisih nol atau minus tidak
+        // menjurnal apa pun — koreksi progress turun ditangani lewat pembalikan
+        // jurnal, bukan dengan jurnal pendapatan negatif yang menyamar.
+        await jurnalPengakuanPendapatan(tx, {
+          projectId, periodId, periodNo: periode.period_no,
+          earnedPct: pct(terbobot), tanggal: String(periode.period_end || periode.cutoff_date || '').slice(0, 10),
+          userId,
+        });
+
         return { ok: true as const, earned_pct: pct(terbobot), claimed_pct: pct(klaimTerbobot),
                  planned_pct: pct(planTerbobot), bobot_tercakup: Math.round(totalBobot * 100) / 100,
                  checksum };
@@ -3055,6 +3073,55 @@ router.post('/:id/progress/periods/:periodId/approve', authMiddleware,
       res.status(500).json({ error: err.message });
     }
   });
+
+/**
+ * Mengakui pendapatan atas progress yang baru saja disetujui.
+ *
+ * Dr 1114 Pendapatan Belum Ditagih / Cr 4100 Pendapatan Kontrak.
+ *
+ * Basisnya kontrak, bukan nilai proposal: `contracts.original_value` tidak
+ * pernah berubah, dan nilai berjalannya = original + SUM(change order approved),
+ * dihitung saat dibaca. Proyek tanpa kontrak tidak menjurnal apa pun — tidak
+ * ada nilai yang sah untuk dijadikan dasar, dan mengarang satu lebih buruk
+ * daripada tidak mengakui.
+ */
+async function jurnalPengakuanPendapatan(tx: TxRunner, o: {
+  projectId: number; periodId: number; periodNo: any;
+  earnedPct: number; tanggal: string; userId: number | null;
+}) {
+  const kontrak: any = await tx.get(
+    `SELECT c.id, c.original_value,
+            COALESCE((SELECT SUM(co.value_delta) FROM change_orders co
+                       WHERE co.contract_id = c.id AND co.status = 'approved'), 0) AS co_value
+     FROM contracts c WHERE c.project_id = ? ORDER BY c.id LIMIT 1`, [o.projectId]);
+  if (!kontrak) return null;
+
+  const nilaiBerjalan = Number(kontrak.original_value || 0) + Number(kontrak.co_value || 0);
+  if (nilaiBerjalan <= 0) return null;
+
+  const sebelumnya: any = await tx.get(
+    `SELECT MAX(earned_pct) AS pct FROM project_progress_periods
+     WHERE project_id = ? AND status = 'approved' AND id <> ?`, [o.projectId, o.periodId]);
+  const delta = Number(o.earnedPct) - Number(sebelumnya?.pct || 0);
+  if (!(delta > 0)) return null;
+
+  const nilai = Math.round(nilaiBerjalan * delta) / 100;
+  if (nilai <= 0) return null;
+
+  const tanggal = o.tanggal || new Date().toISOString().slice(0, 10);
+  return postingOtomatis(tx, {
+    event: 'REVENUE_PROGRESS',
+    date: tanggal,
+    description: `Pengakuan pendapatan progress periode #${o.periodNo} (${delta.toFixed(2)}%)`,
+    refType: 'progress_period', refId: Number(o.periodId), refNumber: `PP-${o.periodId}`,
+    sourceModule: 'projects', userId: o.userId,
+    lines: [
+      { role: 'unbilled', debit: nilai, project_id: o.projectId },
+      { role: 'revenue', credit: nilai, project_id: o.projectId },
+    ],
+    nomorJurnal: (t) => nextSequentialCode('JE', 'journal_entries', 'entry_number', t),
+  });
+}
 
 /** Tolak periode: submitted → draft, dengan alasan yang tercatat. */
 router.post('/:id/progress/periods/:periodId/reject', authMiddleware,

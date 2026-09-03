@@ -3218,6 +3218,10 @@ const seedChartOfAccounts = async (connection: any) => {
  */
 const GL_MAPPINGS: [string, string, string, string][] = [
   // peristiwa, peran, kode akun, catatan
+  //
+  // Setiap peristiwa memuat SELURUH peran yang dibutuhkan jurnalnya — satu
+  // jurnal lahir dari satu event_code, jadi peran yang tercecer di event lain
+  // tidak akan pernah ketemu saat jurnalnya dibentuk.
   ['GRN_APPROVED', 'inventory', '1140', 'Barang diterima menambah persediaan'],
   ['GRN_APPROVED', 'clearing', '2105', 'Utang penerimaan sampai invoice vendor datang'],
 
@@ -3226,22 +3230,21 @@ const GL_MAPPINGS: [string, string, string, string][] = [
 
   ['AP_INVOICE_GOODS', 'clearing', '2105', 'Menutup GRN clearing'],
   ['AP_INVOICE_GOODS', 'payable', '2101', null],
+  ['AP_INVOICE_GOODS', 'input_tax', '1160', 'PPN masukan'],
   ['AP_INVOICE_SERVICE', 'expense', '5300', 'Invoice jasa/subkontraktor tanpa GRN'],
   ['AP_INVOICE_SERVICE', 'payable', '2101', null],
-  ['AP_INVOICE_TAX', 'input_tax', '1160', 'PPN masukan'],
-  ['AP_INVOICE_TAX', 'payable', '2101', null],
-  ['AP_RETENTION', 'payable', '2101', null],
-  ['AP_RETENTION', 'retention', '2110', 'Retensi ditahan atas invoice subkontraktor'],
+  ['AP_INVOICE_SERVICE', 'input_tax', '1160', 'PPN masukan'],
   ['AP_PAYMENT', 'payable', '2101', null],
   ['AP_PAYMENT', 'bank', '1102', null],
+  ['AP_RETENTION', 'payable', '2101', null],
+  ['AP_RETENTION', 'retention', '2110', 'Retensi ditahan atas invoice subkontraktor'],
 
   ['REVENUE_PROGRESS', 'unbilled', '1114', 'Pendapatan diakui mengikuti progress disetujui'],
   ['REVENUE_PROGRESS', 'revenue', '4100', null],
   ['AR_BILLING', 'receivable', '1110', null],
   ['AR_BILLING', 'unbilled', '1114', 'Tagihan mengurangi pendapatan belum ditagih'],
-  ['AR_BILLING', 'overbilling', '2150', 'Kelebihan tagihan di atas progress'],
-  ['AR_BILLING_TAX', 'receivable', '1110', null],
-  ['AR_BILLING_TAX', 'output_tax', '2130', 'PPN keluaran'],
+  ['AR_BILLING', 'overbilling', '2150', 'Kelebihan tagihan di atas progress yang diakui'],
+  ['AR_BILLING', 'output_tax', '2130', 'PPN keluaran'],
   ['AR_RETENTION', 'retention', '1112', 'Retensi ditahan pelanggan'],
   ['AR_RETENTION', 'receivable', '1110', null],
   ['AR_RECEIPT', 'bank', '1102', null],
@@ -3250,30 +3253,53 @@ const GL_MAPPINGS: [string, string, string, string][] = [
   ['AR_ADVANCE', 'advance', '2140', 'Uang muka proyek dari pelanggan'],
 
   ['DEPRECIATION_PROJECT', 'expense', '5600', 'Penyusutan alat proyek'],
+  ['DEPRECIATION_PROJECT', 'accum_building', '1280', null],
+  ['DEPRECIATION_PROJECT', 'accum_equipment', '1281', null],
+  ['DEPRECIATION_PROJECT', 'accum_vehicle', '1282', null],
+  ['DEPRECIATION_PROJECT', 'accum_office', '1283', null],
   ['DEPRECIATION_OFFICE', 'expense', '6400', 'Penyusutan non-proyek'],
-  ['DEPRECIATION', 'accum_building', '1280', null],
-  ['DEPRECIATION', 'accum_equipment', '1281', null],
-  ['DEPRECIATION', 'accum_vehicle', '1282', null],
-  ['DEPRECIATION', 'accum_office', '1283', null],
+  ['DEPRECIATION_OFFICE', 'accum_building', '1280', null],
+  ['DEPRECIATION_OFFICE', 'accum_equipment', '1281', null],
+  ['DEPRECIATION_OFFICE', 'accum_vehicle', '1282', null],
+  ['DEPRECIATION_OFFICE', 'accum_office', '1283', null],
   ['ASSET_CAPITALIZATION', 'asset', '1230', 'Aset dari kapitalisasi CAPEX'],
   ['ASSET_CAPITALIZATION', 'payable', '2101', null],
   ['ASSET_DISPOSAL', 'bank', '1102', 'Hasil pelepasan'],
   ['ASSET_DISPOSAL', 'gain_loss', '7200', null],
 
   ['PAYROLL_DIRECT', 'expense', '5200', 'Upah langsung proyek'],
+  ['PAYROLL_DIRECT', 'payable', '2120', null],
+  ['PAYROLL_DIRECT', 'advance', '1120', 'Potongan kasbon mengurangi piutang karyawan'],
+  ['PAYROLL_DIRECT', 'income_tax', '2125', 'Potongan PPh 21'],
   ['PAYROLL_OFFICE', 'expense', '6100', 'Gaji kantor'],
-  ['PAYROLL', 'payable', '2120', null],
-  ['PAYROLL_DEDUCTION', 'payable', '2120', null],
-  ['PAYROLL_DEDUCTION', 'income_tax', '2125', 'Potongan PPh 21'],
-  ['PAYROLL_DEDUCTION', 'advance', '1120', 'Potongan kasbon'],
+  ['PAYROLL_OFFICE', 'payable', '2120', null],
+  ['PAYROLL_OFFICE', 'advance', '1120', null],
+  ['PAYROLL_OFFICE', 'income_tax', '2125', null],
   ['PAYROLL_PAYMENT', 'payable', '2120', null],
   ['PAYROLL_PAYMENT', 'bank', '1102', null],
   ['KASBON_DISBURSED', 'advance', '1120', null],
   ['KASBON_DISBURSED', 'bank', '1102', null],
+
 ];
+
+/**
+ * Peristiwa dari seed pertama yang dipecah ulang saat auto-posting ditulis:
+ * pajak dilebur ke jurnal invoice-nya, potongan payroll ke jurnal payroll-nya,
+ * dan akun akumulasi penyusutan pindah ke DEPRECIATION_PROJECT/OFFICE. Satu
+ * jurnal lahir dari satu event_code, jadi peran yang tercecer di event lain
+ * tidak akan pernah ketemu saat jurnalnya dibentuk.
+ *
+ * Dibuang, bukan dibiarkan: pemetaan mati yang tetap tampil di layar sebagai
+ * "bisa diatur" akan membuat orang mengira sudah mengatur sesuatu.
+ */
+const GL_EVENT_USANG = ['AP_INVOICE_TAX', 'AR_BILLING_TAX', 'DEPRECIATION', 'PAYROLL', 'PAYROLL_DEDUCTION'];
 
 const seedGlAccountMappings = async (connection: any) => {
   try {
+    await connection.execute(
+      `DELETE FROM gl_account_mappings WHERE event_code IN (${GL_EVENT_USANG.map(() => '?').join(',')})`,
+      GL_EVENT_USANG
+    );
     for (const [event, role, kode, catatan] of GL_MAPPINGS) {
       // INSERT IGNORE, bukan REPLACE: pemetaan yang sudah diubah penggunanya
       // tidak boleh dikembalikan ke bawaan setiap kali proses restart.

@@ -13408,3 +13408,90 @@ saldo awal (harus dari neraca terakhir, bukan dari data aplikasi ini).
 
 **Belum dikerjakan:** auto-posting lima modul (AP, AR, GRN, depresiasi, payroll)
 dan layarnya.
+
+---
+
+## GL-01 langkah 3 — auto-posting enam modul
+
+Delapan peristiwa di enam modul kini menjurnal sendiri lewat `postingOtomatis()`
+di `utils/gl-posting.ts`: GRN disetujui, invoice vendor, pembayaran AP,
+penerimaan AR, tagihan pelanggan, progress disetujui, tutup periode penyusutan,
+payroll, dan kasbon.
+
+**Keputusan struktural: satu jalur pembuatan jurnal.** `buatJurnal` dipindah
+dari `gl.routes.ts` ke `utils/gl-posting.ts` supaya jurnal manual dan jurnal
+otomatis lahir dari fungsi yang sama. Kalau auto-posting punya jalurnya sendiri,
+dua-duanya harus dijaga seimbang, ditolak di akun header, dan dikunci periode —
+cepat atau lambat yang satu ketinggalan aturan yang sudah dipasang di yang lain,
+dan yang mulai menyimpan jurnal rusak justru jalur yang tidak diketik manusia.
+Tes memeriksanya sebagai asersi struktural: `INSERT INTO journal_entries` hanya
+boleh muncul **satu kali** di seluruh modul.
+
+**Jurnal ikut di transaction pemanggilnya.** Kalau jurnalnya gagal, transaksi
+bisnisnya batal. Itu disengaja, dan tesnya membuktikan barisnya benar-benar ikut
+batal — bukan sekadar endpointnya membalas 500.
+
+**Empat keputusan yang diambil dari data, bukan ditebak:**
+
+1. Invoice vendor menutup GRN clearing kalau PO-nya **punya GRN disetujui yang
+   belum direversal**; kalau tidak ada penerimaan sama sekali, ia invoice jasa.
+   Menebaknya dari kategori PO akan salah persis di PO campuran.
+2. GRN yang **tidak bisa dinilai ditolak** (`HARGA_GRN_TIDAK_DITEMUKAN`), bukan
+   dijurnal seadanya.
+3. Payroll menjurnal **GROSS** sebagai beban; potongan kasbon mengurangi piutang
+   karyawan, bukan mengurangi beban.
+4. Kasbon dijurnal **saat uangnya diberikan** (`POST /hr/advances`), bukan saat
+   kasbon request disetujui — persetujuan hanya mengelompokkan kasbon yang sudah
+   terjadi untuk penagihan ke proyek.
+
+**Satu cacat ditemukan sebelum sempat berjalan:** `change_orders.value_change`
+ditulis di jalur pengakuan pendapatan; kolom yang benar `value_delta`. Nama
+kolom salah tidak menghasilkan error saat `tsc` maupun `build` — ia baru meledak
+saat jurnalnya dibentuk, di tengah persetujuan progress orang lain. `test:gl-auto`
+sekarang memeriksa keberadaan setiap kolom yang disebut jalur auto-posting.
+
+**Dua lubang tes ditemukan lewat mutasi, keduanya nyata:**
+
+1. Mutasi "pemetaan hilang didiamkan" awalnya **0 asersi gagal**. Sebabnya:
+   tanpa penjaga `if (!m)`, kodenya tetap gagal — lewat `TypeError` mentah — dan
+   `catch` di HR menelannya jadi `"Failed to record advance"`. Statusnya sama,
+   tapi yang harus membetulkannya tidak punya satu pun petunjuk. Ditambahkan
+   `balasGlGagal()` supaya sebabnya sampai ke pengguna, dan tes memeriksa
+   kodenya (`PEMETAAN_HILANG`) beserta nama peristiwa/perannya.
+2. Mutasi "payroll memakai NET, bukan GROSS" awalnya **0** karena tesnya tidak
+   pernah menjalankan payroll. Ditambahkan uji invarian: beban = utang gaji +
+   potongan kasbon, jadi memakai NET membuat jurnalnya timpang dan ditolak.
+
+⚠️ **Batas yang perlu diketahui:** jalur payroll diuji lewat invarian dan
+pemindaian titik kaitnya, **bukan** lewat menjalankan payroll end-to-end —
+fixture-nya butuh payslip satu periode penuh. Kalau nanti ada perubahan pada
+bentuk jurnal payroll, invarian itu yang menangkapnya, bukan pemanggilan
+sebenarnya.
+
+**Dua cacat lagi ditemukan regresi penuh, bukan setelah deploy:**
+
+1. **Transaksi bertanggal di periode yang belum dibuat jadi ditolak.** Bukan
+   artefak tes — orang yang memasukkan invoice tahun depan sebelum periodenya
+   dibuat akan kena. Diperbaiki: auto-posting **membuat** periode kalau belum
+   ada; jurnal manual tetap menolak. Bedanya disengaja — manusia yang mengetik
+   tanggal di luar periode kemungkinan salah ketik, sementara tanggal dokumen
+   bisnis itu otoritatif. Periode yang sudah TERTUTUP tetap menolak; itu
+   kendalinya, bukan ketiadaan barisnya.
+2. **`reference_id` payroll melampaui jangkauan INT.** Dirakit dari
+   `project_id * 1e6 + tahun * 100 + bulan` — untuk proyek berid empat digit
+   hasilnya 4,5 miliar, dan MySQL menolaknya sebagai error mentah di tengah
+   transaksi: payroll berhenti bekerja dengan 500 tanpa sebab. Ditambatkan ke
+   baris expense gajinya, dan `postingOtomatis` sekarang menolak refId di luar
+   jangkauan dengan sebabnya (`REFERENSI_DI_LUAR_JANGKAUAN`).
+
+`npm run test:gl-auto` — 31 asersi. Enam mutasi diuji, semuanya tertangkap
+setelah kedua lubang di atas ditutup.
+
+**Satu kebersihan tes diperbaiki:** `test:gl-core` mengandaikan auto-posting
+masih mati, jadi begitu `test:gl-auto` menyalakannya lebih dulu di rangkaian
+yang sama, ia gagal karena tes lain — bukan karena kodenya. Sekarang ia
+mengondisikan setelannya sendiri dan mengembalikannya. Diverifikasi dengan
+menjalankan gl-core → gl-auto → gl-core: ketiganya 0 gagal.
+
+**Auto-posting tetap MATI** sampai `auto_posting_start_date` diisi. Tidak ada
+yang berubah di produksi sampai pemilik menyalakannya.
