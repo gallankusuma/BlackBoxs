@@ -203,6 +203,9 @@
             </div>
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">Supplier * <span class="text-xs text-gray-500">(Supply: Chemical, Raw Material, Packaging, etc)</span></label>
+              <p v-if="gagalSaringVendor" class="mb-1 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                {{ gagalSaringVendor }}
+              </p>
               <select v-model="form.vendor_id" class="w-full border border-gray-300 rounded-lg px-3 py-2" :disabled="isEditing && !editModeEnabled" required>
                 <option :value="null">-- Pilih Supplier --</option>
                 <option v-for="vendor in filteredVendors" :key="vendor.id" :value="vendor.id">
@@ -1446,6 +1449,10 @@ const selectedPRDisplay = computed(() => {
 
 // Track filtered vendors based on product availability in vendor_prices table
 const filteredVendorsList = ref<any[]>([]);
+// Penyaring vendor yang GAGAL dimuat harus terlihat: tanpa ini daftar
+// jatuh ke seluruh vendor dan penggunanya mengira semuanya memang memasok
+// barang yang dipilih.
+const gagalSaringVendor = ref('');
 
 // Filter vendors yang punya pricing untuk semua items yang dipilih
 const filteredVendors = computed(() => {
@@ -1476,45 +1483,31 @@ watch(
         return;
       }
       
-      // Fetch vendors for each product
-      const vendorsByProduct = new Map<number, Set<number>>();
-      
-      for (const productId of productIds) {
-        try {
-          const res = await api.get(`/procurement/vendors-for-product/${productId}`);
-          const productVendors = res.data.data || [];
-          const vendorIds = new Set(productVendors.map((v: any) => v.id)) as Set<number>;
-          vendorsByProduct.set(productId, vendorIds);
-        } catch (err) {
-          console.warn(`No vendors found for product ${productId}`);
-        }
-      }
-      
-      // Get intersection: vendors that have ALL products
-      if (vendorsByProduct.size === 0) {
-        filteredVendorsList.value = [];
-        return;
-      }
-      
-      let commonVendorIds: Set<number> | null = null;
-      for (const vendorSet of vendorsByProduct.values()) {
-        if (commonVendorIds === null) {
-          commonVendorIds = new Set(vendorSet);
-        } else {
-          // Keep only vendors that appear in both sets
-          commonVendorIds = new Set([...commonVendorIds].filter((id: number) => vendorSet.has(id)));
-        }
-      }
-      
-      // Filter vendors list to show only those in intersection
-      if (commonVendorIds && commonVendorIds.size > 0) {
-        filteredVendorsList.value = vendors.value.filter(v => commonVendorIds!.has(v.id));
-      } else {
-        filteredVendorsList.value = [];
-      }
-    } catch (err) {
-      console.error('Error filtering vendors by product:', err);
+      // SATU panggilan, bukan satu per produk. Versi sebelumnya memanggil
+      // /vendors-for-product/:id berurutan untuk tiap item PO — pola N+1 yang
+      // sama dengan PROC-N1-01, dan endpoint batch-nya sudah ada sejak itu.
+      //
+      // Irisan "vendor yang punya SEMUA produk" diturunkan dari matched_items:
+      // vendor yang cocok untuk seluruh produk yang diminta punya
+      // matched_items === jumlah produknya.
+      const res = await api.get(
+        `/procurement/vendors-for-items?product_ids=${productIds.join(',')}`);
+      const baris = res.data?.data || [];
+      const punyaSemua = new Set(
+        baris.filter((r: any) => Number(r.matched_items) === productIds.length)
+             .map((r: any) => Number(r.id)));
+      filteredVendorsList.value = vendors.value.filter(v => punyaSemua.has(Number(v.id)));
+      gagalSaringVendor.value = '';
+    } catch (err: any) {
+      // Backend kini membalas 500 kalau query-nya gagal, bukan daftar kosong.
+      // Daftarnya dikosongkan supaya `filteredVendors` jatuh ke SELURUH vendor —
+      // penggunanya tidak terhalang — tapi ia harus tahu penyaringnya tidak
+      // berlaku, kalau tidak ia mengira semua vendor itu memang memasok
+      // barangnya.
+      console.error('Gagal menyaring vendor per produk:', err);
       filteredVendorsList.value = [];
+      gagalSaringVendor.value = err?.response?.data?.error
+        || 'Penyaring vendor per produk gagal dimuat — daftar di bawah menampilkan SEMUA vendor, belum tersaring.';
     }
   },
   { deep: true }

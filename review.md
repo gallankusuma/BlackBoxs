@@ -13611,7 +13611,44 @@ Jadi lubangnya nyata dan sekarang tertutup. Catatan yang menenangkan: bahkan
 dengan pemindai lama, asersi perilaku baru di bagian 7b tetap menangkap
 kebocoran itu — jadi sekarang ada dua penjaga yang berdiri sendiri.
 
-### Belum dikerjakan (dilaporkan, menunggu keputusan)
+### 4–6 (dikerjakan menyusul, atas permintaan pemilik)
+
+**4. Tiga endpoint berhenti menelan errornya.** `/vendors-for-product`,
+`/vendors-for-items`, dan `/vendor-price-details` dulu membalas `{data: []}` /
+`{data: null}` saat query-nya gagal, dengan komentar "supaya tidak memblokir
+UI". Kegagalan jadi menyamar sebagai "tidak ada vendor punya harga", dan buyer
+mengetik harga manual atas dasar kekosongan yang bohong. Sekarang lewat
+`gagalVendorHarga()` yang menyebut sebabnya (`VENDOR_HARGA_GAGAL`).
+
+Layar tidak jadi terhalang: `filteredVendors` di layar PO sudah jatuh ke
+SELURUH vendor kalau daftar tersaringnya kosong. Yang ditambahkan cuma
+pemberitahuan bahwa penyaringnya tidak berlaku — tanpa itu penggunanya mengira
+semua vendor yang tampil memang memasok barang yang dipilih.
+
+**5. Dua fallback mati dengan kolom salah dibuang.** Keduanya hanya berjalan
+kalau tabel `vendor_prices` tidak ada, dan keduanya menyaring
+`material_vendor_prices` lewat kolom `product_id` yang tidak ada di sana (yang
+benar `material_id`). Jaminannya dipindah ke tempat yang benar:
+`vendor_prices` dan `vendors` kini termasuk **tabel wajib** yang diperiksa
+`verifyRequiredTables()` saat boot — gagal di log operator, bukan di hadapan
+pengguna lewat daftar kosong.
+
+⚠️ **Yang kedua LOLOS dari pemindai kolom di audit ini.** Pemindai itu
+memasangkan alias ke tabel (`FROM x alias`), sementara query yang kedua menulis
+`WHERE product_id = ?` **tanpa alias**, jadi tidak pernah dipetakan ke tabel
+mana pun. Ia ketemu hanya karena saya membaca kode di sekitarnya saat
+memperbaiki yang pertama. Pemindai berbasis alias punya titik buta ini, dan itu
+pantas dicatat sebelum ada yang menganggap hasilnya lengkap.
+
+**6. N+1 di layar PO diganti satu panggilan.** `PurchaseOrders.vue` dulu
+memanggil `/vendors-for-product/:id` berurutan untuk tiap item PO. Endpoint
+batch `/vendors-for-items?product_ids=...` sudah ada sejak PROC-N1-01, dan
+irisan "vendor yang punya SEMUA produk" bisa diturunkan dari `matched_items`
+=== jumlah produk. Satu panggilan menggantikan N.
+
+`npm run test:vendor-price` 57 → 64 asersi.
+
+### Yang tersisa (di luar lingkup, dilaporkan saja)
 
 4. **Tiga endpoint menelan error dan mengembalikan data kosong**
    (`/vendors-for-product`, `/vendors-for-items`, `/vendor-price-details`),

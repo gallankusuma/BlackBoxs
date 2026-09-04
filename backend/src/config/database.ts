@@ -3662,6 +3662,11 @@ const REQUIRED_TABLES = [
   'material_requests', 'material_request_items',
   'approval_requests', 'approval_rules', 'approval_rule_steps',
   'notifications', 'documents', 'document_counters',
+  // Ditambahkan PROC-AUDIT-01: dua endpoint harga vendor dulu punya cabang
+  // fallback "kalau tabelnya tidak ada" yang justru mengarang kolom yang salah.
+  // Jaminannya dipindah ke sini — boot gagal di log operator kalau tabelnya
+  // hilang, bukan endpoint yang diam-diam membalas daftar kosong ke pengguna.
+  'vendor_prices', 'vendors',
 ];
 
 const verifyRequiredTables = async (connection: any) => {

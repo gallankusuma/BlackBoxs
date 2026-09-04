@@ -847,6 +847,22 @@ itu memang harus memuat mereka dengan `matched_items = 0`.
 `procurement.*.approve*`. Menghapus harga yang **sedang berlaku** butuh lv≥3,
 karena itu setara mencabutnya dari PR/PO.
 
+⚠️ **Jalur harga vendor tidak boleh membalas data kosong saat gagal.**
+`/vendors-for-product`, `/vendors-for-items`, dan `/vendor-price-details` dulu
+menelan errornya dan membalas `{data: []}` / `{data: null}` "supaya tidak
+memblokir UI" — kegagalan jadi menyamar sebagai "tidak ada vendor punya harga",
+dan buyer mengetik harga manual atas dasar kekosongan yang bohong. Sekarang
+lewat `gagalVendorHarga()`. Layar PO tetap tidak terhalang karena
+`filteredVendors` jatuh ke seluruh vendor, tapi ia **menampilkan** bahwa
+penyaringnya tidak berlaku. `npm run test:vendor-price` memindai setiap `catch`
+yang membalas `data: []` atau `data: null`.
+
+⚠️ **`vendor_prices` dan `vendors` termasuk tabel wajib** (PROC-AUDIT-01). Dua
+cabang fallback "kalau tabelnya tidak ada" sudah dibuang — keduanya mustahil
+terpakai, dan keduanya menyaring `material_vendor_prices` lewat kolom
+`product_id` yang tidak ada di sana (yang benar `material_id`). Jaminannya di
+`verifyRequiredTables()` saat boot, bukan di fallback yang mengarang.
+
 **Yang sengaja TIDAK dipasang:** pemisahan tugas (pembuat harga masih boleh
 menyetujui harganya sendiri kalau levelnya cukup). Menutupnya bisa mengunci tim
 kecil yang orangnya sama — keputusan pemilik, belum diambil.

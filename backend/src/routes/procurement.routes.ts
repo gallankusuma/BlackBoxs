@@ -4585,45 +4585,48 @@ router.get('/procurement-history', authMiddleware, requirePermission('procuremen
   }
 });
 
+/**
+ * Kegagalan pada jalur harga vendor dibalas apa adanya, bukan dikosongkan.
+ *
+ * Ketiga endpoint di bawah dulu menelan errornya dan membalas `{data: []}` /
+ * `{data: null}` "supaya tidak memblokir UI". Akibatnya query yang rusak
+ * menyamar jadi "tidak ada vendor punya harga" — kelas cacat yang sama dengan
+ * `FinanceAP.vue` yang menelan kegagalan detail, dan bertahan lama justru
+ * karena tidak ada yang bisa melaporkannya.
+ *
+ * Layar yang memanggilnya tetap bisa dipakai; yang hilang cuma anggapan palsu
+ * bahwa datanya memang kosong.
+ */
+const gagalVendorHarga = (res: Response, konteks: string, error: any) => {
+  console.error(`Gagal memuat ${konteks}:`, error?.message || error);
+  return res.status(500).json({
+    error: `Gagal memuat ${konteks}. Ini kegagalan sistem, bukan berarti datanya tidak ada.`,
+    code: 'VENDOR_HARGA_GAGAL',
+  });
+};
+
 // Get vendors that can supply a specific product
 router.get('/vendors-for-product/:product_id', authMiddleware, requirePermission('procurement.vendor-price-list.view'), async (req: Request, res: Response) => {
   try {
     const { product_id } = req.params;
     
-    let vendors: any[] = [];
-    try {
-      vendors = await dbAll(`
-        SELECT DISTINCT v.id, v.code, v.name, v.supply_category
-        FROM vendor_prices vp
-        JOIN vendors v ON vp.vendor_id = v.id
-        WHERE vp.product_id = ? AND ${hargaVendorAktif()}
-        ORDER BY v.name ASC
-      `, [product_id]);
-    } catch (tableErr: any) {
-      // Table might not exist — try fallback table
-      if (tableErr.code === 'ER_NO_SUCH_TABLE') {
-        try {
-          vendors = await dbAll(`
-            SELECT DISTINCT v.id, v.code, v.name, v.supply_category
-            FROM material_vendor_prices mvp
-            JOIN vendors v ON mvp.vendor_id = v.id
-            WHERE mvp.product_id = ?
-            ORDER BY v.name ASC
-          `, [product_id]);
-        } catch {
-          // Both tables missing — return empty
-          vendors = [];
-        }
-      } else {
-        throw tableErr;
-      }
-    }
-    
+    // Cabang fallback ke `material_vendor_prices` dibuang: ia hanya jalan
+    // kalau tabel `vendor_prices` tidak ada — yang tidak mungkin, karena
+    // tabelnya dibuat ensure*Schema DAN kini termasuk tabel wajib yang
+    // diperiksa saat boot. Cabang itu juga menulis `mvp.product_id`, kolom yang
+    // tidak ada (yang benar `material_id`), jadi seandainya ia terpakai pun ia
+    // langsung gagal. Kode mati yang salah lebih buruk daripada tidak ada kode.
+    const vendors = await dbAll(`
+      SELECT DISTINCT v.id, v.code, v.name, v.supply_category
+      FROM vendor_prices vp
+      JOIN vendors v ON vp.vendor_id = v.id
+      WHERE vp.product_id = ? AND ${hargaVendorAktif()}
+      ORDER BY v.name ASC
+    `, [product_id]);
+
     res.json({ data: vendors });
   } catch (error) {
-    console.error('Error fetching vendors for product:', error);
-    // Return empty array instead of 500 to not block the UI
-    res.json({ data: [] });
+    gagalVendorHarga(res, 'daftar vendor untuk produk', error);
   }
 });
 
@@ -4670,8 +4673,7 @@ router.get('/vendors-for-items', authMiddleware, requirePermission('procurement.
 
     res.json({ data: rows });
   } catch (error) {
-    console.error('Error fetching vendors for items:', error);
-    res.json({ data: [] });
+    gagalVendorHarga(res, 'daftar vendor untuk item PR', error);
   }
 });
 
@@ -4680,35 +4682,25 @@ router.get('/vendor-price-details/:vendor_id/:product_id', authMiddleware, requi
   try {
     const { vendor_id, product_id } = req.params;
     
-    let pricing: any = null;
-    try {
-      pricing = await dbGet(`
-        SELECT vp.id, vp.price, vp.currency, vp.lead_time_days, vp.min_order_qty, vp.effective_date, vp.valid_until
-        FROM vendor_prices vp
-        WHERE vp.vendor_id = ? AND vp.product_id = ? AND ${hargaVendorAktif()}
-        ORDER BY vp.effective_date DESC
-        LIMIT 1
-      `, [vendor_id, product_id]);
-    } catch (tableErr: any) {
-      if (tableErr.code === 'ER_NO_SUCH_TABLE') {
-        try {
-          pricing = await dbGet(`
-            SELECT id, price, currency, lead_time_days, min_order_qty, effective_date, valid_until
-            FROM material_vendor_prices
-            WHERE vendor_id = ? AND product_id = ?
-            ORDER BY effective_date DESC
-            LIMIT 1
-          `, [vendor_id, product_id]);
-        } catch {
-          pricing = null;
-        }
-      }
-    }
+    // Fallback ER_NO_SUCH_TABLE dibuang, sama alasannya dengan
+    // /vendors-for-product: tabelnya tidak mungkin hilang, dan cabang itu
+    // menyaring `material_vendor_prices` lewat kolom `product_id` yang tidak
+    // ada di sana (yang benar `material_id`). Kolom salah ini LOLOS dari
+    // pemindai kolom di audit karena query-nya tidak memakai alias — pemindai
+    // itu memasangkan alias ke tabel, jadi `WHERE product_id = ?` tanpa alias
+    // tidak pernah dipetakan ke tabel mana pun.
+    const pricing = await dbGet(`
+      SELECT vp.id, vp.price, vp.currency, vp.lead_time_days, vp.min_order_qty, vp.effective_date, vp.valid_until
+      FROM vendor_prices vp
+      WHERE vp.vendor_id = ? AND vp.product_id = ? AND ${hargaVendorAktif()}
+      ORDER BY vp.effective_date DESC
+      LIMIT 1
+    `, [vendor_id, product_id]);
+
     
     res.json({ data: pricing });
   } catch (error) {
-    console.error('Error fetching vendor price details:', error);
-    res.json({ data: null });
+    gagalVendorHarga(res, 'detail harga vendor', error);
   }
 });
 

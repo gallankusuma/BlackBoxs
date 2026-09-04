@@ -272,6 +272,51 @@ async function main() {
   chk('harga pending TIDAK terhitung sebagai vendor punya harga', await cocokUntuk(produkB), 0);
 
   // ================================================================
+  console.log('\n7c. Kegagalan tidak menyamar jadi "tidak ada data" (PROC-AUDIT-01)');
+  const srcProc = fs.readFileSync('src/routes/procurement.routes.ts', 'utf8');
+
+  // Ketiga endpoint ini dulu menelan errornya dan membalas {data: []} /
+  // {data: null} "supaya tidak memblokir UI". Query rusak jadi menyamar sebagai
+  // "tidak ada vendor punya harga", dan buyer mengetik harga manual atas dasar
+  // kekosongan yang bohong — kelas cacat yang sama dengan FinanceAP.vue.
+  //
+  // Yang dicari hanya balasan kosong DI DALAM catch. `return res.json({data: []})`
+  // sebagai klausa penjaga untuk input kosong (mis. /price-search tanpa kata
+  // kunci) memang benar — itu bukan kegagalan, itu memang tidak ada yang dicari.
+  const barisProc = srcProc.split('\n');
+  const menelan: string[] = [];
+  barisProc.forEach((l, i) => {
+    if (!/\}\s*catch\s*[({]/.test(l)) return;
+    const blok = barisProc.slice(i, i + 6).join(' ');
+    if (/res\.json\(\s*\{\s*data:\s*(\[\]|null)\s*\}/.test(blok)) menelan.push(`baris ${i + 1}`);
+  });
+  chk('tidak ada kegagalan yang dibalas sebagai data kosong', menelan, []);
+  chk('jalur harga vendor punya balasan gagal yang menyebut sebabnya',
+    /const gagalVendorHarga[\s\S]{0,400}VENDOR_HARGA_GAGAL/.test(srcProc), true);
+
+  // Fallback "kalau tabelnya tidak ada" dibuang: ia mustahil terpakai dan
+  // justru menyaring material_vendor_prices lewat kolom product_id yang tidak
+  // ada di sana. Jaminannya dipindah ke verifyRequiredTables saat boot.
+  const kodeHidup = srcProc.split('\n')
+    .filter(l => !l.trimStart().startsWith('//') && l.includes('ER_NO_SUCH_TABLE'));
+  chk('tidak ada lagi fallback ER_NO_SUCH_TABLE', kodeHidup, []);
+  chk('vendor_prices termasuk tabel wajib saat boot',
+    /'vendor_prices'/.test(fs.readFileSync('src/config/database.ts', 'utf8')
+      .split('verifyRequiredTables')[0].slice(-3000)), true);
+
+  // Layar PO dulu memanggil /vendors-for-product/:id sekali per item —
+  // pola N+1 yang sama dengan PROC-N1-01, padahal endpoint batch-nya sudah ada.
+  const srcPo = fs.readFileSync('../frontend/src/views/PurchaseOrders.vue', 'utf8');
+  const loopPerProduk = /for\s*\(const productId of productIds\)[\s\S]{0,200}api\.get/.test(srcPo);
+  chk('layar PO tidak lagi menembak vendor per produk', loopPerProduk, false);
+  chk('  layar PO memakai endpoint batch', /vendors-for-items\?product_ids=/.test(srcPo), true);
+  // Perbandingan angka tidak akan menangkap loop yang kembali muncul, dan
+  // kegagalan penyaring yang tidak terlihat membuat pengguna mengira seluruh
+  // vendor memang memasok barangnya.
+  chk('  kegagalan penyaring ditampilkan di layar',
+    /gagalSaringVendor/.test(srcPo) && /v-if="gagalSaringVendor"/.test(srcPo), true);
+
+  // ================================================================
   console.log('\n8. Penyaringan konsumen tidak boleh bocor lewat pembaca baru');
   // Tes ini memindai sumber, bukan perilaku: pembaca vendor_prices yang
   // ditambahkan nanti tidak akan tertangkap tes perilaku mana pun sampai ada
