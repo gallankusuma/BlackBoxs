@@ -988,18 +988,42 @@ router.post('/po-advisor', authMiddleware, async (req: Request, res: Response) =
     }
 
     // ── 3. Pull RAB budget if project linked ───────────────────────────────────
+    // Bagian ini sebelumnya MATI di dua tingkat sekaligus, dan keduanya tidak
+    // menghasilkan gejala apa pun:
+    //
+    //   1. Kolomnya salah — `pi.uraian` dan `pi.ahsp_code` tidak ada (yang
+    //      benar `description` dan `ahsp_code_snapshot`), jadi query-nya selalu
+    //      melempar ER_BAD_FIELD_ERROR.
+    //   2. Errornya ditelan `catch {}` kosong, DAN hasilnya tidak pernah dipakai
+    //      di prompt. Jadi advisor selalu menjawab tanpa pembanding anggaran,
+    //      dengan nada seyakin biasanya.
+    //
+    // Kegagalannya sekarang dicatat dan disebut ke pemanggil lewat
+    // `rab_tersedia` — advisor tetap bisa menjawab tanpa RAB, tapi tidak lagi
+    // berpura-pura sudah membandingkannya.
     let rabBudget: any[] = [];
+    let rabError: string | null = null;
     if (project_id) {
       try {
         rabBudget = await dbAll(
-          `SELECT pi.uraian, pi.total_price, pi.ahsp_code
+          `SELECT pi.description, pi.total_price, pi.ahsp_code_snapshot
            FROM proposal_items pi
            JOIN proposals p ON pi.proposal_id = p.id
-           WHERE p.project_id = ? LIMIT 20`,
+           WHERE p.project_id = ? AND pi.total_price > 0
+           ORDER BY pi.total_price DESC LIMIT 20`,
           [project_id]
         ) as any[];
-      } catch {}
+      } catch (e: any) {
+        rabError = e?.message || 'gagal membaca anggaran RAB';
+        console.error('[AI PO Advisor] RAB gagal dibaca:', rabError);
+      }
     }
+    const totalRab = rabBudget.reduce((t, r) => t + Number(r.total_price || 0), 0);
+    const rabText = rabBudget.length
+      ? rabBudget.map((r: any) =>
+          `• ${r.ahsp_code_snapshot ? r.ahsp_code_snapshot + ' — ' : ''}${r.description || '(tanpa uraian)'}: Rp ${Number(r.total_price || 0).toLocaleString('id-ID')}`
+        ).join('\n')
+      : null;
 
     // ── 4. Build comprehensive AI prompt ─────────────────────────────────────
     const itemLines = itemAnalysis.map(it => {
@@ -1032,6 +1056,12 @@ ${anomalies.map(it => `• ${it.name}: Rp ${it.current_price.toLocaleString('id-
 
 ═══ HISTORI VENDOR ═══
 ${vendorHistText}
+
+${rabText ? `═══ ANGGARAN RAB PROYEK (${rabBudget.length} item teratas, total Rp ${totalRab.toLocaleString('id-ID')}) ═══
+${rabText}
+
+Bandingkan nilai PO Rp ${totalPO.toLocaleString('id-ID')} terhadap anggaran di atas.` : (project_id ? `═══ ANGGARAN RAB PROYEK ═══
+${rabError ? 'Tidak bisa dibaca — JANGAN menyimpulkan apa pun tentang kesesuaian anggaran.' : 'Proyek ini belum punya RAB. JANGAN menyimpulkan apa pun tentang kesesuaian anggaran.'}` : '')}
 
 Berikan analisis dalam JSON format berikut (HANYA JSON, tanpa markdown):
 {
@@ -1085,6 +1115,11 @@ Berikan analisis dalam JSON format berikut (HANYA JSON, tanpa markdown):
         anomaly_count: anomalies.length,
         ai: aiResult,
         ai_error: aiError,
+        // Disebut apa adanya: analisis tanpa pembanding anggaran adalah analisis
+        // yang berbeda, dan penggunanya berhak tahu mana yang sedang ia baca.
+        rab_tersedia: rabBudget.length > 0,
+        rab_total: totalRab || null,
+        rab_error: rabError,
       }
     });
   } catch (error: any) {

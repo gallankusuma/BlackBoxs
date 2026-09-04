@@ -122,8 +122,6 @@ const HANTU_DIKETAHUI: Record<string, string> = {
  * Diverifikasi 3 September 2026 terhadap skema nyata.
  */
 const KOLOM_HANTU_DIKETAHUI: Record<string, string> = {
-  'proposal_items.ahsp_code': 'yang ada: ahsp_code_snapshot (ai.routes.ts)',
-  'proposal_items.uraian': 'yang ada: description (ai.routes.ts)',
   'qc_results.test_id': 'yang ada: qc_test_id (batch.routes.ts)',
   'qc_results.tested_at': 'yang ada: test_date (batch.routes.ts)',
   'qc_results.tester_id': 'yang ada: tested_by (batch.routes.ts)',

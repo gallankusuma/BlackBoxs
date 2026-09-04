@@ -13815,3 +13815,56 @@ berjalan**. Sudah diperbaiki.
 Allowlist penjaga menyusut dari 20 tabel + 21 kolom menjadi **1 tabel + 6
 kolom** — dan penyusutan itu dipaksa oleh penjaga kebasiannya sendiri: entri
 yang tidak dipakai lagi menggagalkan tes, jadi tidak bisa ditinggal menumpuk.
+
+---
+
+## AI-RAB-01 — PO Advisor tidak pernah menerima anggaran RAB
+
+Ditemukan saat pemilik meminta smoke test modul proposal.
+
+**Modulnya sendiri sehat:** 11 rangkaian tes proposal/estimator lulus penuh (436
+asersi, 0 gagal), dan 30 endpoint GET estimator nol yang 5xx.
+
+⚠️ Probe pertama memakai database yang **kosong dari proposal**, jadi ke-30
+endpoint dijawab tanpa data dan join-nya tidak pernah dilewati. Angka itu tidak
+dilaporkan sebagai sehat; probe diulang setelah membuat proposal berisi item.
+Probe yang hijau karena tidak ada datanya sama tidak bergunanya dengan probe
+yang tidak dijalankan.
+
+**Cacatnya mati di DUA tingkat**, dan tingkat kedua yang membuat perbaikan
+setengah jalan tidak akan mengubah apa pun:
+
+1. `SELECT pi.uraian, pi.total_price, pi.ahsp_code` — kolom `uraian` dan
+   `ahsp_code` tidak ada di `proposal_items` (yang benar `description` dan
+   `ahsp_code_snapshot`). Dibuktikan langsung ke database: `ER_BAD_FIELD_ERROR`.
+2. **`rabBudget` tidak pernah dipakai.** Di seluruh berkas ia hanya muncul dua
+   kali: dideklarasikan dan diisi. Tidak pernah masuk ke prompt AI.
+
+Ditambah `catch {}` kosong yang menelan errornya. Tiga lapis yang saling
+menutupi, dan gejalanya nol: endpoint tetap 200, AI tetap menjawab — hanya saja
+tanpa pembanding anggaran sama sekali, dengan nada seyakin biasanya.
+
+**Diterapkan:**
+
+- Nama kolom dibetulkan; hasilnya diurutkan dari nilai terbesar dan yang bernilai
+  nol dibuang — 20 item teratas lebih berguna daripada 20 item acak.
+- RAB **disambungkan ke prompt**, lengkap dengan totalnya dan instruksi
+  membandingkan nilai PO terhadapnya.
+- Kalau RAB gagal dibaca atau proyeknya memang belum punya RAB, prompt menyuruh
+  AI **tidak menyimpulkan apa pun** tentang kesesuaian anggaran. Sebelumnya
+  bagian itu kosong dan AI bebas berasumsi.
+- Respons menyebut `rab_tersedia`, `rab_total`, `rab_error`. Analisis tanpa
+  pembanding anggaran adalah analisis yang berbeda, dan penggunanya berhak tahu
+  mana yang sedang ia baca.
+
+Dibuktikan end-to-end, bukan hanya `tsc` lolos: proposal uji 1 item senilai
+Rp 4.400.000 ditautkan ke proyek → `rab_tersedia: true`, `rab_total: 4400000`,
+`rab_error: null`.
+
+Allowlist kolom di `test:skema-rute` turun 6 → 4, dan penurunannya **dipaksa
+penjaga kebasiannya sendiri** — entri yang tidak dipakai lagi menggagalkan tes.
+
+**Catatan:** saat membersihkan fixture, `DELETE` ditolak `409
+PROPOSAL_HAS_PROJECT`. Itu benar — proposal ditautkan ke proyek langsung lewat
+database, melewati alur normal, dan aplikasi menolak menghapus proposal yang
+sudah menjadi proyek. Tautannya dilepas dulu, lalu dihapus lewat jalur aplikasi.
