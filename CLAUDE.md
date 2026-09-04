@@ -207,6 +207,44 @@ Butuh 2 karyawan aktif berkode `TEST-A` dan `TEST-B` (bisa ditimpa lewat env `EM
 
 **Jangan menulis tes HTTP dengan bash + curl.** Versi bash sebelumnya memberi hasil palsu: `{...}` di argumen `-d` kena brace expansion, body JSON terpecah, server membalas 500, tapi tesnya tetap "lulus".
 
+### Penjaga skema seluruh rute (SKEMA-RUTE-01)
+
+`npm run test:skema-rute` memindai **semua** berkas di `backend/src/routes/` dan
+memastikan setiap nama tabel dan kolom yang disebut SQL benar-benar ada. Nama
+yang salah **tidak menghasilkan error saat `tsc` maupun `npm run build`** — ia
+baru meledak saat query-nya jalan, dan seringnya ditelan `catch` lalu muncul
+sebagai layar kosong. Repo ini sudah tiga kali kena kelas itu (FIN-01,
+PROC-INBOX-01, CABUT-STOCK-01).
+
+Tiga hal yang harus dijaga kalau menyentuh tesnya:
+
+1. **Literal diambil dengan pemindai keadaan, bukan filter baris.** Beberapa
+   komentar di repo ini memuat backtick; menghapus barisnya menggeser batas
+   seluruh literal sesudahnya dan prosa terbaca sebagai SQL (terukur: 7 hantu
+   palsu — `the`, `visible`, `drawing`).
+2. **Literal hanya dianggap SQL kalau memuat bentuk pernyataan nyata.** Tanpa
+   itu prompt AI dan teks "Auto-generated from proposal X" ikut terbaca.
+3. **Aturan kolom-tanpa-alias hanya berlaku pada literal tanpa subquery.**
+   `(SELECT ... FROM mps_details WHERE mps_header_id = m.id)` di dalam query
+   bertabel luar `users` membuat kolomnya salah ditempelkan.
+
+⚠️ **Allowlist bukan izin.** `HANTU_DIKETAHUI` (20 tabel) dan
+`KOLOM_HANTU_DIKETAHUI` (21 kolom) mencatat utang yang sudah ada per
+3 September 2026, lengkap dengan nama kolom yang benar. Dua penjaga menahannya
+jadi hiasan: entri yang tidak dipakai lagi dan entri yang ternyata sudah ada
+sama-sama menggagalkan tes. **Menambah entri baru ke situ untuk meloloskan tes
+adalah cara paling halus membuat penjaga ini tidak berarti.**
+
+Ada juga angka lantai untuk jumlah acuan yang benar-benar diperiksa —
+tanpa itu, mematikan pemindainya membuat asersi "tidak ada kolom hantu" lulus
+dengan sendirinya.
+
+**Utang yang tercatat: 29 dari 304 endpoint GET membalas 5xx** karena tabel yang
+tidak pernah ada, terkonsentrasi di qc, ppic, reports, sales, warehouse,
+quality, documents, inventory, batch, approval, dan clients. Keputusan mau
+dicabut, dibangun, atau dibiarkan **belum diambil** — sama seperti Stock
+Transfer dulu.
+
 ## Modul
 
 Estimator (AHSP/HSP/RAB/Proposal + MTO kalkulator konstruksi), Projects (Gantt, Kanban, milestone, cost control, timesheet, manpower), Procurement (PR/PO + approval bertingkat), Inventory & Warehouse, Sales/CRM (leads, prospects, clients), Finance (AP/AR, margin, COGS, fund request, kasbon, payment schedule), HR (employee, attendance, payslip, position rates), Production/PPIC, Quality/QC, Asset Management (asset, production line, P&ID, maintenance, depresiasi), Approval engine, Reports, Audit log, AI routes (Gemini).

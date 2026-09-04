@@ -13662,3 +13662,77 @@ irisan "vendor yang punya SEMUA produk" bisa diturunkan dari `matched_items`
 6. **N+1 di `PurchaseOrders.vue:1482`** — satu panggilan
    `/vendors-for-product/:id` per item PO, padahal
    `/vendors-for-items?product_ids=...` sudah ada dan melakukannya sekali jalan.
+
+---
+
+## SKEMA-RUTE-01 — penjaga skema untuk seluruh rute, dan apa yang ia temukan
+
+Diminta pemilik setelah audit HR: jadikan pemeriksa nama tabel/kolom sebagai
+penjaga permanen, bukan skrip sekali-pakai per modul.
+
+### Membangun pemindainya: tiga sumber derau, semuanya terukur
+
+Pemindai yang berbunyi palsu membuat orang berhenti memeriksa, jadi deraunya
+diukur dan dihilangkan satu per satu sebelum tesnya ditulis:
+
+| Sebab | Contoh hantu palsu | Perbaikan |
+|---|---|---|
+| Membuang komentar dengan filter baris | `the`, `visible`, `drawing` | Komentar di repo ini ada yang memuat backtick; menghapus barisnya menggeser batas seluruh literal sesudahnya. Diganti pemindai keadaan yang mengikuti string/komentar/interpolasi |
+| `ON DUPLICATE KEY UPDATE <kolom>` | `quantity`, `last_no`, `po` | Dipotong sebelum dipindai |
+| Prosa di dalam template literal | `proposal`, `material`, `po` | Literal hanya dianggap SQL kalau memuat bentuk pernyataan nyata (prompt AI dan teks "Auto-generated from proposal X" tidak lagi terbaca) |
+
+27 kandidat awal → **20 yang nyata**. Aturan "kolom tanpa alias" juga dibatasi
+ke literal tanpa subquery, setelah `(SELECT COUNT(*) FROM mps_details WHERE
+mps_header_id = m.id)` membuat `mps_header_id` salah ditempelkan ke `users`.
+
+### Yang ditemukan
+
+**20 tabel disebut SQL tapi tidak ada** — diverifikasi tidak ada di database
+lokal **maupun produksi**. Kelas yang sama dengan Stock Transfer
+(CABUT-STOCK-01): fitur yang tidak pernah bisa bekerja.
+
+**21 kolom disebut SQL tapi tidak ada di tabelnya**, semuanya diverifikasi
+terhadap skema nyata. Beberapa yang menonjol:
+
+| Ditulis kode | Yang sebenarnya ada |
+|---|---|
+| `qc_results.test_id`, `.status`, `.result`, `.tested_at`, `.tester_id` | `qc_test_id`, `result_status`, `result_value`, `test_date`, `tested_by` |
+| `stock_movements.moved_at` | `created_at` |
+| `products.minimum_stock` | `reorder_point` |
+| `batches.exp_date` | `expiry_date` |
+| `approval_actions.acted_at` | `created_at` |
+| `proposal_items.ahsp_code`, `.uraian` | `ahsp_code_snapshot`, `description` |
+
+**Dampaknya diukur, bukan diperkirakan: 29 dari 304 endpoint GET membalas 5xx**,
+terkonsentrasi di 11 modul — qc (7), ppic (5), reports (4), sales (3), warehouse
+(2), quality (2), documents (2), inventory, batch, approval, clients (1 masing-masing).
+
+### Tesnya
+
+`npm run test:skema-rute` memindai 46 berkas rute, ~950 literal SQL, >800 acuan
+tabel dan >2000 acuan kolom. Temuan yang sudah ada masuk allowlist **yang
+terdokumentasi beserta nama kolom yang benar** — itu bukan izin menambah yang
+baru, dan tesnya menjaga daftarnya tidak bertambah. Dua penjaga tambahan
+menahan allowlist jadi hiasan: entri yang **tidak dipakai lagi** dan entri yang
+**ternyata sudah ada** sama-sama menggagalkan tes.
+
+Satu asersi khusus menahan pemindainya dimatikan diam-diam: jumlah acuan yang
+benar-benar diperiksa punya angka lantai. Tanpa itu, mematikan pemindai membuat
+asersi "tidak ada kolom hantu" lulus dengan sendirinya — kelas "verifikasi yang
+tidak memverifikasi apa pun".
+
+**Mutasi.** Tabel hantu baru → 1 gagal. Kolom hantu baru → 1 gagal. Entri
+allowlist jadi basi → 1 gagal. Entri allowlist yang kolomnya ternyata ada → 2
+gagal. Pemindai alias dimatikan → 2 gagal. Pemindai tabel dimatikan → crash.
+
+⚠️ Satu mutasi **tidak** tertangkap dan itu disebut apa adanya: mengosongkan
+daftar hasil tepat sebelum asersinya. Angka lantai pemindai berjalan lebih dulu
+sehingga tetap lulus. Itu sabotase yang tidak akan dihasilkan refactor mana pun
+— bentuk realistisnya (pemindai alias dimatikan) tertangkap — tapi menyebutnya
+lebih jujur daripada mengklaim cakupan penuh.
+
+### Yang menunggu keputusan pemilik
+
+29 endpoint yang selalu 5xx. Pilihannya sama dengan Stock Transfer dulu:
+**dicabut**, **dibangun tabelnya**, atau **dibiarkan** sebagai utang yang kini
+tercatat. Tidak ada yang diubah tanpa keputusan itu.
