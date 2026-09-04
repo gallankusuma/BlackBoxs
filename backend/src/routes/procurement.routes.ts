@@ -4635,12 +4635,26 @@ router.get('/vendors-for-items', authMiddleware, requirePermission('procurement.
 
     if (productIds.length === 0) {
       // No product IDs → return all vendors unfiltered
-      const allVendors = await dbAll('SELECT id, code, name, supply_category FROM vendors WHERE active = 1 OR active IS NULL ORDER BY name ASC') as any[];
+      // Kolomnya `is_active`, bukan `active`. Versi sebelumnya melempar
+      // ER_BAD_FIELD_ERROR yang ditelan catch di bawah, jadi endpoint ini
+      // SELALU membalas daftar kosong untuk PR yang itemnya tanpa product_id —
+      // dan layar Add Bid menampilkan dropdown vendor kosong tanpa satu pun
+      // pesan, karena servernya membalas 200.
+      const allVendors = await dbAll(
+        'SELECT id, code, name, supply_category FROM vendors WHERE is_active = 1 ORDER BY name ASC') as any[];
       return res.json({ data: allVendors.map(v => ({ ...v, matched_items: 0, total_items: 0 })) });
     }
 
     // For each vendor, count how many of the requested products they have a price for
     const placeholders = productIds.map(() => '?').join(',');
+    // PROC-VPL-01: gerbangnya WAJIB ada di sini juga. Tanpa itu vendor yang
+    // harganya masih menunggu persetujuan tetap terhitung "punya harga untuk 3
+    // item" — dan gerbang yang cuma ada di layar daftar harga sementara
+    // angkanya tetap mengalir ke pemilihan vendor adalah hiasan, bukan kendali.
+    //
+    // Syaratnya di klausa ON, bukan WHERE: di WHERE ia akan ikut membuang
+    // vendor yang belum punya harga sama sekali, padahal daftar ini memang
+    // harus memuat mereka dengan matched_items = 0.
     const rows = await dbAll(`
       SELECT
         v.id, v.code, v.name, v.supply_category,
@@ -4649,6 +4663,7 @@ router.get('/vendors-for-items', authMiddleware, requirePermission('procurement.
       FROM vendors v
       LEFT JOIN vendor_prices vp
         ON vp.vendor_id = v.id AND vp.product_id IN (${placeholders})
+       AND ${hargaVendorAktif()}
       GROUP BY v.id, v.code, v.name, v.supply_category
       ORDER BY matched_items DESC, v.name ASC
     `, [productIds.length, ...productIds]) as any[];

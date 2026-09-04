@@ -826,6 +826,14 @@ Empat aturan yang harus dijaga:
    harga selama menunggu persetujuan. Hanya boleh ada **satu revisi terbuka**
    per induk (`REVISI_MASIH_TERBUKA`); dua revisi yang sama-sama disetujui
    membuat "harga mana yang berlaku" tidak bisa dijawab.
+⚠️ **Gerbangnya juga wajib ada di `JOIN`, bukan cuma `FROM`.** `GET
+/vendors-for-items` membaca `vendor_prices` lewat `LEFT JOIN` dan sempat lolos
+tanpa gerbang, karena pemindai penjaganya hanya mencocokkan `FROM vendor_prices`
+pada satu baris. Sekarang pemindai bekerja per template literal dan menangkap
+keduanya. Untuk `LEFT JOIN`, syaratnya diletakkan di klausa **ON** — di `WHERE`
+ia akan ikut membuang vendor yang belum punya harga sama sekali, padahal daftar
+itu memang harus memuat mereka dengan `matched_items = 0`.
+
 4. **Backfill data warisan hanya boleh jalan sekali.** `ensureVendorPriceApprovalSchema`
    memeriksa keberadaan kolom `approval_status` **sebelum** membuatnya; kalau
    UPDATE itu lepas ke jalur boot biasa, setiap restart akan menyetujui sendiri

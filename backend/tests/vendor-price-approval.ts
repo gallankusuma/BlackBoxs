@@ -245,24 +245,64 @@ async function main() {
   chk('harganya hilang dari konsumen setelah dihapus', await hargaDipakai(produkA), null);
 
   // ================================================================
+  // ================================================================
+  console.log('\n7b. Daftar vendor untuk bidding ikut tersaring, dan tidak pernah kosong diam-diam');
+  // Endpoint ini menelan errornya sendiri dan membalas {data: []}, jadi
+  // kegagalan apa pun di dalamnya menyamar jadi "tidak ada vendor". Dua asersi
+  // di bawah adalah satu-satunya cara cacatnya terlihat.
+
+  // Tanpa product_ids: harus mengembalikan daftar vendor, bukan kosong. Versi
+  // sebelumnya memfilter `WHERE active = 1` padahal kolomnya `is_active`,
+  // jadi query-nya melempar, errornya ditelan, dan layar Add Bid menampilkan
+  // dropdown vendor kosong tanpa satu pun pesan.
+  const semuaVendor = await call('GET', '/procurement/vendors-for-items', undefined, master);
+  chk('tanpa product_ids: daftar vendor terisi',
+    [semuaVendor.status, (semuaVendor.json?.data || []).length > 0], [200, true]);
+  chk('  vendor uji ikut terdaftar',
+    ((semuaVendor.json?.data || []) as any[]).some(v => Number(v.id) === Number(vendorId)), true);
+
+  // Dengan product_ids: harga yang BELUM disetujui tidak boleh ikut terhitung.
+  const cocokUntuk = async (productId: number) => {
+    const r = await call('GET', `/procurement/vendors-for-items?product_ids=${productId}`, undefined, master);
+    const v = ((r.json?.data || []) as any[]).find(x => Number(x.id) === Number(vendorId));
+    return Number(v?.matched_items ?? -1);
+  };
+  const hargaPending = await buatHarga(produkB, 55000);
+  chk('harga baru dibuat sebagai pending', !!hargaPending, true);
+  chk('harga pending TIDAK terhitung sebagai vendor punya harga', await cocokUntuk(produkB), 0);
+
+  // ================================================================
   console.log('\n8. Penyaringan konsumen tidak boleh bocor lewat pembaca baru');
   // Tes ini memindai sumber, bukan perilaku: pembaca vendor_prices yang
   // ditambahkan nanti tidak akan tertangkap tes perilaku mana pun sampai ada
   // yang melaporkan harga pending muncul di PR.
+  //
+  // Dipindai per TEMPLATE LITERAL, bukan per baris, dan menangkap JOIN bukan
+  // cuma FROM. Versi pertama hanya mencocokkan `FROM vendor_prices` di satu
+  // baris — dan `GET /vendors-for-items` membaca tabel ini lewat
+  // `LEFT JOIN vendor_prices vp` di baris tersendiri, jadi kebocorannya lolos
+  // sementara penjaga ini tetap hijau. Penjaga yang punya lubang lebih
+  // berbahaya daripada tidak ada penjaga: ia membuat orang berhenti memeriksa.
   const berkas = ['src/routes/procurement.routes.ts', 'src/routes/ai.routes.ts'];
   const bocor: string[] = [];
   for (const f of berkas) {
-    const isi = fs.readFileSync(f, 'utf8').split('\n');
-    isi.forEach((line, i) => {
-      if (!/FROM vendor_prices/.test(line)) return;
+    const isi = fs.readFileSync(f, 'utf8');
+    // Komentar JS dibuang dulu supaya prosa yang menyebut vendor_prices tidak
+    // ikut terbaca sebagai query.
+    const bersih = isi.replace(/\/\*[\s\S]*?\*\//g, '').split('\n')
+      .filter(l => !l.trimStart().startsWith('//')).join('\n');
+    for (const m of bersih.matchAll(/`([^`]*)`/g)) {
+      const q = m[1];
+      // `material_vendor_prices` tabel yang berbeda dan tidak ikut fitur ini.
+      if (!/(FROM|JOIN)\s+vendor_prices\b/.test(q)) continue;
       // Pembacaan per-id (jalur tulis/approval) memang harus melihat semua baris.
-      const potongan = isi.slice(i, i + 6).join(' ');
-      if (/WHERE id = \?|WHERE revision_of = \?/.test(potongan)) return;
-      if (/hargaVendorAktif\(/.test(potongan)) return;
+      if (/WHERE id = \?|WHERE revision_of = \?/.test(q)) continue;
+      if (/hargaVendorAktif\(|approval_status/.test(q)) continue;
       // Layar daftar harga sengaja menampilkan yang menunggu persetujuan.
-      if (/LEFT JOIN users sup/.test(potongan)) return;
-      bocor.push(`${f}:${i + 1}`);
-    });
+      if (/LEFT JOIN users sup/.test(q)) continue;
+      const baris = bersih.slice(0, m.index).split('\n').length;
+      bocor.push(`${f.split('/').pop()}:${baris}`);
+    }
   }
   chk('tidak ada pembaca vendor_prices tanpa penjaga', bocor, []);
 

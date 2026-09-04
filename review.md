@@ -13537,3 +13537,91 @@ menghapus field dari respons backend (1, 2, dan 1 asersi gagal).
 menguji potongan yang memang bukan rute dan melaporkan empat hantu. Probe yang
 melaporkan hantu sama tidak bergunanya dengan probe yang diam; sekarang jalurnya
 diambil utuh dengan interpolasi diganti `1`.
+
+---
+
+## PROC-AUDIT-01 — audit modul procurement
+
+Diminta pemilik: "cek modul procurement ada masalah gak". 75 endpoint, 4980
+baris.
+
+**Yang sehat.** 31 endpoint GET ditembak dengan id nyata: **nol yang 5xx** (jauh
+lebih baik dari finance sebelum FIN-01, yang 9 dari 26). Nol tabel hantu. Nol
+rute statis yang tertutup `/:id`. Nol prefix `/api` ganda di layar procurement.
+Delapan endpoint tanpa `requirePermission` semuanya approve/reject, dan
+semuanya berjaga lewat `approverLevel()` — itu keputusan yang sudah
+didokumentasikan, bukan kelalaian.
+
+**Tiga temuan yang dikerjakan (1–3); tiga sisanya dilaporkan dan belum diambil.**
+
+### 1. `GET /vendors-for-items` tanpa `product_ids` SELALU gagal
+
+`SELECT ... FROM vendors WHERE active = 1 OR active IS NULL` — kolomnya
+**`is_active`**. Diverifikasi langsung ke database: `ER_BAD_FIELD_ERROR: Unknown
+column 'active'`.
+
+Errornya ditelan `catch` yang membalas `{data: []}`, jadi layar Add Bid
+menampilkan **dropdown vendor kosong** tanpa satu pun pesan — dan `catch` di
+`PurchaseRequests.vue` yang seharusnya mengisi daftar cadangan tidak pernah
+jalan, karena servernya membalas 200.
+
+Belum menggigit: 0 dari 56 PR produksi yang itemnya tanpa `productId`. Menyala
+pada PR pertama yang itemnya diketik bebas.
+
+### 2. Endpoint yang sama menghitung harga vendor yang BELUM disetujui
+
+`LEFT JOIN vendor_prices vp ON ...` tanpa `hargaVendorAktif()` — melanggar
+PROC-VPL-01 aturan 1. Vendor yang harganya masih pending tetap terhitung "punya
+harga untuk 3 item".
+
+Gerbangnya dipasang di klausa **ON**, bukan WHERE: di WHERE ia akan ikut
+membuang vendor yang belum punya harga sama sekali, padahal daftar ini memang
+harus memuat mereka dengan `matched_items = 0`.
+
+Belum menggigit: produksi punya 1517 harga, semuanya sudah status 2, nol pending.
+Salah begitu fitur approval-nya benar-benar dipakai — yang justru alasan fitur
+itu dibuat.
+
+### 3. Penjaga yang seharusnya menangkap nomor 2 punya lubang
+
+`tests/vendor-price-approval.ts` memindai **per baris** dan hanya mencocokkan
+`FROM vendor_prices`. Query di atas memakai `LEFT JOIN vendor_prices vp` di
+baris tersendiri, jadi tidak pernah terpindai — penjaganya hijau padahal
+kebocorannya ada. Penjaga yang punya lubang lebih berbahaya daripada tidak ada
+penjaga: ia membuat orang berhenti memeriksa.
+
+Sekarang dipindai per **template literal**, menangkap `JOIN` maupun `FROM`,
+dengan komentar JS dibuang lebih dulu supaya prosa tidak terbaca sebagai query.
+
+`npm run test:vendor-price` naik 53 → 57 asersi.
+
+Mutasi cacat 1 dan 2 (dikembalikan satu per satu): masing-masing 2 asersi gagal.
+
+Mutasi cacat 3 **tidak bisa diuji sendirian** — memundurkan pemindai sementara
+kodenya sudah benar menghasilkan 0 asersi gagal, karena tidak ada yang bisa ia
+temukan. Percobaan yang benar adalah mengembalikan kebocorannya lalu
+membandingkan kedua versi pemindai:
+
+| Kebocoran dikembalikan, lalu | Pemindai menjawab |
+|---|---|
+| Pemindai **baru** (per-literal, FROM+JOIN) | **FAIL** — menyebut `procurement.routes.ts:3878` |
+| Pemindai **lama** (per-baris, FROM saja) | `ok → []` — melewatkannya |
+
+Jadi lubangnya nyata dan sekarang tertutup. Catatan yang menenangkan: bahkan
+dengan pemindai lama, asersi perilaku baru di bagian 7b tetap menangkap
+kebocoran itu — jadi sekarang ada dua penjaga yang berdiri sendiri.
+
+### Belum dikerjakan (dilaporkan, menunggu keputusan)
+
+4. **Tiga endpoint menelan error dan mengembalikan data kosong**
+   (`/vendors-for-product`, `/vendors-for-items`, `/vendor-price-details`),
+   dengan komentar eksplisit "Return empty array instead of 500 to not block the
+   UI". Kelasnya sama dengan `FinanceAP.vue`: kegagalan menyamar jadi "tidak ada
+   data", dan buyer mengambil keputusan dari kekosongan yang bohong. Probe 5xx
+   tidak bisa melihatnya — hanya asersi perilaku di nomor 1 dan 2 yang bisa.
+5. **Kode mati dengan kolom salah** — `mvp.product_id` di fallback
+   `/vendors-for-product`; tabel `material_vendor_prices` kolomnya `material_id`.
+   Cabang itu hanya jalan kalau tabel `vendor_prices` tidak ada.
+6. **N+1 di `PurchaseOrders.vue:1482`** — satu panggilan
+   `/vendors-for-product/:id` per item PO, padahal
+   `/vendors-for-items?product_ids=...` sudah ada dan melakukannya sekali jalan.
