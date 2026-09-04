@@ -3490,6 +3490,75 @@ const ensureGeneralLedgerSchema = async (connection: any) => {
   console.log('✅ Skema general ledger ensured');
 };
 
+/**
+ * Dua tabel anak yang tidak pernah dibuat (SKEMA-RUTE-01).
+ *
+ * Tabel INDUKNYA ada dan bekerja — `client_events` dan `sales_orders` — tapi
+ * tabel anaknya tidak pernah ada di skema mana pun, sehingga lima endpoint yang
+ * memakainya selalu 500: daftar event yang dibagikan, approval & riwayat sales
+ * order, dan dua jalur tulis sales order.
+ *
+ * Dibuat, bukan dicabut: berbeda dengan MPS/MRP dan modul QC yang seluruh model
+ * datanya tidak ada, di sini yang hilang cuma tabel penghubung, dan bentuknya
+ * sudah sepenuhnya ditentukan oleh INSERT yang memakainya.
+ */
+const ensureTabelAnakHilangSchema = async (connection: any) => {
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS event_shared_users (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      event_id INT NOT NULL,
+      user_id INT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_event_user (event_id, user_id),
+      KEY idx_esu_user (user_id),
+      CONSTRAINT fk_esu_event FOREIGN KEY (event_id) REFERENCES client_events(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS sales_order_items (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      so_id INT NOT NULL,
+      product_id INT NULL,
+      quantity DECIMAL(18,4) DEFAULT 0,
+      uom VARCHAR(30) NULL,
+      unit_price DECIMAL(20,2) DEFAULT 0,
+      currency VARCHAR(3) DEFAULT 'IDR',
+      notes TEXT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_soi_so (so_id),
+      KEY idx_soi_product (product_id),
+      CONSTRAINT fk_soi_so FOREIGN KEY (so_id) REFERENCES sales_orders(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  // `client_events.visibility` juga tidak pernah ada, padahal seluruh logika
+  // berbagi event bergantung padanya (`visibility = 'public' OR ... OR EXISTS
+  // (event_shared_users)`). Ia sepasang dengan tabel di atas, jadi dibuat
+  // bersamanya. Bawaannya 'public' supaya event yang sudah ada tetap terlihat
+  // seperti sebelumnya.
+  await execSchemaEnsure(connection, `
+    ALTER TABLE client_events
+    ADD COLUMN IF NOT EXISTS visibility VARCHAR(20) DEFAULT 'public'
+  `);
+
+  // Jalur approve/reject hasil QC menulis ke kolom yang tidak pernah ada:
+  // `qc_results.approved_by/approved_at` dan `batches.qc_status`. Layar Batch
+  // (stores/batches.ts) memanggil kedua endpoint itu, jadi kolomnya dilengkapi
+  // — bukan endpointnya yang dicabut.
+  await execSchemaEnsure(connection, `
+    ALTER TABLE qc_results
+    ADD COLUMN IF NOT EXISTS approved_by INT NULL,
+    ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP NULL
+  `);
+  await execSchemaEnsure(connection, `
+    ALTER TABLE batches
+    ADD COLUMN IF NOT EXISTS qc_status VARCHAR(20) DEFAULT 'pending'
+  `);
+
+  console.log('✅ Tabel anak yang hilang ensured (event_shared_users, sales_order_items, kolom visibility & QC)');
+};
+
 const ensurePermissionCatalog = async (connection: any) => {
   const rows: [string, string, string][] = [];
   for (const g of PERMISSION_CATALOG) {
@@ -3778,6 +3847,7 @@ export async function initializeDatabase() {
     await ensureAssetCustodySchema(connection);
     await ensureGrnAttachmentSchema(connection);
     await ensureVendorPriceApprovalSchema(connection);
+    await ensureTabelAnakHilangSchema(connection);
     await ensureGeneralLedgerSchema(connection);
     await ensurePermissionCatalog(connection);
     await ensureMasterUserRow(connection);

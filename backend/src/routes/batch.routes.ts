@@ -187,18 +187,23 @@ router.get('/expiring/soon', authMiddleware, async (req: Request, res: Response)
   try {
     const daysAhead = parseInt(req.query.days as string) || 30;
     
+    // SKEMA-RUTE-01: tiga hal salah sekaligus di query lama —
+    //   * JULIANDAY adalah fungsi SQLite, sisa sebelum pindah ke MySQL;
+    //   * kolomnya `expiry_date`, bukan `exp_date`;
+    //   * `batches` tidak punya `location_id` (yang ada `warehouse_id`), jadi
+    //     join ke warehouse_locations diganti ke warehouses.
     const batches = await dbAll(`
-      SELECT b.*, p.name as product_name, p.sku,
-             wl.code as location_code,
-             (CAST((JULIANDAY(b.exp_date) - JULIANDAY('now')) AS INTEGER)) as days_to_expiry
+      SELECT b.*, p.name AS product_name, p.sku,
+             w.name AS location_code,
+             DATEDIFF(b.expiry_date, CURDATE()) AS days_to_expiry
       FROM batches b
       JOIN products p ON b.product_id = p.id
-      LEFT JOIN warehouse_locations wl ON b.location_id = wl.id
+      LEFT JOIN warehouses w ON b.warehouse_id = w.id
       WHERE b.status IN ('open', 'released')
-        AND b.exp_date IS NOT NULL
-        AND (JULIANDAY(b.exp_date) - JULIANDAY('now')) <= ?
-        AND (JULIANDAY(b.exp_date) - JULIANDAY('now')) > 0
-      ORDER BY b.exp_date ASC
+        AND b.expiry_date IS NOT NULL
+        AND DATEDIFF(b.expiry_date, CURDATE()) <= ?
+        AND DATEDIFF(b.expiry_date, CURDATE()) > 0
+      ORDER BY b.expiry_date ASC
     `, [daysAhead]);
     
     res.json({ data: batches });

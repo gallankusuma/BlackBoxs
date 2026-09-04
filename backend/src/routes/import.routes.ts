@@ -484,7 +484,12 @@ async function validateData(entity: string, data: any[]): Promise<{
           if (!row.employee_id) errors.push('Employee ID is required');
           if (!row.name) errors.push('Name is required');
           
-          const existingEmp = await dbGet('SELECT id FROM employees WHERE employee_id = ?', [row.employee_id]);
+          // Kolomnya `code`, bukan `employee_id` — query lama selalu melempar
+          // ER_BAD_FIELD_ERROR, jadi pemeriksaan duplikat NIK tidak pernah
+          // benar-benar berjalan. Baris INSERT-nya sendiri sudah memakai `code`
+          // (lihat `row.code || row.employee_id` di bawah).
+          const existingEmp = await dbGet('SELECT id FROM employees WHERE code = ?',
+            [row.code || row.employee_id]);
           if (existingEmp) errors.push('Employee ID already exists');
           break;
 

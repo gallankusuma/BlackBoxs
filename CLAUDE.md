@@ -239,11 +239,14 @@ Ada juga angka lantai untuk jumlah acuan yang benar-benar diperiksa —
 tanpa itu, mematikan pemindainya membuat asersi "tidak ada kolom hantu" lulus
 dengan sendirinya.
 
-**Utang yang tercatat: 29 dari 304 endpoint GET membalas 5xx** karena tabel yang
-tidak pernah ada, terkonsentrasi di qc, ppic, reports, sales, warehouse,
-quality, documents, inventory, batch, approval, dan clients. Keputusan mau
-dicabut, dibangun, atau dibiarkan **belum diambil** — sama seperti Stock
-Transfer dulu.
+⚠️ **Pemindainya mengambil SEMUA bentuk string**, bukan cuma template literal.
+Versi pertama hanya template literal, dan `dbAll('SELECT * FROM qc_parameters')`
+dengan kutip tunggal lolos — empat endpoint qc tidak terlihat karenanya.
+
+**Hasil CABUT-QC-PPIC-01 (3 September 2026): nol endpoint GET yang 5xx** dari
+291. Utang yang tersisa tinggal 1 tabel dan 6 kolom, semuanya di jalur yang
+belum tersentuh (`ai.routes.ts`, `batch.routes.ts`, satu query di
+`warehouse.routes.ts`).
 
 ## Modul
 

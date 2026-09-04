@@ -17,7 +17,6 @@ import procurementRoutes from './routes/procurement.routes';
 import salesRoutes from './routes/sales.routes';
 import warehouseRoutes from './routes/warehouse.routes';
 import qualityRoutes from './routes/quality.routes';
-import qcRoutes from './routes/qc.routes';
 import batchRoutes from './routes/batch.routes';
 import simulationRoutes from './routes/simulation.routes';
 import productionRoutes from './routes/production.routes';
@@ -149,7 +148,10 @@ app.use('/api/procurement', procurementRoutes);
 app.use('/api/sales', salesRoutes);
 app.use('/api/warehouses', warehouseRoutes);
 app.use('/api/quality', qualityRoutes);
-app.use('/api/qc', qcRoutes);
+// CABUT-QC-PPIC-01: modul /api/qc dicabut — 24 dari 24 endpointnya berdiri
+// di atas tabel yang tidak pernah ada (qc_parameters, qc_methods,
+// qc_instruments, qc_sampling_areas, qc_specifications, qc_analysis_*),
+// dan tidak ada satu pun layar, route, atau menu yang memanggilnya.
 app.use('/api/batches', batchRoutes);
 app.use('/api/simulate', simulationRoutes);
 app.use('/api/production', productionRoutes);

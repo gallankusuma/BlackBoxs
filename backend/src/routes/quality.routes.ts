@@ -49,62 +49,9 @@ router.post('/tests', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // QC Test Definitions (per product)
-router.get('/test-definitions', authMiddleware, async (req: Request, res: Response) => {
-  try {
-    const { product_id } = req.query;
-
-    let query = `
-      SELECT qtd.*, qt.code as test_code, qt.name as test_name, qt.test_type,
-             p.name as product_name, p.sku
-      FROM qc_test_definitions qtd
-      JOIN qc_tests qt ON qtd.test_id = qt.id
-      JOIN products p ON qtd.product_id = p.id
-      WHERE 1=1
-    `;
-
-    const params: any[] = [];
-    if (product_id) {
-      query += ` AND qtd.product_id = ?`;
-      params.push(product_id);
-    }
-
-    const definitions = await dbAll(query, params);
-
-    res.json({ data: definitions });
-  } catch (error) {
-    console.error('Error fetching test definitions:', error);
-    res.status(500).json({ error: 'Failed to fetch test definitions' });
-  }
-});
-
-router.post('/test-definitions', authMiddleware, async (req: Request, res: Response) => {
-  try {
-    const { product_id, test_id, min_value, max_value, target_value, is_required } = req.body;
-
-    if (!product_id || !test_id) {
-      return res.status(400).json({ error: 'product_id and test_id are required' });
-    }
-
-    const result = await dbRun(`
-      INSERT INTO qc_test_definitions (product_id, test_id, min_value, max_value, target_value, is_required)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `, [
-      product_id, test_id,
-      min_value || null, max_value || null, target_value || null,
-      is_required !== undefined ? is_required : 1
-    ]);
-
-    res.status(201).json({
-      message: 'Test definition created successfully',
-      data: { id: result.insertId, product_id, test_id }
-    });
-  } catch (error) {
-    console.error('Error creating test definition:', error);
-    res.status(500).json({ error: 'Failed to create test definition' });
-  }
-});
-
-// QC Results
+// CABUT-QC-PPIC-01: GET & POST /test-definitions dicabut — keduanya berdiri di
+// atas tabel `qc_test_definitions` yang tidak pernah ada di skema mana pun, dan
+// tidak ada satu pun layar yang memanggilnya.
 router.get('/results', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { batch_id, status } = req.query;
@@ -129,7 +76,7 @@ router.get('/results', authMiddleware, async (req: Request, res: Response) => {
     }
 
     if (status) {
-      query += ` AND qr.status = ?`;
+      query += ` AND qr.result_status = ?`;
       params.push(status);
     }
 
@@ -185,7 +132,7 @@ router.put('/results/:id/approve', authMiddleware, async (req: Request, res: Res
     // Update QC result
     await dbRun(`
       UPDATE qc_results 
-      SET status = 'passed', 
+      SET result_status = 'passed', 
           approved_by = ?, 
           approved_at = NOW(),
           notes = ?
@@ -199,8 +146,9 @@ router.put('/results/:id/approve', authMiddleware, async (req: Request, res: Res
       const check = await dbGet(`
         SELECT COUNT(*) as pending_count
         FROM qc_results qr
-        JOIN qc_test_definitions qtd ON qr.test_id = qtd.test_id AND qtd.is_required = 1
-        WHERE qr.batch_id = ? AND qr.status != 'passed'
+          -- Gerbang lama memakai qc_test_definitions.is_required; tabel itu
+          -- tidak pernah ada. Sekarang: SEMUA hasil uji batch ini harus lulus.
+          WHERE qr.batch_id = ? AND qr.result_status != 'passed'
       `, [qcResult.batch_id]) as any;
 
       if (check.pending_count === 0) {
@@ -226,7 +174,7 @@ router.put('/results/:id/reject', authMiddleware, async (req: Request, res: Resp
     // Update QC result
     await dbRun(`
       UPDATE qc_results 
-      SET status = 'failed', 
+      SET result_status = 'failed', 
           approved_by = ?, 
           approved_at = NOW(),
           notes = ?
@@ -369,14 +317,14 @@ router.get('/qc-results', authMiddleware, async (req: Request, res: Response) =>
       `SELECT qr.*, b.batch_number, t.name as test_name, u.full_name as tester_name
        FROM qc_results qr
        JOIN batches b ON qr.batch_id = b.id
-       JOIN qc_tests t ON qr.test_id = t.id
-       LEFT JOIN users u ON qr.tester_id = u.id`;
+       JOIN qc_tests t ON qr.qc_test_id = t.id
+       LEFT JOIN users u ON qr.tested_by = u.id`;
     const params: any[] = [];
     if (batch_id) {
       query += ' WHERE qr.batch_id = ?';
       params.push(batch_id);
     }
-    query += ' ORDER BY qr.tested_at DESC';
+    query += ' ORDER BY qr.test_date DESC';
     const results = await dbAll(query, params);
     res.json({ data: results });
   } catch (error) {

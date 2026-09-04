@@ -161,10 +161,10 @@ router.get('/transactions/:productId', authMiddleware, requirePermission('master
         sm.reference_type,
         sm.reference_id,
         sm.notes,
-        sm.moved_at AS transaction_date
+        sm.created_at AS transaction_date
       FROM stock_movements sm
       WHERE sm.product_id = ?
-      ORDER BY sm.moved_at DESC
+      ORDER BY sm.created_at DESC
     `, [productId]);
     res.json({ data: rows });
   } catch (error) {

@@ -345,10 +345,19 @@ router.put('/approval/:id/reject', authMiddleware, async (req: Request, res: Res
 router.get('/price-list', authMiddleware, async (req: Request, res: Response) => {
   try {
     const rows = await dbAll(
+      // SKEMA-RUTE-01: `products` tidak punya `selling_price` maupun `unit`.
+      // Harga yang memang tersimpan adalah `standard_cost`, dan satuannya
+      // lewat `unit_of_measure_id` → tabel `uom`. Aliasnya dipertahankan
+      // supaya bentuk respons yang dibaca layar tidak berubah.
+      //
+      // Perlu diketahui: `standard_cost` adalah HARGA POKOK, bukan harga jual.
+      // Tidak ada kolom harga jual di mana pun, jadi daftar ini sekarang
+      // menampilkan biaya standar — bukan menampilkan angka karangan.
       `SELECT p.id, p.sku, p.name, p.description,
-              p.selling_price as base_price, p.unit
+              p.standard_cost AS base_price, u.name AS unit
        FROM products p
-       WHERE p.selling_price IS NOT NULL AND p.selling_price > 0
+       LEFT JOIN uom u ON p.unit_of_measure_id = u.id
+       WHERE p.standard_cost IS NOT NULL AND p.standard_cost > 0
        ORDER BY p.name`
     );
     res.json({ success: true, data: rows });

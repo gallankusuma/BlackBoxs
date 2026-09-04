@@ -56,12 +56,14 @@ router.get('/locations', authMiddleware, requirePermission('master_data.warehous
 router.get('/stock-movements', authMiddleware, requirePermission('master-data.warehouses.view'), async (req: Request, res: Response) => {
   try {
     const movements = await dbAll(
-      `SELECT sm.*, p.sku, p.name as product_name, w.name as warehouse_name, wl.code as location_code
+      // SKEMA-RUTE-01: `stock_movements` tidak punya `location_id` — join ke
+      // warehouse_locations dibuang. Pergerakan stok memang dicatat per gudang,
+      // bukan per lokasi rak.
+      `SELECT sm.*, p.sku, p.name as product_name, w.name as warehouse_name
        FROM stock_movements sm
        JOIN products p ON sm.product_id = p.id
        JOIN warehouses w ON sm.warehouse_id = w.id
-       LEFT JOIN warehouse_locations wl ON sm.location_id = wl.id
-       ORDER BY sm.moved_at DESC`,
+       ORDER BY sm.created_at DESC`,
       []
     );
     res.json({ data: movements });
@@ -417,8 +419,7 @@ router.get('/:warehouseId/stock-health', authMiddleware, requirePermission('mast
              0 as max_qty
       FROM inventory_stocks i
       JOIN products p ON i.product_id = p.id
-      JOIN warehouse_locations wl ON i.warehouse_id = wl.warehouse_id
-      WHERE wl.warehouse_id = ?
+      WHERE i.warehouse_id = ?
       GROUP BY p.id
       ORDER BY current_qty ASC
     `, [req.params.warehouseId]);
@@ -430,44 +431,44 @@ router.get('/:warehouseId/stock-health', authMiddleware, requirePermission('mast
              0 as max_qty
       FROM inventory_stocks i
       JOIN products p ON i.product_id = p.id
-      JOIN warehouse_locations wl ON i.warehouse_id = wl.warehouse_id
-      WHERE wl.warehouse_id = ?
+      WHERE i.warehouse_id = ?
       GROUP BY p.id
       ORDER BY current_qty DESC
     `, [req.params.warehouseId]);
 
     // Get expiring batches
+    // SKEMA-RUTE-01: `inventory_stocks` tidak punya `batch_id`, jadi stok tidak
+    // bisa dijembatani ke batch. Batch sendiri menyimpan `warehouse_id` dan
+    // `quantity`, jadi pertanyaannya dijawab langsung dari sana. Kolomnya juga
+    // `expiry_date`, bukan `exp_date`.
     const expiring = await dbAll(`
-      SELECT b.id, b.batch_number, b.exp_date, p.name as product_name,
-             SUM(i.quantity) as quantity,
-             DATEDIFF(b.exp_date, CURDATE()) as days_to_expiry
-      FROM inventory_stocks i
-      JOIN batches b ON i.batch_id = b.id
+      SELECT b.id, b.batch_number, b.expiry_date AS exp_date,
+             p.name AS product_name, b.quantity,
+             DATEDIFF(b.expiry_date, CURDATE()) AS days_to_expiry
+      FROM batches b
       JOIN products p ON b.product_id = p.id
-      JOIN warehouse_locations wl ON i.warehouse_id = wl.warehouse_id
-      WHERE wl.warehouse_id = ?
-        AND b.exp_date IS NOT NULL
+      WHERE b.warehouse_id = ?
+        AND b.expiry_date IS NOT NULL
         AND b.status IN ('open', 'released')
-        AND DATEDIFF(b.exp_date, CURDATE()) <= 30
-        AND DATEDIFF(b.exp_date, CURDATE()) > 0
-      GROUP BY b.id
-      ORDER BY b.exp_date ASC
+        AND DATEDIFF(b.expiry_date, CURDATE()) BETWEEN 1 AND 30
+      ORDER BY b.expiry_date ASC
     `, [req.params.warehouseId]);
 
     // Get location utilization
+    // SKEMA-RUTE-01: `inventory_stocks` tidak punya `location_id` — stok hanya
+    // dilacak per GUDANG, bukan per rak. Utilisasi per lokasi karena itu tidak
+    // bisa dihitung, dan `current_qty`/`capacity_percent` dikembalikan NULL.
+    //
+    // Itu jawaban yang jujur; mengisinya dengan stok se-gudang akan membuat
+    // setiap rak tampak penuh oleh barang yang belum tentu ada di sana.
     const utilization = await dbAll(`
-      SELECT wl.id, wl.code as location_code, wl.rack, wl.row, wl.bin,
+      SELECT wl.id, wl.code AS location_code, wl.rack, wl.row, wl.bin,
              wl.capacity,
-             SUM(i.quantity) as current_qty,
-             CASE 
-               WHEN wl.capacity IS NULL THEN NULL
-               ELSE ROUND(100.0 * SUM(i.quantity) / wl.capacity, 2)
-             END as capacity_percent
+             NULL AS current_qty,
+             NULL AS capacity_percent
       FROM warehouse_locations wl
-      LEFT JOIN inventory_stocks i ON i.warehouse_id = wl.warehouse_id AND i.location_id = wl.id
       WHERE wl.warehouse_id = ?
-      GROUP BY wl.id
-      ORDER BY capacity_percent DESC
+      ORDER BY wl.code
     `, [req.params.warehouseId]);
 
     res.json({

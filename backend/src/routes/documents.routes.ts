@@ -82,10 +82,10 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
 
     const rows = await dbAll(
       `SELECT d.*, c.name as category_name, c.icon as category_icon, c.color as category_color,
-              p.name as project_name
+              p.project_name AS project_name
        FROM documents d
        JOIN document_categories c ON d.category_id = c.id
-       LEFT JOIN projects p ON d.project_id = p.id
+       LEFT JOIN client_projects p ON d.project_id = p.id
        ${where}
        ORDER BY d.updated_at DESC`,
       params
@@ -117,10 +117,10 @@ router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
   try {
     const doc = await dbGet(
       `SELECT d.*, c.name as category_name, c.icon as category_icon, c.color as category_color,
-              p.name as project_name
+              p.project_name AS project_name
        FROM documents d
        JOIN document_categories c ON d.category_id=c.id
-       LEFT JOIN projects p ON d.project_id=p.id
+       LEFT JOIN client_projects p ON d.project_id=p.id
        WHERE d.id=?`,
       [req.params.id]
     );

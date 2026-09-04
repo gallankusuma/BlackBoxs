@@ -29,7 +29,13 @@ const chk = (label: string, actual: unknown, expected: unknown) => {
 };
 
 /**
- * Mengambil isi template literal dari sumber TypeScript.
+ * Mengambil isi SETIAP string dari sumber TypeScript — template literal
+ * maupun kutip tunggal/ganda.
+ *
+ * Versi pertama hanya mengambil template literal, dan itu titik buta yang
+ * nyata: `GET /qc/parameters` menulis query-nya sebagai
+ * `dbAll('SELECT * FROM qc_parameters ...')` dengan kutip tunggal, jadi tabel
+ * hantunya tidak pernah terlihat. Empat endpoint qc lolos karena itu.
  *
  * Membuang komentar dengan filter baris TIDAK aman: beberapa komentar di repo
  * ini memuat backtick (mis. penjelasan tentang query lama), dan menghapus
@@ -50,15 +56,23 @@ function ambilLiteral(src: string): string[] {
     if (mode === 'kode') {
       if (c === '/' && c2 === '/') { mode = 'baris'; i += 2; continue; }
       if (c === '/' && c2 === '*') { mode = 'blok'; i += 2; continue; }
-      if (c === "'") { mode = 'satu'; i++; continue; }
-      if (c === '"') { mode = 'dua'; i++; continue; }
+      if (c === "'") { mode = 'satu'; buf = ''; i++; continue; }
+      if (c === '"') { mode = 'dua'; buf = ''; i++; continue; }
       if (c === '`') { mode = 'templ'; buf = ''; depth = 0; i++; continue; }
       i++; continue;
     }
     if (mode === 'baris') { if (c === '\n') mode = 'kode'; i++; continue; }
     if (mode === 'blok') { if (c === '*' && c2 === '/') { mode = 'kode'; i += 2; } else i++; continue; }
-    if (mode === 'satu') { if (c === '\\') i += 2; else { if (c === "'") mode = 'kode'; i++; } continue; }
-    if (mode === 'dua') { if (c === '\\') i += 2; else { if (c === '"') mode = 'kode'; i++; } continue; }
+    if (mode === 'satu') {
+      if (c === '\\') { buf += src.slice(i, i + 2); i += 2; continue; }
+      if (c === "'") { out.push(buf); mode = 'kode'; i++; continue; }
+      buf += c; i++; continue;
+    }
+    if (mode === 'dua') {
+      if (c === '\\') { buf += src.slice(i, i + 2); i += 2; continue; }
+      if (c === '"') { out.push(buf); mode = 'kode'; i++; continue; }
+      buf += c; i++; continue;
+    }
     if (c === '\\') { buf += src.slice(i, i + 2); i += 2; continue; }
     if (c === '$' && c2 === '{') { depth++; buf += '${'; i += 2; continue; }
     if (depth > 0) { if (c === '}') depth--; buf += c; i++; continue; }
@@ -91,33 +105,13 @@ const tampakSql = (q: string) =>
  * Tabel yang disebut kode tapi memang TIDAK ADA — utang yang sudah diketahui,
  * bukan izin untuk menambah yang baru.
  *
- * Diverifikasi 3 September 2026: kedua puluhnya tidak ada di database lokal
- * MAUPUN produksi, dan 18 endpoint GET yang menyentuhnya semuanya membalas 500.
- * Ini kelas yang sama dengan Stock Transfer (CABUT-STOCK-01): fitur yang tidak
- * pernah bisa bekerja. Keputusan mau dicabut, dibangun, atau dibiarkan ada di
- * pemilik — yang dijaga tes ini adalah daftarnya TIDAK BERTAMBAH.
+ * Sisa setelah CABUT-QC-PPIC-01 (3 September 2026): 19 tabel hantu lainnya
+ * sudah hilang — modul QC dan MPS/MRP dicabut, dan sisanya diarahkan ke tabel
+ * yang benar. Yang tinggal di sini belum dikerjakan, dan daftarnya dijaga TIDAK
+ * BERTAMBAH.
  */
 const HANTU_DIKETAHUI: Record<string, string> = {
-  cogs: 'reports — laporan finance',
-  delivery_orders: 'reports — laporan sales',
-  event_shared_users: 'clients — berbagi event',
-  inventory: 'reports — laporan inventory (tabel yang benar: inventory_stocks)',
-  mps_details: 'ppic — Master Production Schedule',
-  mps_headers: 'ppic — Master Production Schedule',
-  mps_week_data: 'ppic — Master Production Schedule',
-  mrp_week_data: 'ppic — Material Requirement Planning',
-  profitability: 'reports — laporan finance (tabel yang benar: profitability_tracking)',
-  projects: 'documents — daftar dokumen (tabel yang benar: client_projects)',
-  qc_analysis_requests: 'qc — Final Product Analysis',
-  qc_analysis_results: 'qc — Final Product Analysis',
-  qc_batch_release: 'reports — laporan QC',
-  qc_instruments: 'qc — Final Product Analysis',
-  qc_methods: 'qc — spesifikasi QC',
-  qc_parameters: 'qc — spesifikasi QC',
-  qc_sampling_areas: 'qc — Final Product Analysis',
-  qc_specifications: 'qc — spesifikasi QC',
-  qc_test_definitions: 'quality — definisi uji',
-  sales_order_items: 'sales — approval & riwayat',
+  inventory: 'warehouse — satu query stok yang belum dipindah ke inventory_stocks',
 };
 
 /**
@@ -128,27 +122,12 @@ const HANTU_DIKETAHUI: Record<string, string> = {
  * Diverifikasi 3 September 2026 terhadap skema nyata.
  */
 const KOLOM_HANTU_DIKETAHUI: Record<string, string> = {
-  'approval_actions.acted_at': 'yang ada: created_at',
-  'batches.exp_date': 'yang ada: expiry_date',
-  'batches.location_id': 'tidak ada padanannya',
-  'client_events.visibility': 'tidak ada padanannya',
-  'client_projects.product_id': 'tidak ada padanannya (ppic)',
-  'client_projects.quantity': 'tidak ada padanannya (ppic)',
-  'inventory_stocks.batch_id': 'tidak ada padanannya',
-  'inventory_stocks.location_id': 'tidak ada padanannya',
-  'products.minimum_stock': 'yang ada: reorder_point',
-  'products.selling_price': 'tidak ada padanannya',
-  'products.unit': 'yang ada: unit_of_measure_id',
-  'proposal_items.ahsp_code': 'yang ada: ahsp_code_snapshot',
-  'proposal_items.uraian': 'yang ada: description',
-  'qc_results.result': 'yang ada: result_value',
-  'qc_results.status': 'yang ada: result_status',
-  'qc_results.test_id': 'yang ada: qc_test_id',
-  'qc_results.tested_at': 'yang ada: test_date',
-  'qc_results.tester_id': 'yang ada: tested_by',
-  'stock_movements.location_id': 'tidak ada padanannya',
-  'stock_movements.moved_at': 'yang ada: created_at',
-  'stock_movements.uom': 'tidak ada padanannya',
+  'proposal_items.ahsp_code': 'yang ada: ahsp_code_snapshot (ai.routes.ts)',
+  'proposal_items.uraian': 'yang ada: description (ai.routes.ts)',
+  'qc_results.test_id': 'yang ada: qc_test_id (batch.routes.ts)',
+  'qc_results.tested_at': 'yang ada: test_date (batch.routes.ts)',
+  'qc_results.tester_id': 'yang ada: tested_by (batch.routes.ts)',
+  'stock_movements.uom': 'tidak ada padanannya (ai.routes.ts)',
 };
 
 const KATA_KUNCI = new Set(['select', 'set', 'values', 'duplicate', 'key', 'update', 'into', 'from', 'join']);
@@ -287,7 +266,7 @@ async function main() {
   chk('tidak ada entri kolom allowlist yang ternyata kolomnya sudah ada', kolomSudahAda, []);
 
   console.log(`\n  Utang yang masih berdiri: ${Object.keys(HANTU_DIKETAHUI).length} tabel, ${Object.keys(KOLOM_HANTU_DIKETAHUI).length} kolom`);
-  console.log('  (29 dari 304 endpoint GET membalas 5xx karenanya — diukur 3 September 2026)');
+  console.log('  (nol endpoint GET yang 5xx per 3 September 2026 — sisanya jalur yang belum tersentuh)');
   for (const [t, ket] of Object.entries(HANTU_DIKETAHUI).sort()) {
     console.log(`    ${t.padEnd(22)} ${ket}`);
   }

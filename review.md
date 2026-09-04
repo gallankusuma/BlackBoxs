@@ -13736,3 +13736,82 @@ lebih jujur daripada mengklaim cakupan penuh.
 29 endpoint yang selalu 5xx. Pilihannya sama dengan Stock Transfer dulu:
 **dicabut**, **dibangun tabelnya**, atau **dibiarkan** sebagai utang yang kini
 tercatat. Tidak ada yang diubah tanpa keputusan itu.
+
+---
+
+## CABUT-QC-PPIC-01 — 29 endpoint yang selalu 5xx: 41 dicabut, sisanya diperbaiki
+
+Diminta pemilik: "cabut yang 29 endpoint". Sebelum mencabut, ketiga puluhnya
+diklasifikasi — dan ternyata bukan satu masalah, melainkan tiga:
+
+| Kelompok | Jumlah | Nasib |
+|---|---|---|
+| Tabelnya tidak ada dan tidak punya padanan | 18 | **Dicabut** |
+| Tabelnya ada dengan nama lain | 4 | Diarahkan ke tabel yang benar |
+| Tabelnya ada, kolomnya salah nama | 7 | Diperbaiki |
+
+Mencabut yang 11 itu berarti membuang fitur yang cuma butuh ganti satu kata.
+Karena itu yang dicabut hanya yang benar-benar tidak punya model data.
+
+### Yang dicabut (41 endpoint)
+
+- **Modul `/api/qc` seluruhnya** — 24 dari 24 endpointnya berdiri di atas
+  `qc_parameters`, `qc_methods`, `qc_instruments`, `qc_sampling_areas`,
+  `qc_specifications`, `qc_analysis_*`. Berkasnya dihapus, mount-nya dicabut.
+- **PPIC MPS/MRP** — 15 endpoint. `/items` dan `/boms*` **sengaja dibiarkan**:
+  keduanya membaca `products` dan `bom_headers` yang memang ada dan bekerja
+  (pola yang sama dengan `StockCard.vue` di CABUT-STOCK-01).
+- **`GET`/`POST /quality/test-definitions`** — 2 endpoint.
+
+Diverifikasi sebelum mencabut: **nol layar, route, atau menu** memanggil `/qc/*`
+maupun `/ppic/*`, dan tabel terkait di produksi semuanya **0 baris**.
+
+### Yang diperbaiki
+
+Tabel salah nama: `inventory`→`inventory_stocks`, `projects`→`client_projects`,
+`cogs`→`cogs_tracking`, `profitability`→`profitability_tracking`,
+`delivery_orders`→`deliveries`, `qc_batch_release`→`batches`.
+
+Kolom salah nama: `approval_actions.acted_at`→`created_at`,
+`stock_movements.moved_at`→`created_at`, `products.minimum_stock`→`reorder_point`,
+`batches.exp_date`→`expiry_date`, `qc_results.status`→`result_status`,
+`qc_results.test_id`→`qc_test_id`, dan lainnya.
+
+**Tiga tabel/kolom yang hilang DIBUAT, bukan dicabut** — induknya ada dan
+bekerja, yang hilang cuma penghubungnya: `event_shared_users`,
+`sales_order_items`, `client_events.visibility`, plus
+`qc_results.approved_by/approved_at` dan `batches.qc_status`.
+
+### Empat cacat lain yang ikut ketemu
+
+1. **`batch/expiring/soon` memakai `JULIANDAY`** — fungsi SQLite, sisa sebelum
+   pindah ke MySQL. Ditulis ulang dengan `DATEDIFF`.
+2. **`warehouse/:id/stock-health` menggandakan baris**: join ke
+   `warehouse_locations` mengalikan tiap baris stok sebanyak jumlah lokasi di
+   gudang itu, jadi `SUM(quantity)` membesar berlipat tanpa ada yang salah
+   mencatat apa pun. Join-nya dibuang.
+3. **Utilisasi per lokasi tidak bisa dihitung** — `inventory_stocks` tidak punya
+   `location_id`; stok hanya dilacak per gudang. Sekarang mengembalikan NULL,
+   bukan mengisinya dengan stok se-gudang yang akan membuat tiap rak tampak
+   penuh oleh barang yang belum tentu ada di sana.
+4. **`sales/price-list` menampilkan harga pokok, bukan harga jual** — tidak ada
+   kolom harga jual di mana pun (`products.selling_price` tidak ada). Memakai
+   `standard_cost` dan menyebutkannya, daripada menampilkan angka karangan.
+
+### Titik buta di penjaga yang baru dibuat kemarin
+
+`test:skema-rute` hanya memindai **template literal**. `GET /qc/parameters`
+menulis query-nya sebagai `dbAll('SELECT * FROM qc_parameters ...')` dengan
+kutip tunggal — empat endpoint qc lolos karena itu. Lexer-nya kini mengambil
+ketiga bentuk string, dan langsung menemukan satu cacat baru:
+`employees.employee_id` di `import.routes.ts` (kolomnya `code`), yang membuat
+pemeriksaan duplikat NIK saat impor karyawan **tidak pernah benar-benar
+berjalan**. Sudah diperbaiki.
+
+### Hasil
+
+**29 → 0 endpoint GET yang membalas 5xx**, dari 291 endpoint.
+
+Allowlist penjaga menyusut dari 20 tabel + 21 kolom menjadi **1 tabel + 6
+kolom** — dan penyusutan itu dipaksa oleh penjaga kebasiannya sendiri: entri
+yang tidak dipakai lagi menggagalkan tes, jadi tidak bisa ditinggal menumpuk.

@@ -56,34 +56,42 @@ router.get('/production', authMiddleware, async (req: Request, res: Response) =>
 
 router.get('/inventory', authMiddleware, async (req: Request, res: Response) => {
   try {
+    // SKEMA-RUTE-01: tabelnya `inventory_stocks`, bukan `inventory` — yang
+    // terakhir tidak pernah ada (cacat yang sama dengan CABUT-STOCK-01).
+    // `inventory_stocks` juga tidak punya `unit_cost`; nilai persediaan diambil
+    // dari `products.standard_cost`, satu-satunya harga yang memang tersimpan.
+    // Ambang stok minimum bernama `reorder_point`, bukan `minimum_stock`.
     const summary = await dbGet(`
-      SELECT
-        COUNT(DISTINCT product_id) AS total_products,
-        SUM(quantity) AS total_stock,
-        SUM(quantity * COALESCE(unit_cost, 0)) AS total_valuation
-      FROM inventory
+      SELECT COUNT(DISTINCT i.product_id) AS total_products,
+             COALESCE(SUM(i.quantity), 0) AS total_stock,
+             COALESCE(SUM(i.quantity * COALESCE(p.standard_cost, 0)), 0) AS total_valuation
+      FROM inventory_stocks i
+      LEFT JOIN products p ON i.product_id = p.id
     `, []);
 
     const lowStock = await dbAll(`
-      SELECT p.name, p.sku, i.quantity, p.minimum_stock
-      FROM inventory i
+      SELECT p.name, p.sku, i.quantity, p.reorder_point AS minimum_stock
+      FROM inventory_stocks i
       JOIN products p ON i.product_id = p.id
-      WHERE i.quantity <= COALESCE(p.minimum_stock, 0) AND p.minimum_stock > 0
-      ORDER BY (i.quantity / p.minimum_stock) ASC LIMIT 20
+      WHERE p.reorder_point > 0 AND i.quantity <= p.reorder_point
+      ORDER BY (i.quantity / p.reorder_point) ASC LIMIT 20
     `, []);
 
     const byWarehouse = await dbAll(`
       SELECT w.name AS warehouse_name, COUNT(DISTINCT i.product_id) AS products,
-        SUM(i.quantity) AS total_qty, SUM(i.quantity * COALESCE(i.unit_cost, 0)) AS valuation
-      FROM inventory i
+             COALESCE(SUM(i.quantity), 0) AS total_qty,
+             COALESCE(SUM(i.quantity * COALESCE(p.standard_cost, 0)), 0) AS valuation
+      FROM inventory_stocks i
       LEFT JOIN warehouses w ON i.warehouse_id = w.id
+      LEFT JOIN products p ON i.product_id = p.id
       GROUP BY i.warehouse_id, w.name
       ORDER BY valuation DESC
     `, []);
 
     const topItems = await dbAll(`
-      SELECT p.name, p.sku, i.quantity, i.quantity * COALESCE(i.unit_cost, 0) AS value
-      FROM inventory i
+      SELECT p.name, p.sku, i.quantity,
+             i.quantity * COALESCE(p.standard_cost, 0) AS value
+      FROM inventory_stocks i
       JOIN products p ON i.product_id = p.id
       ORDER BY value DESC LIMIT 20
     `, []);
@@ -146,9 +154,9 @@ router.get('/qc', authMiddleware, async (req: Request, res: Response) => {
     const summary = await dbGet(`
       SELECT
         COUNT(*) AS total_results,
-        SUM(CASE WHEN result='pass' THEN 1 ELSE 0 END) AS passed,
-        SUM(CASE WHEN result='fail' THEN 1 ELSE 0 END) AS failed,
-        SUM(CASE WHEN result='pending' OR result IS NULL THEN 1 ELSE 0 END) AS pending
+        SUM(CASE WHEN result_status='pass' THEN 1 ELSE 0 END) AS passed,
+        SUM(CASE WHEN result_status='fail' THEN 1 ELSE 0 END) AS failed,
+        SUM(CASE WHEN result_status='pending' OR result_status IS NULL THEN 1 ELSE 0 END) AS pending
       FROM qc_results
     `, []);
 
@@ -164,21 +172,24 @@ router.get('/qc', authMiddleware, async (req: Request, res: Response) => {
     const byTest = await dbAll(`
       SELECT t.name AS test_name,
         COUNT(r.id) AS total,
-        SUM(CASE WHEN r.result='pass' THEN 1 ELSE 0 END) AS passed,
-        SUM(CASE WHEN r.result='fail' THEN 1 ELSE 0 END) AS failed
+        SUM(CASE WHEN r.result_status='pass' THEN 1 ELSE 0 END) AS passed,
+        SUM(CASE WHEN r.result_status='fail' THEN 1 ELSE 0 END) AS failed
       FROM qc_results r
-      LEFT JOIN qc_tests t ON r.test_id = t.id
-      GROUP BY r.test_id, t.name
+      LEFT JOIN qc_tests t ON r.qc_test_id = t.id
+      GROUP BY r.qc_test_id, t.name
       ORDER BY total DESC LIMIT 20
     `, []);
 
+    // `qc_batch_release` tidak pernah ada. Status rilis batch memang disimpan
+    // di `batches.status` — itu pula yang dibaca layar Batch Release di modul
+    // quality (`FROM batches b JOIN products p ...`).
     const batchStats = await dbGet(`
       SELECT
         COUNT(*) AS total,
         SUM(CASE WHEN status='released' THEN 1 ELSE 0 END) AS released,
         SUM(CASE WHEN status='on_hold' THEN 1 ELSE 0 END) AS on_hold,
         SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END) AS rejected
-      FROM qc_batch_release
+      FROM batches
     `, []);
 
     res.json({ success: true, data: { summary, ncrSummary, byTest, batchStats } });
@@ -223,7 +234,7 @@ router.get('/sales', authMiddleware, async (req: Request, res: Response) => {
         SUM(CASE WHEN status='delivered' THEN 1 ELSE 0 END) AS delivered,
         SUM(CASE WHEN status='shipped' THEN 1 ELSE 0 END) AS shipped,
         SUM(CASE WHEN status='pending' OR status='draft' THEN 1 ELSE 0 END) AS pending
-      FROM delivery_orders
+      FROM deliveries
     `, []);
 
     res.json({ success: true, data: { summary, byCustomer, monthly, deliveryStats } });
@@ -237,10 +248,14 @@ router.get('/sales', authMiddleware, async (req: Request, res: Response) => {
 
 router.get('/finance', authMiddleware, async (req: Request, res: Response) => {
   try {
+    // SKEMA-RUTE-01: tabelnya `cogs_tracking` dan `profitability_tracking`;
+    // `cogs` dan `profitability` tidak pernah ada. Nama kolomnya ikut berbeda
+    // (raw_material_cost/total_cogs, cogs/margin_percentage) dan di-alias ke
+    // nama lama supaya bentuk respons yang dibaca layar tidak berubah.
     const cogsSum = await dbGet(`
-      SELECT SUM(material_cost) AS material, SUM(labor_cost) AS labor,
-        SUM(overhead_cost) AS overhead, SUM(total_cost) AS total
-      FROM cogs
+      SELECT SUM(raw_material_cost) AS material, SUM(labor_cost) AS labor,
+             SUM(overhead_cost) AS overhead, SUM(total_cogs) AS total
+      FROM cogs_tracking
     `, []);
 
     const apSummary = await dbGet(`
@@ -258,10 +273,11 @@ router.get('/finance', authMiddleware, async (req: Request, res: Response) => {
     `, []);
 
     const profitability = await dbAll(`
-      SELECT p.name AS product_name, pr.revenue, pr.total_cost, pr.profit_margin
-      FROM profitability pr
+      SELECT p.name AS product_name, pr.revenue,
+             pr.cogs AS total_cost, pr.margin_percentage AS profit_margin
+      FROM profitability_tracking pr
       LEFT JOIN products p ON pr.product_id = p.id
-      ORDER BY pr.profit_margin DESC LIMIT 15
+      ORDER BY pr.margin_percentage DESC LIMIT 15
     `, []);
 
     res.json({ success: true, data: { cogsSum, apSummary, arSummary, profitability } });

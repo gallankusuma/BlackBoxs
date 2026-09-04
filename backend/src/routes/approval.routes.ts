@@ -687,8 +687,8 @@ router.get('/history', authMiddleware, async (req: Request, res: Response) => {
     let sql = `
       SELECT ar.*, u.full_name AS requester_name,
         (SELECT GROUP_CONCAT(
-          CONCAT(aa.action, ' by ', COALESCE(au.full_name, 'Unknown'), ' on ', aa.acted_at)
-          ORDER BY aa.acted_at SEPARATOR '; '
+          CONCAT(aa.action, ' by ', COALESCE(au.full_name, 'Unknown'), ' on ', aa.created_at)
+          ORDER BY aa.created_at SEPARATOR '; '
         )
         FROM approval_actions aa
         LEFT JOIN users au ON aa.approver_id = au.id
