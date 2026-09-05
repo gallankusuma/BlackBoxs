@@ -719,6 +719,47 @@ yang memakai prefix `/api` ganda. Empat mutasi terbukti tertangkap.
 
 Dijaga `npm run test:gl-layar`.
 
+### RBAC project (PROJ-RBAC-01)
+
+Seluruh **61 endpoint** `project.routes.ts` kini memakai `requirePermission` —
+sebelumnya **nol**. Terbukti dengan user level 1 tanpa role: ia bisa membuat
+proyek senilai Rp 5 miliar, mengubah nilainya jadi Rp 1, membuat task, dan
+**menghapus proyeknya**.
+
+Aksi gerbang diturunkan dari metode, bukan ditebak: GET → `view`, POST →
+`create`, PUT/PATCH → `edit`, DELETE → `delete`, dan jalur berakhiran
+`/approve`, `/reject`, `/submit` → `approve`. Tes memeriksa kecocokan itu
+untuk setiap endpoint.
+
+Sebaran resource: `projects.schedule` 17, `projects.projects` 12,
+`projects.expenses` 10, `projects.documents` 7, `projects.tasks` 7,
+`projects.mto` 5, `projects.reports` 2, `projects.settings` 1.
+
+⚠️ **Enam resource harus DIBERIKAN dulu ke role produksi sebelum gerbangnya
+dipasang.** `Manager Finannce & Acc` (2 user aktif) tidak memegang satu pun
+aksi dari `projects.dashboard`, `projects.documents`, `projects.help`,
+`projects.manpower`, `projects.mto`, dan `projects.schedule` — menggembok
+jadwal, manpower, MTO, atau dokumen proyek tanpa memberikannya lebih dulu akan
+langsung mencabut hak mereka tanpa satu pun error.
+
+Keputusan pemilik (3 September 2026): keenamnya **diberikan**. Dilakukan di
+produksi lewat `INSERT IGNORE INTO role_permissions`, 84 → 120 permission
+`projects.*`. Diverifikasi sesudahnya: kedua role produksi memegang **28/28**
+permission yang dipakai gerbang, nol yang akan terkunci.
+
+Grant itu **sengaja tidak ditaruh di kode boot**. Kalau ia jadi `ensure*` yang
+jalan tiap restart, pencabutan hak yang disengaja nanti akan dikembalikan
+diam-diam — persis jebakan yang dihindari pada backfill harga vendor.
+
+`npm run test:project-rbac` menguji **dua sisi**, dan sisi kedua yang paling
+mudah dilupakan: yang tidak berhak ditolak, DAN yang berhak tidak ikut terkunci.
+Tes membuat role tiruan berisi permission produksi lalu memastikan tidak ada
+satu pun endpoint yang menolaknya.
+
+`POST /projects` tanpa judul dulu membalas **500** — penjaga `CLIENT_WAJIB`
+ditambahkan persis untuk alasan ini tapi `title` kelewat. Sekarang
+`400 JUDUL_WAJIB`.
+
 ### RBAC finance (FIN-RBAC-01)
 
 Seluruh **64 endpoint** `finance.routes.ts` kini memakai `requirePermission` —

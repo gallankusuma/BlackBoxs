@@ -54,9 +54,23 @@ async function main() {
   pass++; console.log('0. Persiapan\n  ok   login master');
 
   const kategori: any = await dbGet('SELECT id FROM asset_categories LIMIT 1');
-  const proyek: any[] = await dbAll('SELECT id, project_name FROM client_projects ORDER BY id DESC LIMIT 2');
-  chk('kategori aset & dua proyek tersedia', !!(kategori?.id && proyek.length >= 2), true);
-  const [projA, projB] = proyek;
+
+  // Proyek uji DIBUAT SENDIRI, tidak meminjam dua proyek teratas yang kebetulan
+  // ada. Versi sebelumnya memakai `ORDER BY id DESC LIMIT 2` dan langsung gagal
+  // begitu database dev tinggal punya satu proyek — tes yang gagal karena
+  // keadaan yang tidak ia siapkan sendiri tidak bisa dipercaya sebagai sinyal.
+  const klien: any = await dbGet('SELECT id FROM clients ORDER BY id DESC LIMIT 1');
+  const buatProyek = async (nama: string) => {
+    const r = await dbRun(
+      `INSERT INTO client_projects (client_id, project_number, project_name, status)
+       VALUES (?, ?, ?, 'open')`,
+      [klien?.id ?? null, `UJI-AST-${stamp}-${nama}`, `Proyek Uji Aset ${nama} ${stamp}`]);
+    return { id: r.insertId, project_name: `Proyek Uji Aset ${nama} ${stamp}` };
+  };
+  const projA = await buatProyek('A');
+  const projB = await buatProyek('B');
+  chk('kategori aset & dua proyek uji siap',
+    !!(kategori?.id && projA.id && projB.id), true);
 
   const aset = await dbRun(
     `INSERT INTO assets (asset_code, category_id, name, spec, status, purchase_date, purchase_price)
@@ -169,6 +183,7 @@ async function main() {
   console.log('\n9. Bersih-bersih fixture');
   await dbRun('DELETE FROM asset_movements WHERE asset_id = ?', [asetId]);
   await dbRun('DELETE FROM assets WHERE id = ?', [asetId]);
+  await dbRun('DELETE FROM client_projects WHERE id IN (?, ?)', [projA.id, projB.id]);
   chk('fixture terhapus', (await dbAll('SELECT id FROM assets WHERE id = ?', [asetId])).length, 0);
 
   console.log(`\n${pass} lulus, ${fail} gagal`);

@@ -13868,3 +13868,73 @@ penjaga kebasiannya sendiri** — entri yang tidak dipakai lagi menggagalkan tes
 PROPOSAL_HAS_PROJECT`. Itu benar — proposal ditautkan ke proyek langsung lewat
 database, melewati alur normal, dan aplikasi menolak menghapus proposal yang
 sudah menjadi proyek. Tautannya dilepas dulu, lalu dihapus lewat jalur aplikasi.
+
+---
+
+## PROJ-RBAC-01 — modul project: 61 endpoint, nol gerbang
+
+Diminta pemilik: cek modul project.
+
+**Fungsinya sehat.** 24 endpoint GET ditembak → nol yang 5xx. Nol tabel/kolom
+hantu (dijaga `test:skema-rute`). Nol `catch` yang menelan error. Nol prefix
+`/api` ganda di layar. Satu dugaan rute tertutup `/:id` diuji langsung → palsu,
+detektornya tidak memeriksa segmen setelah parameter.
+
+**Otorisasinya nol.** 0 dari 61 endpoint memakai `requirePermission` —
+`authMiddleware` menjawab "siapa kamu", tidak pernah "boleh apa". Kelas yang
+sama dengan FIN-RBAC-01.
+
+Dibuktikan, bukan disimpulkan dari hitungan. User level 1 tanpa role, nol
+permission:
+
+```
+buat proyek Rp 5 M   → 201
+ubah nilai proyek    → 200   (Rp 5 M → Rp 1)
+buat task            → 201
+HAPUS proyek         → 200
+baca semua proyek    → 200
+```
+
+**Diterapkan.** 61 endpoint digembok. Aksi diturunkan dari metode, bukan
+ditebak — GET→view, POST→create, PUT/PATCH→edit, DELETE→delete, dan jalur
+berakhiran `/approve`, `/reject`, `/submit`→approve. Tes memeriksa kecocokan itu
+per endpoint, jadi gerbang hapus yang dipasangi aksi `view` akan gagal.
+
+**Yang menentukan urutan kerjanya:** katalog permission-nya sudah lengkap (20
+resource × 6 aksi), tapi `Manager Finannce & Acc` — 2 user aktif — tidak
+memegang satu pun aksi dari enam resource: `projects.dashboard`,
+`projects.documents`, `projects.help`, `projects.manpower`, `projects.mto`,
+`projects.schedule`. Menggembok jadwal/manpower/MTO/dokumen tanpa memberikannya
+lebih dulu akan mencabut hak mereka tanpa satu pun error.
+
+Keputusan pemilik: **berikan keenamnya.** Dilakukan di produksi, 84 → 120
+permission `projects.*`. Diverifikasi sesudahnya: kedua role produksi memegang
+**28/28** permission yang dipakai gerbang — nol yang terkunci.
+
+⚠️ Grant itu **sengaja tidak ditaruh di kode boot.** Kalau ia jadi `ensure*`
+yang jalan tiap restart, pencabutan hak yang disengaja nanti akan dikembalikan
+diam-diam — persis jebakan yang dihindari pada backfill harga vendor
+(PROC-VPL-01 aturan 4).
+
+**Temuan kecil:** `POST /projects` tanpa judul membalas 500 "Failed to create
+project". Penjaga `CLIENT_WAJIB` ditambahkan persis untuk alasan ini, tapi
+`title` kelewat. Sekarang `400 JUDUL_WAJIB`.
+
+**Satu tes lain ikut diperbaiki.** Regresi penuh berhenti di
+`test:asset-custody`: ia meminjam `SELECT ... FROM client_projects ORDER BY id
+DESC LIMIT 2` — dua proyek teratas yang kebetulan ada — dan langsung gagal
+begitu database dev tinggal punya satu proyek. Tes yang gagal karena keadaan
+yang tidak ia siapkan sendiri tidak bisa dipercaya sebagai sinyal; sekarang ia
+membuat kedua proyeknya sendiri dan menghapusnya di akhir.
+
+⚠️ Satu proyek di database **dev lokal** hilang selama audit ini, dan
+`audit_log` tidak memuat jejak penghapusan project sama sekali — jadi tidak bisa
+dibuktikan langkah mana yang menghapusnya, termasuk kemungkinan probe saya
+sendiri. **Produksi diverifikasi tidak tersentuh: 2 proyek, utuh.**
+
+`npm run test:project-rbac` — 27 asersi, menguji **dua sisi**: yang tidak
+berhak ditolak, DAN yang berhak tidak ikut terkunci (role tiruan berisi
+permission produksi, dipastikan tidak ditolak di satu endpoint pun). Lima
+mutasi diuji, semuanya tertangkap — termasuk gerbang yang memakai resource yang
+tidak dipegang role produksi (1 asersi gagal) dan gerbang hapus yang dipasangi
+aksi view (1 asersi gagal).

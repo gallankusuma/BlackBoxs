@@ -6,6 +6,7 @@ import { postingOtomatis } from '../utils/gl-posting';
 import { nextSequentialCode } from './procurement.routes';
 import { isProposalEditable } from '../modules/estimator/mto/units';
 import { authMiddleware } from '../middleware/auth';
+import { requirePermission } from '../middleware/permission';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
@@ -21,7 +22,7 @@ const router = Router();
 // Didaftarkan PALING AWAL: rute literal harus mendahului `/:id`, kalau tidak
 // Express mencocokkannya sebagai id dan endpoint ini tidak pernah terpanggil.
 /** Katalog cost code (CBS). Berlaku lintas proyek — itu justru gunanya. */
-router.get('/cost-codes', authMiddleware, async (_req: Request, res: Response) => {
+router.get('/cost-codes', authMiddleware, requirePermission('projects.settings.view'), async (_req: Request, res: Response) => {
   try {
     const rows = await dbAll(
       `SELECT id, code, name, category, description, is_active
@@ -34,7 +35,7 @@ router.get('/cost-codes', authMiddleware, async (_req: Request, res: Response) =
 });
 
 // Get all projects with client and manager info
-router.get('/', authMiddleware, async (req: Request, res: Response) => {
+router.get('/', authMiddleware, requirePermission('projects.projects.view'), async (req: Request, res: Response) => {
   try {
     const projects = await dbAll(`
       SELECT 
@@ -109,7 +110,7 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // Get single project details
-router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:id', authMiddleware, requirePermission('projects.projects.view'), async (req: Request, res: Response) => {
   try {
     const project = await dbGet(`
       SELECT 
@@ -169,7 +170,7 @@ router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // Create project (Also links to Client)
-router.post('/', authMiddleware, async (req: Request, res: Response) => {
+router.post('/', authMiddleware, requirePermission('projects.projects.create'), async (req: Request, res: Response) => {
   try {
     const { 
       client_id, 
@@ -193,6 +194,18 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
       });
     }
 
+    // Penjaga yang sama untuk judul. Penjaga client_id di atas ditambahkan
+    // persis untuk alasan ini, tapi `title` kelewat: tanpa judul,
+    // `client_projects.project_name` NOT NULL membuat INSERT-nya melempar dan
+    // pemanggil cuma menerima 500 "Failed to create project" tanpa satu pun
+    // petunjuk. Datanya memang belum lengkap — itu 400, bukan kesalahan server.
+    if (!String(title || '').trim()) {
+      return res.status(400).json({
+        error: 'Project harus punya judul.',
+        code: 'JUDUL_WAJIB',
+      });
+    }
+
     const projectNumber = `PRJ-${Date.now()}`; // Simple auto-generation
 
     const result = await dbRun(`
@@ -213,7 +226,7 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // Update project
-router.put('/:id', authMiddleware, async (req: Request, res: Response) => {
+router.put('/:id', authMiddleware, requirePermission('projects.projects.edit'), async (req: Request, res: Response) => {
   try {
     const { 
       title, project_name,
@@ -312,7 +325,7 @@ router.put('/:id', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // Delete project (cascade child records)
-router.delete('/:id', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/:id', authMiddleware, requirePermission('projects.projects.delete'), async (req: Request, res: Response) => {
   try {
     const projectId = req.params.id;
 
@@ -395,7 +408,7 @@ router.delete('/:id', authMiddleware, async (req: Request, res: Response) => {
 // --- Task Routes ---
 
 // Get all tasks for a project
-router.get('/:id/tasks', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:id/tasks', authMiddleware, requirePermission('projects.tasks.view'), async (req: Request, res: Response) => {
   try {
     const tasks = await dbAll(`
       SELECT 
@@ -416,7 +429,7 @@ router.get('/:id/tasks', authMiddleware, async (req: Request, res: Response) => 
 });
 
 // Create task
-router.post('/:id/tasks', authMiddleware, async (req: Request, res: Response) => {
+router.post('/:id/tasks', authMiddleware, requirePermission('projects.tasks.create'), async (req: Request, res: Response) => {
   try {
     const { 
       title, 
@@ -560,19 +573,19 @@ const hapusTask = async (req: Request, res: Response) => {
   }
 };
 
-router.put('/:id/tasks/:taskId', authMiddleware, ubahTask);
-router.delete('/:id/tasks/:taskId', authMiddleware, hapusTask);
+router.put('/:id/tasks/:taskId', authMiddleware, requirePermission('projects.tasks.edit'), ubahTask);
+router.delete('/:id/tasks/:taskId', authMiddleware, requirePermission('projects.tasks.delete'), hapusTask);
 // Bentuk lama dipertahankan supaya klien lama tidak putus, tapi ia kini
 // menuntut `project_id` juga — tanpa itu 400, bukan diam-diam mengubah apa pun.
-router.put('/tasks/:taskId', authMiddleware, ubahTask);
-router.delete('/tasks/:taskId', authMiddleware, hapusTask);
+router.put('/tasks/:taskId', authMiddleware, requirePermission('projects.tasks.edit'), ubahTask);
+router.delete('/tasks/:taskId', authMiddleware, requirePermission('projects.tasks.delete'), hapusTask);
 
 // ... Existing routes ...
 
 // --- Milestone Routes ---
 
 // Get all milestones for a project
-router.get('/:id/milestones', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:id/milestones', authMiddleware, requirePermission('projects.schedule.view'), async (req: Request, res: Response) => {
   try {
     const milestones = await dbAll(`
       SELECT m.*, 
@@ -590,7 +603,7 @@ router.get('/:id/milestones', authMiddleware, async (req: Request, res: Response
 });
 
 // Create milestone
-router.post('/:id/milestones', authMiddleware, async (req: Request, res: Response) => {
+router.post('/:id/milestones', authMiddleware, requirePermission('projects.schedule.create'), async (req: Request, res: Response) => {
   try {
     const { title, description, due_date, status, amount } = req.body;
     if (!title || !String(title).trim()) {
@@ -681,10 +694,10 @@ const hapusMilestone = async (req: Request, res: Response) => {
   }
 };
 
-router.put('/:id/milestones/:milestoneId', authMiddleware, ubahMilestone);
-router.delete('/:id/milestones/:milestoneId', authMiddleware, hapusMilestone);
-router.put('/milestones/:milestoneId', authMiddleware, ubahMilestone);
-router.delete('/milestones/:milestoneId', authMiddleware, hapusMilestone);
+router.put('/:id/milestones/:milestoneId', authMiddleware, requirePermission('projects.schedule.edit'), ubahMilestone);
+router.delete('/:id/milestones/:milestoneId', authMiddleware, requirePermission('projects.schedule.delete'), hapusMilestone);
+router.put('/milestones/:milestoneId', authMiddleware, requirePermission('projects.schedule.edit'), ubahMilestone);
+router.delete('/milestones/:milestoneId', authMiddleware, requirePermission('projects.schedule.delete'), hapusMilestone);
 
 // ... Existing routes ...
 
@@ -709,7 +722,7 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 // Get all files for a project
-router.get('/:id/files', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:id/files', authMiddleware, requirePermission('projects.documents.view'), async (req: Request, res: Response) => {
   try {
     const files = await dbAll(`
       Select f.*, u.full_name as uploader_name
@@ -726,7 +739,7 @@ router.get('/:id/files', authMiddleware, async (req: Request, res: Response) => 
 });
 
 // Upload file
-router.post('/:id/files', authMiddleware, upload.single('file'), async (req: Request, res: Response) => {
+router.post('/:id/files', authMiddleware, requirePermission('projects.documents.create'), upload.single('file'), async (req: Request, res: Response) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
@@ -776,7 +789,7 @@ router.post('/:id/files', authMiddleware, upload.single('file'), async (req: Req
 });
 
 // Delete file
-router.delete('/files/:fileId', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/files/:fileId', authMiddleware, requirePermission('projects.documents.delete'), async (req: Request, res: Response) => {
   try {
     const file = await dbGet('SELECT * FROM project_files WHERE id = ?', [req.params.fileId]);
     if (!file) return res.status(404).json({ error: 'File not found' });
@@ -791,7 +804,7 @@ router.delete('/files/:fileId', authMiddleware, async (req: Request, res: Respon
 });
 
 // PATCH: Update file metadata (no file re-upload needed)
-router.patch('/files/:fileId', authMiddleware, async (req: Request, res: Response) => {
+router.patch('/files/:fileId', authMiddleware, requirePermission('projects.documents.edit'), async (req: Request, res: Response) => {
   try {
     const { doc_title, doc_category, revision, doc_status, doc_no, description, file_name } = req.body;
     await dbRun(
@@ -816,7 +829,7 @@ router.patch('/files/:fileId', authMiddleware, async (req: Request, res: Respons
 });
 
 // GET: Serve uploaded file for preview
-router.get('/files/:fileId/preview', authMiddleware, async (req: Request, res: Response) => {
+router.get('/files/:fileId/preview', authMiddleware, requirePermission('projects.documents.view'), async (req: Request, res: Response) => {
   try {
     const file: any = await dbGet('SELECT * FROM project_files WHERE id = ?', [req.params.fileId]);
     if (!file) return res.status(404).json({ error: 'File not found' });
@@ -831,7 +844,7 @@ router.get('/files/:fileId/preview', authMiddleware, async (req: Request, res: R
 });
 
 // GET: Download file
-router.get('/files/:fileId/download', authMiddleware, async (req: Request, res: Response) => {
+router.get('/files/:fileId/download', authMiddleware, requirePermission('projects.documents.view'), async (req: Request, res: Response) => {
   try {
     const file: any = await dbGet('SELECT * FROM project_files WHERE id = ?', [req.params.fileId]);
     if (!file) return res.status(404).json({ error: 'File not found' });
@@ -844,7 +857,7 @@ router.get('/files/:fileId/download', authMiddleware, async (req: Request, res: 
 });
 
 // ── AI: Analyze drawing with Gemini Vision ────────────────────────────────
-router.post('/files/:fileId/analyze', authMiddleware, async (req: Request, res: Response) => {
+router.post('/files/:fileId/analyze', authMiddleware, requirePermission('projects.documents.create'), async (req: Request, res: Response) => {
   try {
     if (!genAI) {
       return res.status(503).json({ error: 'GEMINI_API_KEY not configured on server' });
@@ -1051,7 +1064,7 @@ const generateExpenseNumber = () => {
 };
 
 // Get project cost summary (budget vs actual from PR, PO, expenses)
-router.get('/:id/cost-summary', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:id/cost-summary', authMiddleware, requirePermission('projects.expenses.view'), async (req: Request, res: Response) => {
   try {
     const projectId = req.params.id;
 
@@ -1148,7 +1161,7 @@ router.get('/:id/cost-summary', authMiddleware, async (req: Request, res: Respon
 });
 
 // List project expenses
-router.get('/:id/expenses', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:id/expenses', authMiddleware, requirePermission('projects.expenses.view'), async (req: Request, res: Response) => {
   try {
     const expenses = await dbAll(`
       SELECT e.*, v.name as vendor_name, u.full_name as created_by_name,
@@ -1168,7 +1181,7 @@ router.get('/:id/expenses', authMiddleware, async (req: Request, res: Response) 
 });
 
 // GET all approved expenses across all projects (for Fund Request dropdown)
-router.get('/expenses/approved', authMiddleware, async (req: Request, res: Response) => {
+router.get('/expenses/approved', authMiddleware, requirePermission('projects.expenses.view'), async (req: Request, res: Response) => {
   try {
     const expenses = await dbAll(`
       SELECT e.*, p.project_name as project_name
@@ -1185,7 +1198,7 @@ router.get('/expenses/approved', authMiddleware, async (req: Request, res: Respo
 });
 
 // PATCH: Approve expense
-router.patch('/:id/expenses/:expenseId/approve', authMiddleware, async (req: Request, res: Response) => {
+router.patch('/:id/expenses/:expenseId/approve', authMiddleware, requirePermission('projects.expenses.approve'), async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user?.userId;
     await dbRun(
@@ -1199,7 +1212,7 @@ router.patch('/:id/expenses/:expenseId/approve', authMiddleware, async (req: Req
 });
 
 // PATCH: Reject expense
-router.patch('/:id/expenses/:expenseId/reject', authMiddleware, async (req: Request, res: Response) => {
+router.patch('/:id/expenses/:expenseId/reject', authMiddleware, requirePermission('projects.expenses.approve'), async (req: Request, res: Response) => {
   try {
     await dbRun(
       `UPDATE project_expenses SET status = 'rejected' WHERE id = ? AND project_id = ?`,
@@ -1212,7 +1225,7 @@ router.patch('/:id/expenses/:expenseId/reject', authMiddleware, async (req: Requ
 });
 
 // Create project expense
-router.post('/:id/expenses', authMiddleware, async (req: Request, res: Response) => {
+router.post('/:id/expenses', authMiddleware, requirePermission('projects.expenses.create'), async (req: Request, res: Response) => {
 
   try {
     const projectId = req.params.id;
@@ -1237,7 +1250,7 @@ router.post('/:id/expenses', authMiddleware, async (req: Request, res: Response)
 });
 
 // Update project expense
-router.put('/:id/expenses/:expenseId', authMiddleware, async (req: Request, res: Response) => {
+router.put('/:id/expenses/:expenseId', authMiddleware, requirePermission('projects.expenses.edit'), async (req: Request, res: Response) => {
   try {
     const { category, description, amount, expense_date, vendor_id, receipt_number, status, notes } = req.body;
 
@@ -1255,7 +1268,7 @@ router.put('/:id/expenses/:expenseId', authMiddleware, async (req: Request, res:
 });
 
 // Delete project expense
-router.delete('/:id/expenses/:expenseId', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/:id/expenses/:expenseId', authMiddleware, requirePermission('projects.expenses.delete'), async (req: Request, res: Response) => {
   try {
     const expense = await dbGet('SELECT status FROM project_expenses WHERE id = ? AND project_id = ?', [req.params.expenseId, req.params.id]) as any;
     if (!expense) return res.status(404).json({ error: 'Expense not found' });
@@ -1271,7 +1284,7 @@ router.delete('/:id/expenses/:expenseId', authMiddleware, async (req: Request, r
 });
 
 // List PRs linked to a project
-router.get('/:id/purchase-requests', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:id/purchase-requests', authMiddleware, requirePermission('projects.projects.view'), async (req: Request, res: Response) => {
   try {
     const prs = await dbAll(`
       SELECT pr.*, u.full_name as requester_name
@@ -1288,7 +1301,7 @@ router.get('/:id/purchase-requests', authMiddleware, async (req: Request, res: R
 });
 
 // List POs linked to a project  
-router.get('/:id/purchase-orders', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:id/purchase-orders', authMiddleware, requirePermission('projects.projects.view'), async (req: Request, res: Response) => {
   try {
     const pos = await dbAll(`
       SELECT po.*, v.name as vendor_name, pr.pr_number,
@@ -1307,7 +1320,7 @@ router.get('/:id/purchase-orders', authMiddleware, async (req: Request, res: Res
 });
 
 // List Fund Requests linked to a project
-router.get('/:id/fund-requests', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:id/fund-requests', authMiddleware, requirePermission('projects.projects.view'), async (req: Request, res: Response) => {
   try {
     const fundRequests = await dbAll(`
       SELECT fr.*, u.full_name as requester_name,
@@ -1327,7 +1340,7 @@ router.get('/:id/fund-requests', authMiddleware, async (req: Request, res: Respo
 // ===== RAB (RENCANA ANGGARAN BIAYA) =====
 
 // Get RAB for project — reads from the linked proposal's items
-router.get('/:id/rab', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:id/rab', authMiddleware, requirePermission('projects.reports.view'), async (req: Request, res: Response) => {
   try {
     const projectId = req.params.id;
 
@@ -1497,7 +1510,7 @@ router.get('/:id/rab', authMiddleware, async (req: Request, res: Response) => {
 
 // List proposals available to link to this project
 
-router.get('/:id/available-proposals', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:id/available-proposals', authMiddleware, requirePermission('projects.projects.view'), async (req: Request, res: Response) => {
   try {
     // P1 ARCH-RISK: daftar dibatasi ke proposal milik CLIENT yang sama.
     //
@@ -1529,7 +1542,7 @@ router.get('/:id/available-proposals', authMiddleware, async (req: Request, res:
 });
 
 // Link a proposal to this project
-router.put('/:id/link-proposal', authMiddleware, async (req: Request, res: Response) => {
+router.put('/:id/link-proposal', authMiddleware, requirePermission('projects.projects.edit'), async (req: Request, res: Response) => {
   try {
     const { proposal_id } = req.body;
     const projectId = req.params.id;
@@ -1609,7 +1622,7 @@ router.put('/:id/link-proposal', authMiddleware, async (req: Request, res: Respo
 });
 
 // Unlink proposal from project
-router.delete('/:id/link-proposal', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/:id/link-proposal', authMiddleware, requirePermission('projects.projects.delete'), async (req: Request, res: Response) => {
   try {
     const hasil = await withTransaction(async tx => {
       const lama: any = await tx.get(
@@ -1748,7 +1761,7 @@ async function getLinkedProposalId(projectId: any): Promise<number|null> {
 }
 
 // GET all MTO elements for a project — reads from linked proposal only (project MTO is read-only)
-router.get('/:id/mto', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:id/mto', authMiddleware, requirePermission('projects.mto.view'), async (req: Request, res: Response) => {
   try {
     const projectId = req.params.id;
     const proposalId = await getLinkedProposalId(projectId);
@@ -1825,7 +1838,7 @@ router.get('/:id/mto', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // POST create/upsert MTO element (DB UNIQUE constraint prevents duplicates)
-router.post('/:id/mto', authMiddleware, async (req: Request, res: Response) => {
+router.post('/:id/mto', authMiddleware, requirePermission('projects.mto.create'), async (req: Request, res: Response) => {
   try {
     const projectId = req.params.id;
     const { element_type, element_name, parameters = {}, sort_order = 0 } = req.body;
@@ -1915,7 +1928,7 @@ const tolakKalauProposalTerkunci = async (row: any, run: TxRunner): Promise<any 
 };
 
 // PUT update MTO element (recalculates quantities) — works for both project & proposal records
-router.put('/:id/mto/:elementId', authMiddleware, async (req: Request, res: Response) => {
+router.put('/:id/mto/:elementId', authMiddleware, requirePermission('projects.mto.edit'), async (req: Request, res: Response) => {
   try {
     const projectId = req.params.id;
     const proposalId = await getLinkedProposalId(projectId);
@@ -1951,7 +1964,7 @@ router.put('/:id/mto/:elementId', authMiddleware, async (req: Request, res: Resp
 });
 
 // DELETE MTO element — works for both project & proposal records
-router.delete('/:id/mto/:elementId', authMiddleware, async (req: Request, res: Response) => {
+router.delete('/:id/mto/:elementId', authMiddleware, requirePermission('projects.mto.delete'), async (req: Request, res: Response) => {
   try {
     const projectId = req.params.id;
     const proposalId = await getLinkedProposalId(projectId);
@@ -2030,7 +2043,7 @@ const emberRingkasan = (kunci: string): string | null => {
 };
 
 // GET QTO Summary — aggregated quantities (includes linked proposal MTO)
-router.get('/:id/mto/summary', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:id/mto/summary', authMiddleware, requirePermission('projects.mto.view'), async (req: Request, res: Response) => {
   try {
     const projectId = req.params.id;
     const proposalId = await getLinkedProposalId(projectId);
@@ -2102,7 +2115,7 @@ router.get('/:id/mto/summary', authMiddleware, async (req: Request, res: Respons
  * karangan yang sama untuk setiap project ("John Doe updated the status to
  * In Progress, 2 hours ago").
  */
-router.get('/:id/activities', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:id/activities', authMiddleware, requirePermission('projects.projects.view'), async (req: Request, res: Response) => {
   try {
     const projectId = Number(req.params.id);
     if (!Number.isInteger(projectId) || projectId <= 0) {
@@ -2134,7 +2147,7 @@ router.get('/:id/activities', authMiddleware, async (req: Request, res: Response
  * Selisih antara keduanya bukan masalah yang perlu disembunyikan — justru itu
  * informasi yang dicari, dan sebelum ini tidak ada acuan untuk menghitungnya.
  */
-router.get('/:id/schedule-baseline', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:id/schedule-baseline', authMiddleware, requirePermission('projects.schedule.view'), async (req: Request, res: Response) => {
   try {
     const projectId = Number(req.params.id);
     if (!Number.isInteger(projectId) || projectId <= 0) {
@@ -2247,7 +2260,7 @@ router.get('/:id/schedule-baseline', authMiddleware, async (req: Request, res: R
  * diminta akan mengubah apa yang dilihat tim proyek di hari pertama, dan itu
  * keputusan mereka, bukan efek samping transisi status.
  */
-router.post('/:id/schedule/seed-from-baseline', authMiddleware, async (req: Request, res: Response) => {
+router.post('/:id/schedule/seed-from-baseline', authMiddleware, requirePermission('projects.schedule.create'), async (req: Request, res: Response) => {
   try {
     const projectId = Number(req.params.id);
     if (!Number.isInteger(projectId) || projectId <= 0) {
@@ -2333,7 +2346,7 @@ router.post('/:id/schedule/seed-from-baseline', authMiddleware, async (req: Requ
  * karena ia baseline — bobot yang ikut bergerak tiap kali nilai berubah membuat
  * kurva-S kemarin dan hari ini tidak bisa dibandingkan.
  */
-router.post('/:id/wbs/generate', authMiddleware, async (req: Request, res: Response) => {
+router.post('/:id/wbs/generate', authMiddleware, requirePermission('projects.schedule.create'), async (req: Request, res: Response) => {
   try {
     const projectId = Number(req.params.id);
     if (!Number.isInteger(projectId) || projectId <= 0) {
@@ -2465,7 +2478,7 @@ router.post('/:id/wbs/generate', authMiddleware, async (req: Request, res: Respo
  * progress tiap work package datang dari task yang tertaut padanya, lalu
  * dijumlah dengan bobot nilainya.
  */
-router.get('/:id/wbs', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:id/wbs', authMiddleware, requirePermission('projects.schedule.view'), async (req: Request, res: Response) => {
   try {
     const projectId = Number(req.params.id);
     if (!Number.isInteger(projectId) || projectId <= 0) {
@@ -2601,7 +2614,7 @@ router.get('/:id/wbs', authMiddleware, async (req: Request, res: Response) => {
 });
 
 /** Tetapkan cost code sebuah work package. */
-router.put('/:id/wbs/:wbsId/cost-code', authMiddleware, async (req: Request, res: Response) => {
+router.put('/:id/wbs/:wbsId/cost-code', authMiddleware, requirePermission('projects.schedule.edit'), async (req: Request, res: Response) => {
   try {
     const projectId = Number(req.params.id);
     const wbsId = Number(req.params.wbsId);
@@ -2636,7 +2649,7 @@ router.put('/:id/wbs/:wbsId/cost-code', authMiddleware, async (req: Request, res
 });
 
 /** Tautkan task ke work package. */
-router.put('/:id/tasks/:taskId/wbs', authMiddleware, async (req: Request, res: Response) => {
+router.put('/:id/tasks/:taskId/wbs', authMiddleware, requirePermission('projects.tasks.edit'), async (req: Request, res: Response) => {
   try {
     const projectId = Number(req.params.id);
     const taskId = Number(req.params.taskId);
@@ -2699,7 +2712,7 @@ const plannedPadaTanggal = (mulai: any, durasi: any, cutoff: string): number => 
 };
 
 /** Buka periode cut-off baru. Barisnya dibentuk dari WBS, bukan diketik ulang. */
-router.post('/:id/progress/periods', authMiddleware, async (req: Request, res: Response) => {
+router.post('/:id/progress/periods', authMiddleware, requirePermission('projects.schedule.create'), async (req: Request, res: Response) => {
   try {
     const projectId = Number(req.params.id);
     if (!idValid(projectId)) return res.status(400).json({ error: 'Id project tidak valid' });
@@ -2813,7 +2826,7 @@ router.post('/:id/progress/periods', authMiddleware, async (req: Request, res: R
 });
 
 /** Isi klaim satu work package. Hanya selama periodenya masih draft. */
-router.put('/:id/progress/periods/:periodId/lines/:lineId', authMiddleware,
+router.put('/:id/progress/periods/:periodId/lines/:lineId', authMiddleware, requirePermission('projects.schedule.edit'),
   async (req: Request, res: Response) => {
     try {
       const projectId = Number(req.params.id);
@@ -2879,7 +2892,7 @@ router.put('/:id/progress/periods/:periodId/lines/:lineId', authMiddleware,
   });
 
 /** Ajukan periode: draft → submitted. Klaim terkunci sejak ini. */
-router.post('/:id/progress/periods/:periodId/submit', authMiddleware,
+router.post('/:id/progress/periods/:periodId/submit', authMiddleware, requirePermission('projects.schedule.approve'),
   async (req: Request, res: Response) => {
     try {
       const projectId = Number(req.params.id);
@@ -2941,7 +2954,7 @@ router.post('/:id/progress/periods/:periodId/submit', authMiddleware,
  * progress yang tidak pernah diminta siapa pun) atau di bawah yang sudah
  * disetujui periode sebelumnya (itu membatalkan persetujuan lama diam-diam).
  */
-router.post('/:id/progress/periods/:periodId/approve', authMiddleware,
+router.post('/:id/progress/periods/:periodId/approve', authMiddleware, requirePermission('projects.schedule.approve'),
   async (req: Request, res: Response) => {
     try {
       const projectId = Number(req.params.id);
@@ -3124,7 +3137,7 @@ async function jurnalPengakuanPendapatan(tx: TxRunner, o: {
 }
 
 /** Tolak periode: submitted → draft, dengan alasan yang tercatat. */
-router.post('/:id/progress/periods/:periodId/reject', authMiddleware,
+router.post('/:id/progress/periods/:periodId/reject', authMiddleware, requirePermission('projects.schedule.approve'),
   async (req: Request, res: Response) => {
     try {
       const projectId = Number(req.params.id);
@@ -3176,7 +3189,7 @@ router.post('/:id/progress/periods/:periodId/reject', authMiddleware,
  * claimed−earned adalah eksposur yang belum disetujui; selisih earned−planned
  * adalah keterlambatan. Meleburnya jadi satu garis menghapus keduanya.
  */
-router.get('/:id/progress', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:id/progress', authMiddleware, requirePermission('projects.schedule.view'), async (req: Request, res: Response) => {
   try {
     const projectId = Number(req.params.id);
     if (!idValid(projectId)) return res.status(400).json({ error: 'Id project tidak valid' });
@@ -3285,7 +3298,7 @@ const DOKUMEN_BIAYA: Record<string, { tabel: string; nilai: string; nomor: strin
  * Angka "actual cost per work package" yang diam-diam mengabaikan separuh
  * biaya jauh lebih berbahaya daripada angka yang mengaku baru mencakup separuh.
  */
-router.get('/:id/cost-allocation', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:id/cost-allocation', authMiddleware, requirePermission('projects.expenses.view'), async (req: Request, res: Response) => {
   try {
     const projectId = Number(req.params.id);
     if (!idValid(projectId)) return res.status(400).json({ error: 'Id project tidak valid' });
@@ -3397,7 +3410,7 @@ router.get('/:id/cost-allocation', authMiddleware, async (req: Request, res: Res
  * pada data historis: kalau pemetaannya keliru, yang salah cuma
  * pengelompokannya, bukan angkanya.
  */
-router.put('/:id/cost-allocation/:jenis/:docId', authMiddleware, async (req: Request, res: Response) => {
+router.put('/:id/cost-allocation/:jenis/:docId', authMiddleware, requirePermission('projects.expenses.edit'), async (req: Request, res: Response) => {
   try {
     const projectId = Number(req.params.id);
     const docId = Number(req.params.docId);
@@ -3461,7 +3474,7 @@ router.put('/:id/cost-allocation/:jenis/:docId', authMiddleware, async (req: Req
  *    Nol berarti "sudah diukur, hasilnya belum ada kemajuan"; itu klaim yang
  *    berbeda dan biasanya keliru.
  */
-router.get('/:id/evm', authMiddleware, async (req: Request, res: Response) => {
+router.get('/:id/evm', authMiddleware, requirePermission('projects.reports.view'), async (req: Request, res: Response) => {
   try {
     const projectId = Number(req.params.id);
     if (!idValid(projectId)) return res.status(400).json({ error: 'Id project tidak valid' });
