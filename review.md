@@ -14066,3 +14066,10 @@ di tengah** karena optional chaining hanya terpasang di indeks array dan tidak
 di akses field sesudahnya, sehingga sisa asersinya tidak pernah berjalan **dan
 tabel goresnya tidak jadi dihapus**. Sekarang aksesnya dilindungi penuh dan
 pembersihannya di `finally`. Angka mutasi di atas adalah angka setelah itu.
+
+**Verifikasi setelah deploy (5 September 2026).** Warning `Schema fallback ALTER
+failed` hilang dari log boot, dan — yang jadi buktinya — kedua kolom benar-benar
+ada di produksi sekarang: `qc_results.approved_by` (`int`, NULL) dan
+`approved_at` (`timestamp`, NULL). Endpoint approve/reject QC-nya sendiri
+**tidak saya jalankan di produksi** karena itu jalur tulis; yang saya buktikan
+adalah kolom yang dulu membuatnya gagal kini ada dengan tipe yang benar.
