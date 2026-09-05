@@ -136,6 +136,25 @@ historis.
   - **Jangan membuat tabel di level modul route** (`initXxx()` yang dipanggil saat import). Itu berjalan sebelum `initializeDatabase()`, sehingga foreign key ke tabel inti gagal di database baru — dan rejection tanpa `.catch()` mematikan proses. Empat kasus seperti ini sudah dipindah ke `ensureRouteModuleSchema`.
   - File `.sql` di `backend/database/` sifatnya historis. **Isinya belum tercermin di `ensure*Schema`**, itulah sumber drift 78 vs 141 tabel di atas. Memindahkannya ke `ensure*Schema` adalah pekerjaan yang masih terbuka.
   - MySQL 8 tidak dukung `ADD COLUMN IF NOT EXISTS`; ada fallback `tryFallbackAddColumn` yang cek INFORMATION_SCHEMA. Aman untuk tetap menulis `IF NOT EXISTS`.
+  - ⚠️ **Satu `ALTER` boleh memuat beberapa `ADD COLUMN`, dan fallback-nya dulu
+    hanya mengambil klausa PERTAMA** lalu menyapu sisanya ke dalam definisi
+    kolom — sehingga ia menjalankan ``ADD COLUMN `approved_by` INT NULL, ADD
+    COLUMN IF NOT EXISTS approved_at ...``, syntax error lagi, dan **tidak satu
+    kolom pun dibuat**. Terukur di produksi 5 September 2026:
+    `qc_results.approved_by`/`approved_at` tidak pernah ada meski ensure-nya
+    berjalan tiap boot, jadi jalur approve/reject QC yang "dilengkapi"
+    CABUT-QC-PPIC-01 sebenarnya tetap mati sepuluh hari. Satu-satunya jejaknya
+    **satu baris `console.warn`** di tengah ratusan baris log boot.
+    Sekarang klausanya dipecah pada kata kuncinya (bukan pada koma — definisi
+    kolom boleh memuat koma seperti `DECIMAL(15,2)`) lewat
+    `pecahKlausaAddColumn()`, dan kegagalan dilaporkan **per kolom**.
+  - ⚠️ **Jangan memverifikasi perbaikan skema dengan "kolomnya ada di database
+    lokal".** Kolom di mesin dev bisa saja dibuat tangan saat verifikasi
+    sebelumnya — itulah yang membuat cacat di atas lolos: lokal punya kedua
+    kolom, produksi tidak, dan keduanya menjalankan kode yang sama.
+    `npm run test:skema-fallback` karena itu menguji **helper-nya** terhadap
+    tabel gores yang dibuat tesnya sendiri, bukan keadaan data yang kebetulan
+    ada.
 - **Frontend**: `views/` = halaman (terdaftar di `router/index.ts`, ~132 route, semua lazy `import()`), `stores/` = Pinia per domain, `components/ui/` = primitives (Button, Dialog, StatusBadge, DataTable, dll). Panggil API lewat `src/lib/api.ts`.
 - **Mobile**: PWA terpisah di dalam app yang sama — `views/mobile/*` di bawah path `/mobile/*` (login, attendance, payslip, material request, settings). Folder root `attendance-app/` adalah prototipe PWA vanilla lama, bukan bagian build.
 

@@ -38,26 +38,70 @@ const activeDatabaseName = process.env.DB_NAME || 'erp_manufacturing';
 // MySQL 8 doesn't support `ADD COLUMN IF NOT EXISTS` (MariaDB extension).
 // Fallback: detect that syntax error, look up the column in INFORMATION_SCHEMA,
 // and re-issue the ALTER without `IF NOT EXISTS` only if the column is missing.
-const tryFallbackAddColumn = async (connection: any, sql: string): Promise<boolean> => {
-  const m = sql.match(/^\s*ALTER\s+TABLE\s+`?(\w+)`?\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+`?(\w+)`?\s+([\s\S]+)$/i);
-  if (!m) return false;
-  const [, table, column, definition] = m;
-  try {
-    const [rows]: any = await connection.execute(
-      `SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
-      [activeDatabaseName, table, column]
-    );
-    const exists = Array.isArray(rows) && rows[0] && Number(rows[0].c) > 0;
-    if (exists) return true;
-    await connection.execute(`ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${definition}`);
-    return true;
-  } catch (err: any) {
-    console.warn('Schema fallback ALTER failed:', table, column, '-', err.message.substring(0, 120));
-    return true; // handled (logged) — do not surface original error
+/**
+ * MySQL 8 tidak mengenal `ADD COLUMN IF NOT EXISTS` sama sekali, jadi SETIAP
+ * statement bentuk itu mendarat di sini.
+ *
+ * ⚠️ Satu `ALTER` boleh memuat beberapa `ADD COLUMN`, dan versi pertama helper
+ * ini hanya mengambil klausa PERTAMA lalu menyapu sisanya ke dalam definisi
+ * kolom — sehingga fallback-nya menjalankan
+ * `ADD COLUMN \`approved_by\` INT NULL, ADD COLUMN IF NOT EXISTS approved_at ...`,
+ * syntax error lagi, dan **tidak satu kolom pun dibuat**. Terukur di produksi:
+ * `qc_results.approved_by`/`approved_at` tidak pernah ada meski ensure-nya
+ * berjalan tiap boot, dan satu-satunya jejaknya cuma satu baris `console.warn`
+ * di tengah ratusan baris log boot. Jalur approve/reject QC yang dilengkapi
+ * CABUT-QC-PPIC-01 karena itu tetap mati selama sepuluh hari.
+ *
+ * Sekarang klausanya dipecah dan diterapkan satu per satu, dan kegagalan per
+ * kolom dilaporkan per kolom — bukan satu pesan untuk seluruh statement.
+ */
+export type KlausaAddColumn = { table: string; kolom: { column: string; definition: string }[] };
+
+/**
+ * Memecah satu `ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...` menjadi klausa
+ * per kolom. Dipisahkan dari eksekusinya supaya bisa diuji langsung — inilah
+ * bagian yang dulu salah, dan salahnya tidak terlihat dari luar.
+ *
+ * Dipecah pada KATA KUNCI-nya, bukan pada koma: definisi kolom sendiri boleh
+ * memuat koma (`DECIMAL(15,2)`).
+ */
+export const pecahKlausaAddColumn = (sql: string): KlausaAddColumn | null => {
+  const kepala = sql.match(/^\s*ALTER\s+TABLE\s+`?(\w+)`?\s+(?=ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s)/i);
+  if (!kepala) return null;
+  const kolom: { column: string; definition: string }[] = [];
+  const potongan = sql.slice(kepala[0].length)
+    .split(/,?\s*ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+/i)
+    .map((x) => x.trim().replace(/[,;]\s*$/, ''))
+    .filter(Boolean);
+  for (const p of potongan) {
+    const m = p.match(/^`?(\w+)`?\s+([\s\S]+)$/);
+    if (m) kolom.push({ column: m[1], definition: m[2].trim() });
+    else console.warn('Schema fallback ALTER dilewati (klausa tidak terbaca):', kepala[1], '-', p.substring(0, 60));
   }
+  return kolom.length ? { table: kepala[1], kolom } : null;
 };
 
-const execSchemaEnsure = async (connection: any, sql: string) => {
+export const tryFallbackAddColumn = async (connection: any, sql: string): Promise<boolean> => {
+  const pecahan = pecahKlausaAddColumn(sql);
+  if (!pecahan) return false;
+  const { table } = pecahan;
+
+  for (const { column, definition } of pecahan.kolom) {
+    try {
+      const [rows]: any = await connection.execute(
+        `SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+        [activeDatabaseName, table, column]
+      );
+      if (Array.isArray(rows) && rows[0] && Number(rows[0].c) > 0) continue;
+      await connection.execute(`ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${definition}`);
+    } catch (err: any) {
+      console.warn('Schema fallback ALTER failed:', table, column, '-', err.message.substring(0, 120));
+    }
+  }
+  return true; // handled (per kolom sudah dilaporkan) — jangan munculkan error asli
+};
+
+export const execSchemaEnsure = async (connection: any, sql: string) => {
   try {
     await connection.execute(sql);
   } catch (err: any) {

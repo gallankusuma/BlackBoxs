@@ -14004,3 +14004,65 @@ tersendiri karena tabelnya di luar jangkauan penyapu.
 otomatis — keputusan pemilik, supaya tidak ada pertanyaan "apa yang terjadi
 kalau layout diubah setelah elemennya sudah diedit manual" sebelum ada
 jawabannya.
+
+---
+
+## SKEMA-FALLBACK-01 — `ADD COLUMN IF NOT EXISTS` dua kolom tidak pernah jalan (5 September 2026)
+
+**Bukan temuan reviewer — ketahuan dari log boot saat deploy EST-MTO-LAYOUT-01.**
+Di antara puluhan baris `Schema ensure warning: Duplicate key name ...` yang
+memang normal, ada satu yang berbeda:
+
+```
+Schema fallback ALTER failed: qc_results approved_by - You have an error in your SQL syntax
+```
+
+**Sebabnya.** MySQL 8 tidak mengenal `ADD COLUMN IF NOT EXISTS` sama sekali,
+jadi setiap statement bentuk itu mendarat di `tryFallbackAddColumn`. Regex-nya
+menangkap `([\s\S]+)$` sebagai definisi kolom — untuk `ALTER` dua kolom, sisa
+statement ikut tersapu ke sana, sehingga fallback-nya menjalankan:
+
+```sql
+ALTER TABLE `qc_results` ADD COLUMN `approved_by` INT NULL,
+    ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP NULL
+```
+
+`IF NOT EXISTS` kedua masih ada → syntax error lagi → **tidak satu kolom pun
+dibuat**, dan `approved_at` bahkan tidak pernah dicoba.
+
+**Dampaknya terverifikasi di produksi**, bukan diduga:
+
+| | `qc_results.approved_by` | `qc_results.approved_at` | `batches.qc_status` |
+|---|---|---|---|
+| Produksi | **tidak ada** | **tidak ada** | ada (ALTER satu kolom) |
+
+Artinya jalur approve/reject QC yang saya laporkan "dilengkapi" di
+CABUT-QC-PPIC-01 sebenarnya **tetap mati sepuluh hari**. Radiusnya kecil —
+hanya 1 dari 105 kolom yang di-`ensure` berbentuk multi-kolom — tapi helper-nya
+jebakan untuk siapa pun yang berikutnya menulis ALTER dua kolom.
+
+**Kenapa verifikasi lokal saya lolos, dan ini bagian yang paling perlu dicatat.**
+Di database dev kedua kolom itu **ada** — hampir pasti saya buat tangan saat
+menguji endpoint QC waktu itu. Jadi pemeriksaan "kolomnya ada?" di mesin dev
+lulus sambil tidak membuktikan apa pun tentang jalur boot. Lokal dan produksi
+menjalankan kode yang sama; yang berbeda cuma riwayat manual saya.
+
+**Perbaikan.** Pemecah klausanya dipisah jadi `pecahKlausaAddColumn()` yang
+diekspor, memecah pada **kata kuncinya** — bukan pada koma, karena definisi
+kolom sendiri boleh memuat koma (`DECIMAL(15,2)`) — dan kegagalan dilaporkan
+**per kolom**, bukan satu pesan untuk seluruh statement.
+
+**Penjaganya sengaja tidak memeriksa data.** `npm run test:skema-fallback`
+(19 asersi) menguji helper-nya terhadap tabel gores yang dibuat tesnya sendiri,
+lalu memindai `database.ts` dan memastikan setiap `ALTER` multi-kolom di sana
+terpecah utuh. Asersi "kolomnya ada di database" justru akan mengulang persis
+kesalahan yang meloloskan cacat ini.
+
+Empat mutasi diuji, semuanya tertangkap (13, 10, 1, 8 asersi gagal).
+
+⚠️ Dua kelemahan pada tesnya sendiri ikut diperbaiki setelah mutasi pertama
+memberi angka yang mencurigakan (2 gagal, harusnya belasan): tesnya **melempar
+di tengah** karena optional chaining hanya terpasang di indeks array dan tidak
+di akses field sesudahnya, sehingga sisa asersinya tidak pernah berjalan **dan
+tabel goresnya tidak jadi dihapus**. Sekarang aksesnya dilindungi penuh dan
+pembersihannya di `finally`. Angka mutasi di atas adalah angka setelah itu.
