@@ -290,6 +290,52 @@ error samar. Kegagalan dari sisi Google dipetakan: **429 `AI_KUOTA_HABIS`**
 dan **503 `AI_KUNCI_DITOLAK`**. Keduanya bukan jalan buntu — penyuntingan dimensi
 dan pratinjau tidak menyentuh AI sama sekali, dan layar mengatakannya.
 
+### General Layout MTO (EST-MTO-LAYOUT-01)
+
+Tab ketujuh di layar MTO — **bukan** elemen ke-7. Ia mendefinisikan kerangka
+bangunan per zona (panjang, lebar, tinggi, jarak kolom arah X & Y) lalu
+**menurunkan** jumlah kolom, bentang balok, panjang balok, luas lantai, luas
+dinding, dan luas atap.
+
+⚠️ **Jangan menjadikannya `element_type` ke-7.** Layout tidak menghasilkan
+kuantitas material sendiri; memasukkannya ke `MODULES` membuat mesin zona
+memperlakukannya sebagai elemen, memunculkan baris tanpa material di rekap, dan
+setiap penjumlahan MTO harus mulai mengecualikannya satu per satu. Ia disimpan
+di tabel sendiri (`mto_layouts`), bukan di `engineering_inputs`. Dijaga tes.
+
+Empat aturan yang harus dijaga, dan semuanya soal kejujuran angka:
+
+1. **Jarak kolom yang diisi adalah TARGET, bukan hasil.** Bangunan 20 m dengan
+   target 6 m tidak menghasilkan bentang 6-6-6-2 — insinyur membaginya rata jadi
+   3 bentang @ 6,667 m. Jarak aktual dihitung ulang, dan kalau berbeda dari
+   target, **selisihnya disebutkan**. Menampilkan target seolah-olah itu yang
+   terpasang membuat orang memesan kolom di posisi yang salah.
+2. **Sifat angka yang belum bersih dikatakan.** Luas dinding masih KOTOR
+   (bukaan pintu/jendela belum dikurangi) dan luas atap hanya PROYEKSI DATAR —
+   atap miring lebih luas dan butuh sudut kemiringannya. Keduanya muncul di
+   `catatan` dan ditampilkan layar apa adanya.
+3. **Hasil hitung TIDAK disimpan, hanya parameternya.** Sama alasannya dengan
+   saldo GL dan lokasi berjalan aset: angka turunan yang disimpan melenceng dari
+   rumusnya begitu rumusnya diperbaiki, dan selisihnya tidak bisa dijelaskan
+   siapa pun.
+4. **Kalkulatornya SATU dan ada di server.** Layar memanggil
+   `POST /estimator/mto/layout/pratinjau` sambil dimensinya diketik (dengan
+   debounce — layar MTO sudah pernah kena batas 300 permintaan/menit di
+   PROC-N1-01). Menduplikasi rumusnya ke browser membuat angka di layar dan
+   angka tersimpan bisa berbeda tanpa ada yang menyadarinya. Tes memindai
+   `ProjectMTO.vue` untuk menahan itu.
+
+Field diekspor sebagai DATA lewat `spesifikasiLayout()` dan diambil layar dari
+`GET /estimator/mto/layout/fields` — sama polanya dengan `spesifikasiField()`,
+jadi field baru otomatis muncul di formulir tanpa daftar kedua di frontend.
+
+**Belum dikerjakan dan itu disengaja:** layout tidak membuat elemen kolom/balok
+otomatis. Keputusan pemilik (3 September 2026): hitung dulu, buat elemen
+menyusul — supaya tidak ada pertanyaan "apa yang terjadi kalau layout diubah
+setelah elemennya sudah diedit manual" sebelum ada jawabannya.
+
+Dijaga `npm run test:mto-layout`.
+
 ### Ledger kontrak & change order
 
 Deal membuat **kontrak + baseline BOQ immutable** di dalam transaction yang sama

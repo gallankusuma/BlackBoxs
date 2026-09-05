@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { calculateMto, toLegacyQuantities, FORMULA_VERSION, MtoResult } from '../modules/estimator/mto/calculator';
 import { checkUnitCompatibility, isProposalEditable } from '../modules/estimator/mto/units';
 import { spesifikasiField, spesifikasiOpsional, katalogElemen } from '../modules/estimator/mto/contract';
+import { hitungLayout, spesifikasiLayout } from '../modules/estimator/mto/layout.calculator';
 import { enrichMtoElement, groupStoredLines } from '../modules/estimator/mto/enrich';
 import crypto from 'crypto';
 import { rakitDokumen } from '../modules/estimator/penawaran/dokumen';
@@ -2748,6 +2749,89 @@ ATURAN KERAS:
  * membuat angka di layar dan angka yang tersimpan berasal dari dua sumber
  * berbeda — persis kelas cacat yang sudah beberapa kali ditutup di modul ini.
  */
+/**
+ * ========== GENERAL LAYOUT (EST-MTO-LAYOUT-01) ==========
+ *
+ * Kerangka bangunan per zona. Yang disimpan hanya PARAMETER; jumlah kolom,
+ * bentang balok, dan luasan selalu dihitung ulang saat dibaca.
+ *
+ * Kalkulatornya SATU dan ada di server — layar memanggil `/pratinjau` untuk
+ * menghitung sambil mengetik, sama seperti pratinjau MTO. Menduplikasinya ke
+ * browser membuat angka di layar dan angka tersimpan bisa berbeda tanpa ada
+ * yang menyadarinya.
+ */
+router.get('/mto/layout/fields', authMiddleware, bolehLihat, async (_req: Request, res: Response) => {
+  // Field diekspor sebagai DATA supaya layar membangun formulirnya dari sini.
+  // Daftar kedua di frontend akan melenceng diam-diam setiap kali ada field baru.
+  res.json({ data: spesifikasiLayout() });
+});
+
+/** Menghitung tanpa menyimpan — dipakai layar saat dimensinya diketik. */
+router.post('/mto/layout/pratinjau', authMiddleware, bolehLihat, async (req: Request, res: Response) => {
+  try {
+    res.json({ data: hitungLayout(req.body?.parameters || req.body || {}) });
+  } catch (error: any) {
+    console.error('Gagal menghitung layout:', error);
+    res.status(500).json({ error: 'Gagal menghitung layout' });
+  }
+});
+
+router.get('/proposals/:id/mto/layout', authMiddleware, bolehLihat, async (req: Request, res: Response) => {
+  try {
+    const rows = await dbAll(
+      `SELECT id, zone_name, parameters, updated_at
+       FROM mto_layouts WHERE scope_type = 'proposal' AND scope_id = ?
+       ORDER BY zone_name`, [req.params.id]) as any[];
+    const data = rows.map(r => {
+      let par: any = {};
+      try { par = typeof r.parameters === 'string' ? JSON.parse(r.parameters) : (r.parameters || {}); } catch { par = {}; }
+      return { id: r.id, zone_name: r.zone_name, parameters: par, updated_at: r.updated_at, hasil: hitungLayout(par) };
+    });
+    res.json({ data });
+  } catch (error: any) {
+    console.error('Gagal memuat layout:', error);
+    res.status(500).json({ error: 'Gagal memuat layout' });
+  }
+});
+
+router.put('/proposals/:id/mto/layout', authMiddleware, bolehUbah, async (req: Request, res: Response) => {
+  try {
+    const zona = String(req.body?.zone_name ?? '').trim();
+    const par = req.body?.parameters || {};
+    const userId = (req as any).userId ?? null;
+
+    // Dihitung lebih dulu: layout yang tidak bisa dihitung tetap boleh disimpan
+    // sebagai draft, tapi penggunanya diberi tahu field mana yang kurang —
+    // bukan disimpan diam-diam lalu tampil sebagai nol di mana-mana.
+    const hasil = hitungLayout(par);
+
+    await dbRun(
+      `INSERT INTO mto_layouts (scope_type, scope_id, zone_name, parameters, created_by, updated_by)
+       VALUES ('proposal', ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE parameters = VALUES(parameters), updated_by = VALUES(updated_by)`,
+      [req.params.id, zona, JSON.stringify(par), userId, userId]);
+
+    res.json({ message: hasil.ok ? 'Layout tersimpan' : 'Layout tersimpan sebagai draft', data: hasil });
+  } catch (error: any) {
+    console.error('Gagal menyimpan layout:', error);
+    res.status(500).json({ error: 'Gagal menyimpan layout' });
+  }
+});
+
+router.delete('/proposals/:id/mto/layout', authMiddleware, bolehHapus, async (req: Request, res: Response) => {
+  try {
+    const zona = String(req.query?.zone_name ?? '').trim();
+    const r = await dbRun(
+      `DELETE FROM mto_layouts WHERE scope_type = 'proposal' AND scope_id = ? AND zone_name = ?`,
+      [req.params.id, zona]);
+    if (!r.affectedRows) return res.status(404).json({ error: 'Layout zona ini tidak ditemukan' });
+    res.json({ message: 'Layout dihapus' });
+  } catch (error: any) {
+    console.error('Gagal menghapus layout:', error);
+    res.status(500).json({ error: 'Gagal menghapus layout' });
+  }
+});
+
 router.post('/proposals/:id/mto/pratinjau', authMiddleware, bolehLihat, async (req: Request, res: Response) => {
   try {
     const tipe = String(req.body?.element_type || 'foundation');

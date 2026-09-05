@@ -13938,3 +13938,69 @@ permission produksi, dipastikan tidak ditolak di satu endpoint pun). Lima
 mutasi diuji, semuanya tertangkap — termasuk gerbang yang memakai resource yang
 tidak dipegang role produksi (1 asersi gagal) dan gerbang hapus yang dipasangi
 aksi view (1 asersi gagal).
+
+---
+
+## EST-MTO-LAYOUT-01 — tab General Layout
+
+Diminta pemilik: satu tab lagi di MTO untuk menentukan panjang, lebar, tinggi,
+jarak antar kolom, dan jumlah kolomnya bisa terlihat.
+
+Tiga keputusan diambil pemilik lebih dulu: **hitung dulu** (belum membuat elemen
+kolom/balok otomatis), **per zona MTO**, dan **jarak seragam per arah**.
+
+**Layout BUKAN elemen MTO ke-7.** Ia tidak menghasilkan kuantitas material
+sendiri; memasukkannya ke `MODULES` membuat mesin zona memperlakukannya sebagai
+elemen, memunculkan baris tanpa material di rekap, dan setiap penjumlahan MTO
+harus mulai mengecualikannya satu per satu. Disimpan di tabel sendiri
+(`mto_layouts`), dan tes memeriksa `engineering_inputs` tetap bersih.
+
+**Empat aturan yang dijaga, semuanya soal kejujuran angka:**
+
+1. **Jarak kolom yang diisi adalah TARGET.** Bangunan 20 m dengan target 6 m
+   dibagi rata jadi 3 bentang @ 6,667 m — dan selisihnya DISEBUTKAN. Menampilkan
+   target seolah-olah itu yang terpasang membuat orang memesan kolom di posisi
+   yang salah.
+2. **Sifat angka yang belum bersih dikatakan.** Luas dinding masih KOTOR (bukaan
+   belum dikurangi), luas atap hanya PROYEKSI DATAR. Layar menampilkan catatan
+   itu apa adanya.
+3. **Hasil hitung tidak disimpan, hanya parameternya** — sama alasannya dengan
+   saldo GL dan lokasi berjalan aset.
+4. **Kalkulatornya satu dan ada di server.** Layar memanggil `/pratinjau` dengan
+   debounce 350 ms; layar MTO sudah pernah kena batas 300 permintaan/menit
+   (PROC-N1-01). Tes memindai `ProjectMTO.vue` untuk menahan rumusnya
+   diduplikasi ke browser.
+
+Field diekspor sebagai DATA lewat `spesifikasiLayout()` dan diambil layar dari
+`GET /estimator/mto/layout/fields` — pola yang sama dengan `spesifikasiField()`,
+jadi tidak ada daftar kedua di frontend yang bisa melenceng.
+
+`npm run test:mto-layout` — 37 asersi.
+
+**Dua lubang tes ditemukan lewat mutasi, keduanya di aturan pembulatan** —
+jantung perilaku "target vs aktual":
+
+- `Math.round` → `Math.floor` awalnya **0 asersi gagal**: seluruh kasus uji
+  kebetulan habis dibagi atau pecahannya di atas 0,5, jadi ketiganya
+  menghasilkan angka identik. Ditambahkan 20 m / target 7 m (= 2,857 bentang):
+  round → 3 bentang @ 6,667 m, floor → 2 bentang @ 10 m, bentang 43% lebih
+  panjang dari yang diminta.
+- `Math.round` → `Math.ceil` juga awalnya 0, karena semua dimensi arah lebar
+  habis dibagi. Ditambahkan 13 m / target 6 m (= 2,167 bentang): round → 2
+  bentang @ 6,5 m, ceil → 3 bentang @ 4,33 m.
+
+Setelah keduanya ditutup: tujuh mutasi diuji, semuanya tertangkap (3, 2, 1, 1,
+7, 3, 1, 1 asersi gagal).
+
+**Penjaga yang sudah ada ikut menangkap satu hal:** `test:kebersihan` menolak
+suite baru ini karena ia membuat proposal tanpa memanggil penyapu bersama
+`sapuFixture`. Bersih-bersih manual saya sudah benar untuk kasus normal, tapi
+konvensinya ada alasannya — endpoint DELETE menolak proposal `submitted`/`deal`
+dan penolakannya mudah tertelan, sehingga fixture menetap dan database dev
+bertumbuh monoton. Sekarang ikut penyapu bersama; baris `mto_layouts` dihapus
+tersendiri karena tabelnya di luar jangkauan penyapu.
+
+**Belum dikerjakan dan itu disengaja:** layout tidak membuat elemen kolom/balok
+otomatis — keputusan pemilik, supaya tidak ada pertanyaan "apa yang terjadi
+kalau layout diubah setelah elemennya sudah diedit manual" sebelum ada
+jawabannya.

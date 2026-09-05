@@ -11,6 +11,16 @@
         <span class="tab-label">{{ mod.label }}</span>
         <span v-if="zones[mod.id]?.length" class="tab-badge">{{ zones[mod.id].length }}</span>
       </button>
+      <!-- General Layout: tab khusus, BUKAN entri MODULES. Ia bukan elemen MTO
+           — tidak menghasilkan kuantitas material sendiri — dan memasukkannya ke
+           MODULES membuat mesin zona memperlakukannya sebagai elemen lalu
+           memunculkan baris tanpa material di rekap. -->
+      <button @click="activeTab='layout'; activeZoneIdx=0"
+        class="mto-tab" :class="{active:activeTab==='layout'}" style="--clr:#14b8a6">
+        <span>📐</span>
+        <span class="tab-label">General Layout</span>
+        <span v-if="layouts.length" class="tab-badge">{{ layouts.length }}</span>
+      </button>
       <!-- Rekap tab -->
       <button @click="activeTab='rekap'; activeZoneIdx=0"
         class="mto-tab" :class="{active:activeTab==='rekap'}" style="--clr:#0ea5e9">
@@ -48,7 +58,7 @@
       <div v-if="loading" class="mto-loading">⏳ Memuat data...</div>
       <template v-else>
         <!-- Zone input UI — only when NOT in Rekap tab -->
-        <template v-if="activeTab !== 'rekap' && activeModule">
+        <template v-if="activeTab !== 'rekap' && activeTab !== 'layout' && activeModule">
 
           <!-- Header row -->
           <div class="mod-header">
@@ -326,6 +336,74 @@
           </div>
 
         </template><!-- zone input -->
+
+        <!-- ── GENERAL LAYOUT ── -->
+        <template v-if="activeTab==='layout'">
+        <div class="rekap-wrap">
+          <div class="mod-header">
+            <div class="mod-title">
+              <span style="font-size:1.4rem">📐</span>
+              <div>
+                <div class="mod-name">General Layout</div>
+                <div class="mod-sub">Kerangka bangunan per zona — jumlah kolom, bentang balok, dan luasan diturunkan dari dimensinya</div>
+              </div>
+            </div>
+            <button class="lay-add" @click="tambahLayout">+ Zona</button>
+          </div>
+
+          <p v-if="!layouts.length" class="lay-empty">
+            Belum ada layout. Tambahkan zona, isi panjang × lebar × tinggi dan jarak kolomnya —
+            jumlah kolom akan langsung terlihat.
+          </p>
+
+          <div v-for="(L, i) in layouts" :key="i" class="lay-card">
+            <div class="lay-head">
+              <input v-model="L.zone_name" class="lay-zone" placeholder="Nama zona (mis. Gudang A)" />
+              <div class="lay-act">
+                <button class="lay-btn" @click="simpanLayout(i)" :disabled="L.saving">
+                  {{ L.saving ? 'Menyimpan…' : 'Simpan' }}
+                </button>
+                <button class="lay-btn danger" @click="hapusLayout(i)">Hapus</button>
+              </div>
+            </div>
+
+            <!-- Formulir dibangun dari spesifikasi yang dikirim server, bukan
+                 dari daftar kedua di sini — field baru otomatis muncul. -->
+            <div class="lay-grid">
+              <div v-for="f in layoutFields" :key="f.field" class="lay-field">
+                <label>{{ f.label }}<span v-if="f.wajib" class="req">*</span></label>
+                <input type="number" step="0.01" min="0" v-model.number="L.parameters[f.field]"
+                  @input="hitungLayoutZona(i)" />
+              </div>
+            </div>
+
+            <div v-if="L.hasil" class="lay-out">
+              <div v-if="!L.hasil.ok" class="lay-kurang">
+                Belum bisa dihitung — isi dulu: {{ L.hasil.kurang.join(', ') }}
+              </div>
+              <template v-else>
+                <div class="lay-stats">
+                  <div class="ls"><span class="ls-n">{{ L.hasil.grid.jumlah_kolom }}</span><span class="ls-l">Kolom</span></div>
+                  <div class="ls"><span class="ls-n">{{ L.hasil.grid.garis_kolom_x }} × {{ L.hasil.grid.garis_kolom_y }}</span><span class="ls-l">Garis kolom</span></div>
+                  <div class="ls"><span class="ls-n">{{ L.hasil.grid.jarak_aktual_x }} × {{ L.hasil.grid.jarak_aktual_y }} m</span><span class="ls-l">Jarak aktual</span></div>
+                  <div class="ls"><span class="ls-n">{{ L.hasil.balok.jumlah_total }}</span><span class="ls-l">Batang balok</span></div>
+                  <div class="ls"><span class="ls-n">{{ L.hasil.balok.panjang_total }} m</span><span class="ls-l">Panjang balok</span></div>
+                  <div class="ls"><span class="ls-n">{{ L.hasil.luas.lantai_total }} m²</span><span class="ls-l">Luas lantai</span></div>
+                  <div class="ls"><span class="ls-n">{{ L.hasil.luas.dinding_kotor }} m²</span><span class="ls-l">Dinding (kotor)</span></div>
+                  <div class="ls"><span class="ls-n">{{ L.hasil.luas.atap_proyeksi }} m²</span><span class="ls-l">Atap (proyeksi)</span></div>
+                </div>
+                <!-- Catatan dari server ditampilkan apa adanya. Di sinilah selisih
+                     jarak target vs aktual dan sifat "luas kotor" diberitahukan —
+                     menyembunyikannya membuat angka di atas terbaca lebih pasti
+                     daripada yang sebenarnya. -->
+                <ul v-if="L.hasil.catatan?.length" class="lay-note">
+                  <li v-for="(c, ci) in L.hasil.catatan" :key="ci">{{ c }}</li>
+                </ul>
+              </template>
+            </div>
+          </div>
+        </div>
+        </template>
 
         <!-- ── REKAP MTO VIEW ── -->
         <template v-if="activeTab==='rekap'">
@@ -660,6 +738,77 @@ const props = defineProps<{
 }>();
 
 const baseUrl = computed(() => `${props.apiBase || '/projects'}/${props.projectId}`);
+
+// ── General Layout (EST-MTO-LAYOUT-01) ─────────────────────────────────
+//
+// Hitungannya SELALU dari server. Kalkulator MTO sengaja tidak diduplikasi ke
+// browser: angka yang dilihat penggunanya dan angka yang tersimpan harus dari
+// satu sumber, kalau tidak keduanya bisa berbeda tanpa ada yang menyadarinya.
+const layouts = ref<any[]>([]);
+const layoutFields = ref<any[]>([]);
+let layoutTimer: any = null;
+
+const muatLayoutFields = async () => {
+  try {
+    layoutFields.value = (await api.get('/estimator/mto/layout/fields')).data?.data || [];
+  } catch (e) { console.error('Gagal memuat spesifikasi layout', e); }
+};
+
+const muatLayouts = async () => {
+  try {
+    const r = await api.get(`${baseUrl.value}/mto/layout`);
+    layouts.value = (r.data?.data || []).map((x: any) => ({
+      zone_name: x.zone_name, parameters: { ...x.parameters }, hasil: x.hasil, saving: false, tersimpan: true,
+    }));
+  } catch (e) { console.error('Gagal memuat layout', e); }
+};
+
+const tambahLayout = () => {
+  layouts.value.push({ zone_name: '', parameters: {}, hasil: null, saving: false, tersimpan: false });
+};
+
+// Debounce: mengetik dimensi memicu satu permintaan per ketukan tanpa ini, dan
+// layar MTO sudah pernah kena batas 300 permintaan/menit (PROC-N1-01).
+const hitungLayoutZona = (i: number) => {
+  clearTimeout(layoutTimer);
+  layoutTimer = setTimeout(async () => {
+    try {
+      const r = await api.post('/estimator/mto/layout/pratinjau', { parameters: layouts.value[i].parameters });
+      layouts.value[i].hasil = r.data?.data;
+    } catch (e: any) {
+      console.error('Gagal menghitung layout', e);
+    }
+  }, 350);
+};
+
+const simpanLayout = async (i: number) => {
+  const L = layouts.value[i];
+  if (!String(L.zone_name || '').trim()) return alert('Nama zona harus diisi.');
+  L.saving = true;
+  try {
+    const r = await api.put(`${baseUrl.value}/mto/layout`,
+      { zone_name: L.zone_name, parameters: L.parameters });
+    L.hasil = r.data?.data;
+    L.tersimpan = true;
+    // Pesan server ditampilkan apa adanya — ia membedakan "tersimpan" dari
+    // "tersimpan sebagai draft" saat dimensinya belum lengkap.
+    alert(r.data?.message || 'Layout tersimpan');
+  } catch (e: any) {
+    alert(e?.response?.data?.error || 'Gagal menyimpan layout');
+  } finally { L.saving = false; }
+};
+
+const hapusLayout = async (i: number) => {
+  const L = layouts.value[i];
+  if (!L.tersimpan) { layouts.value.splice(i, 1); return; }
+  if (!confirm(`Hapus layout zona "${L.zone_name}"?`)) return;
+  try {
+    await api.delete(`${baseUrl.value}/mto/layout?zone_name=${encodeURIComponent(L.zone_name)}`);
+    layouts.value.splice(i, 1);
+  } catch (e: any) {
+    alert(e?.response?.data?.error || 'Gagal menghapus layout');
+  }
+};
 
 const MODULES = [
   { id:'foundation', label:'Pondasi',     icon:'🏗', color:'#f59e0b', component: FoundationInputs },
@@ -1598,7 +1747,7 @@ const mtoGrandTotal = computed(() => [
 ]);
 
 
-onMounted(fetchAll);
+onMounted(() => { fetchAll(); muatLayoutFields(); muatLayouts(); });
 
 // ── Detailed MTO computed for Rekap tab ──────────────────────────────────────
 const f2 = (v:number) => v.toLocaleString('id-ID',{maximumFractionDigits:2});
@@ -1870,4 +2019,29 @@ const f0 = (v:number) => v.toLocaleString('id-ID',{maximumFractionDigits:0});
   background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c;
 }
 .wwc-dari-gambar { margin: .2rem 0 0; font-size: .7rem; color: #0e7490; font-style: italic; }
+
+/* ── General Layout ─────────────────────────────────────────────── */
+.lay-add{background:#14b8a6;color:#fff;border:none;border-radius:8px;padding:.5rem .9rem;font-weight:600;cursor:pointer;font-size:.85rem}
+.lay-add:hover{background:#0d9488}
+.lay-empty{color:#6b7280;font-size:.9rem;padding:1.5rem;text-align:center;background:#f9fafb;border:1px dashed #d1d5db;border-radius:10px}
+.lay-card{border:1px solid #e5e7eb;border-radius:12px;padding:1rem;margin-bottom:1rem;background:#fff}
+.lay-head{display:flex;gap:.75rem;align-items:center;margin-bottom:.85rem}
+.lay-zone{flex:1;border:1px solid #d1d5db;border-radius:8px;padding:.5rem .75rem;font-size:.9rem;font-weight:600}
+.lay-act{display:flex;gap:.4rem}
+.lay-btn{border:1px solid #d1d5db;background:#fff;border-radius:8px;padding:.45rem .8rem;font-size:.8rem;cursor:pointer}
+.lay-btn:hover{background:#f3f4f6}
+.lay-btn:disabled{opacity:.5;cursor:default}
+.lay-btn.danger{color:#dc2626;border-color:#fecaca}
+.lay-btn.danger:hover{background:#fef2f2}
+.lay-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:.7rem}
+.lay-field label{display:block;font-size:.72rem;color:#6b7280;margin-bottom:.25rem}
+.lay-field .req{color:#dc2626;margin-left:2px}
+.lay-field input{width:100%;border:1px solid #d1d5db;border-radius:8px;padding:.45rem .6rem;font-size:.85rem}
+.lay-out{margin-top:1rem;border-top:1px solid #f3f4f6;padding-top:.9rem}
+.lay-kurang{background:#fffbeb;border:1px solid #fde68a;color:#92400e;border-radius:8px;padding:.6rem .8rem;font-size:.83rem}
+.lay-stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:.6rem}
+.ls{background:#f0fdfa;border:1px solid #99f6e4;border-radius:10px;padding:.6rem .7rem;display:flex;flex-direction:column;gap:2px}
+.ls-n{font-size:1.15rem;font-weight:800;color:#0f766e;font-variant-numeric:tabular-nums}
+.ls-l{font-size:.7rem;color:#5eead4;text-transform:uppercase;letter-spacing:.04em;color:#0d9488}
+.lay-note{margin:.8rem 0 0;padding-left:1.1rem;color:#6b7280;font-size:.78rem;line-height:1.6}
 </style>

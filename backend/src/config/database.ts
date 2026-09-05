@@ -3559,6 +3559,40 @@ const ensureTabelAnakHilangSchema = async (connection: any) => {
   console.log('✅ Tabel anak yang hilang ensured (event_shared_users, sales_order_items, kolom visibility & QC)');
 };
 
+/**
+ * General Layout MTO (EST-MTO-LAYOUT-01).
+ *
+ * Kerangka bangunan per zona: panjang, lebar, tinggi, jarak kolom. Dari sini
+ * jumlah kolom, bentang balok, dan luasan DITURUNKAN — tidak disimpan.
+ *
+ * Tabelnya terpisah dari `engineering_inputs`, bukan jadi element_type ke-7.
+ * Layout tidak menghasilkan kuantitas material sendiri; memasukkannya sebagai
+ * elemen akan memunculkan baris tanpa material di daftar take-off, dan setiap
+ * penjumlahan MTO harus mulai mengecualikannya satu per satu.
+ *
+ * Hanya PARAMETER yang disimpan. Hasil hitungnya sengaja tidak — sama alasannya
+ * dengan saldo GL dan lokasi berjalan aset: angka turunan yang disimpan akan
+ * melenceng dari rumusnya begitu rumusnya diperbaiki, dan selisihnya tidak bisa
+ * dijelaskan siapa pun.
+ */
+const ensureMtoLayoutSchema = async (connection: any) => {
+  await execSchemaEnsure(connection, `
+    CREATE TABLE IF NOT EXISTS mto_layouts (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      scope_type VARCHAR(20) NOT NULL DEFAULT 'proposal',
+      scope_id INT NOT NULL,
+      zone_name VARCHAR(150) NOT NULL DEFAULT '',
+      parameters JSON NOT NULL,
+      created_by INT NULL,
+      updated_by INT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_mto_layout (scope_type, scope_id, zone_name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  console.log('✅ Skema general layout MTO ensured');
+};
+
 const ensurePermissionCatalog = async (connection: any) => {
   const rows: [string, string, string][] = [];
   for (const g of PERMISSION_CATALOG) {
@@ -3849,6 +3883,7 @@ export async function initializeDatabase() {
     await ensureVendorPriceApprovalSchema(connection);
     await ensureTabelAnakHilangSchema(connection);
     await ensureGeneralLedgerSchema(connection);
+    await ensureMtoLayoutSchema(connection);
     await ensurePermissionCatalog(connection);
     await ensureMasterUserRow(connection);
     // Harus paling akhir: semua permission dari ensure* di atas sudah ada
